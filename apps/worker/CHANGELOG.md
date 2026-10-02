@@ -1,5 +1,398 @@
 # @opengeni/worker-bundle
 
+## 2.3.1
+
+### Patch Changes
+
+- Updated dependencies [3f7ff5b]
+- Updated dependencies [3a688de]
+- Updated dependencies [5e1175d]
+  - @opengeni/sdk@7.6.1
+  - @opengeni/runtime@4.6.0
+  - @opengeni/db@6.5.0
+  - @opengeni/codemode@0.6.8
+  - @opengeni/core@5.1.1
+  - @opengeni/documents@0.8.40
+  - @opengeni/events@0.4.38
+
+## 2.3.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/core@5.1.0
+  - @opengeni/db@6.4.0
+  - @opengeni/runtime@4.5.0
+  - @opengeni/sdk@7.6.0
+  - @opengeni/codemode@0.6.7
+  - @opengeni/codex@0.2.31
+  - @opengeni/config@3.2.1
+  - @opengeni/documents@0.8.39
+  - @opengeni/events@0.4.37
+  - @opengeni/github@0.8.2
+  - @opengeni/interaction@0.4.45
+  - @opengeni/observability@0.8.37
+  - @opengeni/storage@0.2.138
+  - @opengeni/tool-gateway@0.1.18
+
+## 2.2.1
+
+### Patch Changes
+
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- f26c4f5: Recover transient Modal sandbox readiness failures before command dispatch and observe uncertain probe starts without replay.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 665e849: Share execution's effective turn-tool selection with credential-provider MCP
+  targeting and preparation so follow-up turns retain their per-turn headers,
+  without widening tool selection or connection authority.
+- 45d1301: Preserve bounded exact OpenAI/Azure streamed failure diagnostics separately from safe error messages, and classify provider terminal codes for existing bounded same-turn recovery. Invalid requests, safety refusals, and unknown terminal codes remain non-retryable; Codex and SuperGrok keep their transport-owned behavior.
+- 45d1301: Keep streamed safety diagnostics terminal even under server-error codes, recognize bounded diagnostic-only context overflows for compaction, and retain HTTP Retry-After evidence on yielded Responses failures so long quota waits do not enter automatic recovery.
+- 0bbe2e7: Every `session.requiresAction` approval entry now carries the same top-level `id`, `name`, and `arguments`, whether it is the first pause of a turn or a later one after a decision. `id` is the `approvalId` that `sendApprovalDecision` accepts (the pending tool call id). Historical fields (`rawItem`, `raw`) remain for compatibility. The SDK exports this as `SessionApprovalRequest`.
+- Updated dependencies [e01fc8e]
+- Updated dependencies [a6ff780]
+- Updated dependencies [6a97313]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [6a97313]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [48f5d39]
+- Updated dependencies [c8830e0]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [c7bb6f1]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [79f4635]
+- Updated dependencies [46e3a8e]
+- Updated dependencies [f26c4f5]
+- Updated dependencies [3545ca3]
+- Updated dependencies [665e849]
+- Updated dependencies [665e849]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [dd6795c]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+  - @opengeni/db@6.3.0
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/agent-proto@0.6.1
+  - @opengeni/core@5.0.1
+  - @opengeni/interaction@0.4.44
+  - @opengeni/capabilities@0.3.5
+  - @opengeni/jev@0.2.1
+  - @opengeni/runtime@4.4.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/xai-subscription@0.1.5
+  - @opengeni/documents@0.8.38
+  - @opengeni/events@0.4.36
+  - @opengeni/codemode@0.6.6
+  - @opengeni/github@0.8.1
+  - @opengeni/observability@0.8.36
+  - @opengeni/storage@0.2.137
+  - @opengeni/tool-gateway@0.1.17
+
+## 2.2.0
+
+### Minor Changes
+
+- 8669490: Add per-person product lifecycle facts to the durable host export as a third kind, `lifecycle_fact`. Migration `0532_product_lifecycle_fact_export.sql` (rolling) captures one content-free fact per sign-up, email verification, sign-in, organization setup, model connection, credit top-up, connection, scheduled task, installed catalog Skill, Slack user link, enrolled machine and organization join, in the same transaction as the product change. Nothing is captured until a host registers a `lifecycle_fact` consumer, and a capture failure never fails the product change.
+
+  Every fact is a fixed type with an optional value from a fixed per-type list (`PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`), a subject kind, the opaque `user:`/`api_key:` subject id when there is one, and the organization and workspace UUIDs when the product change has them. Sign-up, verification and sign-in facts carry no organization. `claimHostExportBatch` accepts `kind: "lifecycle_fact"` and returns a `HostLifecycleFactExportBatch`; `createHostExportPump` accepts an optional `lifecycleSink`.
+
+- f986809: Scheduled tasks can post to one Slack channel as the OpenGeni workspace bot. A person chooses the channel in the schedule editor ("Post to Slack" under Advanced), stored as `agentConfig.slackBotChannelId` next to `slackBotConnectionId`. Choosing or changing it needs a signed-in person with `connections:write`, and the bot must be a member of an active channel that is not shared with another organization. Agents, services and API keys cannot set or change it. `listScheduledTaskSlackChannels` in the SDK lists the eligible channels.
+
+  Runs of such a task get two tools, `slack_bot_prepare_message` and `slack_bot_send_prepared_message`, which take no channel. Prepare saves the exact text; send posts it to the task's channel with the saved server-owned id as the Slack post operation id, so a retried send never posts twice. Both re-read the task at every call, so clearing or changing the channel takes effect immediately and never redirects an already prepared message. Rolling migration 0530 adds the private prepared-message table and its two capabilities.
+
+### Patch Changes
+
+- 378327b: Emit one `agent.message.completed` per assistant message with its `phase` and, when the provider sent one, its `messageId`. Runtime normalization read a text field that Agents SDK message items do not have, so no per-message completion or phase ever reached events. Deltas now carry the phase a Responses provider declares, also through compact delta coalescing. An undeclared message gets the SDK's own rule: `commentary` when the same response asks for client tool work (including a client tool search) or ends with a later message, `final_answer` for the message the SDK returns. A Responses message completes as soon as it finishes, before the next message streams, instead of after the whole response. The worker skips the phase-less settlement copy once the stream completed the final text.
+
+  Commentary is activity: it no longer marks a session unread (rolling migration 0527 indexes the new attention predicate), wakes `session_wait` change mode, becomes a Slack post, or enters the SDK chat reply. A turn that settles with only commentary still replies with its latest note. When a human or API message's turn ends waiting for input (`wait_for_input`), settlement records its latest assistant message on `turn.completed` as `reply` (the output stays empty; a child an agent spawned and a scheduled, automation or maintenance session's first turn record none), so a status answer given before waiting again marks the session unread and becomes a Slack post with the requester mention while delivery stays open for the result; stored history keeps the provider's phase. The SDK chat fold completes each segment by `messageId`, so a note completed after its answer streamed never repeats the answer. The MCP conversation view labels commentary, `latest: "terminal"` skips it, and the React timeline knows a streaming note is commentary from its first delta. `phase` stays optional.
+
+  Older SDK clients see the new completions too: their live reply now separates a note from the answer that follows it in the same response with a blank line (it was run together before), and `history()` lists each completed note as its own assistant message. Roll the API before the workers: an older API process next to a newer worker can briefly post notes to Slack, wake `session_wait` change mode on them, and mark sessions unread for them.
+
+- a5e93ba: Background commands that finish quickly but print a lot of output are now recognized as finished on the next background check instead of staying "running" for hours. Their sandbox can then save its workspace and go idle normally, instead of being held until the provider's 24-hour limit ends it. A command's saved output keeps its first 16 MiB and its final part, with a note where output was skipped.
+- 056997b: Make `skill_checkout` fast. The worker now writes a Skill's files through one Channel-A `fsWriteFiles` batch, normally a single sandbox command with one workspace mutation admission and one `fs.changed` event, instead of about five sandbox commands per file. On a real Docker sandbox an 11-file, 31 KB Skill went from 61 sandbox commands, 35 mutation admissions, and 13 events (about 4 s) to 1 command, 1 admission, and 1 event (about 0.1 to 0.2 s). Checkout never overwrites: files already holding the same bytes are kept and reported `unchanged`, and any different existing entry fails before anything is written, so repeating a checkout into the same directory is safe. New optional `paths` copies exactly those files, for example one script to run. Only a complete checkout that created its directory returns the `skill_publish` base; other results say `publishable: false`. The default `skill_read` also returns a bounded `scripts` index (path and first usage line) so commands are visible without a checkout. The worker records `opengeni_skill_checkouts_total`, `opengeni_skill_checkout_duration_seconds{phase}`, and `opengeni_skill_checkout_files_total`. `@opengeni/runtime` exports `SandboxChannelAService.fsWriteFiles`, `FsWriteFilesRequest`, `FsWriteFilesResponse`, and `skillScriptIndex`.
+- 37c478b: Allow goal continuations to suspend for work already in flight without a mandatory preliminary status check. Preserve tool-availability gating, event-driven resumption, and safety deadlines.
+- 6f28afd: A definitively lost managed Modal sandbox no longer dead-ends its sessions. Shared sandbox groups (a parent with its children) now get the automatic checkpoint fallback, and every member receives the durable filesystem-discontinuity warning. When no checkpoint can be restored automatically (no archive, an unverified or legacy archive, an invalid artifact, or a definitive, non-retryable content-integrity failure of the selected checkpoint), the whole quiescent group continues on a new empty workspace after a separate audited decision that warns every member the previous files are not available. Loss must be proven by a loss transition (a failed replacement box never counts), the empty workspace waits until the lost box is past its hard provider lifetime, other restore failures (including a missing archive object, now `archive_object_missing`, or unconfigured archive storage, now `archive_storage_unavailable`) retry the checkpoint with backoff and then wait for an operator, and a complete archive is never bypassed. Ambiguous provider states and live writers in any member still block, unknown command outcomes are never replayed, and the lost archive evidence is kept. Sessions stuck before this release recover on their next turn or Retry. The recovery projection adds `automaticLane` (`checkpoint` or `fresh_workspace`) and, for a timed wait, `availableAt` (when a Retry or a new message can decide again), and the failed-session banner says what Retry will do and when. Rolling migration 0548 requires warning protocol v3 to claim a session with an empty-workspace receipt.
+- 32598eb: Expose content-free MCP phase timings and host-owned outbound trace correlation across gateway, credential, transport and persistence boundaries. Preserve W3C sampling flags, credential header semantics, exact execution authority and existing retry behavior.
+- a6854a7: Allow completed turn owners to reach bounded Modal deadline capture without an interruption-only quiescence receipt. When the provider is definitively gone, select only a verified singleton CURRENT checkpoint for automatic continuity, persist a cache-stable filesystem warning before the agent runs, and fence old workers from affected sessions. Keep unknown command outcomes and unavailable or invalid archives fail-closed.
+- b591ea1: Support native Claude Messages with separate encrypted Anthropic API-key and Claude subscription setup-token connections, workspace access policies, streaming tools and thinking, prompt caching and usage accounting. Add connection UI and payment-source labels. Migration 0544 expands organization connection kinds and lifecycle validation.
+
+  Pin the Claude subscription client identity headers, persist account/device metadata with encrypted credentials, and add request-scoped attribution. Existing token-only connections require replacement with identity metadata. The captured billing checksum remains unverified and is not replayed.
+
+  Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
+
+  Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
+
+  Polish Claude setup with local settings import, full-page token renewal, named model choices, provider marks, accurate subscription payment labels, and workspace discovery of organization-owned connections.
+
+  Support workspace-owned Claude credentials, model generations, access controls and setup/account screens alongside organization connections. Migration 0545 expands workspace custom-model provider kinds. Gate Claude subscriptions behind OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED (default off), leaving Anthropic API keys and other providers unchanged.
+
+- 5ab0b13: Remove the unconditional five-second grace period from normal session idle completion and child-result handoff. Keep the final durable work recheck, transactional idle settlement and parent-result deduplication, and close-race signal guard. Fence runnable machine input accepted before idle settlement as well as queued turns, preventing a stale parent result when input wins that race. Late follow-ups may start another workflow run of the same session through the durable wake path. A Temporal patch preserves legacy timer histories; held input waits, goal backoff, cancellation, quiescence, and capacity timers are unchanged.
+- 126a395: Make agent effort proportional to the request. The operational contract now asks for a direct answer with minimal tool use on simple asks, reuse of the earlier approach on repeat asks, one-sentence progress updates without a forced opening update, answer-first final responses, answers from web or published sources that are short but not partial (the best-supported finding, figures in the user's terms, and a source link beside each study or figure), and reading each Skill once without announcing it. A question asked mid-run gets an answer instead of restarting work; while work is still in flight the agent answers in one or two sentences in the user's terms, naming a blocker only when the user must act on it, and registers the wait again with the earlier reason and remaining time, even with an active goal, so its result still resumes the agent without pushing back a timed recheck, and a question alone no longer resumes a paused goal. Answers stay in chat by default; a document Artifact is created only when the user asks for one or the deliverable is large or meant to be kept or shared, and a session no longer creates a goal only to declare a document. The default persona is a general assistant; it works on a branch with a pull request only when the repository has a remote and git provider credentials, and otherwise leaves changes in the working tree without branch or pull request talk unless the user asks, saying only that the changes are not pushed when the repository has a remote, and the Sites and visualize Skill descriptors apply when the user asks or clearly benefits.
+- aa29eae: Rate-limited turns now back off with an escalating floor (10 s, 20 s, 40 s, 60 s, 120 s), and a longer provider `Retry-After` still wins. Previously a one-second `Retry-After` on a per-minute token limit used up all five automatic recoveries within seconds and failed the turn.
+- 7a08660: Make a finished child's result carry its answer. An idle `child_terminal_result` now includes optional `payload.finalAnswer`: the child's newest result-bearing answer, frozen by the idle settlement, bounded to 8 KiB UTF-8 with a head/tail truncation marker and a `session_events` pointer to the full text (`childTerminalResultFinalAnswer`, `CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES`). No answer is copied when the child's newest turn failed, was cancelled or superseded, or stopped at a segment limit. A turn claimed only to continue the child's goal (for example one that confirms and completes the goal after the answer) no longer replaces the answer: the answer is reported with that turn's output after it as `finalAnswer.goalContinuations`, whole when the parts fit the bound (`childTerminalResultFinalAnswerWithGoalContinuations`). Parts that do not fit are reported as the newest part, marked truncated, with `omittedSequences` and a `nextAction` that reads every part, so a child working across goal continuations still reports its final report. The walk stops at a non-answer outcome and at the child's newest goal activation, and a window holding only continuations reports the newest answer alone. The worker's enrichment upsert now keeps the committed answer and evidence instead of replacing them, and an untruncated answer serves as the parent claim's consumption evidence. When a parent's exact live attempt reads a direct child's complete answer through `session_wait` or `session_events` in its own model call (the worker now marks first-party calls with `_meta.opengeniCaller`, `FIRST_PARTY_MCP_CALLER_META_KEY`; Codemode calls do not count), the answer is recorded on the reading turn (`metadata.consumedChildAnswers`, `recordConsumedChildAnswers`) and `session_wait` stops counting that child's result as own pending input (`listOutstandingSessionSystemUpdatesForAttempt`). The attempt's successful completion settlement supersedes each still-pending idle result whose every part it received (`consumed_by_parent_read`), and a result the child commits after that completion is inserted already consumed, without a wake. A read by an attempt that fails or is interrupted suppresses nothing. The operational contract and the `session_create`, `session_wait`, `session_get`, `session_send_message`, and `wait_for_input` descriptions now price a child, prefer a direct answer or reusing an existing child, and steer multi-minute waits to `wait_for_input` instead of alternating `session_wait` and `session_get`. No tool is capped or removed.
+- 3f9c757: A scheduled occurrence the scheduler refuses before running it is now a visible
+  run instead of a thrown, retried activity or a silently dropped occurrence.
+  `ScheduledTaskRun.admissionRefusal` (`{ version, reason, retryable }`, with
+  `error` equal to `reason`) covers unprovable authority, an unavailable
+  Connected Machine target, a missing Variable Set, a Sandbox Environment without
+  an active version (terminal, status `failed`), and an inactive machine
+  enrollment, insufficient credits or monthly limits (transient, status
+  `skipped`; later occurrences run normally). Redelivery never adds a second run.
+- 3f9c757: Scheduled tasks created by an organization or workspace API key (or the
+  configured key) are now ownerless service schedules and run. Previously the
+  key subject became the schedule's immutable owner, and every occurrence failed
+  invisibly in the scheduler. An occurrence refused because its frozen authority
+  cannot be proven is now recorded as a failed run with error
+  `scheduled_authority_unavailable` instead of being retried to exhaustion with
+  no run.
+- 3f9c757: A scheduled run whose turn waits for a tool approval or a structured question
+  is now visible: `ScheduledTaskRun.awaitingHuman` (`{ since, expiresAt }`) on run
+  listings and `awaitingHuman` on the scheduled-task attention list, instead of the
+  run looking merely "dispatched". The new optional
+  `agentConfig.approvalTimeoutSeconds` (60 s to 30 days; default none) lets the
+  scheduler reject the pending approval (or skip the question) as a labelled
+  system decision once nobody answered in time, driven by a durable workflow
+  timer.
+- 30414a0: Add the first-party `session_set_model` MCP tool for changing an existing session's future model and reasoning defaults without waking it or rewriting accepted work. Preserve ordinary target authorization and exact-attempt fencing, provide stable idempotent receipts across reconnects, and report canonical model, reasoning and latency settings in full session readback. Share effective defaults across prompt admission, goal continuation, compaction and scheduled snapshots so older queued or resumed turns cannot undo an explicit choice. Deploy API and workers from a matched source cohort before using the new operation.
+- 740bebd: A repeated default `skill_read` of the same Skill no longer returns the full `SKILL.md` again while that exact text is still in the session's active model history. The model receives a short `alreadyInContext` receipt with the current revision identity instead. Reads that compaction removed from history count as absent, so the next read returns full text. A stored read counts only if the current model receives it untruncated under its own tool-output bound, and a failed history lookup returns full text. Explicit `paths` (including `["SKILL.md"]`), `listFiles`, and Codemode callers always receive content. The tool schema, instructions, and Skill index are unchanged, so the cached prompt prefix is unaffected. `@opengeni/db` exports `getActiveSessionFunctionToolResults` for the active, call-paired results of one function tool.
+- 514f8ea: Count Skill reads and record a content-free Skill-use fact on each model `skill_read` event. The worker increments `opengeni_skill_reads_total{source, skill, kind, caller}`, where `skill` is a built-in id or `custom`, so tenant Skill ids, names, and requested identifiers never become labels. A successful model read also carries `_meta["opengeni/skillUse"]` (resolved id and source, ledger revision or whole-artifact digest, result kind, returned bytes, whether the Skill was in this turn's model-visible index, and whether `skill_search` returned it earlier in the attempt). MCP `_meta` never reaches the model, so the model-visible result and model history stay byte-identical; only the `agent.toolCall.output` event projection keeps the fact. Codemode results never carry it, and it is dropped rather than let a result cross the 1 MiB model-visible cap. `@opengeni/contracts` exports `SkillUse`, `SkillUseSource`, `SkillReadKind`, `SKILL_USE_META_KEY`, and `skillUseFromToolOutput` (the writer schema is closed; the reader drops fields a newer writer adds instead of the whole fact); `@opengeni/runtime` exports `skillCatalogEntryIds` and `modelToolResultFits`.
+- b28d5fa: Reading a session's stored bundled Skill selection now drops ids this build does not know instead of failing the whole session read. Dropping only narrows the stored selection; API input still rejects unknown ids, and keyed create replay still compares the exact stored selection. The bundled `document-parsing` guide now ships the upstream AnyDoc MIT license and a `SOURCES.md` attribution, the runtime package notices cover both AnyDoc-derived guidance copies, and the `skill_install` description no longer claims that `skill_search` returns library ids.
+- bcd9988: Give the model the current time without a tool call, and ask supported models for shorter answers. Each claimed user message now carries a separate `[Message sent <weekday> <date> <HH:MM> UTC]` part taken from the turn's durable acceptance time, and each delivered machine-input batch states its `deliveredAt` and every member's `createdAt` (scheduled occurrences add `Delivered:` and `Created:` lines). The times are persisted with the history row, never computed at inference time, and never enter `Agent.instructions`. Agent turns on the Codex subscription, direct OpenAI Responses and Azure OpenAI Responses routes send `text.verbosity: "low"` for GPT-5-family and later models; the new optional `textVerbosity` agent option is omitted everywhere else, so Gateway, OpenRouter, SuperGrok, chat and other compatible routes are unchanged. `reasoning.summary` is unchanged. Realtime voice-call history now keeps a user message's separate parts on separate lines.
+- d1f4724: Every accepted turn now records the product surface its request entered through: `web`, `slack`, `api_key`, `embedded`, `scheduled`, `agent`, `voice`, `site`, `automation`, `mcp`, or `system`. Slack, realtime voice, automations and maintenance name their surface; other requests derive it once from the verified access path (a managed or local browser session is `web`, an API or configured key is `api_key`, signed delegation or an external actor is `embedded`, workspace MCP OAuth is `mcp`, an agent attempt is `agent`, and a validated Site origin is `site`, including follow-up Send and Steer from the Site bridge). A scheduled occurrence records `scheduled` and another agent's message records `agent`, so scheduled runs no longer look like generic system work; other machine turns inherit the session's latest surface. `origin` is unchanged. Embedding hosts that call core directly can pass `surface` to `createSessionForRequest` and `acceptSessionUserMessage`.
+
+  The durable host export carries `surface` and `modelProvider` (the provider family from the turn's execution policy, with operator-configured providers reported as `registry`) on session events and usage facts, and `toolFamily` on `agent.toolCall.created` (a first-party tool name, `integration:<reviewed domain>`, or `custom`). The worker stamps `toolFamily` on the tool-call event payload. All values come from fixed lists and carry no content. Rolling migration 0533 adds the immutable, checked `session_turns.surface` column, the three export columns, and the `host_export_claim_analytics_sidecars` companion, which inherits the claim function's exporter grants. Published export function signatures are unchanged.
+
+- efa453c: `skill_read` and `skill_checkout` now answer an identifier that resolves to no Skill with the available Skills (id and name only, bounded to 25 entries and 4 KiB, entries resembling the requested identifier first, the rest via `skill_search`) instead of only "Skill is not available in this session", so the model can retry with a valid id.
+- Updated dependencies [3dc46a8]
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [304ddc5]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [a6644b6]
+- Updated dependencies [aad6598]
+- Updated dependencies [87f5393]
+- Updated dependencies [6146167]
+- Updated dependencies [8d2bcdf]
+- Updated dependencies [8019cac]
+- Updated dependencies [e14db2a]
+- Updated dependencies [e917ce3]
+- Updated dependencies [a5e93ba]
+- Updated dependencies [cb25b14]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a6644b6]
+- Updated dependencies [d480872]
+- Updated dependencies [3f9c757]
+- Updated dependencies [056997b]
+- Updated dependencies [c4d0d1a]
+- Updated dependencies [3b58ff8]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a6644b6]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [32598eb]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [5ab0b13]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a1b6b8e]
+- Updated dependencies [a82657f]
+- Updated dependencies [3f9c757]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [f68b176]
+- Updated dependencies [3f9c757]
+- Updated dependencies [8669490]
+- Updated dependencies [126a395]
+- Updated dependencies [359382e]
+- Updated dependencies [2088678]
+- Updated dependencies [8d19289]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [12bc3de]
+- Updated dependencies [1ffeb7c]
+- Updated dependencies [30414a0]
+- Updated dependencies [a6644b6]
+- Updated dependencies [740bebd]
+- Updated dependencies [514f8ea]
+- Updated dependencies [8a9d19e]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [b37af05]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [95c700a]
+- Updated dependencies [22e8ebf]
+- Updated dependencies [b99fd06]
+- Updated dependencies [bcd9988]
+- Updated dependencies [b5a77df]
+- Updated dependencies [d1f4724]
+- Updated dependencies [6f4be14]
+- Updated dependencies [c823664]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/contracts@5.4.0
+  - @opengeni/sdk@7.4.0
+  - @opengeni/events@0.4.35
+  - @opengeni/db@6.2.0
+  - @opengeni/config@3.1.1
+  - @opengeni/jev@0.2.0
+  - @opengeni/codex@0.2.29
+  - @opengeni/core@5.0.0
+  - @opengeni/storage@0.2.136
+  - @opengeni/observability@0.8.35
+  - @opengeni/tool-gateway@0.1.16
+  - @opengeni/github@0.8.0
+  - @opengeni/codemode@0.6.5
+  - @opengeni/documents@0.8.37
+
+## 2.1.1
+
+### Patch Changes
+
+- 2563950: Add a database runtime kill switch for the one-time verified signup trial credit (rolling migration 0521). A grant now needs both `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` and the newest row of the append-only `opengeni_private.verified_signup_trial_switch_revisions` table, which starts enabled. Operators flip it with the owner-only audited `set_verified_signup_trial_credits_enabled(enabled, operator, reason)` function. The change applies to the next setup transaction on every API replica, with no deploy or restart. Runtime roles can only read the switch. `readVerifiedSignupTrialSwitch` exposes the switch state, and the control worker publishes it as `opengeni_verified_signup_trial_credits_runtime_enabled`, next to `opengeni_verified_signup_trial_credits_deployment_enabled` for the master opt-in.
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1fa1216]
+- Updated dependencies [1842911]
+- Updated dependencies [d83d5d0]
+- Updated dependencies [9d0c1bb]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [a63a029]
+- Updated dependencies [b9482ea]
+- Updated dependencies [4124c7c]
+- Updated dependencies [82fa577]
+- Updated dependencies [3aab8f9]
+- Updated dependencies [2563950]
+  - @opengeni/config@3.1.0
+  - @opengeni/runtime@4.2.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/sdk@7.3.0
+  - @opengeni/db@6.1.1
+  - @opengeni/observability@0.8.34
+  - @opengeni/core@4.0.5
+  - @opengeni/documents@0.8.36
+  - @opengeni/github@0.7.18
+  - @opengeni/storage@0.2.135
+  - @opengeni/codemode@0.6.4
+  - @opengeni/codex@0.2.28
+  - @opengeni/events@0.4.34
+  - @opengeni/tool-gateway@0.1.15
+
+## 2.1.0
+
+### Minor Changes
+
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+
+### Patch Changes
+
+- f3d178b: A model tool call to `knowledge_search` (first-party and Docs MCP) or `knowledge_prepare_save` now receives a compact copy of the result: the same JSON without timestamps, rank score, revision lineage, session and review-batch IDs, default-valued flags, a collection descriptor's `revisionId`, or a `revision.preview` that is empty or already begins a content excerpt starting at offset 0. Every entry and collection ID, `version`, `revision.id`, scope, publication status, title, kind, group and parent ID, description, excerpt, index status and cursor is kept, and a preview with unique text is kept in full. Codemode scripts and every other programmatic caller still receive the exact result. The projection runs at the existing per-caller seam (`projectAttemptToolResultForCaller`, which gains an optional tool identity), after the MCP transport has bounded the exact result; a result still over 1 MiB for the model spills its exact bytes. It affects only new tool outputs and passes any result that does not strictly match the contract through unchanged. On fixtures sized to staging medians a search result shrinks by 44% and a save preparation by 35%.
+- 9cdeef1: Git credential provisioning scripts (the repository clone setup and both token refresh commands) now refuse to run unless the sandbox lifecycle hook marks the command as targeting a sandbox. Executed directly on a developer or host machine they exit with status 78 before touching `$HOME/.opengeni` or the global Git configuration, instead of replacing that user's credential helpers. The runtime's clone and renewal hooks add the marker, so sandbox behavior is unchanged.
+- cbb7aa4: Let a normally completed, closed turn owner reach bounded Modal deadline and repeated-provider-error capture without an interruption-only quiescence receipt. Failed or interrupted owners still require physical quiescence proof; checkpoint publication and other-writer fences are unchanged.
+- 48a8774: Generate automatic session titles on chat-completions providers, such as OpenRouter connections, through one direct request outside the agent runner instead of a runner-only traced call that always failed. Routes without a resolved provider client now take the same direct path. The title request uses the model's lowest runnable reasoning effort and a larger output budget, a response stopped by the output limit keeps only whole words, and inline `<think>` reasoning before the answer is dropped. Automatic titles no longer keep a dangling closing quote or markdown mark from a wrapped title such as `"Pod Crash Debugging"` or `**Pod Crash Debugging**`. The managed OpenRouter free route (`isManagedOpenRouterFreeRoute`: the deployment-funded OpenRouter provider serving a `:free` variant) sends no title request, because it would spend the deployment key's shared per-minute and per-day request limits that users' turns need; those sessions keep the prompt preview until a turn on another route titles them.
+- fa12bd4: Keep detached NATS subscription loops from rejecting the process: a poison message or throwing consumer is dropped and logged, and a subscription error such as a permissions violation ends only that subscription instead of reaching the API's fatal unhandled-rejection boundary. A session or workspace-control SSE stream whose live subscription ends fails retryably so the client replays from Postgres, and the auth-callout, Codemode request, and agent-event responders resubscribe with bounded backoff; every unexpected end is counted in `opengeni_nats_subscription_terminations_total` and alerts. Long-lived NATS connections keep reconnecting through repeated auth errors. A freshly created sandbox that misses its command-readiness budget is terminated and replaced at most once per turn attempt after a jittered pause, with outcomes in `opengeni_sandbox_readiness_replacements_total`, and Codex/xAI capacity-wait wakes are spread by a bounded replay-safe jitter so a capacity reset no longer resumes every waiting turn at once.
+- 36e1764: An exhausted model-provider quota no longer retries. A daily or monthly allowance (for example OpenRouter's `free-models-per-day` cap or a requests/tokens-per-day limit), a used-up quota (`insufficient_quota`), an account out of credits (HTTP 402), or a 429 whose provider retry hint exceeds 15 minutes now fails the turn at once with the new `provider_quota_exhausted` code, `retryable: false`, a `quotaScope`, plain-language copy, and the provider's text as `detail`, instead of five paced same-turn recoveries. Ordinary per-minute rate limits, and quota wording whose provider retry hint is a minute or less, remain `provider_rate_limited` and retryable. `@opengeni/runtime` exports the classifier (`classifyProviderQuotaError`), and model clients that let the OpenAI SDK retry classify the exact SDK error for a 429 and mark an exhausted one `x-should-retry: false`, so the SDK does not replay it either and both decisions always agree. Google's generic `RESOURCE_EXHAUSTED` status and snake_case per-minute metric ids (Vertex `requests_per_minute_per_project`) stay retryable. A quota-refused compaction request records the same `quotaScope` marker, and failed session detail projects it. Codex and SuperGrok subscription transports keep their credential-rotation and capacity-wait semantics.
+- Updated dependencies [f3d178b]
+- Updated dependencies [084616e]
+- Updated dependencies [9cdeef1]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [cbb7aa4]
+- Updated dependencies [9cd1d23]
+- Updated dependencies [6fd328b]
+- Updated dependencies [9b9c6df]
+- Updated dependencies [6eb431b]
+- Updated dependencies [f11a3e3]
+- Updated dependencies [48a8774]
+- Updated dependencies [a307c83]
+- Updated dependencies [51aa35e]
+- Updated dependencies [e422b62]
+- Updated dependencies [fa12bd4]
+- Updated dependencies [36e1764]
+- Updated dependencies [f2ee81e]
+- Updated dependencies [f48191e]
+- Updated dependencies [c1756ef]
+- Updated dependencies [bd365b7]
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/sdk@7.2.0
+  - @opengeni/config@3.0.0
+  - @opengeni/db@6.1.0
+  - @opengeni/github@0.7.17
+  - @opengeni/core@4.0.4
+  - @opengeni/storage@0.2.134
+  - @opengeni/events@0.4.33
+  - @opengeni/observability@0.8.33
+  - @opengeni/codemode@0.6.3
+  - @opengeni/codex@0.2.27
+  - @opengeni/documents@0.8.35
+  - @opengeni/tool-gateway@0.1.14
+
 ## 2.0.3
 
 ### Patch Changes

@@ -69,7 +69,9 @@ import {
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
   renderSessionGoalContext,
+  renderSessionSystemUpdateBatch,
   renderUserMessageContentForModel,
+  formatModelContextTimestamp,
   sessionSystemUpdateBatchHistoryItem,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -136,6 +138,23 @@ describe("API key descriptions", () => {
       "read",
     );
     expect(
+      CreateOrganizationApiKeyRequest.parse({ name: "setup", preset: "developer_setup" }),
+    ).toEqual({ name: "setup", access: "full", preset: "developer_setup" });
+    expect(
+      CreateOrganizationApiKeyRequest.parse({ name: "setup", access: "developer_setup" }),
+    ).toEqual({ name: "setup", access: "developer_setup" });
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({
+        name: "setup",
+        access: "read",
+        preset: "developer_setup",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "setup", preset: "all_permissions" })
+        .success,
+    ).toBe(false);
+    expect(
       CreateOrganizationApiKeyRequest.safeParse({ name: "backend", access: "write" }).success,
     ).toBe(false);
     expect(
@@ -172,6 +191,15 @@ describe("external workspace identity", () => {
         settings: {},
       }).success,
     ).toBe(false);
+    // An organization API key may omit the owning organization; the route
+    // resolves it from the key and refuses every other caller without it.
+    expect(
+      EnsureWorkspaceRequest.parse({
+        externalSource: "acme-product",
+        externalId: "tenant-42",
+        name: "Acme tenant",
+      }),
+    ).toEqual({ externalSource: "acme-product", externalId: "tenant-42", name: "Acme tenant" });
     expect(
       EnsureWorkspaceRequest.safeParse({
         accountId,
@@ -793,6 +821,48 @@ describe("contracts", () => {
           source: "built_in",
           action: "connect",
           rationale: "x".repeat(2_001),
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("agent-suggested MCP endpoints reject embedded secrets and connection authority", () => {
+    const proposal = {
+      serverId: "opengeni",
+      toolName: "custom_mcp_setup_request",
+      providerDomain: "mcp.example.test",
+      reason: "missing_connection",
+      setupRequest: {
+        kind: "mcp",
+        name: "Records MCP",
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested documents.",
+      },
+    } as const;
+    expect(ToolAuthNeededPayload.safeParse(proposal).success).toBe(true);
+    for (const endpointUrl of [
+      "http://mcp.example.test/mcp",
+      "https://user:password@mcp.example.test/mcp",
+      "https://mcp.example.test/mcp#token",
+      "https://mcp.example.test/mcp?token=secret",
+    ]) {
+      expect(
+        ToolAuthNeededPayload.safeParse({
+          ...proposal,
+          setupRequest: { ...proposal.setupRequest, endpointUrl },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        ...proposal,
+        capability: {
+          id: "mcp:fake",
+          name: "Fake",
+          kind: "mcp",
+          source: "manual",
+          action: "connect",
+          rationale: "Fake",
         },
       }).success,
     ).toBe(false);
@@ -1569,6 +1639,17 @@ describe("contracts", () => {
       capturedAt: "2026-08-17T12:00:00.000Z",
     };
     const goalContext = renderSessionGoalContext(goalSnapshot)!;
+    expect(goalContext).toContain("You may update your operational goal directly");
+    expect(goalContext).not.toContain("adaptations and replacements are proposals");
+    expect(goalContext).toContain("Root constraints are user/API authority");
+    const reviewedGoalContext = renderSessionGoalContext({
+      ...goalSnapshot,
+      mutationPolicy: "review_changes",
+    })!;
+    expect(reviewedGoalContext).toContain(
+      "Semantic changes are proposals until a user applies them.",
+    );
+    expect(reviewedGoalContext).not.toContain("You may update your operational goal directly");
     expect(
       renderUserMessageContentForModel("Continue", [], "selected record 42", goalSnapshot),
     ).toEqual([
@@ -1659,6 +1740,112 @@ describe("contracts", () => {
     expect(scheduled.content).not.toContain("They are not human prompts");
   });
 
+  test("formats model-visible times as minute-precision UTC with the weekday", () => {
+    expect(formatModelContextTimestamp("2026-09-26T07:51:59.999Z")).toBe(
+      "Saturday 2026-09-26 07:51 UTC",
+    );
+    // A non-UTC offset renders in UTC, including across a date boundary.
+    expect(formatModelContextTimestamp(new Date("2026-09-27T01:05:00+02:00"))).toBe(
+      "Saturday 2026-09-26 23:05 UTC",
+    );
+    expect(() => formatModelContextTimestamp("not a time")).toThrow(RangeError);
+  });
+
+  test("renders the accepted send time as its own part beside the visible message", () => {
+    const sentAt = new Date("2026-09-26T07:51:30Z");
+    expect(
+      renderUserMessageContentForModel("What changed today?", [], null, undefined, sentAt),
+    ).toEqual([
+      { type: "input_text", text: "[Message sent Saturday 2026-09-26 07:51 UTC]" },
+      { type: "input_text", text: "What changed today?" },
+    ]);
+    // Caller context keeps its exact separate part; the time follows it.
+    expect(
+      renderUserMessageContentForModel(
+        "Visible request",
+        [],
+        "selected record 42",
+        undefined,
+        sentAt,
+      ),
+    ).toEqual([
+      { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
+      { type: "input_text", text: "[Message sent Saturday 2026-09-26 07:51 UTC]" },
+      { type: "input_text", text: "Visible request" },
+    ]);
+    // Legacy callers without a durable time render unchanged.
+    expect(renderUserMessageContentForModel("Visible request", [], null)).toBe("Visible request");
+  });
+
+  test("states delivery and creation times on machine-input batches", () => {
+    const childSessionId = "12121212-1212-4212-8212-121212121212";
+    const update = {
+      id: "13131313-1313-4313-8313-131313131313",
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: childSessionId,
+      summary: "Child completed",
+      payload: { type: "child_terminal_result" as const, childSessionId, status: "idle" as const },
+      lineage: {},
+      createdAt: "2026-09-26T07:40:12.000Z",
+    };
+    const content = renderSessionSystemUpdateBatch([update], {
+      deliveredAt: new Date("2026-09-26T07:51:00Z"),
+    });
+    expect(content.split("\n").slice(0, 3)).toEqual([
+      "[OpenGeni internal updates]",
+      "These platform updates were delivered together for this inference.",
+      "Delivered: Saturday 2026-09-26 07:51 UTC",
+    ]);
+    expect(JSON.parse(content.split("\n")[3]!)).toEqual({
+      updates: [
+        {
+          id: update.id,
+          kind: update.kind,
+          classification: update.classification,
+          sourceId: update.sourceId,
+          createdAt: "Saturday 2026-09-26 07:40 UTC",
+          summary: update.summary,
+          payload: update.payload,
+          lineage: {},
+        },
+      ],
+    });
+    // Rendering is a pure function of durable fields.
+    expect(
+      renderSessionSystemUpdateBatch([update], { deliveredAt: "2026-09-26T07:51:00.000Z" }),
+    ).toBe(content);
+
+    const scheduledTaskId = "14141414-1414-4414-8414-141414141414";
+    const scheduledTaskRunId = "15151515-1515-4515-8515-151515151515";
+    const scheduled = sessionSystemUpdateBatchHistoryItem(
+      [
+        {
+          id: "16161616-1616-4616-8616-161616161616",
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: scheduledTaskRunId,
+          summary: "Daily report",
+          payload: {
+            type: "scheduled_occurrence",
+            text: "Report yesterday's signups.",
+            scheduledTaskId,
+            scheduledTaskRunId,
+          },
+          lineage: {},
+          createdAt: "2026-09-26T07:00:00.000Z",
+        },
+      ],
+      undefined,
+      { promoteScheduledOccurrenceToUser: true, deliveredAt: "2026-09-26T07:02:00.000Z" },
+    );
+    expect(scheduled.role).toBe("user");
+    expect(scheduled.content).toContain("\nDelivered: Saturday 2026-09-26 07:02 UTC\n");
+    expect(scheduled.content).toContain(
+      "\nCreated: Saturday 2026-09-26 07:00 UTC\nInstructions:\nReport yesterday's signups.",
+    );
+  });
+
   test("keeps inconsistent scheduled occurrence identity on the system update path", () => {
     const scheduled = sessionSystemUpdateBatchHistoryItem([
       {
@@ -1724,6 +1911,40 @@ describe("contracts", () => {
       productAccessMode: "local",
     });
     expect(payload.defaultSandboxBackend).toBe("selfhosted");
+  });
+
+  test("accepts optional http(s) legal document links", () => {
+    const base = {
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+    } as const;
+    expect(ClientConfig.parse(base).legal).toBeUndefined();
+    expect(
+      ClientConfig.parse({
+        ...base,
+        legal: {
+          privacyPolicyUrl: "https://opengeni.ai/privacy",
+          termsOfServiceUrl: "https://opengeni.ai/terms",
+        },
+      }).legal,
+    ).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(() =>
+      ClientConfig.parse({ ...base, legal: { privacyPolicyUrl: "javascript:alert(1)" } }),
+    ).toThrow();
+    expect(ClientConfig.parse(base).supportEmail).toBeUndefined();
+    expect(ClientConfig.parse({ ...base, supportEmail: "support@opengeni.ai" }).supportEmail).toBe(
+      "support@opengeni.ai",
+    );
+    expect(() => ClientConfig.parse({ ...base, supportEmail: "mailto:x@y.z" })).toThrow();
   });
 
   test("accepts allowlisted browser analytics providers", () => {

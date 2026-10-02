@@ -14,7 +14,9 @@
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { publishDurableSessionEvents } from "../session-event-fanout";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
+import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 
 import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
@@ -40,8 +42,14 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  countActiveUsers,
+  readCreditGrantTotals,
+  readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
+  listPendingModalProviderCreates,
+  claimModalProviderCreateRecovery,
+  recordRecoveredModalProviderCreate,
   markWarmBillingStopCutoff,
   listMeterableWarmLeases,
   listSandboxViewerForceDrainWorkspaceIds,
@@ -57,6 +65,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
@@ -111,6 +120,7 @@ import {
   providerWorkspaceCapturePolicy,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
+  findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForSession,
   querySelfhostedOp,
   resumeExactSandboxSession,
@@ -143,7 +153,9 @@ import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-re
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
+  recordActiveUserGauges,
   recordCreditBalanceGauges,
+  recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
   recordOpenSandboxKubernetesInventoryGauges,
@@ -158,8 +170,13 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
+  recordSandboxCommandContainment,
+  recordSandboxProviderMissingBeforeCapture,
+  recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
+  recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordVerifiedSignupTrialSwitchGauge,
   runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
 import {
@@ -275,6 +292,8 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Only provider discovery is injected; durable recovery remains real. */
+  findModalProviderCreateReceipt?: typeof findModalProviderCreateReceipt;
   /** Override the read-only bounded OpenSandbox Kubernetes projection. */
   inspectOpenSandboxKubernetesInventory?: InspectOpenSandboxKubernetesInventoryFn;
   /** Override only the read-only provider process probe. The canonical DB
@@ -308,6 +327,8 @@ export type RetainedProcessProbeResult =
         | "provider_binding_missing"
         | "provider_binding_mismatch"
         | "process_observation_unavailable";
+      /** A running command whose last read still returned a large backlog. */
+      outputBacklog?: boolean;
     };
 
 export type RetainedProcessProbeFn = (
@@ -322,7 +343,11 @@ export type RetainedProcessProbeFn = (
     streamFidelity?: "separate" | "merged",
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
+  drainBudget?: RetainedProcessDrainBudget,
 ) => Promise<RetainedProcessProbeResult>;
+
+/** Shared wall-clock bound on output draining within one reconciliation sweep. */
+export type RetainedProcessDrainBudget = { until: number };
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
 
@@ -334,6 +359,16 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+/** Bounds on reading a command's output backlog: per claim, and across one
+ * reconciliation sweep so the reaper activity stays well inside its timeout.
+ * Each read returns up to one provider page per stream. */
+export const RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS = 8;
+export const RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS = 10_000;
+export const RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS = 60_000;
+/** A live process whose read returned at least this much output left a backlog
+ * behind it. A server or watcher that only trickles output stays on ordinary
+ * backoff; a process the provider reports exited is always read to EOF. */
+export const RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES = 256 * 1024;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
@@ -529,10 +564,15 @@ export function createSandboxLeaseActivities(
     try {
       const { db, settings, observability } = await services();
       const timing = sandboxDrainTiming(settings);
-      const onUnobservableCommandDrainError = (error: unknown) => {
-        observability.warn("sandbox reaper: unobservable command drain inspection failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+      const commandContainment = {
+        idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+        onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>
+          recordSandboxCommandContainment(observability, outcome),
+        onCommandContainmentError: (error: unknown) => {
+          observability.warn("sandbox reaper: retained command containment inspection failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
       };
       if (!settings.sandboxOwnershipEnabled) {
         // Turns skip leases when the flag is off, but Computer/Browser attach
@@ -540,7 +580,7 @@ export function createSandboxLeaseActivities(
         // behind rotation_in_progress forever. Inventory and drain those rows;
         // do not request NEW deadline rotations or meter warm time.
         const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
-          onUnobservableCommandDrainError,
+          ...commandContainment,
           viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
           turnHolderTtlMs: settings.sandboxLeaseTtlMs,
           interactionHolderTtlMs: settings.sandboxInteractionHolderTtlMs,
@@ -577,7 +617,7 @@ export function createSandboxLeaseActivities(
       // Billing, reconciliation, provider-orphan cleanup, artifact GC, and gauges
       // run only after every drainable box has its own durable child.
       const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
-        onUnobservableCommandDrainError,
+        ...commandContainment,
         viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
         // Dead-worker turn holders: a live holder is touched every 10s from the
         // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
@@ -621,7 +661,7 @@ export function createSandboxLeaseActivities(
       instanceId: input.target.instanceId,
     });
     try {
-      const { db, settings, observability, objectStorage } = await services();
+      const { db, settings, observability, objectStorage, bus } = await services();
       assertSandboxDrainInputTiming(input);
       const drainSettings =
         settings.sandboxSnapshotTimeoutMs === input.snapshotTimeoutMs
@@ -645,6 +685,7 @@ export function createSandboxLeaseActivities(
           probeDrainableProvider,
           captureAttempt,
           objectStorage,
+          bus,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
       } catch (error) {
@@ -719,6 +760,22 @@ export function createSandboxLeaseActivities(
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
       await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+
+      // Disabling new lease ownership cannot strand a previously dispatched
+      // operation. This only attributes a positive receipt; normal draining
+      // already runs in both ownership modes.
+      try {
+        await reconcileModalProviderCreates(
+          db,
+          settings,
+          observability,
+          options.findModalProviderCreateReceipt,
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: Modal create recovery inventory failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       if (!settings.sandboxOwnershipEnabled) {
         // Inventory remains useful while provider ownership is intentionally
@@ -1273,14 +1330,12 @@ export async function replayConnectedCommandOutput(
   let capturedThrough = 0n;
   while (true) {
     const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, async (frames) => {
-      await capture(frames);
-      for (const frame of frames) {
-        const sequence = BigInt(frame.sequence);
-        if (sequence > capturedThrough) capturedThrough = sequence;
-      }
-    });
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
+    // chunk). These are real replay progress even when capture receives no
+    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
+    capturedThrough = BigInt(replay.replaySequence);
     // This is a finite terminal drain, not a poller for a running command.
     // Failed persistence, transport/integrity errors, and no-progress reads
     // return control to normal reconciliation without licensing settlement.
@@ -1417,6 +1472,9 @@ async function reconcileTerminalRetainedProcesses(
     return;
   }
 
+  const drainBudget: RetainedProcessDrainBudget = {
+    until: Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS,
+  };
   for (const claim of claims) {
     let process = claim.process;
     const expected = retainedProcessSettlementIdentity(process);
@@ -1645,6 +1703,7 @@ async function reconcileTerminalRetainedProcesses(
                     .catch(() => undefined);
               },
               commandPersistence,
+              drainBudget,
             ).then(
               (value) => ({ ok: true as const, value }),
               (error: unknown) => ({ ok: false as const, error }),
@@ -1713,6 +1772,7 @@ async function reconcileTerminalRetainedProcesses(
           expected,
           claim.claimId,
           observation.reason,
+          observation.outputBacklog === true,
         );
         continue;
       }
@@ -1793,9 +1853,17 @@ async function deferRetainedProcessClaim(
   expected: ReturnType<typeof retainedProcessSettlementIdentity>,
   claimId: string,
   outcome: RetainedProcessDeferralOutcome,
+  outputBacklog = false,
 ): Promise<void> {
-  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome);
+  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome, outputBacklog);
   try {
+    // A healthy long-lived command can already be on a five-minute backoff
+    // when rotation becomes due. Wake it at the lead boundary, then at the
+    // reaper cadence, so observation does not consume the capture window.
+    const lease =
+      process.providerBackend === "modal" && process.routeTargetId === null
+        ? await readLease(db, process.workspaceId, process.sandboxGroupId)
+        : null;
     await deferRetainedProcessReconciliation(db, {
       accountId: process.accountId,
       workspaceId: process.workspaceId,
@@ -1804,7 +1872,7 @@ async function deferRetainedProcessClaim(
       expected,
       claimId,
       outcome: deferral.durableOutcome,
-      retryAfterMs: deferral.retryAfterMs,
+      retryAfterMs: retainedProcessDeadlineRetryMs(process, lease, settings, deferral.retryAfterMs),
     });
     recordRetainedProcessReconciliation(observability, deferral.metricOutcome);
   } catch (error) {
@@ -1824,6 +1892,7 @@ export function retainedProcessReconciliationDeferral(
   settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
   process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
   outcome: RetainedProcessDeferralOutcome,
+  outputBacklog = false,
 ): {
   durableOutcome: string;
   metricOutcome: RetainedProcessReconciliationOutcome;
@@ -1848,11 +1917,14 @@ export function retainedProcessReconciliationDeferral(
       quarantined: true,
     };
   }
-  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
-  );
+  const baseRetryMs = Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000);
+  // A backlog still being drained is progress, not an unhealthy provider:
+  // come back at the reaper cadence, without backoff.
+  const exponent =
+    outcome === "provider_running" && outputBacklog
+      ? 0
+      : Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(5 * 60_000, baseRetryMs * 2 ** exponent);
   return {
     durableOutcome: outcome,
     metricOutcome: outcome,
@@ -1878,6 +1950,77 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 };
 
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
+
+/** A command's exit is reported only after both output streams reach EOF, so a
+ * finished command with a large backlog looks running until it is read. While a
+ * backlog remains, keep reading within the per-claim and per-sweep budgets, so
+ * it settles in this claim instead of one page per backoff step. Every page,
+ * including `first`, is captured here. */
+export async function drainRetainedCommandBacklog(
+  session: RetainedProcessProbeSession,
+  providerSessionId: number,
+  first: unknown,
+  capturePage: (value: unknown) => Promise<void>,
+  budget?: RetainedProcessDrainBudget,
+): Promise<RetainedProcessProbeResult> {
+  // Measure before capture: capturing a byte-offset page consumes its receipt.
+  let backlog = retainedBacklogRemains(session, first);
+  await capturePage(first);
+  let observation = classifyRetainedProcessPollResult(first, providerSessionId, session);
+  if (typeof session.writeStdin !== "function") return observation;
+  const until = Math.min(
+    Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS,
+    budget?.until ?? Number.POSITIVE_INFINITY,
+  );
+  for (
+    let reads = 0;
+    backlog &&
+    observation.status === "deferred" &&
+    observation.reason === "provider_running" &&
+    reads < RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS &&
+    Date.now() < until;
+    reads++
+  ) {
+    let next: unknown;
+    try {
+      next = await withRetainedProcessProbeTimeout(
+        session.writeStdin({
+          sessionId: providerSessionId,
+          chars: "",
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 2_000,
+        }),
+      );
+    } catch {
+      // The observation already made stays authoritative; the next sweep
+      // classifies any provider failure through the ordinary path.
+      break;
+    }
+    backlog = retainedBacklogRemains(session, next);
+    await capturePage(next);
+    observation = classifyRetainedProcessPollResult(next, providerSessionId, session);
+  }
+  return backlog && observation.status === "deferred" && observation.reason === "provider_running"
+    ? { ...observation, outputBacklog: true }
+    : observation;
+}
+
+/** Whether a byte-offset page leaves a backlog worth reading now: the provider
+ * reports the process exited but its output is not yet read to EOF, or a live
+ * process produced a large page. Must run before the page is captured, which
+ * consumes its receipt. Supervised commands are left to their proof path. */
+function retainedBacklogRemains(session: RetainedProcessProbeSession, result: unknown): boolean {
+  const page = session.getProviderCommandOutput?.(result);
+  if (!page?.expected || page.command.kind !== "modal-router-v1") return false;
+  if (page.command.supervision || page.exitCode !== null) return false;
+  if (page.providerExited) return true;
+  const { command, expected } = page;
+  return (["stdout", "stderr"] as const).some(
+    (stream) =>
+      command.streams[stream].byteOffset - expected.streams[stream].byteOffset >=
+      RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES,
+  );
+}
 
 async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1927,6 +2070,7 @@ export async function probeRetainedProcessAtProvider(
     streamFidelity?: "separate" | "merged",
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
+  drainBudget?: RetainedProcessDrainBudget,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -2149,8 +2293,15 @@ export async function probeRetainedProcessAtProvider(
     }
     return { status: "deferred", reason: "provider_error" };
   }
-  await capturePage(result);
-  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId, session);
+  // Cancellation keeps draining with empty reads too: a stopped command's exit
+  // is also reported only after its unread output reaches EOF.
+  const observation = await drainRetainedCommandBacklog(
+    session,
+    process.providerSessionId,
+    result,
+    capturePage,
+    drainBudget,
+  );
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
@@ -2325,6 +2476,17 @@ async function refreshQueueLeaseAndCreditGauges(
     ),
     refreshSandboxInventoryGauge(
       observability,
+      "recovery_observations",
+      "recovery-observations",
+      async () => {
+        recordSandboxRecoveryObservationGauges(
+          observability,
+          await readRecentSandboxRecoveryObservations(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
       "rotation_backlog",
       "rotation-backlog",
       async () => {
@@ -2371,6 +2533,38 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordActiveUserGauges(observability, await countActiveUsers(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: active-user gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordCreditGrantGauges(observability, await readCreditGrantTotals(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: credit-grant gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      recordVerifiedSignupTrialDeploymentFlagGauge(
+        observability,
+        settings.verifiedSignupTrialCreditsEnabled,
+      );
+      try {
+        const trialSwitch = await readVerifiedSignupTrialSwitch(db);
+        recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);
+      } catch (error) {
+        observability.warn("sandbox reaper: trial-credit switch gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -2441,10 +2635,50 @@ async function forceDrainOverLimitWorkspaces(
   return forceDrained;
 }
 
+export async function reconcileModalProviderCreates(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  discover: typeof findModalProviderCreateReceipt = findModalProviderCreateReceipt,
+): Promise<void> {
+  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret)
+    return;
+  const candidates = await listPendingModalProviderCreates(db);
+  await forEachWithConcurrency(candidates, 2, async (candidate) => {
+    try {
+      const { accountId } = await rlsContextForWorkspace(db, candidate.workspaceId);
+      const identity = { ...candidate, accountId };
+      const attempt = await claimModalProviderCreateRecovery(db, identity);
+      if (!attempt) return;
+      const instanceId = await discover(settings, attempt);
+      if (!instanceId) return; // Absence never settles an unknown dispatch.
+      if (await recordRecoveredModalProviderCreate(db, { ...identity, attempt, instanceId })) {
+        observability.info("sandbox reaper: recovered Modal create receipt", {
+          ...candidate,
+          operationId: attempt.operationId,
+          instanceId,
+        });
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: Modal create remains fenced pending discovery", {
+        ...candidate,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+}
+
 export function modalOrphanTerminationStillEligible(
   latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
   candidate: ModalOrphanSweepTermination,
 ): boolean {
+  // The provider may have accepted a create whose reply has not arrived.
+  // Before attribution, neither its ID nor its separately-applied tags are
+  // available here. Postpone orphan deletion while any such owner exists;
+  // age/absence cannot distinguish its provider from an abandoned one.
+  if (latest.some((lease) => lease.liveness === "warming" && lease.instanceId === null)) {
+    return false;
+  }
   if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
     return false;
   }
@@ -2632,6 +2866,7 @@ async function terminateDrainableBox(
   probeDrainableProvider: DrainableProviderProbeFn,
   attempt: SandboxDrainCaptureAttempt,
   objectStorage: ObjectStorage | null,
+  bus: ActivityServices["bus"] | null = null,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
   // returns no account_id; the workspace->account map is the bootstrap read).
@@ -3092,15 +3327,36 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold } = await confirmDrainCold(db, {
+  const { wentCold, backgroundCommandEvents } = await confirmDrainCold(db, {
     accountId,
     workspaceId: row.workspaceId,
     sandboxGroupId: row.sandboxGroupId,
     expectedEpoch: row.leaseEpoch,
     ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
     providerMissingBeforeCapture: providerMissing,
+    idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+  });
+  // The command terminal events and agent inputs are already durable in the
+  // cold commit; this is only best-effort live fanout.
+  await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
+    observability.warn("sandbox reaper: contained command event fanout failed", {
+      sandboxGroupId: row.sandboxGroupId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   });
   if (wentCold) {
+    // Only the exact successful cold commit counts provider loss. A missing
+    // probe, a stale capture, a failed commit, or a retried child is not another
+    // observed loss. Keep this outside the best-effort session event writer.
+    if (providerMissing) {
+      recordSandboxProviderMissingBeforeCapture(observability, backend);
+    }
+    if (lease.unobservableCommandDrainIds?.length) {
+      recordSandboxCommandContainment(
+        observability,
+        providerMissing ? "provider_missing" : "contained",
+      );
+    }
     // Durable termination record (sandbox-file-persistence observability): who
     // ended this box and whether its /workspace was captured first, appended to
     // every session sharing the group's box. Best-effort: attribution must
@@ -3279,6 +3535,11 @@ export async function terminateProviderBox(
   // fail closed instead of silently leaving a live provider behind while the
   // caller commits the lease cold.
   if (!lease.instanceId) {
+    if (lease.providerCreateAttempt?.instanceId === null) {
+      throw new Error(
+        "provider_create_outcome_unknown: cannot infer termination from missing instance ID",
+      );
+    }
     if (persistedInstanceId) {
       throw new Error(
         `sandbox backend ${backend} has persisted provider identity ${persistedInstanceId} but no authoritative lease instance; refusing teardown`,
@@ -3315,7 +3576,12 @@ export async function terminateProviderBox(
     }
     try {
       await beforeProviderStop?.();
-      await terminateModalById(settings, lease.instanceId);
+      await terminateModalById(
+        settings,
+        lease.instanceId,
+        undefined,
+        lease.providerCreateAttempt?.providerBindingKey,
+      );
     } catch (error) {
       if (!isProviderSandboxNotFoundError("modal", error)) {
         throw error;

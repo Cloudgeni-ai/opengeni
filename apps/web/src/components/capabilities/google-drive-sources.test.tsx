@@ -376,7 +376,7 @@ describe("Google Drive extra accounts fold into the same row", () => {
     try {
       const describedById = integrationDisclosureElementId("google-drive-access");
       const addAccount = [...rendered.sheet.querySelectorAll("button")].find(
-        (node) => node.textContent?.trim() === "+ Add account",
+        (node) => node.textContent?.trim() === "Add account",
       )!;
       expect(addAccount.getAttribute("aria-describedby")).toBe(describedById);
       const allowAccess = [...rendered.sheet.querySelectorAll("button")].find(

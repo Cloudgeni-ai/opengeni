@@ -1,8 +1,15 @@
 import { MessageTimeline, type TimelineItem } from "@opengeni/react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
 import { ChatInteractiveBlock } from "../src/components/artifacts/chat-interactive-block";
 import { InlineChatImage } from "../src/components/artifacts/inline-chat-image";
 import { mediaFixture, workspaceId, siteId, imageId } from "./chat-media-context-fixture";
+import { consoleLinkResolver } from "../src/lib/session-artifact-navigation";
 import "../src/styles.css";
 
 declare global {
@@ -19,46 +26,56 @@ const items: TimelineItem[] = Array.from({ length: 18 }, (_, index) => ({
   streaming: false,
   text: String(index),
 }));
-createRoot(document.getElementById("root")!).render(
-  <main className="flex h-dvh flex-col bg-bg text-fg">
-    <h1 className="p-3 text-lg">Chat media entry regression</h1>
-    <div className="min-h-0 flex-1">
-      <MessageTimeline
-        className="h-full"
-        items={items}
-        status="completed"
-        renderMessageText={(text) => {
-          const index = Number(text);
-          return (
-            <div data-media-row={index}>
-              <p>Message {index}</p>
-              {index % 3 === 0 ? (
-                <ChatInteractiveBlock
-                  workspaceId={workspaceId}
-                  kind="html"
-                  content={
-                    '<h2>Inline preview</h2><div id="late">Growing content</div><script>setTimeout(()=>{document.getElementById("late").style.height="1100px"},700)</script>'
-                  }
-                />
-              ) : index % 3 === 1 ? (
-                <ChatInteractiveBlock
-                  workspaceId={workspaceId}
-                  kind="site"
-                  content={JSON.stringify({ siteId })}
-                />
-              ) : (
-                <InlineChatImage
-                  workspaceId={workspaceId}
-                  artifactId={imageId}
-                  alt={`Image ${index}`}
-                />
-              )}
-              <p data-media-anchor={index}>After media {index}</p>
-            </div>
-          );
-        }}
-      />
-    </div>
-    <footer className="h-16 shrink-0 border-t p-4">Composer</footer>
-  </main>,
-);
+function Fixture() {
+  return (
+    <main className="flex h-dvh flex-col bg-bg text-fg">
+      <h1 className="p-3 text-lg">Chat media entry regression</h1>
+      <div className="min-h-0 flex-1">
+        <MessageTimeline
+          resolveLink={consoleLinkResolver}
+          className="h-full"
+          items={items}
+          status="completed"
+          renderMessageText={(text) => {
+            const index = Number(text);
+            return (
+              <div data-media-row={index}>
+                <p>Message {index}</p>
+                {index % 3 === 0 ? (
+                  <ChatInteractiveBlock
+                    workspaceId={workspaceId}
+                    kind="html"
+                    content={
+                      '<h2>Inline preview</h2><div id="late">Growing content</div><script>setTimeout(()=>{document.getElementById("late").style.height="1100px"},700)</script>'
+                    }
+                  />
+                ) : index % 3 === 1 ? (
+                  <ChatInteractiveBlock
+                    workspaceId={workspaceId}
+                    kind="site"
+                    content={JSON.stringify({ siteId })}
+                  />
+                ) : (
+                  <InlineChatImage
+                    workspaceId={workspaceId}
+                    artifactId={imageId}
+                    alt={`Image ${index}`}
+                  />
+                )}
+                <p data-media-anchor={index}>After media {index}</p>
+              </div>
+            );
+          }}
+        />
+      </div>
+      <footer className="h-16 shrink-0 border-t p-4">Composer</footer>
+    </main>
+  );
+}
+// The Site block and retained file preview use router links, so the fixture
+// needs a router like the app provides.
+const router = createRouter({
+  routeTree: createRootRoute({ component: Fixture }),
+  history: createMemoryHistory({ initialEntries: ["/"] }),
+});
+createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

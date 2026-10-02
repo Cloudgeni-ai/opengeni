@@ -3,7 +3,6 @@ import { Loader2Icon, MailIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuMeta } from "@/components/ui/dropdown-menu";
 import { Notice } from "@/components/ui/notice";
 import { isOrganizationConflict } from "@/lib/organization-admin";
 import {
@@ -267,92 +266,39 @@ export function accountMenuAriaLabel(input: {
   return cue ? `${base} ${cue}.` : base;
 }
 
-export function organizationInvitationNoticeLabel(
-  invitations: readonly OrganizationInvitation[],
-): string | null {
-  if (invitations.length === 0) return null;
-  if (invitations.length === 1) {
-    const organizationName = invitations[0]?.organizationName?.trim();
-    return organizationName ? `Join ${organizationName}` : "Review organization invitation";
-  }
-  return `${invitations.length} organization invitations`;
-}
-
-export function OrganizationInvitationCountBadge(props: {
-  pendingCount: number;
-  className?: string;
-}) {
+/** The quiet cue on a closed account button: a dot while invitations are pending. */
+export function OrganizationInvitationDot(props: { pendingCount: number; className?: string }) {
   if (props.pendingCount <= 0) return null;
   return (
     <span
       aria-hidden="true"
-      data-slot="organization-invitation-count"
+      data-slot="organization-invitation-dot"
       className={cn(
-        "absolute -right-1 -top-1 z-10 flex min-w-3.5 items-center justify-center rounded-full bg-brand-strong px-1 text-2xs font-semibold leading-tight text-brand-fg",
+        "absolute -top-0.5 -right-0.5 size-2.5 rounded-full bg-status-waiting ring-2 ring-bg",
         props.className,
       )}
-    >
-      {props.pendingCount > 9 ? "9+" : props.pendingCount}
-    </span>
+    />
   );
 }
 
-export function OrganizationInvitationRailNotice(props: {
-  controller: OrganizationInvitationsController;
-}) {
-  const label = organizationInvitationNoticeLabel(props.controller.invitations);
-  if (!label) return null;
-  const cue = pendingOrganizationInvitationCue(props.controller.pendingCount);
-  return (
-    <button
-      type="button"
-      aria-label={cue ? `Review invitations. ${cue}.` : "Review organization invitations"}
-      onClick={props.controller.openDialog}
-      className="mb-1 flex min-h-8 w-full items-center gap-2 rounded-md border border-brand/30 bg-brand/[0.06] px-1.5 py-1 text-left transition-colors hover:bg-brand/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-h-11"
-    >
-      <MailIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg">{label}</span>
-      {props.controller.pendingCount > 1 ? (
-        <Badge variant="secondary" className="min-w-5 px-1.5 py-0 text-2xs tabular-nums">
-          {props.controller.pendingCount > 9 ? "9+" : props.controller.pendingCount}
-        </Badge>
-      ) : null}
-    </button>
-  );
-}
-
+/** "Invitations" with the pending count. It only exists while there is something to review. */
 export function OrganizationInvitationsMenuItem(props: {
   controller: OrganizationInvitationsController;
   className?: string;
   disabled?: boolean;
 }) {
   const { controller } = props;
-  const accessibleLabel =
-    controller.pendingCount > 0
-      ? `Organization invitations, ${controller.pendingCount} pending`
-      : "Organization invitations";
+  if (controller.pendingCount <= 0) return null;
   return (
     <DropdownMenuItem
       className={props.className}
-      aria-label={accessibleLabel}
+      aria-label={`Organization invitations, ${controller.pendingCount} pending`}
       disabled={props.disabled}
       onSelect={controller.openDialog}
     >
-      <MailIcon
-        className={cn("size-4", controller.pendingCount > 0 && "text-brand!")}
-        aria-hidden="true"
-      />
-      <span className="min-w-0 flex-1">Organization invitations</span>
-      {controller.loading && !controller.loaded ? (
-        <Loader2Icon
-          className="size-3.5 animate-spin text-fg-subtle motion-reduce:animate-none"
-          aria-hidden="true"
-        />
-      ) : controller.pendingCount > 0 ? (
-        <Badge variant="secondary" className="min-w-5 px-1.5 py-0 text-2xs tabular-nums">
-          {controller.pendingCount}
-        </Badge>
-      ) : null}
+      <MailIcon className="text-brand!" aria-hidden="true" />
+      Invitations
+      <DropdownMenuMeta>{controller.pendingCount}</DropdownMenuMeta>
     </DropdownMenuItem>
   );
 }
@@ -483,7 +429,7 @@ export function OrganizationInvitationsDialog(props: {
                     </div>
                     <Button
                       type="button"
-                      variant="secondary"
+                      variant="outline"
                       size="sm"
                       className="w-full sm:w-auto"
                       aria-label={`Accept invitation to ${organizationName}`}

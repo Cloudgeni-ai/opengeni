@@ -20,6 +20,7 @@ import {
   getSlackInteractionActionHandle,
   getSessionForSubject,
   grantWorkspaceAccess,
+  listPendingSlackInteractionMessageActionHandles,
   listSessionsForSubject,
   renewSlackAppHomeRefreshClaim,
   releaseSlackAppHomeRefresh,
@@ -655,6 +656,171 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await getSessionForSubject(db, target.workspaceId, root.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, owner)).not.toBeNull();
+  });
+
+  test("freezes the first message's start line with the first bind only", async () => {
+    if (!available) return;
+    const target = await workspace("start-line");
+    const owner = "user:slack-start-line-owner";
+    await member(target, owner);
+    const connection = await botConnection(target, "T_START_LINE", {
+      botId: "B_START_LINE",
+      botUserId: "U_START_LINE_BOT",
+    });
+    const { interaction } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_START_LINE",
+      slackChannelId: "C_START_LINE",
+      slackThreadTs: "1710000000.000020",
+      routeKey: "C_START_LINE:1710000000.000020",
+      triggeringProviderEventId: "E_START_LINE",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    expect(interaction.startMessageLine).toBeNull();
+    expect(interaction.sessionDefaultsLine).toBeNull();
+    const session = await createSession(db, {
+      ...target,
+      requestedSessionId: interaction.sessionReservationId,
+      initialMessage: "start line",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const line = "<https://app.example.test/w/s|OpenGeni started this task> in *Platform*.";
+    expect(
+      await bindSlackInteractionSession(db, {
+        ...interaction,
+        owningSubjectId: owner,
+        sessionId: session.id,
+        startMessageLine: line,
+      }),
+    ).toMatchObject({ sessionId: session.id, startMessageLine: line, sessionDefaultsLine: null });
+    // A replayed bind that rendered different bytes keeps the frozen line, so
+    // an acknowledgement repair posts exactly what the first attempt posted.
+    expect(
+      await bindSlackInteractionSession(db, {
+        ...interaction,
+        owningSubjectId: owner,
+        sessionId: session.id,
+        startMessageLine: "<https://elsewhere.test/w/s|OpenGeni started this task>.",
+      }),
+    ).toMatchObject({ sessionId: session.id, startMessageLine: line });
+    const [row] = await admin<{ start_message_line: string | null }[]>`
+      select start_message_line from slack_interactions where id = ${interaction.id}`;
+    expect(row!.start_message_line).toBe(line);
+    // Both frozen columns are bounded. A postgres.js query runs only once
+    // awaited, so each one runs inside its own function.
+    for (const [column, value, constraint] of [
+      ["start_message_line", "", "slack_interactions_start_message_line_check"],
+      ["start_message_line", "x".repeat(2049), "slack_interactions_start_message_line_check"],
+      ["session_defaults_line", "", "slack_interactions_session_defaults_line_check"],
+      ["session_defaults_line", "x".repeat(1025), "slack_interactions_session_defaults_line_check"],
+    ] as const) {
+      await expect(
+        (async () => {
+          await admin`update slack_interactions set ${admin(column)} = ${value} where id = ${interaction.id}`;
+        })(),
+      ).rejects.toThrow(constraint);
+    }
+  }, 60_000);
+
+  test("a single-button message swaps its button in place without superseding the replacement", async () => {
+    if (!available) return;
+    const target = await workspace("start-button");
+    const owner = `user:slack-start-button-owner-${crypto.randomUUID()}`;
+    await member(target, owner);
+    const connection = await botConnection(target, "T_START_BUTTON", {
+      botId: "B_START_BUTTON",
+      botUserId: "U_START_BUTTON_BOT",
+    });
+    const { interaction: reserved } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_START_BUTTON",
+      slackChannelId: "C_START_BUTTON",
+      slackThreadTs: "1710000000.000040",
+      routeKey: "C_START_BUTTON:1710000000.000040",
+      triggeringProviderEventId: "E_START_BUTTON",
+      initiatingSlackUserId: "U_START_BUTTON",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    const session = await createSession(db, {
+      ...target,
+      requestedSessionId: reserved.sessionReservationId,
+      initialMessage: "start button root",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const interaction = await bindSlackInteractionSession(db, {
+      ...reserved,
+      owningSubjectId: owner,
+      sessionId: session.id,
+      startMessageLine: "<https://app.example.test/w/s|OpenGeni started this task>.",
+    });
+    if (!interaction) throw new Error("start button interaction did not bind");
+    const messageOperationId = crypto.randomUUID();
+    const reserve = async (actionKind: "session_pause" | "session_resume", actionKey: string) =>
+      (
+        await reserveSlackInteractionActionHandles(db, {
+          interaction,
+          sessionEventSequence: 0,
+          messageOperationId,
+          expiresAt: new Date(Date.now() + 60_000),
+          actions: [{ actionKind, actionKey }],
+        })
+      )[0]!;
+    const pending = async () =>
+      await listPendingSlackInteractionMessageActionHandles(db, {
+        ...target,
+        interactionId: interaction.id,
+        messageOperationId,
+      });
+    const stop = await reserve("session_pause", `${messageOperationId}:session_pause`);
+    expect((await pending()).map((handle) => handle.id)).toEqual([stop.id]);
+    // Pressing Stop reserves Resume on the same message before Stop settles.
+    const resume = await reserve(
+      "session_resume",
+      `${messageOperationId}:session_resume:${stop.id}`,
+    );
+    expect(
+      await settleSlackInteractionActionHandles(db, {
+        ...target,
+        handleId: stop.id,
+        result: "paused",
+        supersedeSiblings: false,
+      }),
+    ).toMatchObject({ status: "completed", result: "paused" });
+    expect((await pending()).map((handle) => handle.id)).toEqual([resume.id]);
+    // Another message's pending handles are never listed.
+    expect(
+      await listPendingSlackInteractionMessageActionHandles(db, {
+        ...target,
+        interactionId: interaction.id,
+        messageOperationId: crypto.randomUUID(),
+      }),
+    ).toEqual([]);
+    // Settling the task retires what is left.
+    expect(
+      await settleSlackInteractionActionHandles(db, {
+        ...target,
+        handleId: resume.id,
+        result: "task_settled",
+        stale: true,
+      }),
+    ).toMatchObject({ status: "stale", result: "task_settled" });
+    expect(await pending()).toEqual([]);
   });
 
   test("reserves opaque requester-bound actions and settles one card once", async () => {

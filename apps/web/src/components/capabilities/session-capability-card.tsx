@@ -1,5 +1,5 @@
 import { attachSessionCapability } from "./attach-session-capability";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
@@ -10,12 +10,14 @@ import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
+import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
 
 const CodexSubscriptionsCard = lazy(async () => ({
-  default: (await import("@/components/codex-connection")).CodexSubscriptionsCard,
+  default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
 }));
 
 /** Recommendations carry identity and rationale, never connection configuration.
@@ -30,7 +32,37 @@ type SessionCapabilityCardProps = {
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const context = useAppContext();
-  const capability = props.item.capability;
+  const [registered, setRegistered] = useState<{ id: string; restoreFocus: boolean } | null>(null);
+  const onRegistered = useCallback(
+    (id: string, restoreFocus: boolean) => setRegistered({ id, restoreFocus }),
+    [],
+  );
+  if (props.item.setupRequest && !registered) {
+    return (
+      <SessionCustomMcpCard
+        key={`${props.workspaceId}:${props.item.id}`}
+        item={props.item}
+        workspaceId={props.workspaceId}
+        onRegistered={onRegistered}
+      />
+    );
+  }
+  const item = registered
+    ? {
+        ...props.item,
+        setupRequest: null,
+        capability: {
+          id: registered.id,
+          name: props.item.setupRequest!.name,
+          kind: "mcp" as const,
+          source: "manual" as const,
+          action: "connect" as const,
+          rationale: props.item.setupRequest!.rationale,
+          requiredVariables: [],
+        },
+      }
+    : props.item;
+  const capability = item.capability;
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
@@ -48,8 +80,10 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   }
   return (
     <ScopedSessionCapabilityCard
-      key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}
+      key={`${props.workspaceId}:${props.sessionId}:${capability!.id}`}
       {...props}
+      item={item}
+      restoreFocus={registered?.restoreFocus ?? false}
     />
   );
 }
@@ -59,7 +93,8 @@ function ScopedSessionCapabilityCard({
   workspaceId,
   sessionId,
   onConfigured,
-}: SessionCapabilityCardProps) {
+  restoreFocus = false,
+}: SessionCapabilityCardProps & { restoreFocus?: boolean }) {
   const context = useAppContext();
   const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
@@ -74,6 +109,13 @@ function ScopedSessionCapabilityCard({
   const githubRequestSequence = useRef(0);
   const active = useRef(true);
   const github = recommendation.id === "api:github-app";
+  useEffect(() => {
+    if (!restoreFocus) return;
+    // The review dialog's opener is removed when the new connection card
+    // replaces it. Focus the next actionable control after Radix closes it.
+    const frame = requestAnimationFrame(() => opener.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [restoreFocus]);
   useEffect(() => {
     active.current = true;
     return () => {
@@ -139,9 +181,7 @@ function ScopedSessionCapabilityCard({
     } catch (failure) {
       navigating = false;
       if (active.current && requestSequence === githubRequestSequence.current) {
-        setGithubError(
-          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
-        );
+        setGithubError(`Couldn't start GitHub setup. ${userErrorText(failure, "Try again.")}`);
         setExpanded(true);
       }
     } finally {
@@ -252,19 +292,88 @@ function SessionCapabilitySetup({
 }) {
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
+  const canReadConnections =
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [error, setError] = useState<string | null>(null);
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
   const inFlight = useRef(false);
-  const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
-  scope.current = { client: context.client, workspaceId, sessionId, alive: true };
+  const scope = useRef({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    canReadConnections,
+    alive: true,
+  });
+  if (
+    scope.current.client !== context.client ||
+    scope.current.workspaceId !== workspaceId ||
+    scope.current.sessionId !== sessionId ||
+    scope.current.canReadConnections !== canReadConnections
+  ) {
+    scope.current = {
+      client: context.client,
+      workspaceId,
+      sessionId,
+      canReadConnections,
+      alive: true,
+    };
+  }
   useEffect(() => {
+    const activeScope = scope.current;
     void catalog.refresh();
     return () => {
-      scope.current.alive = false;
+      activeScope.alive = false;
     };
-    // Catalog refresh is intentionally invoked once per mounted scope.
+    // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId]);
-  const item = catalog.items.find((entry) => entry.id === capabilityId);
+  }, [context.client, workspaceId, sessionId, canReadConnections]);
+  const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
+  const rawItemId = rawItem?.id;
+  const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
+  const needsAuthInspection =
+    rawItem?.kind === "mcp" &&
+    !rawItem.enabled &&
+    capabilityConnectPlan(rawItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
+  useEffect(() => {
+    if (!needsAuthInspection || !rawItemId || !inspectUrl) return;
+    let active = true;
+    setAuthInspection(null);
+    void context.client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
+      (result) => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: "unknown" });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId, rawItemId, inspectUrl, needsAuthInspection]);
+  const item = useMemo(() => {
+    if (!rawItem || !needsAuthInspection) return rawItem;
+    const inspection =
+      authInspection?.id === rawItem.id && authInspection.url === inspectUrl
+        ? authInspection.kind
+        : "checking";
+    return {
+      ...rawItem,
+      authKind:
+        inspection === "oauth2"
+          ? ("oauth2" as const)
+          : inspection === "none"
+            ? ("none" as const)
+            : null,
+      metadata: { ...rawItem.metadata, authDiscovery: inspection },
+    };
+  }, [rawItem, needsAuthInspection, inspectUrl, authInspection]);
   useEffect(() => {
     if (item) onResolvedItem(item);
   }, [item, onResolvedItem]);
@@ -277,11 +386,7 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await performCapabilityAction(
         {
@@ -339,20 +444,14 @@ function SessionCapabilitySetup({
     setBusy(true);
     setError(null);
     const invocation = scope.current;
-    const current = () =>
-      scope.current.alive &&
-      scope.current.client === invocation.client &&
-      scope.current.workspaceId === invocation.workspaceId &&
-      scope.current.sessionId === invocation.sessionId;
+    const current = () => scope.current === invocation && invocation.alive;
     try {
       await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
     } catch (failure) {
       if (current())
-        setError(
-          failure instanceof Error ? failure.message : "Couldn't add this connection. Try again.",
-        );
+        setError(`Couldn't add this connection. ${userErrorText(failure, "Try again.")}`);
     } finally {
       inFlight.current = false;
       if (current()) setBusy(false);
@@ -501,7 +600,7 @@ function SessionCodexAppsSetup({
     } catch (failure) {
       if (active.current)
         setError(
-          failure instanceof Error ? failure.message : "Couldn't enable Apps in this conversation.",
+          `Couldn't enable Apps in this conversation. ${userErrorText(failure, "Try again.")}`,
         );
     } finally {
       inFlight.current = false;

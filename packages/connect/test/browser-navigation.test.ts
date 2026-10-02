@@ -1,5 +1,68 @@
 import { expect, test } from "bun:test";
-import { createBrowserConnectNavigation, reserveBrowserConnectNavigation } from "../src";
+import {
+  authorizeConnectAttempt,
+  createBrowserConnectNavigation,
+  reserveBrowserConnectNavigation,
+  type ConnectAttempt,
+} from "../src";
+
+for (const reserved of [false, true]) {
+  test(`${reserved ? "reserved" : "direct"} popup keeps polling when COOP severs its window reference`, async () => {
+    let detached = false;
+    const browser = {
+      open: () => ({
+        opener: {} as unknown,
+        get closed() {
+          return detached;
+        },
+        location: {
+          replace() {
+            detached = true;
+          },
+        },
+        close() {},
+      }),
+      location: { assign() {} },
+    };
+    const navigation = reserved
+      ? reserveBrowserConnectNavigation(browser).navigation
+      : createBrowserConnectNavigation(browser);
+    const attempt: ConnectAttempt = {
+      id: "attempt",
+      workspaceId: "workspace",
+      providerId: "provider",
+      ownership: "workspace",
+      revision: 1,
+      state: "requires_user_action",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "connection",
+      nextAction: { type: "authorize", url: "https://provider.example/authorize" },
+      expiresAt: "2030-01-01T00:00:00Z",
+    };
+    let reads = 0;
+    const result = await authorizeConnectAttempt(
+      {
+        get: async () =>
+          ++reads < 4
+            ? attempt
+            : {
+                ...attempt,
+                revision: 2,
+                state: "complete",
+                credentialsCommitted: true,
+                nextAction: { type: "none" },
+              },
+      },
+      attempt,
+      navigation,
+      { mode: "popup", timeoutMs: 5_000 },
+    );
+    expect(detached).toBe(true);
+    expect(reads).toBe(4);
+    expect(result?.state).toBe("complete");
+  });
+}
 
 test("reserves an isolated popup before discovery and navigates without another click", async () => {
   const destinations: string[] = [];
@@ -81,6 +144,56 @@ test("popup blocker does not cause a redirect", () => {
     },
   });
   expect(navigation.openPopup("https://provider.example")).toBeNull();
+});
+
+for (const reserved of [false, true]) {
+  test(`${reserved ? "reserved" : "direct"} navigation skips inaccessible provider-window cleanup`, () => {
+    let navigated = false;
+    let closes = 0;
+    const popup = {
+      opener: {} as unknown,
+      location: {
+        get href() {
+          if (navigated) throw new DOMException("Cross-origin window", "SecurityError");
+          return "about:blank";
+        },
+        replace() {
+          navigated = true;
+        },
+      },
+      close() {
+        closes++;
+      },
+    };
+    const browser = { open: () => popup, location: { assign() {} } };
+    const navigation = reserved
+      ? reserveBrowserConnectNavigation(browser).navigation
+      : createBrowserConnectNavigation(browser);
+    const handle = navigation.openPopup("https://provider.example/authorize")!;
+    expect(popup.opener).toBeNull();
+    expect(() => handle.close()).not.toThrow();
+    expect(closes).toBe(0);
+    // A same-origin callback can restore cleanup access independently of success.
+    navigated = false;
+    handle.close();
+    expect(closes).toBe(1);
+  });
+}
+
+test("reserved blank-window cleanup still runs when discovery fails", () => {
+  let closes = 0;
+  const reserved = reserveBrowserConnectNavigation({
+    open: () => ({
+      opener: {} as unknown,
+      location: { href: "about:blank", replace() {} },
+      close() {
+        closes++;
+      },
+    }),
+    location: { assign() {} },
+  });
+  reserved.close();
+  expect(closes).toBe(1);
 });
 
 test("failed opener isolation closes blank popup before provider navigation", () => {

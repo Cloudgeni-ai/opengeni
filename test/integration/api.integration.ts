@@ -1,3 +1,4 @@
+import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -65,6 +66,13 @@ import {
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
+import {
+  checkoutSessionEvent,
+  foreignPaymentCheckoutSession,
+  foreignSubscriptionCheckoutSession,
+  openGeniCheckoutMetadata,
+  openGeniCheckoutSession,
+} from "../../apps/api/test/fixtures/stripe-checkout-events";
 import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
@@ -159,6 +167,164 @@ describe("API component integration", () => {
     expect(response.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
       "x-opengeni-subject",
     );
+  });
+
+  test("customer OpenAI and Azure keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      environmentsEncryptionKey: environmentsTestKey,
+    });
+    let probeStatus = 200;
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      directModelFetch: (async () =>
+        Response.json(
+          probeStatus === 200
+            ? { status: "completed" }
+            : { error: { message: "customer-test-secret" } },
+          { status: probeStatus },
+        )) as typeof fetch,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    for (const provider of ["openai", "azure_openai"] as const) {
+      const payload = {
+        providerDomain: provider === "openai" ? "api.openai.com" : "customer.openai.azure.com",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "customer-test-secret" },
+        grantedScopes: [],
+        operationId: crypto.randomUUID(),
+        verifyModelAccess: true,
+        metadata: {
+          credentialRole: `direct_${provider}`,
+          directModelProvider: {
+            provider,
+            model: "customer-model",
+            ...(provider === "azure_openai"
+              ? { endpoint: "https://customer.openai.azure.com" }
+              : {}),
+          },
+        },
+      };
+      probeStatus = 401;
+      const rejected = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(rejected.status).toBe(422);
+      expect(await rejected.text()).not.toContain("customer-test-secret");
+      const absent = await app.request(
+        workspacePath(workspaceId, `/connections/operations/${payload.operationId}`),
+      );
+      expect(absent.status).toBe(404);
+      probeStatus = 200;
+      const create = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (create.status !== 201)
+        throw new Error(`Customer connection failed: ${create.status} ${await create.text()}`);
+      expect(create.status).toBe(201);
+      const connection = ((await create.json()) as { connection: { id: string } }).connection;
+      const replay = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(201);
+      expect(((await replay.json()) as { connection: { id: string } }).connection.id).toBe(
+        connection.id,
+      );
+      const catalog = await app.request(workspacePath(workspaceId, "/model-catalog"));
+      const catalogBody = (await catalog.json()) as {
+        models: Array<{
+          id: string;
+          cost: string;
+          billing: unknown;
+          availability: { selectable: boolean };
+        }>;
+      };
+      const model = catalogBody.models.find((row) => row.id.includes(connection.id))!;
+      expect(model).toBeDefined();
+      expect(model.cost).toBe("workspace");
+      expect(model.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+      expect(model.availability.selectable).toBe(true);
+      expect(JSON.stringify(catalogBody)).not.toContain("customer-test-secret");
+      const loaded = await loadDirectModelProviderConnection(
+        dbClient.db,
+        settings,
+        workspaceId,
+        model.id,
+      );
+      expect(loaded?.apiKey).toBe("customer-test-secret");
+      const otherWorkspace = await bootstrapWorkspace(dbClient.db, {
+        accountExternalSource: "test:customer-key-isolation",
+        accountExternalId: crypto.randomUUID(),
+        accountName: "Customer key isolation",
+        workspaceExternalSource: "test:customer-key-isolation",
+        workspaceExternalId: crypto.randomUUID(),
+        workspaceName: "Other workspace",
+        subjectId: "test:customer-key-isolation",
+      });
+      const otherWorkspaceId = otherWorkspace.defaultWorkspaceId!;
+      await expect(
+        loadDirectModelProviderConnection(dbClient.db, settings, otherWorkspaceId, model.id),
+      ).rejects.toThrow("no longer available");
+      const update = await app.request(
+        workspacePath(workspaceId, `/connections/${connection.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            metadata: {
+              credentialRole: "direct_openai",
+              directModelProvider: { provider: "openai", model: "other-model" },
+            },
+          }),
+        },
+      );
+      expect(update.status).toBe(422);
+      const start = await app.request(workspacePath(workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ initialMessage: "customer model test", model: model.id }),
+      });
+      expect(start.status).toBe(202);
+      const remove = await app.request(
+        workspacePath(workspaceId, `/connections/${connection.id}`),
+        { method: "DELETE" },
+      );
+      expect(remove.status).toBe(200);
+      await expect(
+        loadDirectModelProviderConnection(dbClient.db, settings, workspaceId, model.id),
+      ).rejects.toThrow("no longer available");
+    }
+    const invalid = await app.request(workspacePath(workspaceId, "/connections"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        providerDomain: "evil.test",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "private-key" },
+        grantedScopes: [],
+        operationId: crypto.randomUUID(),
+        metadata: {
+          credentialRole: "direct_azure_openai",
+          directModelProvider: {
+            provider: "azure_openai",
+            model: "model",
+            endpoint: "https://evil.test",
+          },
+        },
+      }),
+    });
+    expect(invalid.status).toBe(422);
   });
 
   test("creates sessions, persists initial events, and starts workflow", async () => {
@@ -2324,6 +2490,168 @@ describe("API component integration", () => {
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(20_000_000);
   });
 
+  test("Stripe promotion codes credit the full package and reverse discounted purchases", async () => {
+    const webhookSecret = "whsec_test_coupon_secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+        stripeWebhookSecret: webhookSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const context = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:stripe-coupon",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Stripe coupon test",
+      workspaceExternalSource: "test:stripe-coupon",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Stripe coupon workspace",
+      subjectId: "test:stripe-coupon",
+    });
+    const accountId = context.defaultAccountId!;
+    const discountedMetadata = {
+      opengeni_account_id: accountId,
+      opengeni_credit_micros: "25000000",
+      opengeni_credit_idempotency_key: `checkout:coupon:${crypto.randomUUID()}`,
+      opengeni_credit_coupon_v1: "1",
+    };
+    const discountedCheckout = await postStripeEvent(app, webhookSecret, {
+      id: `evt_coupon_checkout_${crypto.randomUUID()}`,
+      object: "event",
+      type: "checkout.session.completed",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `cs_coupon_${crypto.randomUUID()}`,
+          object: "checkout.session",
+          mode: "payment",
+          status: "complete",
+          payment_status: "paid",
+          currency: "usd",
+          amount_subtotal: 2500,
+          amount_total: 1500,
+          total_details: { amount_discount: 1000 },
+          payment_intent: "pi_coupon_test",
+          metadata: discountedMetadata,
+        },
+      },
+    });
+    expect(discountedCheckout.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+
+    const disputeId = `dp_coupon_${crypto.randomUUID()}`;
+    const dispute = {
+      id: disputeId,
+      object: "dispute",
+      amount: 1500,
+      currency: "usd",
+      status: "needs_response",
+      payment_intent: "pi_coupon_test",
+      metadata: discountedMetadata,
+    };
+    expect(
+      (
+        await postStripeEvent(app, webhookSecret, {
+          id: `evt_coupon_dispute_${crypto.randomUUID()}`,
+          object: "event",
+          type: "charge.dispute.created",
+          livemode: false,
+          created: Math.floor(Date.now() / 1000),
+          data: { object: dispute },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+    expect(
+      (
+        await postStripeEvent(app, webhookSecret, {
+          id: `evt_coupon_dispute_release_${crypto.randomUUID()}`,
+          object: "event",
+          type: "charge.dispute.closed",
+          livemode: false,
+          created: Math.floor(Date.now() / 1000),
+          data: { object: { ...dispute, status: "won" } },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+
+    const refund = await postStripeEvent(app, webhookSecret, {
+      id: `evt_coupon_refund_${crypto.randomUUID()}`,
+      object: "event",
+      type: "refund.created",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `re_coupon_${crypto.randomUUID()}`,
+          object: "refund",
+          amount: 1500,
+          currency: "usd",
+          status: "succeeded",
+          payment_intent: "pi_coupon_test",
+          metadata: discountedMetadata,
+        },
+      },
+    });
+    expect(refund.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+
+    const freeMetadata = {
+      opengeni_account_id: accountId,
+      opengeni_credit_micros: "10000000",
+      opengeni_credit_idempotency_key: `checkout:free-coupon:${crypto.randomUUID()}`,
+      opengeni_credit_coupon_v1: "1",
+    };
+    const freeEvent = {
+      id: `evt_free_coupon_${crypto.randomUUID()}`,
+      object: "event",
+      type: "checkout.session.completed",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `cs_free_coupon_${crypto.randomUUID()}`,
+          object: "checkout.session",
+          mode: "payment",
+          status: "complete",
+          payment_status: "no_payment_required",
+          currency: "usd",
+          amount_subtotal: 1000,
+          amount_total: 0,
+          total_details: { amount_discount: 1000 },
+          payment_intent: null,
+          metadata: freeMetadata,
+        },
+      },
+    };
+    const zeroWithoutCoupon = await postStripeEvent(app, webhookSecret, {
+      ...freeEvent,
+      id: `evt_no_coupon_${crypto.randomUUID()}`,
+      data: {
+        object: {
+          ...freeEvent.data.object,
+          id: `cs_no_coupon_${crypto.randomUUID()}`,
+          total_details: { amount_discount: 0 },
+        },
+      },
+    });
+    expect(zeroWithoutCoupon.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+    expect((await postStripeEvent(app, webhookSecret, freeEvent)).status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(10_000_000);
+    expect((await postStripeEvent(app, webhookSecret, freeEvent)).status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(10_000_000);
+  });
+
   test("Stripe webhook retry processes stored events that were not marked processed", async () => {
     const webhookSecret = "whsec_test_webhook_retry_secret";
     const app = createApp({
@@ -2393,6 +2721,148 @@ describe("API component integration", () => {
     expect(duplicate.status).toBe(200);
     expect(await duplicate.json()).toEqual({ received: true, duplicate: true });
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+  });
+
+  test("Stripe webhooks acknowledge foreign checkouts and credit delayed payments once paid", async () => {
+    const webhookSecret = "whsec_test_webhook_checkout_lifecycle";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+        stripeWebhookSecret: webhookSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const context = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:stripe-webhook-checkout-lifecycle",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Stripe checkout lifecycle test",
+      workspaceExternalSource: "test:stripe-webhook-checkout-lifecycle",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Stripe checkout lifecycle workspace",
+      subjectId: "test:stripe-webhook-checkout-lifecycle",
+    });
+    const accountId = context.defaultAccountId!;
+    const balance = async () => (await getBillingBalance(dbClient.db, accountId)).balanceMicros;
+    const post = async (event: Record<string, unknown>) => {
+      const response = await postStripeEvent(app, webhookSecret, event);
+      if (response.status !== 200) {
+        throw new Error(
+          `${String(event.type)} webhook failed: ${response.status} ${await response.text()}`,
+        );
+      }
+      return await response.json();
+    };
+
+    // Other products on the same Stripe account: acknowledged, recorded as
+    // processed (a redelivery is a duplicate), and never credited.
+    const foreignPayment = checkoutSessionEvent(
+      "checkout.session.completed",
+      foreignPaymentCheckoutSession(),
+    );
+    expect(await post(foreignPayment)).toEqual({ received: true });
+    expect(await post(foreignPayment)).toEqual({ received: true, duplicate: true });
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.completed", foreignSubscriptionCheckoutSession()),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.async_payment_succeeded",
+          foreignPaymentCheckoutSession(),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+
+    // A paid OpenGeni checkout for an account this deployment does not hold,
+    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // cannot succeed, so it is acknowledged rather than failed for days.
+    const absentAccountId = crypto.randomUUID();
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.completed",
+          openGeniCheckoutSession({
+            metadata: openGeniCheckoutMetadata({ accountId: absentAccountId }),
+            paymentStatus: "paid",
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect((await getBillingBalance(dbClient.db, absentAccountId)).balanceMicros).toBe(0);
+
+    // A delayed payment method that later fails: nothing is granted.
+    const failedMetadata = openGeniCheckoutMetadata({ accountId, amountCents: 1000 });
+    const failedSessionId = `cs_test_a1failed${crypto.randomUUID().replaceAll("-", "")}`;
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.completed",
+          openGeniCheckoutSession({
+            metadata: failedMetadata,
+            paymentStatus: "unpaid",
+            delayed: true,
+            sessionId: failedSessionId,
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(
+        checkoutSessionEvent(
+          "checkout.session.async_payment_failed",
+          openGeniCheckoutSession({
+            metadata: failedMetadata,
+            paymentStatus: "unpaid",
+            delayed: true,
+            sessionId: failedSessionId,
+          }),
+        ),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+
+    // A delayed payment method that later succeeds: credited exactly once,
+    // when Stripe reports the payment paid.
+    const paidMetadata = openGeniCheckoutMetadata({ accountId, amountCents: 2500 });
+    const paidSessionId = `cs_test_a1paid${crypto.randomUUID().replaceAll("-", "")}`;
+    const delayedSession = (paymentStatus: "paid" | "unpaid") =>
+      openGeniCheckoutSession({
+        metadata: paidMetadata,
+        paymentStatus,
+        delayed: true,
+        sessionId: paidSessionId,
+      });
+    expect(
+      await post(checkoutSessionEvent("checkout.session.completed", delayedSession("unpaid"))),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(0);
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.async_payment_succeeded", delayedSession("paid")),
+      ),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(25_000_000);
+    // A second paid notification for the same session reuses the checkout's
+    // ledger idempotency key and grants nothing more.
+    expect(
+      await post(
+        checkoutSessionEvent("checkout.session.async_payment_succeeded", delayedSession("paid")),
+      ),
+    ).toEqual({ received: true });
+    expect(
+      await post(checkoutSessionEvent("checkout.session.completed", delayedSession("paid"))),
+    ).toEqual({ received: true });
+    expect(await balance()).toBe(25_000_000);
   });
 
   test("rejects unknown MCP tool refs during session create", async () => {
@@ -6326,9 +6796,11 @@ describe("API component integration", () => {
     expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
     expect(compact).not.toHaveProperty("effectiveToolPolicy");
     expect(compact).not.toHaveProperty("initialMessage");
+    // A missing session is refused exactly like an invisible one, so the
+    // manager tools cannot distinguish "absent" from "not yours".
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
-    ).rejects.toThrow("session not found");
+    ).rejects.toThrow("Session not found or access denied");
 
     const conversation = await callMcpTool<{ view: string; events: unknown[] }>(
       mcp,

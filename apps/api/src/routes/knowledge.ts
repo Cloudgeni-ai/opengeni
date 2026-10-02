@@ -44,12 +44,16 @@ import {
   reviewKnowledgeEntries,
   reviewAgentInstruction,
   listAgentInstructionReviews,
+  KnowledgeEntryIdRequiredError,
+  KnowledgeEntryIdTakenError,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { parseRequestJson } from "../http/request-body";
 
 const ReadSettings = z
   .object({
@@ -78,6 +82,18 @@ function knowledgeHttpError(error: unknown): never {
       message: error.message,
       details: { code: error.code, keywordAvailable: true },
     });
+  if (error instanceof KnowledgeEntryIdTakenError)
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      details: { code: error.code },
+    });
+  if (error instanceof KnowledgeEntryIdRequiredError)
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      details: { code: error.code },
+    });
   if (error instanceof z.ZodError)
     throw new HTTPException(422, {
       message: error.issues[0]?.message ?? "Invalid Knowledge request",
@@ -100,20 +116,29 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     c: Context,
     write: boolean,
     fn: (context: Awaited<ReturnType<typeof knowledgeContextForAccess>>) => Promise<T>,
+    readPermission: "documents:search" | "workspace:read" = "documents:search",
   ) {
     try {
       const access = await requireAccessGrantAuthorization(
         c,
         deps,
         c.req.param("workspaceId")!,
-        write ? "documents:manage" : "documents:search",
+        write
+          ? "documents:manage"
+          : readPermission === "workspace:read"
+            ? undefined
+            : readPermission,
       );
+      // Preserve existing document-reader access to the settings read while
+      // admitting workspace readers to that one endpoint as well.
+      const permission = write
+        ? "documents:manage"
+        : readPermission === "workspace:read" &&
+            hasPermission(access.grant.permissions, "documents:search")
+          ? "documents:search"
+          : readPermission;
       return await withAccessGrantSessionRlsContext(deps, access.grant, async () => {
-        const context = await knowledgeContextForAccess(
-          deps,
-          access,
-          write ? "documents:manage" : "documents:search",
-        );
+        const context = await knowledgeContextForAccess(deps, access, permission);
         c.header("cache-control", "private, no-store");
         return fn(context);
       });
@@ -166,10 +191,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         context.workspaceId,
         "files:read",
       );
-      const { revisionId } = z
-        .object({ revisionId: z.uuid().optional() })
-        .strict()
-        .parse(await c.req.json());
+      const { revisionId } = await parseRequestJson(
+        c,
+        z.object({ revisionId: z.uuid().optional() }).strict(),
+      );
       const entryId = Id.parse(c.req.param("entryId"));
       const file = await getKnowledgeOriginalFile(deps.db, context, entryId, revisionId);
       if (!file) throw new HTTPException(404, { message: "Original file unavailable" });
@@ -181,7 +206,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         ))
       )
         throw new HTTPException(410, { message: "Original file bytes are unavailable" });
-      const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+      const signed = await deps.objectStorage.createGetUrl({
+        key: file.objectKey,
+        ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+      });
       await recordAuditEvent(deps.db, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
@@ -229,7 +257,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await prepareKnowledgeSave(
           deps.db,
           context,
-          KnowledgeSavePreparationRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeSavePreparationRequest),
           () => deps.getDocumentServices().embedder,
           undefined,
           deps.settings,
@@ -243,7 +271,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await searchKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryListRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeEntryListRequest),
           () => deps.getDocumentServices().embedder,
           deps.settings,
         ),
@@ -271,7 +299,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await reviewKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryBatchReviewRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeEntryBatchReviewRequest),
         ),
       ),
     ),
@@ -298,7 +326,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       const result = await saveKnowledgeEntry(
         deps.db,
         context,
-        KnowledgeEntrySaveRequest.parse(await c.req.json()),
+        await parseRequestJson(c, KnowledgeEntrySaveRequest),
       );
       return c.json(result, result.replayed ? 200 : 201);
     }),
@@ -356,10 +384,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.post(`${base}/:entryId/archive`, (c) =>
     run(c, true, async (context) => {
-      const request = z
-        .object({ operationId: Id, expectedVersion: z.number().int().positive() })
-        .strict()
-        .parse(await c.req.json());
+      const request = await parseRequestJson(
+        c,
+        z.object({ operationId: Id, expectedVersion: z.number().int().positive() }).strict(),
+      );
       return c.json(
         await archiveKnowledgeEntry(deps.db, context, {
           ...request,
@@ -399,18 +427,26 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await reviewAgentInstruction(
           deps.db,
           await instructionReviewContext(c, context),
-          AgentInstructionReviewRequest.parse(await c.req.json()),
+          await parseRequestJson(c, AgentInstructionReviewRequest),
         ),
       ),
     ),
   );
   app.post(`${learning}/read`, (c) =>
-    run(c, false, async (context) => {
-      const request = ReadSettings.parse(await c.req.json());
-      return c.json(
-        await getAgentLearningSettings(deps.db, context, request.scope, request.source),
-      );
-    }),
+    // Members can inspect the settings relevant to their admitted workspace or
+    // owner context without gaining Knowledge search or settings-write access.
+    // The database still requires a human and checks each source's owner layer.
+    run(
+      c,
+      false,
+      async (context) => {
+        const request = await parseRequestJson(c, ReadSettings);
+        return c.json(
+          await getAgentLearningSettings(deps.db, context, request.scope, request.source),
+        );
+      },
+      "workspace:read",
+    ),
   );
   app.get(`${learning}/overrides`, (c) =>
     run(c, false, async (context) => {
@@ -423,7 +459,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.post(learning, (c) =>
     run(c, false, async (context) => {
-      const request = WriteSettings.parse(await c.req.json());
+      const request = await parseRequestJson(c, WriteSettings);
       if (context.actor.kind !== "human")
         throw new HTTPException(403, { message: "Agents cannot change learning settings" });
       const access = await requireAccessGrantAuthorization(c, deps, context.workspaceId);

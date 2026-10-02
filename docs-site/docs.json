@@ -2,11 +2,26 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "OpenGeni",
-  "description": "Documentation for OpenGeni, the open, self-hostable runtime for long-running AI agents.",
+  "description": "Add agents that finish real work to your product. OpenGeni is the open, self-hostable runtime for long-running AI agents.",
   "colors": {
-    "primary": "#026fd7",
-    "light": "#5fa7ff",
-    "dark": "#004bb7"
+    "primary": "#1f8a74",
+    "light": "#9fe3d3",
+    "dark": "#1f8a74"
+  },
+  "background": {
+    "color": {
+      "light": "#fbfbf8",
+      "dark": "#0f1115"
+    }
+  },
+  "fonts": {
+    "heading": {
+      "family": "DM Sans",
+      "weight": 500
+    },
+    "body": {
+      "family": "DM Sans"
+    }
   },
   "favicon": "/favicon.svg",
   "logo": {
@@ -18,7 +33,24 @@
     "groups": [
       {
         "group": "Get started",
-        "pages": ["index", "quickstart", "run-locally"]
+        "pages": ["index", "embed-with-a-coding-agent", "embed-manually", "quickstart"]
+      },
+      {
+        "group": "Build",
+        "pages": [
+          "integrate/how-it-fits-together",
+          "integrate/conversation-ui",
+          "integrate/configure-the-agent",
+          "integrate/your-data",
+          "integrate/background-agents",
+          "integrate/users-and-tenants",
+          "integrate/approvals-and-questions",
+          "integrate/existing-chat-ui",
+          "integrate/proxy-from-any-backend",
+          "integrate/production",
+          "integrate/session-history-import",
+          "integrate/host-managed-integrations"
+        ]
       },
       {
         "group": "Concepts",
@@ -32,11 +64,33 @@
       },
       {
         "group": "Guides",
-        "pages": ["guides/self-host", "guides/connect-a-machine", "guides/integrate-your-product"]
+        "pages": [
+          "guides/developer-plugin",
+          "guides/self-host",
+          "run-locally",
+          "guides/connect-a-machine",
+          "guides/webhooks-and-credentials",
+          "guides/usage-allowances"
+        ]
       },
       {
         "group": "Reference",
-        "pages": ["reference/sdk", "reference/authentication", "reference/further-reading"]
+        "pages": [
+          "reference/sdk",
+          "reference/react",
+          "reference/authentication",
+          "reference/http-api",
+          "reference/for-ai-agents",
+          "reference/opengeni-client-skill"
+        ]
+      },
+      {
+        "group": "Examples",
+        "pages": ["examples/northstar-support", "examples/chat-quickstart"]
+      },
+      {
+        "group": "Further reading",
+        "pages": ["reference/further-reading"]
       }
     ],
     "global": {
@@ -73,6 +127,40 @@
   "footer": {
     "socials": {
       "github": "https://github.com/Cloudgeni-ai/opengeni"
+    },
+    "links": [
+      {
+        "header": "Support",
+        "items": [
+          {
+            "label": "support@opengeni.ai",
+            "href": "mailto:support@opengeni.ai"
+          }
+        ]
+      },
+      {
+        "header": "Legal",
+        "items": [
+          {
+            "label": "Privacy Policy",
+            "href": "https://opengeni.ai/privacy"
+          },
+          {
+            "label": "Terms of Service",
+            "href": "https://opengeni.ai/terms"
+          }
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/guides/integrate-your-product",
+      "destination": "/embed-manually"
+    },
+    {
+      "source": "/guides/coding-agents",
+      "destination": "/guides/developer-plugin"
     }
-  }
+  ]
 }

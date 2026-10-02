@@ -175,7 +175,9 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   messagePlaceholder: "Message the agent…",
   pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
-  keyboardHint: "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line",
+  // Shortcuts live in the send button's title; the footer stays quiet unless
+  // the host supplies its own hint.
+  keyboardHint: "",
   slashCommandBlocked:
     "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
   controlChangedError:
@@ -1003,6 +1005,26 @@ type OwnedInputProps =
   | "aria-keyshortcuts";
 export type ComposerInputProps = Omit<ComponentPropsWithoutRef<"textarea">, OwnedInputProps>;
 
+const EDITING_FOCUS_SELECTOR =
+  'input, textarea, select, [contenteditable="true"], [role="textbox"]';
+const POPUP_FOCUS_SELECTOR =
+  '[role="menu"], [role="menubar"], [role="listbox"], [role="dialog"], [role="alertdialog"]';
+
+/**
+ * Initial focus is a convenience, not authority to move focus the person has
+ * placed elsewhere. It yields to a field they started editing and to an open
+ * menu, listbox, or dialog that does not contain the composer: moving focus
+ * behind a non-modal popup dismisses it, and a modal surface owns focus until
+ * it closes.
+ */
+function focusBelongsElsewhere(textarea: HTMLTextAreaElement): boolean {
+  const active = textarea.ownerDocument.activeElement;
+  if (!active || active === textarea) return false;
+  if (active.closest(EDITING_FOCUS_SELECTOR)) return true;
+  const popup = active.closest(POPUP_FOCUS_SELECTOR);
+  return popup !== null && !popup.contains(textarea);
+}
+
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(
   { rows = 1, placeholder, className, "aria-label": ariaLabel, autoFocus = false, ...props },
   forwardedRef,
@@ -1012,22 +1034,17 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
   const paletteOpen =
     controller.paletteEnabled && controller.paletteMounted && controller.palette.open;
 
-  // Native autoFocus loses when the textarea mounts disabled (create-session draft
-  // hydrate). Retry once the controller becomes interactive.
+  // Focus once the controller is interactive. The textarea can mount disabled
+  // (create-session draft hydrate), and the route can finish loading after the
+  // person has already moved on, so this deliberately does not use the native
+  // autoFocus attribute: that would take focus at mount without the guard.
   useEffect(() => {
     if (!autoFocus || controller.disabled || autoFocusedRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const textarea = controller.textareaRef.current;
       if (!textarea || textarea.disabled) return;
       autoFocusedRef.current = true;
-      // Draft hydration may finish after the user has started editing another
-      // field. Initial focus is a convenience, not authority to take their caret.
-      const active = textarea.ownerDocument.activeElement;
-      if (
-        active !== textarea &&
-        active?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')
-      )
-        return;
+      if (focusBelongsElsewhere(textarea)) return;
       textarea.focus();
     });
     return () => window.cancelAnimationFrame(frame);
@@ -1048,7 +1065,6 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
           : (placeholder ?? controller.messages.messagePlaceholder)
       }
       disabled={controller.disabled}
-      autoFocus={autoFocus && !controller.disabled}
       aria-label={ariaLabel ?? controller.messages.inputLabel}
       aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
       aria-autocomplete={
@@ -1265,6 +1281,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
     return (
       <ComposerTip tip={tip}>
         <button
+          data-analytics-action="pause"
           {...props}
           ref={mergeRefs(controller.pauseButtonRef, ref)}
           type="button"
@@ -1312,6 +1329,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
     return (
       <ComposerTip tip={tip}>
         <button
+          data-analytics-action="send"
           {...props}
           ref={ref}
           type="button"
@@ -1326,10 +1344,10 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           }
           className={cn(
             "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
-            "bg-og-accent text-og-accent-fg shadow-og-sm",
+            "border border-og-primary-border bg-og-primary text-og-primary-fg",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
-            "hover:bg-og-accent-strong active:scale-95",
-            "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
+            "hover:bg-og-primary-hover active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-50",
             className,
           )}
         >
@@ -1486,7 +1504,7 @@ function WorkstreamPausedStrip({
         <button
           type="button"
           aria-label={messages.resumeThisWorkstream}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md border border-og-status-waiting/35 bg-og-surface-1 px-2.5 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary px-2.5 text-og-xs font-medium text-og-primary-fg hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
           disabled={busy}
           onClick={onResume}
         >

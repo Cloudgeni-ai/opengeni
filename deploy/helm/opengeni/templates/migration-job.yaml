@@ -10,6 +10,9 @@ metadata:
   annotations:
     {{- toYaml .Values.migrations.annotations | nindent 4 }}
 spec:
+  {{- with $.Values.jobTtlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ . }}
+  {{- end }}
   backoffLimit: {{ .Values.migrations.backoffLimit }}
   template:
     metadata:
@@ -22,6 +25,7 @@ spec:
       priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:

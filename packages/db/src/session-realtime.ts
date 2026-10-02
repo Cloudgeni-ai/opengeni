@@ -1,11 +1,15 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import type {
+  McpConnectionAccountBinding,
+  McpPersonalConnectionDelegation,
   SessionEventType,
   SessionRealtimeEndReason,
   SessionRealtimeMode,
   SessionRealtimeModel,
 } from "@opengeni/contracts";
+import { McpPersonalConnectionDelegations } from "@opengeni/contracts";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -68,6 +72,8 @@ export type BeginSessionRealtimeInput = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   now?: Date;
   leaseMs?: number;
 };
@@ -422,6 +428,10 @@ export async function beginSessionRealtimeInTransaction(
       ownerSubjectId: input.ownerSubjectId,
       browserInstanceId: input.browserInstanceId,
       ownerKeyHash: hashOwnerKey(input.ownerKey),
+      personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+        input.personalConnectionDelegations ?? [],
+      ),
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
       model: input.model,
       state: "active",
       version: 1,

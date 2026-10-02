@@ -296,30 +296,56 @@ async function fetchRegistryPackage(pkg: PublishablePackage): Promise<RegistryPa
   }
 }
 
-async function readRegistryPackage(
+// npm may acknowledge a publish several minutes before its package metadata
+// becomes public. Bound verification by elapsed time (including request time),
+// not a small attempt count; planning still retries only transient read errors.
+export const REGISTRY_SETTLEMENT_TIMEOUT_MS = 15 * 60_000;
+const REGISTRY_RETRY_INTERVAL_MS = 5_000;
+
+type RegistryPackageReader = {
+  fetchPackage: (pkg: PublishablePackage) => Promise<RegistryPackage | null>;
+  sleep: (milliseconds: number) => Promise<void>;
+  now: () => number;
+};
+
+export async function readRegistryPackage(
   pkg: PublishablePackage,
   waitForAvailability: boolean,
+  reader: Partial<RegistryPackageReader> = {},
 ): Promise<RegistryPackage | null> {
-  const attempts = waitForAvailability ? 24 : 3;
+  const fetchPackage = reader.fetchPackage ?? fetchRegistryPackage;
+  const sleep = reader.sleep ?? ((milliseconds: number) => Bun.sleep(milliseconds));
+  const now = reader.now ?? (() => performance.now());
+  const deadline = now() + REGISTRY_SETTLEMENT_TIMEOUT_MS;
+  let lastResult: RegistryPackage | null = null;
   let lastError: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  for (let attempt = 1; ; attempt += 1) {
     try {
-      const result = await fetchRegistryPackage(pkg);
+      const result = await fetchPackage(pkg);
+      lastResult = result;
+      lastError = undefined;
       if (
         !waitForAvailability ||
-        attempt === attempts ||
         (result !== null && result.gitHead !== null && result.integrity !== null)
       ) {
         return result;
       }
     } catch (error) {
       lastError = error;
-      if (attempt === attempts) throw error;
     }
-    await Bun.sleep(5_000);
+    const remaining = deadline - now();
+    if ((!waitForAvailability && attempt === 3) || (waitForAvailability && remaining <= 0)) {
+      break;
+    }
+    await sleep(
+      waitForAvailability
+        ? Math.min(REGISTRY_RETRY_INTERVAL_MS, remaining)
+        : REGISTRY_RETRY_INTERVAL_MS,
+    );
+    if (waitForAvailability && now() >= deadline) break;
   }
   if (lastError) throw lastError;
-  return null;
+  return lastResult;
 }
 
 async function main(): Promise<void> {

@@ -524,6 +524,8 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "maintain_usage_allowances(integer,integer)",
+    "usage_allowance_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",
     "lookup_external_identity(uuid,text,text,text)",
     "prepare_external_workspace_membership_operation(jsonb)",
@@ -704,6 +706,28 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
+    END IF;
+    IF to_regprocedure(format('%I.usage_allowance_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.usage_allowance_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_period(jsonb,timestamptz), %I.count_workspace_allowance_debit() FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_attribution() FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.validate_usage_allowance_config(jsonb), %I.validate_usage_allowance_rule(jsonb), %I.emit_usage_allowance_notifications(uuid,uuid,jsonb,text,timestamptz,text) FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_period(uuid,uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_members(uuid,uuid), %I.usage_allowance_effective_period(uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(schema)},${literal(role)});
+      IF to_regprocedure(format('%I.reverse_video_allowance_refund()', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.reverse_video_allowance_refund() FROM %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      FOREACH runtime_table IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
+        'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',
+        'workspace_video_allowance_allocations','usage_allowance_attribution_receipts',
+        'workspace_allowance_clear_receipts']
+      LOOP
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I',runtime_table,${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
+          (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass
+              AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
+      END LOOP;
     END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
@@ -1602,6 +1626,20 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- The trial-credit kill switch setter is operator-only (migration owner).
+    -- Reprovisioning repairs any accidental runtime or PUBLIC grant.
+    IF to_regprocedure(
+      format('%I.set_verified_signup_trial_credits_enabled(boolean,text,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_verified_signup_trial_credits_enabled(boolean, text, text) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -2083,6 +2121,14 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.session_import_batches FROM %I',
+        (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+          WHERE attrelid='opengeni_private.session_import_batches'::regclass AND attnum>0 AND NOT attisdropped),
+        ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.modal_inventory_read_capabilities') IS NOT NULL THEN
       -- Inventory is the only capability mint. Reprovisioning must repair
       -- accidental table and column grants, never expose its private ledger.
@@ -2091,6 +2137,9 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL (backend_pid, transaction_id, data_schema) ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_live_modal_sandbox_leases() FROM PUBLIC;
+      IF to_regprocedure('opengeni_private.list_pending_modal_provider_creates()') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
+      END IF;
     END IF;
     IF to_regclass('opengeni_private.sandbox_recovery_rollout') IS NOT NULL THEN
       -- Migration may precede this role's creation. Converge only read access;
@@ -2101,10 +2150,22 @@ BEGIN
       REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.sandbox_recovery_rollout TO %I', ${literal(role)});
     END IF;
+    IF to_regclass('opengeni_private.verified_signup_trial_switch_revisions') IS NOT NULL THEN
+      -- Read-only for the operator gauge. Only the owner-only audited setter
+      -- appends revisions; runtime identities and PUBLIC never write them.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.verified_signup_trial_switch_revisions TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
     END IF;
     IF to_regclass('opengeni_private.session_file_attachments') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM %I', ${literal(role)});
@@ -2116,6 +2177,23 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.slack_file_upload_operations') IS NOT NULL THEN
+      -- Ordinary RLS repositories own the upload CAS, not owner capabilities.
+      -- Never allow deletion/truncation to erase its durable completion fence.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.slack_file_upload_operations FROM PUBLIC;
+      EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE opengeni_private.slack_file_upload_operations TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.guard_slack_file_upload_operation() FROM PUBLIC', ${literal(schema)});
+    END IF;
+    IF to_regclass('opengeni_private.scheduled_slack_bot_messages') IS NOT NULL THEN
+      -- Prepared scheduled bot posts are reachable only through their two
+      -- capabilities, so a saved destination can never be rewritten directly.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',

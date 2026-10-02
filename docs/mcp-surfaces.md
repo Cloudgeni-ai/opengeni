@@ -34,6 +34,40 @@ operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
+For lossless scheduled-task model edits, use
+`scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
+The read tool's bounded projection is not full replacement input. Existing
+sessions keep their own model; see [scheduled-task update semantics](scheduled-task-access.md).
+
+For an **existing session**, use
+`session_set_model({ sessionId, model, reasoningEffort, idempotencyKey })`.
+Both model and reasoning are explicit; latency and all unrelated settings stay
+unchanged. The tool uses `sessions:control`, the caller's exact tool selection,
+live-attempt fencing, private-session ownership and the host's
+`session.model.write` decision. It adds no permission or approval layer.
+The response identifies the durable receipt and effective defaults; reuse the
+same key and input after an uncertain response. `session_get({ sessionId,
+detail: "full" })` returns canonical `model`, `reasoningEffort` and `latencyMode`.
+An agent retry remains bound to the same calling session and target across
+attempt replacement, while the current attempt must independently remain
+authorized. Replaying an old receipt does not overwrite a newer setting.
+
+This is a future-default change, not a prompt or a resume. Already accepted work
+keeps its frozen policy. Older queued turns cannot undo the choice when they
+start, and scheduled per-occurrence model overrides do not replace these explicit
+session defaults. A subsequent human/API turn accepted after the setting can
+establish a new inherited choice when it starts. Ordering uses its original
+`turn.queued` admission, not a mutable approval/recovery trigger; an older turn
+never becomes a fresh model selection. New schedules targeting the
+session capture the effective defaults at occurrence admission; editing the
+session does not edit the task's own configuration. No Codemode SDK proxy path
+is widened, and already-running attempts do not gain a newly released tool.
+
+Release the API, core/database/contracts and workers as one matched source cohort
+before using this operation. There is no schema migration, but an older worker
+does not honor the new defaults boundary. A source merge or SDK update alone
+does not establish deployment or behavioral verification.
+
 ### Human integration setup in chat
 
 The shared operational guidance tells the agent to use available integration
@@ -55,7 +89,10 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 Progressive discovery uses the same authorized deferred pool on Codex-native,
 OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
-exhaustive. `tool_list` is a query-independent fallback: it returns compact
+exhaustive. Tools whose exact name (with an underscore) appears in the query
+come first, before the keyword ranking, and the result grows to include all of
+them. Past search results are stored as they were returned and never re-run,
+so this ordering changes new searches only, not any cached prompt. `tool_list` is a query-independent fallback: it returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
 optional literal `namePrefix` filter. An invalid cursor requires restarting
@@ -70,6 +107,22 @@ Native disclosure returns the original SDK tool objects; generic dispatch,
 approvals, and invocation continue through the existing runtime. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
+
+### Tool argument errors
+
+Every adapter validates arguments against the tool's advertised input schema in
+the shared gateway, including properties a provider lists as required but does
+not itself enforce. A rejected call never reaches the provider. The error names
+each missing, mistyped, or unexpected property (up to eight, then a count of the
+rest) and never quotes argument values:
+
+- Model MCP calls receive an `isError` tool result that says the tool was not
+  called, lists those properties, and asks the model to correct them and call
+  again. Other thrown MCP failures keep the generic retry wording.
+- Workspace HTTP/SDK calls and approvals return `422 validation_failed` with the
+  same summary as `message` and `details: { code: "invalid_tool_arguments",
+  issues, omittedIssueCount }`, where each issue is `{ path, keyword, message }`.
+- Codemode and the unified workspace MCP surface the same error message.
 
 The native Connected Machine Codemode client sends its compiled API contract
 acknowledgement for compatibility with older deployments whose Codemode routes
@@ -117,6 +170,11 @@ First-party OpenGeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
+A model call to `knowledge_search` or `knowledge_prepare_save` receives a
+compact copy without bookkeeping or repeated preview text, keeping every ID,
+version, status, title, description and excerpt; Codemode and other callers
+receive the exact result. See
+[model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party OpenGeni MCP company-profile tools (separate organization policy):
@@ -126,9 +184,9 @@ First-party OpenGeni MCP company-profile tools (separate organization policy):
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
-- `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. Do not immediately repeat a timed-out short wait without new evidence.
+- `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
 - `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
-- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
+- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use
 `work_claim_upsert` and `work_claim_release`. They are CAS/idempotency-fenced,

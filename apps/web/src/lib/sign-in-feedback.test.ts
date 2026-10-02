@@ -9,6 +9,10 @@ test("callback failures provide a safe next step without rendering provider text
   expect(signInCallbackError("account_not_linked")).toContain("Personal settings → Security");
   expect(signInCallbackError("state_mismatch")).toContain("Start sign-in again");
   expect(signInCallbackError("email_not_verified")).toContain("Verify your email");
+  expect(readSignInCallbackError("?error=TOKEN_EXPIRED")).toContain(
+    "verification link has expired",
+  );
+  expect(readSignInCallbackError("?error=INVALID_TOKEN")).toContain("new verification email");
   expect(readSignInCallbackError("?error=%3Cscript%3E&error_description=secret")).not.toContain(
     "secret",
   );

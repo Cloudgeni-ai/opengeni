@@ -33,6 +33,21 @@ export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessio
   sessionId?: string;
   dialogOnly?: boolean;
   onClose?: (() => void) | undefined;
+  /**
+   * The provider only ever connects someone's own account (official Gmail,
+   * Slack's hosted MCP): no ownership choice, always personal.
+   */
+  personalOnly?: boolean;
+  /** The connect button's words, "Connect Gmail". Defaults to "Continue to <name>". */
+  connectLabel?: string;
+  /** The line under the dialog title. Defaults to the kind and provider domain. */
+  dialogSubtitle?: string;
+  /** The host's product copy for this connection, instead of the catalog description. */
+  description?: string;
+  /** The host's logo for this connection, when the catalog has no asset. */
+  logoSrc?: string | null;
+  /** The host's words for the ownership choice. */
+  ownershipCopy?: { legend: string; workspace: string; personal: string };
 };
 
 /** Native OAuth recommendation flow. Identity and endpoint come from the live
@@ -67,6 +82,12 @@ function ScopedCard({
   onConfigured,
   dialogOnly = false,
   onClose,
+  personalOnly = false,
+  connectLabel,
+  dialogSubtitle,
+  description: hostDescription,
+  logoSrc,
+  ownershipCopy,
 }: McpConnectionCardProps) {
   const [controller] = useState(
     () => new ConnectController(client.connectTransport(), workspaceId),
@@ -83,7 +104,9 @@ function ScopedCard({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [retryFresh, setRetryFresh] = useState(false);
-  const [ownership, setOwnership] = useState<ConnectOwnership>("workspace");
+  const [ownership, setOwnership] = useState<ConnectOwnership>(
+    personalOnly ? "personal" : "workspace",
+  );
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
@@ -104,7 +127,17 @@ function ScopedCard({
     ]);
     if (!invocation || invocation.signal.aborted || lifetime.current !== invocation || !active())
       return null;
-    const resolved = catalog.items.find((entry) => entry.id === capabilityId);
+    let resolved = catalog.items.find((entry) => entry.id === capabilityId);
+    // Custom catalog entries may not declare authentication. Discover it from
+    // the live catalog's endpoint, never from recommendation/host copy.
+    if (resolved?.kind === "mcp" && !resolved.enabled && !resolved.authKind) {
+      const endpoint = resolved.mcpUrl ?? resolved.endpointUrl;
+      if (endpoint) {
+        const inspected = await client.inspectMcpAuthentication(workspaceId, endpoint);
+        if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
+        if (inspected.kind === "oauth2") resolved = { ...resolved, authKind: "oauth2" };
+      }
+    }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
       throw new Error(
         "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
@@ -112,7 +145,10 @@ function ScopedCard({
     setItem(resolved);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
-    else if (!item && resolved.metadata?.defaultConnectionOwnership === "personal")
+    else if (
+      !item &&
+      (personalOnly || resolved.metadata?.defaultConnectionOwnership === "personal")
+    )
       setOwnership("personal");
     let accountReady = false;
     if (resolved.enabled && resolved.connectionRef) {
@@ -500,10 +536,10 @@ function ScopedCard({
   return (
     <SessionCapabilityFrame
       name={item?.name ?? name}
-      subtitle={item?.providerDomain ?? ""}
-      logo={logo}
-      typeLabel="MCP server"
-      description={item?.description || rationale}
+      subtitle={dialogSubtitle !== undefined ? "" : (item?.providerDomain ?? "")}
+      logo={logo ?? logoSrc ?? null}
+      typeLabel={dialogSubtitle ?? "MCP server"}
+      description={hostDescription || item?.description || rationale}
       skill={false}
       expanded={expanded}
       complete={complete}
@@ -541,7 +577,7 @@ function ScopedCard({
           </>
         ) : (
           <>
-            <p>{item.description || rationale}</p>
+            <p>{hostDescription || item.description || rationale}</p>
             {busy ? (
               <>
                 <p role="status" className="og-session-capability-progress">
@@ -563,9 +599,9 @@ function ScopedCard({
               </>
             ) : !connected ? (
               <>
-                {!item.connectionRef ? (
+                {!item.connectionRef && !personalOnly ? (
                   <fieldset disabled={busy}>
-                    <legend>Who can use this connection?</legend>
+                    <legend>{ownershipCopy?.legend ?? "Who can use this connection?"}</legend>
                     <label>
                       <input
                         type="radio"
@@ -587,11 +623,17 @@ function ScopedCard({
                   </fieldset>
                 ) : null}
                 <p className="og-session-capability-scope">
-                  {ownership === "workspace"
-                    ? sessionId
-                      ? "This connection will be available to your workspace and used in this conversation."
-                      : "This connection will be available to your workspace."
-                    : "This connection belongs to you. Your messages can use it; other participants use their own accounts."}
+                  {personalOnly && ownership === "personal"
+                    ? "Connects your own account. Only work you start can use it."
+                    : ownershipCopy
+                      ? ownership === "workspace"
+                        ? ownershipCopy.workspace
+                        : ownershipCopy.personal
+                      : ownership === "workspace"
+                        ? sessionId
+                          ? "This connection will be available to your workspace and used in this conversation."
+                          : "This connection will be available to your workspace."
+                        : "This connection belongs to you. Your messages can use it; other participants use their own accounts."}
                 </p>
                 <button
                   className="og-session-capability-primary"
@@ -608,7 +650,7 @@ function ScopedCard({
                   {retryFresh ||
                   ((error || notice) && view.attempt?.nextAction.type === "authorize")
                     ? "Try signing in again"
-                    : `Continue to ${item.name}`}
+                    : (connectLabel ?? `Continue to ${item.name}`)}
                 </button>
               </>
             ) : null}

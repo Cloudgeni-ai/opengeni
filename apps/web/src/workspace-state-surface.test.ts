@@ -1,52 +1,70 @@
 import { describe, expect, test } from "bun:test";
 
+import { parseKnowledgeSearch } from "@/lib/knowledge-route";
+
 async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
 }
 
-describe("Agent Knowledge surface", () => {
-  test("registers the renamed workspace destination with only focused subviews", async () => {
-    const [app, navigation] = await Promise.all([
-      source("App.tsx"),
-      source("components/rail/workspace-nav-data.ts"),
-    ]);
+describe("Knowledge surface", () => {
+  test("one /state page; Memory, Documents and Agent learning links redirect into it", async () => {
+    const app = await source("App.tsx");
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
-    expect(app).toContain('search.view === "instructions" || search.view === "skills"');
-    expect(navigation).toContain('to: "/workspaces/$workspaceId/state"');
-    expect(navigation).toContain('label: "Agent Knowledge"');
-    expect(navigation).toContain('description: "Knowledge, instructions, and skills"');
+    expect(app).toContain("parseKnowledgeSearch(search)");
+    // Old Memory and Documents links open Knowledge instead of rendering their own page.
+    expect(app).not.toContain('import("@/routes/memory")');
+    expect(app).not.toContain('import("@/routes/documents")');
+    expect(app).toContain('search={{ page: "learning" }}');
   });
 
-  test("routes organization profile and instruction and Skill autonomy to settings", async () => {
-    const [organization, shell, workspaceSettings, learning, memory, knowledgePage] =
-      await Promise.all([
-        source("routes/org-settings.tsx"),
-        source("components/settings/organization-settings-shell.tsx"),
-        source("routes/workspace-settings.tsx"),
-        source("routes/workspace-learning-admin.tsx"),
-        source("components/knowledge/knowledge-browser.tsx"),
-        source("components/knowledge/agent-knowledge-page.tsx"),
-      ]);
-    expect(shell).toContain('id: "knowledge"');
-    expect(shell).toContain('title: "Knowledge"');
-    expect(organization).toContain('section === "knowledge"');
-    expect(organization).toContain("OrganizationKnowledgePrompt");
-    expect(organization).toContain("Organization identity");
-    expect(organization).toContain("Open documents");
-    expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
-    expect(workspaceSettings).not.toContain("resolveWorkspaceMemoryEnabled");
-    expect(learning).toContain("Agent learning");
-    expect(workspaceSettings).not.toContain("editable on Documents");
-    expect(learning).toContain("AgentLearningSettingsEditor");
-    expect(memory).toContain("KnowledgeOriginalFile");
-    expect(knowledgePage).toContain("Instructions");
-    expect(knowledgePage).toContain("Skills");
+  test("parses tabs, pages and entries, and drops what it doesn't know", () => {
+    expect(parseKnowledgeSearch({ view: "review" })).toEqual({ view: "review" });
+    expect(parseKnowledgeSearch({ view: "memory", page: "delete" })).toEqual({});
+    expect(
+      parseKnowledgeSearch({
+        entry: "8f2c1b9e-0d4a-4c1e-9b7a-1f2e3d4c5b6a",
+        revision: "r1",
+        page: "edit",
+      }),
+    ).toEqual({
+      entry: "8f2c1b9e-0d4a-4c1e-9b7a-1f2e3d4c5b6a",
+      revision: "r1",
+      page: "edit",
+    });
+    // A revision means nothing without its entry.
+    expect(parseKnowledgeSearch({ revision: "r1" })).toEqual({});
+    expect(parseKnowledgeSearch({ entry: "../../etc" })).toEqual({});
+    expect(parseKnowledgeSearch({ review: true })).toEqual({ review: true });
   });
 
-  test("teaches agents the three durable destinations and compact instruction budget", async () => {
+  test("the page never shows the retired words", async () => {
+    const files = await Promise.all(
+      [
+        "knowledge-page.tsx",
+        "knowledge-library.tsx",
+        "knowledge-entry.tsx",
+        "knowledge-instructions.tsx",
+        "knowledge-review.tsx",
+        "knowledge-learning.tsx",
+        "knowledge-upload.tsx",
+        "knowledge-labels.ts",
+        "agent-learning-settings.tsx",
+      ].map((name) => source(`components/knowledge/${name}`)),
+    );
+    for (const text of files) {
+      expect(text).not.toContain("Allow updates");
+      expect(text).not.toContain('"Company"');
+      expect(text).not.toMatch(/>\s*Memory\s*</u);
+      expect(text).not.toContain("—");
+    }
+  });
+
+  test("teaches agents the three durable destinations and shared instruction limit", async () => {
     const prompt = await source("routes/agent-brain-prompt.tsx");
-    expect(prompt).toContain("normally 1–3 sentences and no more than 600 characters");
+    expect(prompt).toContain("normally 1–3 sentences");
+    expect(prompt).toContain("Use the same size limit as the manual editor");
+    expect(prompt).not.toContain("600 characters");
     expect(prompt).toContain("fact, decision, incident, bug fix, or outcome");
     expect(prompt).toContain("Describe a reusable skill");
     expect(prompt).toContain("one-sentence always-visible summary");
@@ -54,7 +72,7 @@ describe("Agent Knowledge surface", () => {
     expect(prompt).toContain("Automatic activates it");
     expect(prompt).toContain("discover the lazy skill_save tool");
     expect(prompt).toContain(
-      "Review first leaves it pending in Knowledge > Needs review while the chat continues",
+      "Review first leaves it pending in Knowledge > Review while the chat continues",
     );
     expect(prompt).not.toContain("call remember with lane=preference");
     expect(prompt).toContain("instruction_policy_get");

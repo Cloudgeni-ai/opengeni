@@ -143,7 +143,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("scheduled_") ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
-      tool.startsWith("capability_"),
+      tool.startsWith("capability_") ||
+      tool === "custom_mcp_setup_request",
   },
 ];
 
@@ -174,7 +175,7 @@ export function sessionCapabilityGroupsFor(
   if (unmatched.size > 0) {
     groups.push({
       id: "other",
-      name: "Other OpenGeni actions",
+      name: "Other Opengeni actions",
       description: "Additional workspace actions enabled by this deployment.",
       kind: "opengeni",
       toolIds: [...unmatched],

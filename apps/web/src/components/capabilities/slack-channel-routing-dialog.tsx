@@ -2,6 +2,7 @@ import type { SlackChannelRoute, SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -155,7 +156,7 @@ function SlackChannelRoutingDialogBody({
         );
       } catch (caught) {
         if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : String(caught));
+          setError(`Couldn't load Slack channels. ${userErrorText(caught)}`);
           setLoadedRoutes(null);
         }
       } finally {
@@ -214,7 +215,7 @@ function SlackChannelRoutingDialogBody({
       onClose();
     } catch (caught) {
       toast.error("Couldn't save Slack channel routing", {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
     } finally {
       setSaving(false);
@@ -226,7 +227,7 @@ function SlackChannelRoutingDialogBody({
       <DialogHeader>
         <DialogTitle>Where Slack channels start work</DialogTitle>
         <DialogDescription>
-          Pick the OpenGeni workspace each channel uses. A channel with no choice asks the person
+          Pick the Opengeni workspace each channel uses. A channel with no choice asks the person
           once and remembers the answer. Direct messages always use each person's own workspace.
         </DialogDescription>
       </DialogHeader>
@@ -234,14 +235,14 @@ function SlackChannelRoutingDialogBody({
       <div className="rounded-md border border-border bg-bg p-3">
         {loading ? (
           <p className="flex items-center gap-2 text-2xs text-fg-subtle">
-            <Loader2Icon className="size-3 animate-spin" /> Loading conversations OpenGeni has
+            <Loader2Icon className="size-3 animate-spin" /> Loading conversations Opengeni has
             joined
           </p>
         ) : error ? (
           <p className="text-2xs text-danger">{error}</p>
         ) : channels.length === 0 ? (
           <p className="text-2xs text-fg-subtle">
-            OpenGeni has not been invited anywhere yet. Tag @OpenGeni in Slack, then return here.
+            Opengeni has not been invited anywhere yet. Tag @Opengeni in Slack, then return here.
           </p>
         ) : (
           <div className="grid max-h-72 gap-2 overflow-y-auto">
@@ -293,7 +294,7 @@ function SlackChannelRoutingDialogBody({
       </div>
 
       <DialogFooter>
-        <Button type="button" variant="secondary" onClick={onClose}>
+        <Button type="button" variant="outline" onClick={onClose}>
           Cancel
         </Button>
         <Button

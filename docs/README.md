@@ -6,7 +6,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Audience | Reads | Notes |
 | --- | --- | --- |
-| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the `@opengeni/sdk/chat` facade and the chat quickstart; `docs/embedding.md` is only for advanced in-process hosts. |
+| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
 | Maintainer | `CONTRIBUTING.md`, `docs/local-development.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
@@ -24,7 +24,10 @@ This map defines who each doc tier serves and where volatile facts belong.
 | HTTP route families | `docs/http-api.md` | `README.md`, `packages/sdk/README.md`, and topic docs link instead of re-listing routes; typed method details stay in `packages/sdk/README.md`. |
 | Roadmap | `docs/roadmap.md` | `README.md` links; issues carry discussion. |
 | Standalone product integration, organization keys/workspaces, and external Skill ownership | `docs/product-integration.md` | `README.md`, package READMEs, the Northstar example, and both integration Skills link here; `packages/sdk/README.md` owns typed method details, while `docs/embedding-workbench.md` owns the optional workbench. |
+| Developer plugin packaging and installation | `docs/developer-plugin.md` | The shared `plugins/opengeni` package uses contained generated canonical guides; `README.md` and the public developer-plugin guide link here. |
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
+| Workspace credential provider, webhooks, MCP call identity, and default sandbox image | `docs/workspace-integrations.md` | `docs/product-integration.md`, `docs/credentials.md`, `docs/embedding.md`, and `packages/sdk/README.md` should link instead of restating the protocol or signature scheme. |
+| Workspace/member usage allowances, plan recipes, top-ups, and usage meters | `docs/usage-allowances.md` | `docs/product-integration.md`, architecture, the integration-agent Skill, and public product guides link here; SDK types/contracts and deployed debit/reset behavior remain authoritative. |
 | Shared connection UI and conversation setup | `docs/connection-presentation.md` | Console and SDK discovery, OAuth details, personal consent, and shared controls. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
@@ -38,13 +41,16 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; hotfix freeze-head admission in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs`; promote/hotfix loop in `CONTRIBUTING.md` § Release / Publishing | `.agents/skills/opengeni/SKILL.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. Ordinary PRs into `main` do not run source admission. |
 | Client/SDK method reference | `packages/sdk/README.md` | `docs/product-integration.md`, `README.md`, `packages/react/README.md`, and customer integration skills should link rather than duplicating volatile signatures. |
+| Jev-backed `code_search` tool and Jev settings | `docs/code-search.md` | Architecture, deployment notes, and the `@opengeni/jev` README should link instead of restating the switches or the sandbox command contract. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
+| Agent behavior eval (real model, manual/nightly) | `scripts/agent-behavior-eval/README.md` | Scenario scoring, variants, and the prompt/agent-configuration release gate; not a CI lane. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |
 | OpenGeni Review Bot PR-review automation | `docs/pr-review.md` | `docs/github-app.md`, architecture, SDK, and UI copy should link instead of restating provider permissions, delivery semantics, or exact-head authority. |
 | Google Drive connection, scheduled source sync, and release readiness | `docs/google-drive.md` | Capabilities UI, connector code, and deployment guides should link instead of restating OAuth scope, explicit enablement, bounded sync/retry behavior, release gates, or ACL/citation boundaries. |
+| Scheduled task access drift, owner refresh, and failed-access notices | `docs/scheduled-task-access.md` | Schedules UI copy, `docs/agent-session-authority.md`, and `AGENTS.md` should link instead of restating the refresh authority or the notice semantics. |
 | OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, capability UI copy and marketing guidance should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Fiken connector (accounting) | `docs/fiken.md` | Capabilities UI copy and architecture should link instead of restating token verification, company scoping, or the single-concurrent-request rule. |
@@ -64,7 +70,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | First-party MCP response contracts | `docs/mcp-response-contracts.md` | Mutation handlers, consumer migration notes, and release notes should link instead of restating the receipt schema and tool classification. |
 | Codemode programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/codemode.md` | Runtime/API/worker comments should link instead of restating security invariants. |
-| Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
+| Public API compatibility policy, public surface, deprecation, and enforcement | `docs/design/api-compatibility-policy.md` (accepted ADR, append-only exception log; the one design record that is current policy) | `docs/architecture.md` §3.10 summarizes; `packages/sdk/README.md`, `AGENTS.md`, the PR template, and release notes link instead of restating the rules. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `docs/local-development.md` § Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |

@@ -1,8 +1,16 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { createRequire } from "node:module";
+import { DrizzleQueryError } from "drizzle-orm";
 
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
+import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
+import {
+  CompactionProviderResponseError,
+  ProviderCommandObservationUnavailableError,
+  compactionProviderFailureDiagnostics,
+} from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
 
 import {
@@ -12,7 +20,11 @@ import {
   settleTurnFailure,
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
-import { providerRecoveryResult } from "../src/activities/agent-turn/errors";
+import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+  providerRecoveryResult,
+  shouldRecoverCompactionProviderFailure,
+} from "../src/activities/agent-turn/errors";
 
 const base = {
   rotationEnabled: true,
@@ -21,6 +33,20 @@ const base = {
   decisionCredentialId: "alternate",
   servingCredentialId: "serving",
 };
+
+const { CommandStartOutcomeUnknownError } = createRequire(import.meta.resolve("@opengeni/runtime"))(
+  "modal",
+);
+
+function genuineSetupUnknown() {
+  return new Error("SDK setup unwound", {
+    cause: new CommandStartOutcomeUnknownError(
+      "task-owning-turn-original",
+      crypto.randomUUID(),
+      Object.assign(new Error("lost original Start acknowledgement"), { code: 14 }),
+    ),
+  });
+}
 
 describe("definitive Codex credential failure disposition", () => {
   test("rotation-on quota refusal recovers the same turn on an eligible alternate", () => {
@@ -78,6 +104,38 @@ describe("definitive Codex credential failure disposition", () => {
           decisionCredentialId: null,
         }),
       ).toBe("wait");
+    }
+  });
+
+  test("a proven plan entitlement loss fails over, waits only on capped alternates, else fails", () => {
+    expect(codexDefinitiveFailureDisposition({ ...base, failureKind: "plan_entitlement" })).toBe(
+      "failover",
+    );
+    expect(
+      codexDefinitiveFailureDisposition({
+        ...base,
+        failureKind: "plan_entitlement",
+        decisionKind: "allCapped",
+        decisionCredentialId: null,
+      }),
+    ).toBe("wait");
+    for (const override of [
+      { pinDisposition: "manual" as const },
+      { rotationEnabled: false },
+      { decisionKind: "none" as const, decisionCredentialId: null },
+      {
+        decisionKind: "allCapped" as const,
+        decisionCredentialId: null,
+        pinDisposition: "manual" as const,
+      },
+    ]) {
+      expect(
+        codexDefinitiveFailureDisposition({
+          ...base,
+          failureKind: "plan_entitlement",
+          ...override,
+        }),
+      ).toBe("terminal");
     }
   });
 
@@ -267,6 +325,7 @@ function codexFailureDeps(
         effectiveCodexCredentialId: "serving",
         effectiveCodexCredentialVersion: 1,
         codexCredentialFailoverLimit: 1,
+        codexProductModelId: "codex/gpt-6-sol",
         codexPolicySnapshot: overrides.codexPolicySnapshot ?? {
           schemaVersion: 1,
           activeCredentialId: "serving",
@@ -300,6 +359,63 @@ function codexFailureDeps(
   };
 }
 
+describe("raw database rollback settlement", () => {
+  const rawFailure = (sqlState: string) =>
+    new DrizzleQueryError(
+      "INSERT INTO runtime_records (payload) VALUES ($1)",
+      ["fixture-value"],
+      Object.assign(new Error("transaction aborted"), { name: "PostgresError", code: sqlState }),
+    );
+
+  test("startup exports the exact recovery identity and retains its diagnostic cause", async () => {
+    for (const [sqlState, code] of [
+      ["40P01", "db_deadlock"],
+      ["40001", "db_serialization_failure"],
+    ] as const) {
+      const error = rawFailure(sqlState);
+      const { deps } = codexFailureDeps({ error });
+      deps.billingState.isCodexTurn = false;
+      deps.attempt.modelRequestStarted = false;
+      deps.eventing.turnStartedPublished = false;
+      Object.assign(deps.eventing, { publish: undefined });
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [{ turnId: "turn-1", triggerEventId: "trigger-1", executionGeneration: 1, code }],
+      });
+      expect(deps.control.activityStatus).toBe("recovering");
+      expect(deps.control.activityError).toBe(error);
+    }
+  });
+
+  test("a model that already started cannot acquire database startup replay authority", async () => {
+    const settle = mock(async () => true);
+    const error = rawFailure("40P01");
+    const { deps } = codexFailureDeps({ error, settle });
+    deps.billingState.isCodexTurn = false;
+    expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "failed" });
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({
+              error: "OpenGeni encountered a database error.",
+              code: "db_deadlock",
+              sqlState: "40P01",
+            }),
+          },
+        ]),
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+      }),
+    );
+    expect(JSON.stringify(settle.mock.calls)).not.toContain("fixture-value");
+    expect(deps.control.activityError).toBe(error);
+  });
+});
+
 describe("early accepted-definition mismatch", () => {
   function earlyDeps(error: unknown = new TurnExecutionPolicyDefinitionMismatchError()) {
     const { deps } = codexFailureDeps({ error });
@@ -309,6 +425,301 @@ describe("early accepted-definition mismatch", () => {
     Object.assign(deps.eventing, { publish: undefined });
     return deps;
   }
+
+  test.each([0, 4, 5])(
+    "post-start internal observation uncertainty parks without replenishing recovery count %i",
+    async (count) => {
+      const command = {
+        kind: "modal-router-v1" as const,
+        sandboxId: "sb-test",
+        taskId: "task-test",
+        execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+        streams: {
+          stdout: { byteOffset: 17, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      };
+      const error = new Error("setup observer unwound", {
+        cause: new ProviderCommandObservationUnavailableError(command, { code: 14 }),
+      });
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = count;
+      const settled = mock(async () => true);
+      deps.eventing.settle = settled;
+      try {
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          deferredUntilWake: true,
+        });
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_observation_unavailable",
+          sandboxSetupOutcomeUnknown: true,
+          detail: {
+            code: "sandbox_command_observation_unavailable",
+            retryable: false,
+            replay: "blocked",
+            providerRecoveryCount: count,
+          },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(settled).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test.each([0, 4, 5])(
+    "genuine setup uncertainty parks before eventing without resetting recovery count %i",
+    async (count) => {
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const deps = earlyDeps(genuineSetupUnknown());
+      deps.attempt.providerRecoveryCount = count;
+      const reconcile = mock(async () => {
+        throw new Error("no fabricated model history before inference");
+      });
+      deps.historySink.reconcileConversationTruth = reconcile;
+      const settled = mock(async () => true);
+      deps.eventing.settle = settled;
+      try {
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          deferredUntilWake: true,
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+        });
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_start_outcome_unknown",
+          sandboxSetupOutcomeUnknown: true,
+          detail: { retryable: false, replay: "blocked", providerRecoveryCount: count },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(settled).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test("setup uncertainty respects a stale ownership receipt instead of painting recovery", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "stale",
+      events: [],
+    } as never);
+    const deps = earlyDeps(genuineSetupUnknown());
+    const lost = mock(() => undefined);
+    deps.acknowledgeLostAttemptOwnership = lost;
+    try {
+      expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "cancelled" });
+      expect(lost).toHaveBeenCalledTimes(1);
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test.each([false, true])(
+    "setup uncertainty after eventing preserves history and no-replay authority on checkpoint outage %s",
+    async (outage) => {
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const { deps } = codexFailureDeps({ error: genuineSetupUnknown() });
+      const reconcile = mock(async () => {
+        if (outage)
+          throw Object.assign(new Error("history database reset"), { code: "ECONNRESET" });
+      });
+      const terminal = mock(async () => true);
+      deps.historySink.reconcileConversationTruth = reconcile;
+      deps.eventing.settle = terminal;
+      try {
+        if (outage) {
+          await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+            type: "OpenGeniPostClaimDatabaseRecovery",
+            details: [expect.objectContaining({ sandboxSetupOutcomeUnknown: true })],
+          });
+          expect(recovery).not.toHaveBeenCalled();
+        } else {
+          expect(await settleTurnFailure(deps as any)).toMatchObject({
+            status: "recovering",
+            deferredUntilWake: true,
+          });
+          expect(recovery).toHaveBeenCalledTimes(1);
+        }
+        expect(reconcile).toHaveBeenCalledWith({ requireDurable: true });
+        expect(terminal).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test("a setup-unknown checkpoint outage carries the no-replay marker into DB-only recovery", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockRejectedValue(
+      Object.assign(new Error("database connection reset"), { code: "ECONNRESET" }),
+    );
+    const deps = earlyDeps(genuineSetupUnknown());
+    try {
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [
+          {
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            executionGeneration: 1,
+            code: "db_failure",
+            sandboxSetupOutcomeUnknown: true,
+          },
+        ],
+      });
+      expect(deps.control.activityStatus).toBe("recovering");
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("pre-dispatch command-start setup recovery checkpoints before eventing with the same finite budget", async () => {
+    const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+      waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+        callback(new Error("router not ready")),
+    } as never).catch((failure) => failure);
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    try {
+      for (const [count, continueDelayMs] of [2000, 5000, 15000, 30000, 60000].entries()) {
+        const deps = earlyDeps(error);
+        deps.attempt.providerRecoveryCount = count;
+        deps.historySink.reconcileConversationTruth = mock(async () => {
+          throw new Error("no model history before eventing");
+        });
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          turnId: "turn-1",
+          continueDelayMs,
+        });
+        expect(recovery).toHaveBeenLastCalledWith(
+          {},
+          "workspace-1",
+          expect.objectContaining({
+            turnId: "turn-1",
+            attemptId: "attempt-1",
+            triggerEventId: "trigger-1",
+            reason: "sandbox_command_start_unavailable",
+            providerRecoveryCount: count + 1,
+          }),
+        );
+        expect(deps.historySink.reconcileConversationTruth).not.toHaveBeenCalled();
+      }
+      const exhausted = earlyDeps(error);
+      exhausted.attempt.providerRecoveryCount = 5;
+      expect(await settleTurnFailure(exhausted as any)).toMatchObject({
+        status: "recovering",
+        turnId: "turn-1",
+      });
+      expect(exhausted.control.activityStatus).toBe("recovering");
+      expect(recovery).toHaveBeenCalledTimes(6);
+      const checkpoint = recovery.mock.calls[5]?.[2];
+      expect(checkpoint).toMatchObject({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        triggerEventId: "trigger-1",
+        reason: "sandbox_command_start_recovery_exhausted",
+        sandboxSetupRecoveryExhausted: true,
+        detail: {
+          setupOutcome: "not_started",
+          retryable: false,
+          replay: "blocked",
+          recoveryExhausted: true,
+          providerRecoveryCount: 5,
+        },
+      });
+      expect(checkpoint).not.toHaveProperty("providerRecoveryCount");
+      expect(checkpoint).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+      expect(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT).toBe(5);
+      expect(MAX_AUTOMATIC_PROVIDER_RECOVERIES).toBe(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT);
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test.each(["stale", "db_deadlock", "db_failure"] as const)(
+    "exhausted pre-dispatch setup preserves the park fate on %s",
+    async (failure) => {
+      const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+        waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+          callback(new Error("router not ready")),
+      } as never).catch((value) => value);
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+      if (failure === "stale") {
+        recovery.mockResolvedValue({ action: "stale", events: [] } as never);
+      } else {
+        recovery.mockRejectedValue(
+          failure === "db_deadlock"
+            ? Object.assign(new Error("test rollback"), { name: "PostgresError", code: "40P01" })
+            : Object.assign(new Error("test disconnected DB"), { code: "ECONNRESET" }),
+        );
+      }
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = 5;
+      deps.historySink.reconcileConversationTruth = mock(async () => undefined);
+      try {
+        if (failure === "stale") {
+          expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "cancelled" });
+        } else {
+          await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+            type: "OpenGeniPostClaimDatabaseRecovery",
+            nonRetryable: true,
+            details: [
+              {
+                turnId: "turn-1",
+                triggerEventId: "trigger-1",
+                executionGeneration: 1,
+                code: failure,
+                sandboxSetupRecoveryExhausted: true,
+              },
+            ],
+          });
+          expect(deps.control.activityStatus).toBe("recovering");
+        }
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(deps.attempt.providerRecoveryCount).toBe(5);
+        expect(deps.historySink.reconcileConversationTruth).not.toHaveBeenCalled();
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test("raw gRPC lookalikes never gain early command-start recovery authority", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    try {
+      for (const error of [
+        Object.assign(new Error("Name resolution failed"), { code: 14 }),
+        Object.assign(new Error("lookalike"), { name: "CommandStartPreDispatchUnavailableError" }),
+      ]) {
+        await expect(settleTurnFailure(earlyDeps(error) as any)).rejects.toBe(error);
+      }
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+    }
+  });
 
   test("checkpoints the exact turn before eventing without reconciling model history", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
@@ -884,6 +1295,482 @@ describe("definitive Codex failure settlement", () => {
       quarantine.mockRestore();
       failover.mockRestore();
       parentDelivery.mockRestore();
+    }
+  });
+});
+
+function codexEmptyBadRequest(): Error {
+  return Object.assign(new Error("400 status code (no body)"), {
+    status: 400,
+    error: undefined,
+    headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+  });
+}
+
+function planRecheck(
+  overrides: Partial<opengeniDb.CodexCredentialPlanRecheck> = {},
+): opengeniDb.CodexCredentialPlanRecheck {
+  return {
+    previousPlanType: "pro",
+    planType: "pro",
+    source: "usage",
+    credentialVersion: 1,
+    planChangedFrom: null,
+    planChangedAt: overrides.planChangedFrom ? new Date() : null,
+    exclusion: null,
+    ...overrides,
+  };
+}
+
+describe("Codex plan entitlement settlement", () => {
+  const rotationOn = {
+    schemaVersion: 1 as const,
+    activeCredentialId: "serving",
+    rotationEnabled: true,
+    rotationStrategy: "sharded",
+    pinnedCredentialId: null,
+    pinSource: null,
+    lastCredentialId: "serving",
+  };
+
+  test("an empty 400 on a downgraded account re-checks the plan and fails over the same turn", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockImplementation(
+      async () =>
+        [
+          codexAccount("serving", {
+            label: "Work Pro",
+            planType: "free",
+            planEntitlementExclusion: {
+              planType: "free",
+              models: [{ modelId: "codex/gpt-6-sol", excludedAt: new Date() }],
+            },
+          }),
+          codexAccount("alternate"),
+        ] as never,
+    );
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: "free", credentialVersion: 3, planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const settle = mock(async () => true);
+    const { deps, control } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "workspace-1",
+        "serving",
+        {
+          turnId: "turn-1",
+          holderId: "holder-1",
+          generation: 1,
+        },
+      );
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          credentialId: "serving",
+          credentialVersion: 3,
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "free",
+            planObserved: true,
+          },
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({
+            reason: "codex_credential_failover",
+            credentialId: "serving",
+            failureKind: "plan_entitlement",
+          }),
+        }),
+      );
+      expect(settle).not.toHaveBeenCalled();
+      expect(control.activityStatus).toBe("recovering");
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("a downgrade a usage read recorded first still fails over the same turn", async () => {
+    // Pro -> Plus was observed before the turn (accounts page usage read), so
+    // the failing turn's re-check reads Plus again. The recorded change from
+    // Pro is the evidence; the empty 400 must not become "unexplained".
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work", planType: "plus" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ previousPlanType: "plus", planType: "plus", planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle: mock(async () => true),
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "plus",
+            planObserved: true,
+          },
+        }),
+      );
+      expect(failover).toHaveBeenCalledTimes(1);
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("an empty 400 on the remote compaction request takes the same re-check and failover", async () => {
+    const compaction = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(codexEmptyBadRequest()),
+      codexEmptyBadRequest(),
+    );
+    expect(compaction.status).toBe(400);
+    expect(shouldRecoverCompactionProviderFailure(compaction)).toBe(true);
+    // Another definitive compaction rejection stays terminal.
+    const invalid = Object.assign(new Error("Invalid value"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "invalid_request_error", code: "invalid_value", message: "Invalid value" },
+    });
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError(compactionProviderFailureDiagnostics(invalid), invalid),
+      ),
+    ).toBe(false);
+
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { planType: "free" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: "free", planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const { deps } = codexFailureDeps({
+      error: compaction,
+      settle: mock(async () => true),
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).toHaveBeenCalledTimes(1);
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: expect.objectContaining({ kind: "plan_entitlement", planType: "free" }),
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({ failureKind: "plan_entitlement" }),
+        }),
+      );
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("explicit plan evidence with an unreadable plan names no plan and binds the turn receipt to none", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro", planType: "pro" }),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: null, source: null }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const explicit = Object.assign(new Error("403 model not available on plan"), {
+      status: 403,
+      error: {
+        code: "model_not_available_on_plan",
+        message: "This model is not available on your current plan.",
+      },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps } = codexFailureDeps({ error: explicit, settle, codexPolicySnapshot: rotationOn });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "pro",
+            planObserved: false,
+          },
+        }),
+      );
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: Record<string, unknown> }>;
+      };
+      expect(settled.events[0]?.payload).toMatchObject({
+        code: "codex_plan_entitlement",
+        planType: null,
+        error:
+          'The ChatGPT account "Work Pro" no longer has access to GPT-6 Sol on its current plan. ' +
+          "Upgrade it, use another connected account, or choose another model.",
+      });
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("without an alternate the turn fails with typed copy naming the account and plan", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro", planType: "free" }),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({
+        planType: "free",
+        source: "token_refresh",
+        credentialVersion: 2,
+        planChangedFrom: "pro",
+      }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover");
+    const armWait = spyOn(opengeniDb, "armCodexCapacityWait");
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).toHaveBeenCalledTimes(1);
+      expect(failover).not.toHaveBeenCalled();
+      expect(armWait).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledTimes(1);
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: unknown }>;
+      };
+      expect(settled.events[0]).toEqual({
+        type: "turn.failed",
+        payload: {
+          error:
+            'The ChatGPT account "Work Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+            "Upgrade it, use another connected account, or choose another model.",
+          code: "codex_plan_entitlement",
+          retryable: false,
+          planType: "free",
+          model: "codex/gpt-6-sol",
+          detail: "The Codex backend answered HTTP 400 with no error body.",
+        },
+      });
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+      armWait.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("an unchanged paid plan keeps the account and fails with typed copy, without looping", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck(),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease");
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).not.toHaveBeenCalled();
+      expect(recovery).not.toHaveBeenCalled();
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: unknown }>;
+      };
+      expect(settled.events[0]?.payload).toMatchObject({
+        code: "codex_request_rejected",
+        retryable: false,
+        planType: "pro",
+      });
+      expect(String((settled.events[0]!.payload as { error: string }).error)).toContain(
+        'The ChatGPT account "Work Pro" still reports the Pro plan',
+      );
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      recovery.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("the encrypted-content 400 and quota 429 paths never re-check the plan", async () => {
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan");
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "stale",
+    } as never);
+    const history = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue(
+      [] as never,
+    );
+    const encrypted = Object.assign(new Error("400 invalid_encrypted_content"), {
+      status: 400,
+      error: {
+        code: "invalid_encrypted_content",
+        message: "The encrypted content could not be decrypted or parsed.",
+      },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps: encryptedDeps } = codexFailureDeps({ error: encrypted });
+    try {
+      await settleTurnFailure({
+        ...encryptedDeps,
+        historySink: {
+          ...encryptedDeps.historySink,
+          providerArtifactCandidates: { historyItemIds: [], runStateId: null },
+        },
+        providerTurn: { ...encryptedDeps.providerTurn, lastCodexRequestOpaqueArtifacts: [] },
+      } as never);
+      expect(recovery).toHaveBeenCalledWith(
+        expect.anything(),
+        "workspace-1",
+        expect.objectContaining({ reason: "encrypted_content_rejected" }),
+      );
+      expect(recheck).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+      history.mockRestore();
+    }
+
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving"),
+      codexAccount("alternate"),
+    ] as never);
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const quota = Object.assign(new Error("429 usage limit reached"), {
+      status: 429,
+      error: { type: "usage_limit_reached", resets_in_seconds: 3600 },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps: quotaDeps } = codexFailureDeps({ error: quota, codexPolicySnapshot: rotationOn });
+    try {
+      expect(await settleTurnFailure(quotaDeps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).not.toHaveBeenCalled();
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: expect.objectContaining({ kind: "cooldown", cooldownKind: "quota" }),
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({ failureKind: "quota" }),
+        }),
+      );
+    } finally {
+      recheck.mockRestore();
+      listAccounts.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
     }
   });
 });

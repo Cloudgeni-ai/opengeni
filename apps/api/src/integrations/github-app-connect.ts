@@ -27,6 +27,7 @@ import {
   isConsistentGitHubBindingCandidates,
   isConsistentGitHubBindingProof,
 } from "./github-installation-proof";
+import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -418,8 +419,17 @@ export async function completeGitHubAppConnect(
     }
   } catch {
     // Preserve unknown outcomes; never replay provider authorization to recover.
-    if (!destination)
-      return Response.json({ error: "Connection callback is invalid or expired" }, { status: 400 });
+    // This is browser navigation (usually the Connect popup), so explain the
+    // stale or reused link on a page instead of returning a JSON body.
+    if (!destination) {
+      const home =
+        deps.settings.webBaseUrl ??
+        integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
+      return new Response(githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`), {
+        status: 400,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+      });
+    }
   }
   return new Response(null, { status: 302, headers: { Location: destination! } });
 }

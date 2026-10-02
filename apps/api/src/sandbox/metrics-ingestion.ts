@@ -633,6 +633,34 @@ export async function handleAgentEventPayload(
       });
     }
   }
+  if (heartbeat.desktopStatus) {
+    try {
+      const status = heartbeat.desktopStatus;
+      const available = status.available && !status.unavailableReason;
+      const reason = status.unavailableReason || null;
+      // The heartbeat already read the exact enrollment. Steady state adds no
+      // extra query; the change path re-reads and fences its eventual write.
+      if (
+        enrollment.hasDisplay !== available ||
+        (enrollment.desktopUnavailableReason ?? null) !== reason ||
+        enrollment.agentCapabilities?.desktop !== available
+      ) {
+        await refreshEnrollmentDisplay(db, {
+          workspaceId: ids.workspaceId,
+          agentId: ids.agentId,
+          hasDisplay: available,
+          desktopUnavailableReason: reason,
+          runtimeDesktop: available,
+          connectionInstanceId: ids.connectionInstanceId,
+        });
+      }
+    } catch (error) {
+      observability?.warn?.("Failed to refresh a machine desktop heartbeat", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   const metrics = heartbeat.metrics;
   if (!metrics) return;
   try {
@@ -781,6 +809,7 @@ export async function refreshEnrollmentDisplay(
     agentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason?: string | null;
+    runtimeDesktop?: boolean;
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
@@ -791,7 +820,9 @@ export async function refreshEnrollmentDisplay(
   }
   if (
     enrollment.hasDisplay === input.hasDisplay &&
-    (enrollment.desktopUnavailableReason ?? null) === desktopUnavailableReason
+    (enrollment.desktopUnavailableReason ?? null) === desktopUnavailableReason &&
+    (input.runtimeDesktop === undefined ||
+      enrollment.agentCapabilities?.desktop === input.runtimeDesktop)
   ) {
     // Both fields unchanged — do not even issue the UPDATE (no churn on a
     // steady-state Hello).
@@ -803,6 +834,7 @@ export async function refreshEnrollmentDisplay(
     enrollmentId: input.agentId,
     hasDisplay: input.hasDisplay,
     desktopUnavailableReason,
+    ...(input.runtimeDesktop !== undefined ? { runtimeDesktop: input.runtimeDesktop } : {}),
     ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }

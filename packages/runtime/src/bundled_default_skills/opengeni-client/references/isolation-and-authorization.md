@@ -9,7 +9,8 @@ Use the smallest group allowed to share those workspace-scoped capabilities as t
 | Product requirement | Default mapping | Why |
 | --- | --- | --- |
 | A team or tenant may collaborate across all chats | One workspace per team or tenant | Shared sessions and workspace resources match the product rule |
-| Users share workspace resources but their conversations are private | One workspace per tenant; `asUser()` and private session visibility | Canonical ownership protects transcripts without duplicating shared resources |
+| Users share workspace resources but their conversations are private | One workspace per tenant; `asUser()` and `chats: "private"` | Canonical ownership protects transcripts without duplicating shared resources |
+| Each user must have their own workspace resources too | `chats: "isolated"` (a workspace per tenant user via `workspaceIdFor`) | Separate Knowledge, files and connections per user |
 | An agent must not reach even its user's other conversations | `agentAccess: "session"` | An additional task-tree boundary, independent of human visibility |
 | Chats may share but data access differs by tenant | At least one workspace per data tenant | Provider authority must never span a tenant that may not share data |
 | Different users access the same data but their chats are private | Shared workspace data and private sessions | Shared upstream data does not make a private transcript shared |
@@ -39,10 +40,11 @@ promoting historical rows into workspace visibility.
 
 For a customer-facing headless session, never rely accidentally on omission:
 
+- Omitting `agent` uses the workspace defaults (normally everything it offers). Start from `capabilities: "none"` and turn on only what the product needs; check `session.effectiveTools`.
 - Omitting tools uses the workspace's configured MCP defaults; an explicit empty tools list suppresses them.
-- Omitting firstPartyMcpTools selects the deployment's non-connector default catalog; an explicit empty list exposes none.
+- On deployments without agent settings: omitting firstPartyMcpTools selects the deployment's non-connector default catalog; an explicit empty list exposes none.
 - Build an allowlist from the product's actual use case and the live SDK type or client configuration.
-- Exclude cross-session tools unless collaboration is an explicit feature. Current examples include sessions_list, session_get, session_events, session_wait, session_send_message, session_pause, session_resume, session_steer, session_human_input_respond, set_other_session_title, and workspace-scoped discovery. Recheck the live catalog rather than treating this list as permanent.
+- Keep `subagents` off unless collaboration is an explicit feature. Its tools reach other sessions. Current examples include sessions_list, session_get, session_events, session_wait, session_send_message, session_pause, session_resume, session_steer, session_human_input_respond, set_other_session_title, and workspace-scoped discovery. Recheck the live catalog rather than treating this list as permanent.
 - Also examine Knowledge, notes, files, artifacts, browsers, computers, scheduling, and capability-management tools. A tool is safe only when both its scope and its necessity fit the product.
 - A tool allowlist narrows what the model can invoke; it does not repair an incorrectly shared workspace, an over-broad provider token, or a vulnerable customer API.
 

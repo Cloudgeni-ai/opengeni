@@ -41,7 +41,7 @@ import {
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { trustedRequestSourceAddress } from "./http/request-source";
+import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,
@@ -126,9 +126,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         clientName: parsed.data.client_name ?? null,
         grantTypes: parsed.data.grant_types,
         responseTypes: ["code"],
-        registrationScopeHash: tokenHash(
-          mcpOAuthRegistrationClientKey(c, deps.settings.mcpOauthTrustedProxyHops),
-        ),
+        registrationScopeHash: tokenHash(mcpOAuthRegistrationClientKey(c, deps.settings)),
       });
     } catch (error) {
       if (error instanceof McpOAuthClientRegistrationRateLimitError) {
@@ -626,8 +624,8 @@ function tokenHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function mcpOAuthRegistrationClientKey(c: Context, trustedProxyHops: number): string {
-  return `mcp-oauth-registration:${trustedRequestSourceAddress(c, trustedProxyHops)}`;
+function mcpOAuthRegistrationClientKey(c: Context, trust: RequestSourceTrust): string {
+  return `mcp-oauth-registration:${trustedRequestSourceRateLimitKey(c, trust)}`;
 }
 
 function expiresIn(seconds: number): Date {

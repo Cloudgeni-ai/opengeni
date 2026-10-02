@@ -27,6 +27,11 @@ import {
 import { requireVariableSetEncryption } from "../domain/environments";
 import { normalizedSessionMcpCredentialHeaders } from "../domain/sessions";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
+import {
+  listOwnConnectionAccountsForGrant,
+  personalConnectionDelegationSourceForGrant,
+} from "../domain/personal-connection-delegations";
+import { nativeSessionConnectionReplacement } from "../domain/session-native-connection-replacement";
 
 /** HMAC domains separate request identity from key availability. The key tag
  * carries no request material and neither fingerprint is returned publicly. */
@@ -80,11 +85,20 @@ export async function rotateSessionMcpCredentialsForRequest(
           id: update.id,
           expectedCredentialVersion: update.expectedCredentialVersion,
           expectedServerUrl: update.expectedServerUrl,
-          headers: Object.fromEntries(
-            Object.entries(normalizedSessionMcpCredentialHeaders(update.headers))
-              .map(([name, value]) => [name.toLowerCase(), value] as const)
-              .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-          ),
+          ...("nativeConnectionId" in update
+            ? {
+                nativeConnectionId: update.nativeConnectionId,
+                ...(update.replacementServerUrl
+                  ? { replacementServerUrl: update.replacementServerUrl }
+                  : {}),
+              }
+            : {
+                headers: Object.fromEntries(
+                  Object.entries(normalizedSessionMcpCredentialHeaders(update.headers))
+                    .map(([name, value]) => [name.toLowerCase(), value] as const)
+                    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+                ),
+              }),
         }))
         .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)),
     };
@@ -102,20 +116,45 @@ export async function rotateSessionMcpCredentialsForRequest(
     actorType: grant.principalKind === "service" ? ("service" as const) : ("human" as const),
   };
   const externalAuthorize = externalContinuationCommitAuthorizer(authorization);
+  let authorizedGrant = grant;
   try {
     return await rotateSessionMcpCredentialsAtomically(deps.db, {
       ...scope,
       operationKey: request.operationKey,
       ...sessionMcpRotationFingerprint(encryptionKey, scope, request),
-      updates: request.updates.map(({ headers, ...update }) => ({
-        ...update,
-        headersEncrypted: Object.fromEntries(
-          Object.entries(headers).map(([name, value]) => [
-            name,
-            encryptVariableSetValue(encryptionKey, value),
-          ]),
-        ),
-      })),
+      updates: request.updates.map((update) =>
+        "nativeConnectionId" in update
+          ? update
+          : {
+              id: update.id,
+              expectedCredentialVersion: update.expectedCredentialVersion,
+              expectedServerUrl: update.expectedServerUrl,
+              headersEncrypted: Object.fromEntries(
+                Object.entries(update.headers).map(([name, value]) => [
+                  name,
+                  encryptVariableSetValue(encryptionKey, value),
+                ]),
+              ),
+            },
+      ),
+      resolveNativeConnection: async (tx, server, nativeConnectionId, replacementServerUrl) => {
+        const connections = await listOwnConnectionAccountsForGrant(tx, authorizedGrant);
+        const source = personalConnectionDelegationSourceForGrant(authorizedGrant);
+        try {
+          return nativeSessionConnectionReplacement({
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: source.kind === "subject" ? source.subjectId : null,
+            serverUrl: server.url,
+            ...(replacementServerUrl ? { replacementServerUrl } : {}),
+            currentRef: server.connectionRef,
+            nativeConnectionId,
+            connections,
+          });
+        } catch {
+          throw new SessionMcpCredentialRotationError("connection_unavailable");
+        }
+      },
       authorize: async (tx) => {
         await externalAuthorize?.(tx);
         const fresh = await reauthorize(tx);
@@ -145,6 +184,7 @@ export async function rotateSessionMcpCredentialsForRequest(
           operation: "session.mcp.credentials.rotate",
           surface: "http",
         });
+        authorizedGrant = fresh;
       },
     });
   } catch (error) {
@@ -162,7 +202,9 @@ export async function rotateSessionMcpCredentialsForRequest(
             ? 403
             : error.code === "not_found"
               ? 404
-              : error.code === "invalid_request" || error.code === "brokered_server"
+              : error.code === "invalid_request" ||
+                  error.code === "brokered_server" ||
+                  error.code === "connection_unavailable"
                 ? 422
                 : 409;
       throw new HTTPException(status, { message: `credential_rotation_${error.code}` });

@@ -240,6 +240,88 @@ describe("durable ComputerSession lifecycle", () => {
     ).rejects.toBeInstanceOf(ComputerSessionOperationConflictError);
   });
 
+  test("settles an undispatched computer create failure and replays its durable receipt", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareComputerSessionCreate(client.db, input);
+    const failed = await failComputerSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      computerSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "failed", controller: null, failureCode: "driver_failed" },
+      operation: { state: "failed", dispatchedAt: null },
+    });
+    expect(
+      await getComputerSessionControlRecord(client.db, {
+        ...scope,
+        computerSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({ operation: { state: "failed", controllerGeneration: null } });
+    const replay = await prepareComputerSessionCreate(client.db, input);
+    expect(replay.session.id).toBe(prepared.session.id);
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+  });
+
+  test("a late computer placement failure cannot erase a dispatched or accepted binding", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareComputerSessionCreate(client.db, input);
+    const controller = {
+      controllerId: "interaction-controller:test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "placement:test",
+    };
+    await dispatchComputerSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      computerSessionId: prepared.session.id,
+      controllerGeneration: controller.controllerGeneration,
+      controller,
+    });
+    const failure = {
+      ...scope,
+      operationId: input.operationId,
+      computerSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed" as const, message: "Placement unavailable", retryable: true },
+    };
+    expect(await failComputerSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "starting", controller, failureCode: null },
+      operation: { state: "dispatched", settledAt: null, error: null, replayed: true },
+    });
+    expect(
+      await getComputerSessionControlRecord(client.db, {
+        ...scope,
+        computerSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({
+      operation: { state: "dispatched", controllerGeneration: controller.controllerGeneration },
+    });
+    await activateComputerSession(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      computerSessionId: prepared.session.id,
+      controller,
+      platform: "linux",
+      adapter: "opengeni.atspi-x11.v1",
+      seatId: "seat:test",
+      displayId: ":97",
+      capabilities,
+    });
+    expect(await failComputerSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "active", controller, failureCode: null },
+      operation: { state: "completed", error: null, replayed: true },
+    });
+  });
+
   test("persists native activation under the exact controller fence", async () => {
     if (!available) return;
     const scope = await fixture();

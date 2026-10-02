@@ -64,6 +64,12 @@ Outside local development, `configured` mode refuses to start unless you set eit
 
 The optional deployment shared key (`OPENGENI_AUTH_REQUIRED=true` with `OPENGENI_ACCESS_KEY`) is a coarse perimeter for smoke tests and simple self-hosting, sent as the `x-opengeni-access-key` header. It is not a tenant model.
 
+## Customer credit coupons
+
+With Stripe billing enabled, customers can select **Add credits** on the main chat screen and enter a promotion code in Stripe Checkout. They receive the full selected package value, including when the coupon covers the full price. A $10 coupon applied to a $5 package gives $5 of credits; selecting a $15 package gives $15 of credits for $5 paid.
+
+OpenGeni provides coupon redemption and the credit ledger. Deployment operators manage campaigns, coupon creation, eligibility, expiry, and redemption limits in their own Stripe account and operations workflow. Configure `OPENGENI_WEB_BASE_URL` for the browser origin when it differs from the API origin.
+
 ## Before you expose it
 
 Put a long-lived deployment behind a gateway that provides:
@@ -83,6 +89,12 @@ Review sandbox preparation profiles and environment allowlists before running li
   guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md) before every
   upgrade.
 </Warning>
+
+## Console links
+
+The web console's account menu has a Help entry that opens the public OpenGeni documentation. Set `OPENGENI_DOCUMENTATION_URL` on the API to your own documentation URL, or to `none` to hide the entry.
+
+Shared console links unfurl in Slack, X, and other chat tools with a preview card. Keep `OPENGENI_PUBLIC_BASE_URL` set to the address people use, so the preview image URL is absolute. If the console and API use different origins, also set `OPENGENI_WEB_BASE_URL` to the console origin: without it the preview image URL points at the API host, which does not serve that image.
 
 ## Going deeper
 

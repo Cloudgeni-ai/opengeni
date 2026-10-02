@@ -1,16 +1,19 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, useEffect, useState } from "react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
-import {
-  ARTIFACT_VIEW_KEY,
-  defaultArtifactFilters,
-  filterArtifactCatalog,
-} from "@/lib/artifact-catalog";
+import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
+let siteStillDocument: typeof import("./artifact-library").siteStillDocument;
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -21,7 +24,7 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactLibrary, ArtifactThumbnail } = await import("./artifact-library"));
+  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } = await import("./artifact-library"));
 });
 
 test("offscreen thumbnails never mount the retained loader; visible thumbnails load once", async () => {
@@ -143,12 +146,81 @@ const items: ArtifactCatalogItem[] = [
   },
 ];
 
-test("shared library filters, persists list view, and never executes Sites", async () => {
-  const previousView = localStorage.getItem(ARTIFACT_VIEW_KEY);
-  localStorage.removeItem(ARTIFACT_VIEW_KEY);
+async function renderInRouter(root: ReturnType<typeof createRoot>, node: () => ReactNode) {
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => <>{node()}</> }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await act(async () => {
+    await router.load();
+    root.render(<RouterProvider router={router} />);
+  });
+}
+
+test("a Site still blocks scripts and the network before any of the Site's markup", () => {
+  const still = siteStillDocument(
+    "<html><head><script>alert(1)</script></head><body>Hi</body></html>",
+  );
+  expect(still.startsWith('<!doctype html><meta http-equiv="Content-Security-Policy"')).toBe(true);
+  expect(still).toContain("default-src 'none'");
+  expect(still).not.toContain("script-src");
+  expect(still.indexOf("Content-Security-Policy")).toBeLessThan(still.indexOf("<script>"));
+});
+
+test("the gallery is the default; List shows flush rows and is remembered", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = () =>
+    renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+        onSelect={() => {}}
+      />
+    ));
+  try {
+    await render();
+    const cards = container.querySelectorAll("ul[aria-label=Artifacts] > li");
+    expect(cards).toHaveLength(2);
+    expect(container.querySelector('[data-slot="list-row"]')).toBeNull();
+    expect(cards[0]!.textContent).toContain("Site · updated");
+    const list = container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]');
+    await act(async () => list!.click());
+    expect(localStorage.getItem("opengeni:artifact-library:view:v1")).toBe("list");
+    expect(container.querySelector("[data-card-action]")).toBeNull();
+    await act(async () => root.unmount());
+    const again = createRoot(container);
+    await renderInRouter(again, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    expect(container.querySelector("[data-card-action]")).toBeNull();
+    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(2);
+    await act(async () => again.unmount());
+  } finally {
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+    container.remove();
+  }
+});
+
+test("shared library lists the type as a word and never executes Sites", async () => {
   const selected: string[] = [];
+  let setKind: (kind: "all" | "document") => void = () => {};
   function Fixture() {
     const [filters, setFilters] = useState(defaultArtifactFilters);
+    setKind = (kind) => setFilters((current) => ({ ...current, kind }));
     return (
       <ArtifactLibrary
         workspaceId="workspace"
@@ -165,32 +237,23 @@ test("shared library filters, persists list view, and never executes Sites", asy
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<Fixture />));
-    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(2);
+    await renderInRouter(root, () => <Fixture />);
+    const rows = () => container.querySelectorAll("ul[aria-label=Artifacts] > li");
+    expect(rows()).toHaveLength(2);
     expect(container.querySelector("iframe")).toBeNull();
-    expect(container.textContent).toContain("Preview not available");
-    await act(async () =>
-      (container.querySelector('[aria-label="List view"]') as HTMLButtonElement).click(),
-    );
-    expect(container.querySelector('[aria-label="List view"]')?.getAttribute("aria-pressed")).toBe(
-      "true",
-    );
-    expect(localStorage.getItem("opengeni:artifact-library:view:v1")).toBe("list");
+    expect(rows()[0]!.textContent).toContain("Document");
+    expect(rows()[1]!.textContent).toContain("Site");
+    await act(async () => setKind("document"));
+    expect(rows()).toHaveLength(1);
     await act(async () =>
       Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Documents")!
+        .find((button) => button.textContent === "Project brief")!
         .click(),
-    );
-    expect(container.querySelectorAll("ul[aria-label=Artifacts] > li")).toHaveLength(1);
-    await act(async () =>
-      (container.querySelector('[aria-label="Open Project brief"]') as HTMLButtonElement).click(),
     );
     expect(selected).toEqual(["document:same"]);
   } finally {
     await act(async () => root.unmount());
     container.remove();
-    if (previousView === null) localStorage.removeItem(ARTIFACT_VIEW_KEY);
-    else localStorage.setItem(ARTIFACT_VIEW_KEY, previousView);
   }
 });
 
@@ -209,13 +272,13 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
     },
   };
   try {
-    await act(async () => root.render(<ArtifactLibrary {...props} loading />));
+    await renderInRouter(root, () => <ArtifactLibrary {...props} loading />);
     expect(container.querySelector('[aria-label="Loading artifacts"]')).not.toBeNull();
-    await act(async () => root.render(<ArtifactLibrary {...props} loading={false} />));
+    await renderInRouter(root, () => <ArtifactLibrary {...props} loading={false} />);
     expect(container.textContent).toContain("No artifacts yet");
-    await act(async () =>
-      root.render(<ArtifactLibrary {...props} loading={false} error={new Error("Denied")} />),
-    );
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} loading={false} error={new Error("Denied")} />
+    ));
     expect(container.textContent).toContain("Couldn't load artifacts");
     expect(container.textContent).not.toContain("No artifacts yet");
     const retry = Array.from(container.querySelectorAll("button")).find((button) =>
@@ -223,6 +286,125 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
     );
     await act(async () => retry!.click());
     expect(retries).toBe(1);
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        loading={false}
+        error={Object.assign(
+          new Error("OpenGeni API 503: upstream unavailable Reference: req_503."),
+          { status: 503 },
+        )}
+      />
+    ));
+    expect(container.textContent).toContain("Couldn't load artifacts");
+    expect(container.textContent).toContain("Try again in a moment.");
+    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("req_503");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        loading={false}
+        error={Object.assign(
+          new Error("OpenGeni API 403: missing permission: artifacts:read Reference: req_403."),
+          { status: 403 },
+        )}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see artifacts here.");
+    expect(container.textContent).not.toContain("Couldn't load artifacts");
+    expect(container.textContent).not.toContain("missing permission");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((button) =>
+        /retry|try again/i.test(button.textContent ?? ""),
+      ),
+    ).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("hidden Sites and documents are explained instead of reported as missing", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const props = {
+    workspaceId: "workspace",
+    onFiltersChange: () => {},
+    onRetry: () => {},
+    loading: false,
+    artifactKindsHidden: true,
+  };
+  const access = "You need access to artifacts in this workspace. Ask a workspace admin.";
+  try {
+    // A Sites tab without artifacts:read is a permission gap, never "No sites yet".
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see sites here.");
+    expect(container.textContent).toContain(access);
+    expect(container.textContent).not.toContain("No sites yet");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "document" }}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see documents here.");
+    // Files the viewer can read still list, with the hidden kinds named above them.
+    const file: ArtifactCatalogItem = {
+      id: "file",
+      kind: "file",
+      title: "notes.txt",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-02T00:00:00Z",
+    };
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} items={[file]} filters={defaultArtifactFilters} />
+    ));
+    expect(container.textContent).toContain("Sites and documents are hidden");
+    expect(container.textContent).toContain(access);
+    expect(container.textContent).toContain("notes.txt");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[file]}
+        filters={{ ...defaultArtifactFilters, kind: "file" }}
+      />
+    ));
+    expect(container.textContent).not.toContain(access);
+    // A stale grant never hides what the server returned.
+    const site: ArtifactCatalogItem = { ...file, id: "site", kind: "site", title: "Status board" };
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[site]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("Status board");
+    expect(container.textContent).not.toContain(access);
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} items={[file, site]} filters={defaultArtifactFilters} />
+    ));
+    expect(container.textContent).not.toContain("Sites and documents are hidden");
+    // A viewer who can read artifacts sees no notice.
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        artifactKindsHidden={false}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("No sites yet.");
+    expect(container.textContent).not.toContain(access);
   } finally {
     await act(async () => root.unmount());
     container.remove();

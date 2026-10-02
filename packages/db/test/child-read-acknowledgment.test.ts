@@ -458,6 +458,7 @@ describe("child read acknowledgment on parent consumption", () => {
       await enqueueHumanTurn(grant, parent.session.id);
       const parentClaim = await claim(grant, parent.session.id);
       expect(parentClaim.action).toBe("claimed");
+      // The untruncated final answer is itself the consumption evidence.
       expect((await pinRow(grant.subjectId, child.session.id))?.acknowledged_sequence).toBe(
         sequence,
       );
@@ -468,27 +469,26 @@ describe("child read acknowledgment on parent consumption", () => {
           (content) =>
             typeof content === "string" &&
             content.includes(child.session.id) &&
-            content.includes("childEventEvidence"),
+            content.includes("finalAnswer"),
         );
       if (typeof batch !== "string") throw new Error("claimed lifecycle history missing");
       const updates = JSON.parse(batch.slice(batch.indexOf("{"))).updates as Array<{
         payload: {
           childSessionId?: string;
-          childEventEvidence?: Array<{
-            sequence: number;
-            payload: { output?: string; text?: string };
-          }>;
+          childEventEvidence?: unknown;
+          finalAnswer?: { sequence: number; text: string; truncated: boolean };
         };
       }>;
-      const result = updates
-        .find((update) => update.payload.childSessionId === child.session.id)
-        ?.payload.childEventEvidence?.find((event) => event.sequence === sequence);
-      expect(result?.payload.output).toBe(answer);
+      const result = updates.find(
+        (update) => update.payload.childSessionId === child.session.id,
+      )?.payload;
+      expect(result?.finalAnswer).toMatchObject({ sequence, text: answer, truncated: false });
+      // No second copy of the answer rides along as lifecycle evidence.
+      expect(result).not.toHaveProperty("childEventEvidence");
       if (legacySequence !== null) {
-        const legacy = updates
-          .find((update) => update.payload.childSessionId === child.session.id)
-          ?.payload.childEventEvidence?.find((event) => event.sequence === legacySequence);
-        expect(legacy?.payload.text).toBe(answer);
+        // The null-version legacy row is older than the answer and was not
+        // decoded into it.
+        expect(legacySequence).toBeLessThan(sequence);
       }
 
       // A separate child proves historical reconciliation independently of the
@@ -514,6 +514,46 @@ describe("child read acknowledgment on parent consumption", () => {
       ).toBe(await lastMeaningfulSequence(historicalChild.session.id));
     },
   );
+
+  test("a terminal result without an answer keeps literal legacy lifecycle evidence", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "parent" });
+    const child = await startSession(grant, { parent, message: "child" });
+    const literal = toPostgresLosslessJson("literal\u0000marker") as string;
+    const legacySequence = (await lastSequence(child.session.id)) + 1;
+    await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload,payload_codec_version)
+      values(${grant.accountId},${grant.workspaceId},${child.session.id},${legacySequence},'agent.message.completed',
+        jsonb_build_object('text',${literal}::text),null)`;
+    await settleFailed(grant, child);
+    await deliverOutboxTo(parent.session.id);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    const history = await getSessionHistoryItems(client.db, grant.workspaceId, parent.session.id);
+    const batch = history
+      .map(({ item }) => item.content)
+      .find(
+        (content) =>
+          typeof content === "string" &&
+          content.includes(child.session.id) &&
+          content.includes("childEventEvidence"),
+      );
+    if (typeof batch !== "string") throw new Error("claimed lifecycle history missing");
+    const updates = JSON.parse(batch.slice(batch.indexOf("{"))).updates as Array<{
+      payload: {
+        childSessionId?: string;
+        finalAnswer?: unknown;
+        childEventEvidence?: Array<{ sequence: number; payload: { text?: string } }>;
+      };
+    }>;
+    const payload = updates.find(
+      (update) => update.payload.childSessionId === child.session.id,
+    )?.payload;
+    expect(payload).not.toHaveProperty("finalAnswer");
+    expect(
+      payload?.childEventEvidence?.find((event) => event.sequence === legacySequence)?.payload.text,
+    ).toBe(literal);
+  });
 
   test("historical null-version marker literals are never decoded as versioned source content", async () => {
     const grant = await workspace();

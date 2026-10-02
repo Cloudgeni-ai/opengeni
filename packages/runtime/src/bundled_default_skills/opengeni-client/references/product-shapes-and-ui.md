@@ -1,40 +1,90 @@
-# Opening host-owned workbench tabs
-
-Use `SandboxWorkspace.openTabRequest={{ tab, requestId }}` to open a built-in or
-host-injected tab from the host's UI. Increment `requestId` for each intentional
-open, including repeated clicks on the same item. Keep artifact selection and
-internal-link recognition in the host; the workbench only selects an available
-tab and expands the dock. Preserve modified clicks and external navigation.
-When handing off to a full-page artifact route, retain an explicit originating
-session return path rather than relying on browser history.
-
 # Product shapes and UI
 
-## Choose the smallest suitable surface
+## Default to the full conversation
 
-OpenGeni supports several product shapes. Select from the product experience and host stack rather than assuming every integration needs a custom chat:
-
-| Need | Likely surface | Product owns |
+| Need | Surface | Product owns |
 | --- | --- | --- |
-| The complete OpenGeni experience is acceptable | Link or deep-link to stock OpenGeni | Entry point and product navigation |
-| Custom UI in any framework, mobile app, CLI, or automation | OpenGeni SDK or public API behind product backend | All user-facing presentation |
-| React product wants canonical session state without packaged visuals | Headless React session hooks and projections | Components, layout, and styling |
-| React product wants packaged chat/session controls | Focused styled React subpaths | Shell, domain UI, and theming |
-| Product exposes files, changes, terminal, or desktop compute | Optional workbench surfaces | Product shell and selected tabs |
+| Agent conversation in a React product (default) | `OpenGeniChat` (or `SessionConversation` for one record) + `compiled.css` behind `createSessionProxyHandler` | Shell, placement, and `--og-*` theme |
+| Materially different interaction model in React | Headless `@opengeni/react/session` hooks and projections | Components, layout, and styling |
+| Non-React frontend, mobile app, CLI, or automation | OpenGeni SDK or public API behind the product backend | All user-facing presentation |
+| Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
+| Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Start with the narrowest surface that preserves the desired experience. Do not mount the full workbench for an ordinary analytics chat. Do not rebuild session streaming, replay, queueing, approval, or timeline projection when a compatible package already supplies the needed behavior.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
-## Evaluate reuse before writing chat UI
+## When deviating in React
 
-For React hosts, inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Compare:
+Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
-- packaged components with customer theme tokens;
-- headless hooks with customer-native components; and
-- a fully custom SDK-driven UI.
-
-Choose based on UX requirements and dependency compatibility, then record why. Styling differences alone are not a reason to skip reusable components if their structure fits. Conversely, do not force a packaged component when the product needs a materially different interaction model.
+## Native non-React frontends
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+Start with the [runnable Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md)
+for native Vue single-file components, Vite and the existing Bun Fetch session
+proxy using the published SDK. Follow the README's deployment and host-auth
+prerequisites; run install, onboarding and consumer checks from
+`examples/vue-conversation/app`, not the repository root. The sample handles
+durable conversations and decisions with an escaped-text UI, not a full rich
+Markdown, artifact or file renderer. Keep organization credentials server-only.
+
+## Links, downloads, artifacts, and Sites
+
+Agent replies link OpenGeni objects as `artifact:<file uuid>`,
+`sandbox:<path>[:line]`, `/workspaces/<ws>/artifacts/editable/<id>` (live
+document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
+(Site). None is navigable inside the product: the `/workspaces/...` forms are
+console routes and 404 on the product origin. Never pass them to a raw `<a>`.
+
+- `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
+  download `artifact:` files by default. `sandbox:` reads require deliberate
+  proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
+  to the selected working directory, including on Connected Machines, and
+  refuse symlinked paths. Disabled sandbox links render unavailable.
+- Artifacts and Sites: reuse the OpenGeni surfaces, do not rebuild them.
+  `opengeni-site` fences render the inline Site preview automatically. Mount
+  `SessionArtifactViewer` (`@opengeni/react/artifacts`) in a host container
+  (for example the main area beside an assistant panel, a full-screen sheet on
+  phones) and pass `onOpenArtifact` to `SessionConversation` (or
+  `viewerLinkResolver` to `MessageTimeline`). Enable the proxy's
+  `artifacts: true`; editors also need the document, spreadsheet, and
+  presentation runtimes (`@opengeni/artifact-kernel-wasm-document`,
+  `@opengeni/artifact-kernel-wasm-spreadsheet`,
+  `@opengeni/artifact-kernel-wasm-presentation`) plus the SDK Worker URL
+  (`editableRuntimes`). A custom host proxy reports the viewer capability with
+  `artifactViewerCapability` from `@opengeni/sdk`. Close the viewer when the session changes.
+  Translate its copy with `labels` (partial `ArtifactLabels`) or
+  `ArtifactLabelsProvider`.
+- Other routing: `resolveLink={(target) => ... ({ href } | { open } | null)}`
+  on `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+  subtree; it also covers `Markdown` inside a custom `renderMessageText`.
+  Unresolved targets render as unavailable text, not broken links.
+- `MessageTimeline` alone has no defaults; add
+  `sessionLinkResolver({ client, workspaceId, sessionId })` for downloads.
+- Non-React or custom renderers: classify each href with
+  `parseOpenGeniLink(href)` from `@opengeni/sdk`, then use
+  `createFileDownloadUrl` / `fsRead`, or the product's artifact page.
+- Editable artifact export serves only the formats the export tool lists
+  (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
+  live artifact instead.
+
+## Optional workbench peers
+
+The React root keeps all existing exports and builds in Next.js/Vite without
+optional workbench peers. Do not install compute packages for an ordinary chat.
+When mounting compute surfaces, install only their peers and call
+`enableSandboxTerminal()` from `@opengeni/react/terminal`, `enableDesktopViewer()`
+from `@opengeni/react/desktop`, or `enableCodeEditor()` from
+`@opengeni/react/editor` once in the corresponding client route. Libraries load
+on mount, not at registration or SSR. Root component imports still work after
+setup. Supply only installed grammars to `enableCodeEditor`, for example
+`{ javascript: async () => (await import("@codemirror/lang-javascript")).javascript() }`.
+For optional WebGL, pass `{ webgl: () => import("@xterm/addon-webgl") }` to
+`enableSandboxTerminal`; otherwise the DOM renderer is used. Highlighted diffs
+still use `enablePierreDiffs()` from `@opengeni/react/diffs`. Never hide optional
+imports behind bare runtime strings or `@vite-ignore`; use bundler-resolvable
+loaders. Test the packed root with optional peers absent, and the enabled
+surface's mount path with its peers installed.
 
 ## Optional artifact library
 
@@ -89,11 +139,70 @@ may include fields deliberately omitted from the visible conversation.
 
 ## Browser/backend split
 
-The product browser normally sends product-shaped requests to its own same-origin backend. The backend authenticates, resolves the allowed mapping, and calls OpenGeni. Never bundle an organization key into frontend code.
+The product browser talks to its own same-origin backend: `createSessionProxyHandler` for the conversation, or product-shaped routes for a custom UI. The backend authenticates, resolves the allowed mapping, and calls OpenGeni as that user. Never bundle an organization key into frontend code, and never replace the packaged proxy with a raw passthrough that forwards arbitrary paths under the organization key.
 
 For live sessions, preserve event sequence, reconnect, replay, and duplicate suppression. The SDK's stream and proxy helpers are preferred where compatible. Treat unknown additive event types as forward-compatible data rather than crashing the UI.
 
 Uploads may send bytes directly to a short-lived signed storage URL returned by the trusted flow. That URL is narrow transfer authority, not the OpenGeni API key. Verify storage CORS for every intended browser origin.
+
+### Bind asynchronous UI work to the current identity and session
+
+In a custom polling/static UI, backend authorization does not stop an already
+authorized response for account A arriving after account B signs in. On logout,
+login, tenant switch or session switch, invalidate the UI epoch, abort outstanding
+requests, stop polling, and clear private messages, approval cards, session IDs,
+cursors and local caches. Do not reuse A's session ID for B. Abort alone is not
+enough: a completed request or a transport that ignores abort can still resolve.
+Guard both success and failure rendering by the captured identity/session epoch.
+
+These framework-neutral helpers belong in the host's existing frontend module:
+
+```js
+function createIdentityBoundView(clearPrivateState) {
+  let epoch = 0;
+  let identityKey = null;
+  const requests = new Set();
+  return {
+    reset(nextIdentityKey) {
+      epoch += 1; // also fences A -> B -> A and a new session for the same user
+      identityKey = nextIdentityKey;
+      for (const controller of requests) controller.abort();
+      requests.clear();
+      clearPrivateState(); // include polling timers, cached IDs and decisions
+    },
+    begin() {
+      if (identityKey === null) throw new Error("No authenticated view");
+      const capturedEpoch = epoch;
+      const controller = new AbortController();
+      requests.add(controller);
+      return {
+        signal: controller.signal,
+        isCurrent: () => capturedEpoch === epoch && !controller.signal.aborted,
+        finish: () => requests.delete(controller),
+      };
+    },
+  };
+}
+
+async function readForCurrentView(view, load, render, showFailure) {
+  const request = view.begin();
+  try {
+    const result = await load(request.signal);
+    if (request.isCurrent()) render(result);
+  } catch {
+    if (request.isCurrent()) showFailure("The assistant could not refresh.");
+  } finally {
+    request.finish();
+  }
+}
+```
+
+Call `view.reset(null)` before clearing host authentication; after authenticated
+mapping, reset with a key for the tenant/user/session tuple before loading its
+view. `load(signal)` calls the host's authenticated same-origin route and passes
+the signal to `fetch`. The epoch is a presentation fence, not authorization:
+the backend must still check every request's user and session ownership. Do not
+run these browser helpers with an organization key or put that key in storage.
 
 ## Decide what the user sees
 
@@ -107,7 +216,92 @@ OpenGeni's durable event stream can support different product projections:
 
 The customer frontend chooses which event types and fields to render. Hiding an event from the chat view does not remove it from OpenGeni's durable history or from authorized audit readers. Do not promise data erasure or secrecy from presentation filtering.
 
+Each `session.requiresAction` event replaces the pending approval set. Read only `payload.approvals[].id`, `.name`, and `.arguments` (SDK type `SessionApprovalRequest`); other fields differ between a turn's first pause and later ones and exist for compatibility. Send `sendApprovalDecision({ approvalId: approval.id, decision })`: `id` is the pending tool call id, not the event id. `approvalsFromRequiresAction` / `projectPendingApprovals` from `@opengeni/react` already normalize older events.
+
+For a custom non-React projection, fold ordered, deduplicated events rather than
+appending every historical approval as a new pending card. Keep the original
+approval ID and the durable decision event ID. A decision is terminal for that
+approval; a replay/reload must not restore its Approve button. Turn settlement
+clears that turn's undecided approvals, not approvals owned by a different turn.
+The following minimal projection uses current stable fields; use the packaged
+normalizer for older events, not generated IDs or guessed compatibility fields:
+
+```js
+function projectApprovalState(events) {
+  let pending = new Map();
+  let owningTurnId = null;
+  const decisions = new Map();
+  const settledTurns = new Set();
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    if (event.type === "session.requiresAction") {
+      owningTurnId = event.turnId ?? null;
+      pending = new Map();
+      if (owningTurnId !== null && settledTurns.has(owningTurnId)) continue;
+      for (const approval of Array.isArray(payload.approvals) ? payload.approvals : []) {
+        if (!approval || typeof approval.id !== "string" || !approval.id ||
+            typeof approval.name !== "string" || !approval.name || decisions.has(approval.id)) continue;
+        pending.set(approval.id, approval);
+      }
+    } else if (event.type === "user.approvalDecision") {
+      if (typeof payload.approvalId !== "string" || !payload.approvalId ||
+          !["approve", "reject"].includes(payload.decision) || decisions.has(payload.approvalId)) continue;
+      decisions.set(payload.approvalId, {
+        approvalId: payload.approvalId,
+        decision: payload.decision,
+        decisionEventId: event.id,
+      });
+      pending.delete(payload.approvalId);
+    } else if (["turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
+      if (event.turnId != null) settledTurns.add(event.turnId);
+      if (owningTurnId === null || event.turnId == null || event.turnId === owningTurnId) {
+        pending.clear();
+        owningTurnId = null;
+      }
+    }
+  }
+  return { pending: [...pending.values()], decisions: [...decisions.values()] };
+}
+
+// Example for a known title-only operation, not a generic approval formatter.
+function exactTitleProposal(approval) {
+  try {
+    const args = typeof approval.arguments === "string"
+      ? JSON.parse(approval.arguments) : approval.arguments;
+    const body = args?.body;
+    if (!body || Array.isArray(body) || Object.keys(body).some((key) => key !== "title")) return null;
+    return typeof body.title === "string" && body.title.trim() ? body.title : null;
+  } catch {
+    return null;
+  }
+}
+```
+
+Render arguments using the selected operation's schema: for this example the
+title is `arguments.body.title`, not `arguments.title`. Use escaped text, retain
+the exact string (do not silently trim/change it), and also display the target
+record and operation. Enable Approve only for a currently pending, authorized
+request whose exact proposal and target can be shown. Missing/malformed proposal
+means disabled Approve, not a placeholder beside an enabled button; Reject or
+refresh can remain available. The provider still enforces record ownership,
+allowed fields and any expected-version/CAS precondition on the actual write.
+
+Persist a stable `clientEventId` before `sendApprovalDecision`, retain the
+returned decision event, and reconcile after an uncertain response or a local
+save failure. Accepted approval means a decision was accepted, not that its
+provider write completed. See [Failure and reconciliation](compatibility-and-troubleshooting.md#host-errors-and-uncertain-actions).
+
 Even a final-answer-only UI should surface states the user must act on: failure, cancellation, credit or policy denial, approval requests, human-input requests, reconnect status, and a way to retry safely. Avoid presenting tool failures as ordinary assistant prose when product state can represent them more clearly.
+
+## Opening host-owned workbench tabs
+
+Use `SandboxWorkspace.openTabRequest={{ tab, requestId }}` to open a built-in or
+host-injected tab from the host's UI. Increment `requestId` for each intentional
+open, including repeated clicks on the same item. Keep artifact selection and
+internal-link recognition in the host; the workbench only selects an available
+tab and expands the dock. Preserve modified clicks and external navigation.
+When handing off to a full-page artifact route, retain an explicit originating
+session return path rather than relying on browser history.
 
 ## Fit the host product
 

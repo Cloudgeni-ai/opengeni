@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
-  {{- if ((.Values.observability).metrics).enabled }}
+  {{- if and ((.Values.observability).metrics).enabled (not .Values.api.metricsPort) }}
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
@@ -25,4 +25,33 @@ spec:
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: api
+{{- with .Values.api.metricsPort }}
+---
+# Internal-only Prometheus endpoint. Always ClusterIP, so a NodePort or
+# LoadBalancer API Service never publishes it, and no Ingress routes to it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" $ }}-api-metrics
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: api
+    opengeni.ai/metrics-endpoint: "true"
+  {{- if (($.Values.observability).metrics).enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: {{ (($.Values.observability).metrics).path | default "/metrics" | quote }}
+    prometheus.io/port: {{ . | quote }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ . }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "opengeni.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: api
+{{- end }}
 {{- end }}

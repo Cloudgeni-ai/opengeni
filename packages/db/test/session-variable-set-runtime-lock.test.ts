@@ -84,14 +84,18 @@ describe("session Variable Set runtime fence", () => {
     ]);
     expect(classifierSource).toContain('nestedPostgresSqlState(error) === "23503"');
     expect(classifierSource).toContain("sessionVariableSetSelectionFkConstraints.has(");
-    expect(classifierSource).toContain("translateSessionVariableSetSelectionCreateError(");
+    expect(classifierSource).toContain("translateSessionCreateError(");
+    expect(classifierSource).toContain("sessionCreateConnectionSelectionFailure(error)");
+    expect(classifierSource).toContain(
+      "if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error",
+    );
     expect(classifierSource).toContain("subjectId: input.subjectId");
     expect(classifierSource).toContain("const current = await getVariableSet(");
     expect(classifierSource).toContain(
       "throw new SessionVariableSetSelectionUnavailableError(unavailableVariableSetIds, error)",
     );
-    expect(createSource).toContain("translateSessionVariableSetSelectionCreateError(");
-    expect(keyedCreateSource).toContain("translateSessionVariableSetSelectionCreateError(");
+    expect(createSource).toContain("translateSessionCreateError(");
+    expect(keyedCreateSource).toContain("translateSessionCreateError(");
     expect(routeSource).toContain("error instanceof SessionVariableSetSelectionUnavailableError");
     expect(routeSource).toContain("details: { variableSetIds: error.variableSetIds }");
   });

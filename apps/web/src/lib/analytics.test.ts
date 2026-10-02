@@ -1,5 +1,7 @@
 import { beginAnalyticsRequest as observeRequest } from "./analytics-observer";
 import { noteSuccessfulLogin } from "./analytics-login";
+import { observeSessionTurnEvents } from "./analytics-observer";
+import { resetSignupAttributionForTests, retainSignupAttribution } from "./signup-attribution";
 import { describe, expect, mock, test } from "bun:test";
 
 import {
@@ -111,7 +113,11 @@ describe("analytics providers", () => {
       syncAnalytics(config, "/first");
       syncAnalytics(config, "/second");
       noteSuccessfulLogin("ga4-user", "email");
-      syncAnalyticsIdentity({ userId: "ga4-user", accountId: "ga4-account" });
+      syncAnalyticsIdentity({
+        userId: "ga4-user",
+        accountId: "ga4-account",
+        accountResolved: true,
+      });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(pageViewLocations(dataLayer)).toEqual(["https://app.opengeni.ai/second"]);
@@ -122,7 +128,11 @@ describe("analytics providers", () => {
         dataLayer.some((entry) => Array.isArray(entry) && entry[1] === "login_completed"),
       ).toBe(true);
       syncAnalytics(config, "/second");
-      syncAnalyticsIdentity({ userId: "ga4-user", accountId: "another-account" });
+      syncAnalyticsIdentity({
+        userId: "ga4-user",
+        accountId: "another-account",
+        accountResolved: true,
+      });
       syncAnalytics(config, "/second");
       expect(pageViewLocations(dataLayer)).toEqual(["https://app.opengeni.ai/second"]);
 
@@ -217,6 +227,7 @@ describe("analytics providers", () => {
       init: (...args: unknown[]) => calls.push(["init", ...args]),
       opt_in_capturing: () => calls.push(["opt_in_capturing"]),
       opt_out_capturing: () => calls.push(["opt_out_capturing"]),
+      register_once: (...args: unknown[]) => calls.push(["register_once", ...args]),
       reset: () => calls.push(["reset"]),
       resetGroups: () => calls.push(["resetGroups"]),
     };
@@ -240,6 +251,19 @@ describe("analytics providers", () => {
     });
 
     try {
+      resetSignupAttributionForTests();
+      // A Google sign-up returns with first-touch campaign tokens and a one-shot marker.
+      const replaced: string[] = [];
+      retainSignupAttribution({
+        location: {
+          href: "https://app.opengeni.ai/?utm_source=producthunt&ref=producthunt&auth_event=google_signup",
+        },
+        history: {
+          state: null,
+          replaceState: (_state: unknown, _title: string, url: string) => replaced.push(url),
+        },
+      } as unknown as Window);
+      expect(replaced).toEqual(["/?utm_source=producthunt&ref=producthunt"]);
       syncAnalytics(
         {
           consentRequired: true,
@@ -249,7 +273,7 @@ describe("analytics providers", () => {
         },
         "/workspaces",
       );
-      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1" });
+      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1", accountResolved: true });
       const finishLoadingRequest = observeRequest(
         "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
         "POST",
@@ -260,7 +284,17 @@ describe("analytics providers", () => {
 
       expect(calls.some((call) => call[1] === "session_create_attempted")).toBe(true);
       expect(calls.some((call) => call[1] === "session_create_finished")).toBe(true);
+      expect(calls).toContainEqual([
+        "register_once",
+        { utm_source: "producthunt", ref: "producthunt" },
+      ]);
+      expect(calls).toContainEqual([
+        "capture",
+        "signup_completed",
+        { method: "google", is_new_user: true, page: "other" },
+      ]);
       const initCall = calls.find(([method]) => method === "init");
+      expect(initCall?.[2]).toMatchObject({ save_campaign_params: true, save_referrer: true });
       const beforeSend = (
         initCall?.[2] as {
           before_send?: (
@@ -296,15 +330,40 @@ describe("analytics providers", () => {
           $current_url: "https://app.opengeni.ai/?secret=sensitive",
           $pathname: "/private-title",
           $title: "private title",
+          $referrer: "https://www.producthunt.com/posts/private-path",
+          $referring_domain: "www.producthunt.com",
+          $session_entry_referring_domain: "private.example",
+          utm_source: "producthunt",
+          utm_content: "person@sensitive.example",
+          // URL-shaped and free-text campaign values fail the closed token rule.
+          utm_medium: "https://private.example/path",
+          utm_term: "private free text",
+          gclid: "sensitive-click",
+          ttclid: "sensitive-click",
+          _kx: "sensitive-click",
+          $search_engine: "private-engine",
           $set_once: {
             $initial_current_url: "https://app.opengeni.ai/?code=sensitive",
-            utm_campaign: "private",
+            $initial_referrer: "https://private.example/?q=sensitive",
+            $initial_referring_domain: "www.producthunt.com",
+            $initial_utm_campaign: "launch-day",
+            $initial_gclid: "sensitive-click",
             $browser: "Chrome",
           },
         },
       });
       expect(JSON.stringify(projected)).not.toMatch(/sensitive|private/);
       expect(projected?.properties.token).toBe("project-key");
+      // Consented campaign tokens and referring domains survive the projection.
+      expect(projected?.properties).toMatchObject({
+        utm_source: "producthunt",
+        $referring_domain: "www.producthunt.com",
+        $set_once: {
+          $initial_referring_domain: "www.producthunt.com",
+          $initial_utm_campaign: "launch-day",
+          $browser: "Chrome",
+        },
+      });
 
       expect(calls).toContainEqual(["identify", "user-1"]);
       expect(calls).toContainEqual(["group", "account", "account-1"]);
@@ -319,8 +378,10 @@ describe("analytics providers", () => {
         { workspace_id: "workspace-1", page: "other" },
       ]);
 
+      // A fresh sign-in waits for the account lookup, so the login event is
+      // sent after the account group and carries it.
       noteSuccessfulLogin("user-1", "email");
-      syncAnalyticsIdentity({ userId: "user-1", accountId: null });
+      syncAnalyticsIdentity({ userId: "user-1", accountId: null, accountResolved: false });
       syncAnalytics(
         {
           consentRequired: true,
@@ -328,11 +389,25 @@ describe("analytics providers", () => {
         },
         "/workspaces",
       );
-      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const loginIndex = () =>
+        calls.findIndex(([method, event]) => method === "capture" && event === "login_completed");
+      expect(loginIndex()).toBe(-1);
+      const groupsBeforeResolution = calls.length;
+      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1", accountResolved: true });
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(
         calls.filter(([method, event]) => method === "capture" && event === "login_completed"),
       ).toHaveLength(1);
+      const groupIndex = calls.findIndex(
+        (call, index) =>
+          index >= groupsBeforeResolution &&
+          call[0] === "group" &&
+          call[1] === "account" &&
+          call[2] === "account-1",
+      );
+      expect(groupIndex).toBeGreaterThanOrEqual(0);
+      expect(loginIndex()).toBeGreaterThan(groupIndex);
 
       const finish = beginAnalyticsRequest(
         "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
@@ -360,7 +435,7 @@ describe("analytics providers", () => {
         "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
         "POST",
       );
-      syncAnalyticsIdentity({ userId: "user-2", accountId: "account-2" });
+      syncAnalyticsIdentity({ userId: "user-2", accountId: "account-2", accountResolved: true });
       staleFinish(201);
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(
@@ -369,10 +444,72 @@ describe("analytics providers", () => {
         ),
       ).toHaveLength(2);
 
+      // Funnel milestones are reported only for accepted requests.
+      beginAnalyticsRequest("/v1/billing/checkout", "POST")(402);
+      beginAnalyticsRequest("/v1/billing/checkout", "POST")(200);
+      beginAnalyticsRequest("/v1/auth/organization-onboarding", "POST")(200);
+      beginAnalyticsRequest("/v1/auth/organization-onboarding", "GET")(200);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const captured = (event: string) =>
+        calls.filter(([method, name]) => method === "capture" && name === event);
+      expect(captured("checkout_started")).toHaveLength(1);
+      expect(captured("organization_setup_completed")).toHaveLength(1);
+
+      // Only the first completed turn of a session this page started is reported.
+      const sessionId = "22222222-2222-4222-8222-222222222222";
+      observeSessionTurnEvents(sessionId, [{ type: "turn.completed" }]);
+      captureAnalyticsEvent("session_started", {
+        session_id: sessionId,
+        workspace_id: "11111111-1111-4111-8111-111111111111",
+        account_id: "account-2",
+      });
+      observeSessionTurnEvents(sessionId, [{ type: "turn.started" }]);
+      observeSessionTurnEvents(sessionId, [{ type: "turn.started" }, { type: "turn.completed" }]);
+      observeSessionTurnEvents(sessionId, [{ type: "turn.completed" }, { type: "turn.completed" }]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(captured("first_turn_completed")).toEqual([
+        [
+          "capture",
+          "first_turn_completed",
+          {
+            page: "other",
+            session_id: sessionId,
+            workspace_id: "11111111-1111-4111-8111-111111111111",
+            account_id: "account-2",
+            $insert_id: `first_turn_completed:${sessionId}`,
+          },
+        ],
+      ]);
+
+      // Opening the app as another user waits for the account lookup too, so
+      // app_opened carries the account group; a user with no account yet
+      // still reports it once the lookup has finished.
+      const opened = () =>
+        calls.flatMap((call, index) =>
+          call[0] === "capture" && call[1] === "app_opened" ? [index] : [],
+        );
+      const openedBefore = opened().length;
+      syncAnalyticsIdentity({ userId: "user-3", accountId: null, accountResolved: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls).toContainEqual(["identify", "user-3"]);
+      expect(opened()).toHaveLength(openedBefore);
+      syncAnalyticsIdentity({ userId: "user-3", accountId: "account-3", accountResolved: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(opened()).toHaveLength(openedBefore + 1);
+      expect(opened().at(-1)!).toBeGreaterThan(
+        calls.findIndex(
+          (call) => call[0] === "group" && call[1] === "account" && call[2] === "account-3",
+        ),
+      );
+      syncAnalyticsIdentity({ userId: "user-4", accountId: null, accountResolved: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(opened()).toHaveLength(openedBefore + 2);
+
       syncAnalyticsIdentity(null);
       expect(calls).toContainEqual(["reset"]);
       applyAnalyticsConsent("denied");
     } finally {
+      resetSignupAttributionForTests();
       restoreGlobal("window", originalWindow);
       restoreGlobal("document", originalDocument);
     }

@@ -90,6 +90,29 @@ describe("projectHistoryForProvider", () => {
     expect(developer.role).toBe("developer");
   });
 
+  test("Chat normalizes structured system/developer text without rewriting history on replay", () => {
+    for (const role of ["system", "developer"]) {
+      const item = {
+        type: "message",
+        role,
+        content: [
+          { type: "input_text", text: "first instruction" },
+          { type: "input_text", text: "second instruction" },
+        ],
+      };
+      const original = JSON.stringify(item);
+      for (let request = 0; request < 2; request++)
+        expect(projectHistoryForProvider([item], "chat")).toEqual([
+          {
+            type: "message",
+            role: "system",
+            content: "first instruction\nsecond instruction",
+          },
+        ]);
+      expect(JSON.stringify(item)).toBe(original);
+    }
+  });
+
   test("Chat keeps the SDK-supported file-search hosted record by reference", () => {
     const item = {
       type: "hosted_tool_call",

@@ -1,5 +1,105 @@
 # @opengeni/codex
 
+## 0.2.31
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
+## 0.2.30
+
+### Patch Changes
+
+- 04640d1: Use live Codex account catalogs for browser and agent model choices and automatic new-session defaults. Require exact model support on every permitted serving account, refresh expired credentials, and preserve provider unsupported-model explanations through the OpenAI SDK error envelope.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+
+## 0.2.29
+
+### Patch Changes
+
+- 8019cac: A Codex request for a model the resolver doesn't recognize is sent unchanged, so the provider rejects it visibly. Previously it was silently rewritten to the first fallback model (`gpt-6-astra`). For example, a session set to `codex/gpt-6.1-sol` ran on Astra without any indication. The resolver now also matches against the active catalog's exact upstream slugs.
+- e14db2a: Recognize a ChatGPT account whose plan no longer includes the requested Codex
+  model (an explicit plan refusal, `usage_not_included`, or an empty HTTP 400).
+  The worker re-checks the account's current plan, excludes that account for that
+  model only, and moves the same turn to another eligible account, or fails with a
+  typed `codex_plan_entitlement` or `codex_request_rejected` code and plain copy.
+  Plan metadata now refreshes from token refreshes and usage reads, a plan change
+  is recorded as lasting evidence, the remote compaction request takes the same
+  path, and each exclusion expires after 24 hours. Codex accounts report
+  `planCheckedAt`, `planChangedFrom`, `planChangedAt`, and `planExcludedModels`.
+- e917ce3: Update the Codex client identity to 0.159.2 so model discovery and inference can access GPT-6.1 Sol.
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+
+## 0.2.28
+
+### Patch Changes
+
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
+## 0.2.27
+
+### Patch Changes
+
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+
 ## 0.2.26
 
 ### Patch Changes

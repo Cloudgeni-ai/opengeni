@@ -152,3 +152,71 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     container.remove();
   }
 });
+
+test("phones keep a compact lifecycle indicator instead of hiding status", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (value: Session, status: Session["status"]) => (
+    <SessionHeader
+      session={value}
+      ancestors={[]}
+      connectionState="live"
+      status={status}
+      keyAuthRequired={false}
+      onForgetAccessKey={() => undefined}
+      inspectorOpen={false}
+      onToggleInspector={() => undefined}
+      onRename={async () => null}
+      onPin={async () => null}
+    />
+  );
+  const compact = () => container.querySelector<HTMLElement>("[data-compact-session-status]");
+  try {
+    for (const [status, label] of [
+      ["running", "Running"],
+      ["failed", "Failed"],
+      ["requires_action", "Waiting on you"],
+      ["waiting_capacity", "Waiting"],
+    ] as const) {
+      await act(async () => root.render(render(session, status)));
+      expect(compact()?.dataset.compactSessionStatus).toBe(status);
+      expect(compact()?.textContent).toBe(label);
+      expect(compact()?.className).toContain("md:hidden");
+    }
+    await act(async () =>
+      root.render(
+        render(
+          {
+            ...session,
+            inputWait: { deadlineAt: "2026-09-25T12:00:00.000Z", reason: "Waiting for CI" },
+          } as Session,
+          "idle",
+        ),
+      ),
+    );
+    expect(compact()?.textContent).toBe("Waiting");
+    // Only the desktop badge carries the wait marker, so selectors stay unique.
+    expect(container.querySelectorAll("[data-session-wait-badge]")).toHaveLength(1);
+    await act(async () =>
+      root.render(
+        render(
+          {
+            ...session,
+            effectiveControl: {
+              ...session.effectiveControl,
+              state: "paused",
+              directState: "paused",
+            },
+          } as Session,
+          "idle",
+        ),
+      ),
+    );
+    expect(compact()?.textContent).toBe("Paused");
+    expect(container.querySelector(".sr-only.md\\:hidden")?.textContent).toBe("Connection live.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

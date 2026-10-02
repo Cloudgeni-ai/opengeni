@@ -1,0 +1,85 @@
+---
+title: "Embed with your coding agent"
+description: "Install the opengeni-client skill and let Claude Code, Codex, or Cursor add an OpenGeni agent to your product."
+icon: "wand-magic-sparkles"
+---
+
+The `opengeni-client` skill teaches a coding agent how to integrate OpenGeni the right way: the full conversation behind a tenant-scoped backend proxy, explicit user onboarding, a minimal tool surface, and your own tools for data. Give it to your agent and describe what you want.
+
+## What you need
+
+- An OpenGeni organization. Sign up at [app.opengeni.ai](https://app.opengeni.ai) or [self-host](/guides/self-host).
+- A **full-access organization API key**: **Organization settings → Developer → API keys**. The token is shown once; store it in your secret manager.
+- Three environment variables on your backend:
+
+| Variable                   | Value                                                               |
+| -------------------------- | ------------------------------------------------------------------- |
+| `OPENGENI_API_BASE_URL`    | `https://app.opengeni.ai`, or your self-hosted API URL              |
+| `OPENGENI_ORGANIZATION_ID` | **Organization settings → General → Organization ID**               |
+| `OPENGENI_API_KEY`         | The organization API key. Server only; never send it to the browser |
+
+## Copy this prompt
+
+Paste it into Claude Code, Codex, Cursor, or any agent that can run commands in your repository:
+
+```text
+Add an OpenGeni agent to this product.
+
+1. Install the OpenGeni integration skill:
+     npx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+   If that is unavailable, copy
+   https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client
+   into this repository's skills directory, or read the full text at
+   https://docs.opengeni.ai/reference/opengeni-client-skill.md
+2. Read the skill, then inspect this repository: auth, tenants, data routes,
+   frontend, tests.
+3. Embed the default OpenGeni conversation (OpenGeniChat, or
+   SessionConversation for one record, behind createSessionProxyHandler with
+   the framework adapter) where it fits the product, and give the agent our
+   data through our own authenticated tools.
+4. Before building, ask me once about anything the repository does not
+   answer: who shares chats, what runs on a schedule, where results land,
+   and whether the agent may write.
+
+Credentials are in the environment: OPENGENI_API_BASE_URL,
+OPENGENI_ORGANIZATION_ID, OPENGENI_API_KEY. Keep the API key on the server.
+```
+
+You can also install the skill yourself first:
+
+<CodeGroup>
+
+```bash npx
+npx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+```
+
+```bash bunx
+bunx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+```
+
+</CodeGroup>
+
+Using Claude Code, Codex, or Cursor? The [OpenGeni plugin](/guides/developer-plugin) bundles this guide with `opengeni-setup`, which creates the organization and a scoped API key with you.
+
+## What you get
+
+A typical integration adds:
+
+- **Onboarding.** Each of your tenants maps to an OpenGeni workspace, and each admitted user becomes a member with only the permissions the conversation needs.
+- **One backend route.** `createSessionProxyHandler` mounted at `/api/opengeni/*` through the Next.js, Express, or Hono adapter, authenticating every request with your existing session check.
+- **The conversation.** `OpenGeniProvider` and `OpenGeniChat` (the user's chats plus the conversation), or `SessionConversation` for one record, styled with your brand tokens.
+- **Your tools.** An MCP server or OpenAPI Integration that exposes the product data and actions the agent may use, authorized as the signed-in user.
+- **Tests** for the proxy and for tenant isolation.
+
+The agent asks before choosing things only you can decide, such as whether chats are private or shared and whether the agent may change data.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Embed manually" icon="code" href="/embed-manually">
+    The same integration in four steps, if you prefer to write it yourself.
+  </Card>
+  <Card title="How it fits together" icon="diagram-project" href="/integrate/how-it-fits-together">
+    What the agent builds, and why each piece is there.
+  </Card>
+</CardGroup>

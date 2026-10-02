@@ -20,6 +20,22 @@ These Skill artifacts are licensed under the Mozilla Public License 2.0
 at `src/curated_skill_library/LICENSE`. Exact per-entry source paths and
 provenance are recorded in `src/skill-library.ts`.
 
+AnyDoc document-parsing guidance
+--------------------------------
+
+The runtime source package contains document-parsing Skill guidance adapted
+from firecrawl/anydoc (skills/convert-documents-to-markdown) at commit
+4e3089b1ed43404241a303109f81e2c7933040b2:
+
+- src/bundled_default_skills/document-parsing
+- src/curated_skill_library/document-parsing
+
+This guidance is licensed under the MIT License, Copyright (c) 2026 Sideguide
+Technologies Inc. The complete, unmodified license text is published with this
+package at `src/bundled_default_skills/document-parsing/LICENSE`, and
+`src/bundled_default_skills/document-parsing/SOURCES.md` records the upstream
+paths and OpenGeni's changes.
+
 MIT-licensed executable dependencies
 ------------------------------------
 

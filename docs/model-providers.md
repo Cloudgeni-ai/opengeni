@@ -25,10 +25,10 @@ or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
 `gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
-| | OpenAI | Azure |
-| --- | --- | --- |
-| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`) | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN` |
-| URL | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
+|            | OpenAI                                                                                        | Azure                                                                                                                |
+| ---------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN`                                                  |
+| URL        | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
 
 Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `https://api.openai.com/v1`. Built-in Responses knobs:
@@ -66,16 +66,59 @@ and examples are in [Registry configuration](#registry-configuration). In
 database catalog mode the host JSON still owns transport and credentials; the
 singleton owns membership.
 
+### Customer OpenAI and Azure OpenAI keys
+
+The web console offers **OpenAI** and **Azure OpenAI** in the model step after
+organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+asks for an API key, with the model preselected and an optional Change model
+control. Azure asks for an API key, resource endpoint
+(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
+name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+are refused. Azure endpoint/deployment/API-version configuration remains available
+separately for deployment operators.
+
+The web flow sends `verifyModelAccess: true` on connection creation. Before
+saving, the API checks the exact provider/model with a short Responses message
+(32 output tokens maximum, `store: false`, no tools). Provider usage applies;
+this uses no OpenGeni credits. Failed checks do not save a connection and show
+safe actionable errors without reflecting upstream response text. Other API
+callers can omit the check for offline provisioning. A successful setup check
+does not establish ongoing provider health. The connected model is selected in
+the current user’s next-chat draft from onboarding and Workspace settings.
+
+These connections are workspace-owned, including in the onboarding Personal
+workspace. The existing Connections API encrypts the key at rest and returns
+metadata only. Usage is externally billed to that provider account and consumes
+no OpenGeni credits. Organization provider inheritance does not apply to these
+workspace connections. Replace a key, endpoint, or model by disconnecting and
+reconnecting; the new connection has a distinct model ID.
+
+`directModelProvider` metadata declares the provider, model/deployment, and Azure
+endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
+include the exact connection ID and version. The metadata-only workspace catalog
+adds a secret-free provider definition; the worker loads only the selected exact
+active connection, verifies its definition and access, and overlays its decrypted
+key for that turn. Revocation or an identity mismatch fails closed. Missing
+customer connections never fall back to deployment credentials. Customer routes
+use conservative text/function capabilities; hosted tools and reasoning controls
+are not enabled implicitly for an arbitrary Azure deployment name.
+
+Canonical: `packages/contracts/src/direct-model-provider.ts`,
+`packages/core/src/domain/direct-model-provider.ts` for the setup check,
+`withDirectModelProviders` in `packages/config/src/index.ts`,
+`loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+
 ### Reviewed overlays — not generic JSON
 
-| Route | Enable | Wire | Catalog |
-| --- | --- | --- | --- |
-| OpenGeni-managed AI Gateway | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` | Responses | Curated DeepSeek / Kimi, OpenGeni credits |
-| Workspace AI Gateway | member connects a Gateway key in Settings | Responses | Same curated models plus optional workspace slugs, workspace-paid |
-| Deployment OpenRouter | `OPENGENI_OPENROUTER_API_KEY` | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter) |
-| Workspace OpenRouter | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid |
-| Codex ChatGPT subscription | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` | Responses | `codex/…` after the workspace connection is ready |
-| SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED` | Responses | `supergrok/…` after the workspace connection is ready |
+| Route                        | Enable                                        | Wire             | Catalog                                                           |
+| ---------------------------- | --------------------------------------------- | ---------------- | ----------------------------------------------------------------- |
+| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, OpenGeni credits                         |
+| Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
+| Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
+| Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
+| Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
+| SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
 Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
 switch. Voice input, image, and video use separate provider settings.
@@ -254,6 +297,18 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
+`validation_failed` (`model is not available: <id>`) plus
+`details: { code: "model_unavailable", modelId }`; retrying the same request
+cannot succeed, so clients must choose another model. The web console detects
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
+
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model
 selection immediately, while an already accepted turn or an existing-session
@@ -360,6 +415,7 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 
@@ -508,8 +564,8 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                                  | Conservative retail fallback (+5%)                                 |
-| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                             | Conservative retail fallback (+5%)                                 |
+| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
 | DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.13 / $0.26; Novita $0.14 / $0.028 / $0.14 / $0.28; DeepInfra $0.09 / $0.018 / $0.09 / $0.18 per 1M | $0.147 / $0.0294 / $0.147 / $0.294 per 1M (highest approved route) |
 | Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $3 / $15 per 1M on both routes                                                                                        | $3.15 / $0.315 / $3.15 / $15.75 per 1M                            |
 
@@ -546,7 +602,8 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`skill_read`, `request_human_input`, `list_models`), and exact session MCP refs marked
+`skill_read`, `request_human_input`, `list_models`, and `code_search` when enabled),
+and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
@@ -793,7 +850,8 @@ Progressive disclosure is selected explicitly per resolved provider:
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
-`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`) plus MCP
+`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`,
+and `code_search` when enabled) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is
@@ -851,10 +909,47 @@ the intent is an explicit fixed allow-list instead.
 
 ## Static catalog and workspace availability
 
-`GET /v1/config/client` is public deployment bootstrap configuration. Its
-`models` array exposes client-safe static definitions and the legacy
-`allowedModels` list. It never contains workspace credential readiness,
-workspace policy, concrete connected-account identity, or provider secrets.
+`GET /v1/config/client` remains public bootstrap configuration. Signed-out
+responses expose stably admissible deployment models, never disconnected
+subscription models. Bearer or actor-epoch authenticated responses resolve the
+caller's default workspace; `?workspaceId=<id>` selects an exact authorized workspace (required
+for organization keys without a default). The SDK accepts this selector through
+`getClientConfig({ workspaceId })`, and the embedded session proxy pins its host
+workspace. A managed-browser cookie alone remains unscoped deployment bootstrap
+so account/session-set reconciliation can load before scoped reads; it never
+discloses a workspace model catalog.
+
+`models` contains exactly the canonical IDs that
+direct fresh session creation accepts through the shared stable admission
+predicate. It rejects only absent/retired definitions, unsupported text/SSE,
+workspace policy or connection model permissions, inactive/reauth-required
+connections, and missing deployment API keys. Unknown, stale or unavailable
+provider health (including xAI freshness) and deployment credential-resolver
+observations never reject creation. Azure AD/managed identity credentials are
+resolved at execution, not assumed absent when no observation exists.
+
+Client config and omitted-model creation use the complete same default
+decision, including reasoning effort. When the configured deployment default
+is stably blocked, the shared decision falls back to the first admitted model
+with that model's default reasoning effort. A transiently unavailable but
+stably admitted deployment default is not replaced by this fallback.
+
+Each config model carries an optional `availability` observation for degraded
+UI display. Its status/reason/checkedAt and transient `selectable` flag do not
+override membership in `models`: a model may remain creatable while
+reported unavailable. A caller lacking `sessions:create` receives no models.
+`models` is authoritative and may be empty. Normally `allowedModels` has the
+same IDs; only when `models` is empty, it retains the one `defaultModel` hint so
+older clients with a nonempty-list parser still load. The additive
+`legacyModelFallback: { id, availability }` explicitly marks that hint
+unavailable and not selectable, with its stable reason. It grants no admission;
+creation still rejects it. New clients use `models`, not this legacy fallback,
+for choices. Older string-list-only clients may show the unusable hint but
+receive the ordinary rejection instead of failing bootstrap parsing.
+Billing/usage admission and a provider's live response are separate from model
+selection. Changes between listing and creating are re-evaluated at creation.
+Responses contain no connected-account identity, provider secrets, or execution
+topology. Child inheritance and keyed repair keep their accepted-work rules.
 
 Authenticated callers use:
 
@@ -895,8 +990,8 @@ type ModelAvailabilityV1 = {
 };
 ```
 
-Workspace admins manage the hard allowlist from **Workspace Settings → Model
-access**. The UI supports an unrestricted policy or an exact canonical model-id
+Workspace admins manage the hard allowlist from **Workspace settings → Models →
+Allowed models**. The UI supports an unrestricted policy or an exact canonical model-id
 allowlist, including future/custom IDs that are not yet present in the catalog.
 It uses the existing model-policy routes through the typed SDK methods
 `getWorkspaceModelAccessPolicy` and `updateWorkspaceModelAccessPolicy`:
@@ -947,6 +1042,95 @@ The SDK method is:
 client.getWorkspaceModelCatalog(workspaceId);
 ```
 
+The response also carries `defaultSelection` (the default for new work that
+names no model, see below) and `creditsSelection` (what that default is while
+the organization holds a positive OpenGeni credit balance; `null` when the
+deployment does not bill credits). Both are `{ model, reasoningEffort, source }`
+and are additive: older API instances omit them.
+
+## Default model for new work
+
+The deployment default (for example the free OpenRouter model) stays in the
+catalog, but it is only the last resort for new work that names no model. The
+server resolves the default in `packages/core/src/default-session-model.ts`,
+first match wins:
+
+1. `workspace`: the saved workspace default (`settings.sessionDefaults`), while
+   it is selectable in the workspace. Its saved reasoning is clamped to the
+   highest effort the model supports today at or below it.
+2. `subscription`: the first selectable connected-subscription model in
+   operator catalog order (ChatGPT/Codex, then SuperGrok) with its own default
+   reasoning. A deployment default that is itself a selectable subscription
+   model wins inside this step.
+3. `credits`: while the organization holds a positive OpenGeni credit balance
+   and the deployment bills credits (`OPENGENI_BILLING_MODE=stripe`), the
+   configured credits default. Any source counts: a Stripe purchase, an
+   operator grant, a test credit, or the one-time verified-signup trial grant
+   (`source_type = 'verified_signup_trial'`, migration 0509), so a new user
+   with the trial starts on the credits default. Once usage brings the balance
+   to zero or below, new work falls back to the next step on its own.
+   `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   highest effort the model supports at or below it) configure it. An explicit
+   `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
+   catalog or boot fails. The unset built-in value, and any value checked
+   against a database catalog (edited independently of this env value), fall
+   back instead: when the configured model is not selectable, the first
+   selectable credits-billed model in operator catalog order is used at its own
+   default reasoning. When the deployment default is already a selectable
+   credits-billed model, it is never replaced: it keeps the deployment effort,
+   except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
+   `credits`) when it is the credits default model itself, so a deployment
+   whose default is `gpt-6-luna` still starts credit holders on extra high
+   reasoning.
+4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
+
+An explicit choice always wins and never passes through this resolver: a
+`model` on a session create or message request, a scheduled task's
+`agentConfig.model`, a child session inheriting its calling turn, or a model
+the person picked in the new-chat composer. Subscription readiness uses the
+same subject authority as the catalog: the authenticated caller for a direct
+create, or a scheduled task's frozen SuperGrok authority snapshot and
+immutable execution owner for an occurrence. It never borrows another member's
+personal subscription. A frozen user-scope SuperGrok snapshot whose pool is
+gone (disconnected, reconnected under a new authority generation, or its owner
+left) only means SuperGrok is not ready: no SuperGrok model is selectable and
+resolution falls through to credits or the deployment default instead of
+failing the occurrence. The ledger is read only when it can change the answer,
+and the resolver does not change billing, pricing, or credit admission.
+
+Where it applies:
+
+- **API, SDK, and Slack creates** without `model` stamp the resolved default
+  on the session (`modelSource: "deployment"` in the turn policy). A keyed
+  retry of a still-uninitialized shell keeps the model that shell persisted.
+- **Scheduled tasks** without `model` resolve at each fresh occurrence, so a
+  daily report created on the free model moves to a later subscription or
+  credits purchase. The accepted occurrence freezes the result; retries and
+  recovery never resolve again, and existing-session runs keep that session's
+  model. A manual trigger's limit pre-check evaluates the same model the
+  occurrence will run (the target session's model, or the resolved default).
+- **New-chat drafts** carry a `modelProvided` marker. `false` follows the
+  default: `GET .../new-session-draft` projects the stored row onto today's
+  resolved default (the row changes only on the next save). `true` is the
+  person's choice and is returned unchanged. A row written before the marker
+  existed counts as following the default only when it holds exactly the
+  deployment default policy (model, reasoning, and standard speed). Slack and
+  other draft-reusing creates copy only a chosen model.
+- **The web console** marks a picker, launch-URL, or onboarding-connect choice
+  as `modelProvided: true`. A credit purchase returns with the credits default
+  and `?modelSource=default`, which applies it at once (before the payment
+  webhook lands) while the draft keeps following the default, so a later
+  subscription connect still replaces it. The draft save response reports the
+  same `modelProvided` marker a read of that row reports. Its fallback for an
+  unselectable model takes the resolved default first. When a new
+  organization starts with a positive balance (for example the trial grant)
+  and its resolved default is a credits-billed model, the post-signup model
+  step shows that balance and the resolved default instead of the free-model
+  copy (see `docs/organization-tenancy.md`). The workspace **Default model** setting shows the
+  resolved default and its source until an admin saves one. New schedules
+  follow the default and are saved without a model until someone picks one.
+
 ## Per-turn execution policy
 
 Admission resolves the effective model and reasoning effort and persists a
@@ -974,7 +1158,8 @@ turn. A present `null`, `undefined`, unknown schema version, extra field, or
 otherwise malformed value fails closed. Parsing errors identify invalid paths
 without reflecting untrusted values.
 
-Create admission uses `deployment` sources for omitted values and `explicit`
+Create admission uses `deployment` sources for omitted values (including a
+resolved subscription, credits, or saved workspace default) and `explicit`
 sources for caller-supplied values. Follow-up admission uses the session's
 durable model and reasoning preference when omitted. An explicit alias records
 the raw requested ID but persists and executes its canonical product ID.
@@ -1019,6 +1204,22 @@ provider-bound model is constructed with the normalized
 Portable compaction is provider-independent conversation lifecycle, not a
 model capability. The summarizer uses the same resolved provider and wire API
 as the turn while the durable replacement algorithm remains shared.
+
+Agent turns send `text.verbosity: "low"`, the Codex CLI default for these
+models, only on the Codex subscription route, direct OpenAI Responses, and the
+Azure OpenAI Responses wire (built-in or registered `wireProfile:
+"azure-openai"`), and only for GPT-5-family and later models other than
+`-codex` and `-chat` variants (`textVerbosityForTurn` in
+`apps/worker/src/activities/agent-turn/tool-policy.ts`). Azure is included
+because the parallel session-title request has always sent the same field with
+the turn's own model on every Responses route, and Azure sessions receive
+generated titles. AI Gateway, OpenRouter, SuperGrok, other OpenAI-compatible
+endpoints, and chat wires keep their provider default until each is verified.
+The value depends only on the route and model, never on the message: like
+reasoning effort, a provider may treat it as part of the cached prompt prefix.
+A compaction request built from the turn's prepared request carries the same
+model settings, so the portable checkpoint summary is also requested at low
+verbosity. `reasoning.summary` stays `detailed`.
 
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
@@ -1144,3 +1345,177 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 - Health scoring and fleet pressure are observations consumed by the catalog,
   not computed here.
 - Tool capability metadata never grants or discovers tools.
+
+## Native Claude Messages
+
+Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
+sign-in as separate connections. **Sign in to Claude** opens Claude's approval page;
+paste its authorization code back into OpenGeni. This grants model and profile
+access, enables direct usage checks and reset times, and stores an encrypted refresh
+token for automatic renewal. Account files and terminal commands are not needed.
+**Sign in again** reconnects through the same flow while retaining native access policy.
+The disclosed **Use a setup token** option accepts `claude setup-token` credentials,
+which allow model calls but cannot query current usage or renew automatically.
+Replace expired or revoked setup tokens through the connection's actions menu. Named
+Opus/Sonnet choices add models without requiring model IDs; other IDs remain
+available under the model disclosure. Workspace setup creates a workspace-owned connection;
+organization setup creates a separate connection for shared workspaces. The two
+scopes never borrow or overwrite each other’s credentials. Both use existing encrypted
+connection storage and model access policy. Add exact upstream
+model IDs to each connection; connecting alone does not validate model entitlement
+or make a paid model call. Subscription usage consumes the connected plan's limits;
+API-key usage is billed by Anthropic. Neither uses OpenGeni credits.
+
+The `anthropic-messages` protocol is implemented by
+`packages/runtime/src/anthropic-messages.ts`, through the existing Agents SDK
+model interface and instrumented transport. It posts full projected history to
+`/v1/messages`, without remote conversation or thread state. Tool calls/results,
+parallel calls, images, streaming text, signed thinking and redacted thinking are
+preserved. Initial system/developer history items join the top-level system field
+in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
+Native OpenAI hosted tools and opaque compaction tokens are not compatible;
+ordinary function tools and OpenGeni's text compaction remain available.
+
+Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
+the deployment default is off. Anthropic API-key connections are independent of
+this flag. When off, subscription setup endpoints and catalog/credential resolution
+are disabled, and subscription setup is hidden from model settings. Stored credentials
+are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
+
+Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+workspace connection create/rotate/revoke API. Model IDs are scoped under
+`workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
+`organization-anthropic/` and `organization-claude-subscription/`. Custom models use
+immutable generations: retiring one prevents fresh selection while preserving
+accepted execution history. Connection/model allowlists still govern execution.
+Workspace API-key credential rotation and disconnect/reconnect preserve the
+previous connection's model access policy, including deny-all restrictions and
+its policy revision. Credential management does not grant permission to reset
+administrator-owned access rules.
+
+Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
+(`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
+`x-api-key`; subscription tokens use Bearer authentication and the OAuth beta.
+Up to four cache breakpoints cover tools, instructions, the prefix before the
+latest assistant reply, and current history. The previous prefix remains directly
+addressable when a large tool batch exceeds the server's 20-block lookback.
+Signed thinking is never marked; canonical history is unchanged. One TTL applies
+to every marker: mixed TTLs and `scope: global` are not implemented. This is not
+a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
+Usage includes fresh input, cache reads, cache writes and output. Per-response SDK
+usage preserves reported 5-minute and 1-hour creation counts separately; downstream
+durable telemetry and UI currently show aggregate writes. Registry pricing has one
+cache-write rate, which must match its configured TTL (do not use a 5-minute write
+price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
+billing; OpenGeni does not debit these tokens as credits.
+Managed Claude connections use per-model native profiles from
+`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
+expose low, medium, high, xhigh and max, with medium as the new-selection default.
+Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
+threshold and up to 128k output; the native request includes the 1M-context beta.
+Smaller models retain their own output ceiling. Unknown IDs keep conservative
+200k context / 168k input / 150k compaction / 32k output and no adaptive thinking.
+Registry providers can explicitly declare additional verified model capabilities
+and lower request defaults. Native xhigh is never silently downgraded to high;
+unsupported effort on a known adaptive model is rejected before network I/O.
+Historical models requiring fixed thinking budgets are not enabled through
+adaptive-thinking controls. Invalid streams fail closed, incomplete tools
+are never executed, and truncated compaction summaries are rejected. The adapter
+does not silently retry failed requests or rotate credentials.
+HTTP error details are read for at most 5 seconds (or the shorter configured
+stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
+hide the HTTP status, request ID or Retry-After header; caller cancellation
+interrupts the read.
+
+HTTP and SSE permission failures remain access errors, separate from expired
+credentials. A provider `model_access_suspended` rejection reports the validated
+UTC suspension deadline when present and stops automatic retry; reconnecting
+does not lift a provider suspension. Native `stop_reason: "refusal"` is a terminal
+policy rejection even when HTTP is 200 and content is empty. It uses the existing
+policy-refusal presentation, never completes an empty successful response, and
+never executes tools from refused output. These failures retain the request ID
+without persisting arbitrary provider explanation text.
+
+
+### Claude subscription request identity
+
+OAuth requests use the pinned Claude Code 2.1.285 / Agent SDK 0.3.276 profile in
+`packages/runtime/src/claude-code-identity.ts`: `beta=true`, CLI user-agent,
+Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
+the captured v2d dispatch selector. These are compatibility headers, not a
+statement about the actual worker runtime. API-key requests do not use this profile.
+
+Subscription setup creates a stable installation device ID and uses an empty
+account UUID, the fallback used by Claude Code for inference-only setup tokens.
+Both are encrypted with the token; API reads return neither. Existing explicit
+account/device bundles remain supported. Registry OAuth providers supply the
+same fields through `anthropic.identity`. Never hardcode a user's account IDs into source or borrow
+another connection's identity. The worker passes its stable session cache key to
+native Claude, preserving session identity across turns and activity retries;
+prompt IDs persist through the run's tool loop and client request IDs are fresh.
+
+Billing attribution is a system text block. Its `cc_version` suffix follows the
+locally inspected 2.1.285 fingerprint calculation; previous request and prompt
+IDs describe this request sequence. **The `cch` checksum is not implemented:** its
+algorithm has not been verified. No captured checksum is replayed. A single
+user-approved nonstreaming Opus 5.5 probe on 2026-09-30 returned HTTP 200 and the
+requested text with this profile and no `cch`. Omission therefore did not prevent
+that request; this does not establish a universal requirement or the cause of
+the earlier HTTP 429. The profile is not a byte-exact reproduction. Separately,
+98 completed captured response streams passed offline adapter replay. A user-requested
+full local OpenGeni session subsequently completed an SSB population chart with
+streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/CSV
+artifacts using this profile without `cch`.
+
+The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
+also enable interleaved thinking, thinking token counts, effort, and summarized
+thinking display betas. One-hour caching adds the extended cache TTL beta;
+mid-conversation system messages add their existing beta. Thread, advisor,
+inline-tool, context-management, global-cache-scope and fallback-credit flags
+are not advertised without those features. Normal agent calls stream; title and
+compaction calls remain nonstreaming. The default output ceiling remains 32k,
+within the adapter's conservative context budget, rather than copying 128k from
+an unrelated request. No live subscription probe is part of these tests.
+
+### Claude subscription usage
+
+Model responses, including quota errors, report observed 5-hour, weekly and optional
+model-specific usage windows. The worker saves these through the existing connection
+RLS boundary, fenced against credential replacement, without changing credential or
+admission versions. Settings reuse the shared usage meters, reset times and refresh
+controls. Past reset times invalidate the displayed balance until Claude reports
+another reading; missing windows are never shown as zero usage.
+
+Setup tokens have `user:inference` scope. The separate `/api/oauth/usage` endpoint
+requires `user:profile`, so inference-only tokens update their readings through model
+responses. Browser sign-in requests `user:inference user:profile` using the installed
+Claude Code OAuth client and PKCE. Manual refresh reads that endpoint without making model calls; a scope
+error retains the readings and disables further unsupported refreshes until the
+credential is replaced. Browser sign-in credentials can refresh usage directly.
+A read-only quota check runs after sign-in so the connection initially shows
+provider readings when available.
+
+Sign-in attempts reuse encrypted, expiring OAuth pending states. They bind the exact
+human, browser session, scope and current connection generation. The one-use code
+is spent once; a committed connection has a secret-free, generation-fenced replay
+receipt. Authority is freshly checked after exchange, before native connection writes.
+Organization attempts require organization administration and are not readable from
+a shared workspace's runtime scope.
+
+`packages/db/src/claude-subscription-tokens.ts` serializes renewal across replicas,
+re-reads the captured generation and writes only encrypted token material. Renewal
+keeps connection identity, admission/credential generations, access policy and usage
+cache. Each physical Claude model request resolves its original binding before
+dispatch, including title and compaction requests; replacement credentials are never
+lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
+the previously captured token is never used as a fallback. Claude currently has
+one connection per scope and no Codex-style account pool or quota failover.
+Catalog loading is offline, so Claude renewal failures do not
+block turns using another provider. Invalid refresh grants require sign-in again;
+transient failures retain credentials and existing usage readings.
+
+Cached usage reads are available to workspace readers; live refresh requires
+connection-management permission. Organization usage follows the existing
+organization provider administration boundary. Credentials and identities are
+never returned in usage responses.

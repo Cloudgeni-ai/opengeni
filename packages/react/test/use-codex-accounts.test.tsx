@@ -332,6 +332,48 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     await hook.unmount();
   });
 
+  test("a live no-data response hides misleading cached window labels", async () => {
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () =>
+        response([
+          account("a", {
+            fiveHour: win(66, 18000),
+            weekly: win(0, 604800),
+          }),
+        ]),
+      refreshCodexUsage: async () => ({
+        usage: {
+          a: {
+            status: "no-data",
+            usage: {
+              status: "no-data",
+              planType: "pro",
+              fiveHour: null,
+              weekly: null,
+              limitReached: false,
+              fetchedAt: new Date().toISOString(),
+            },
+          },
+        },
+      }),
+    };
+    const hook = await renderHook(
+      () => useCodexAccounts({ client, workspaceId: WORKSPACE_ID, codexClient, pollIntervalMs: 0 }),
+      undefined,
+    );
+    try {
+      await flush();
+      expect(hook.result.current.accounts[0]?.fiveHour?.remaining).toBe(34);
+      expect(await actRun(() => hook.result.current.refreshUsage())).toBe(true);
+      await flush();
+      expect(hook.result.current.liveUsage.a?.status).toBe("no-data");
+      expect(hook.result.current.accounts[0]?.fiveHour).toBeNull();
+      expect(hook.result.current.accounts[0]?.weekly).toBeNull();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("refreshUsage() is a no-op (false) when the client can't refresh usage", async () => {
     const codexClient: CodexAccountsClientLike = {
       listCodexAccounts: async () => response([account("a")]),

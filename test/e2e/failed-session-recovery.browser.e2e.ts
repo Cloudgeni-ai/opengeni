@@ -80,7 +80,7 @@ for (const unsupported of [true, false]) {
       await Promise.race([
         banner.waitFor({ timeout: 45_000 }),
         page
-          .getByText("Something went wrong!", { exact: true })
+          .getByRole("heading", { name: /^(Something went wrong|Opengeni has been updated)$/ })
           .waitFor({ timeout: 45_000 })
           .then(() => {
             throw new Error("Route failed");
@@ -234,6 +234,52 @@ for (const uncertainFirst of [false, true]) {
   }, 60_000);
 }
 
+for (const lane of ["checkpoint", "fresh_workspace"] as const) {
+  test(`real session shows automatic ${lane} Retry and loss notice at desktop and mobile widths`, async () => {
+    for (const [size, viewport] of [
+      ["desktop", { width: 1440, height: 960 }],
+      ["mobile", { width: 390, height: 844 }],
+    ] as const) {
+      const page = await browser.newPage({ viewport });
+      const retries: unknown[] = [];
+      try {
+        await installApi(page, false, retries, true, true, lane);
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const banner = page.getByTestId("failed-session-banner");
+        await banner.waitFor();
+        await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
+        const text = await banner.textContent();
+        if (lane === "checkpoint") {
+          expect(text).toContain("Retry will use the latest verified checkpoint from");
+          expect(text).toContain("Newer files are unavailable.");
+        } else {
+          expect(text).toContain(
+            "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+          );
+        }
+        expect(await banner.getByRole("button").count()).toBe(1);
+        expect(
+          await banner.getByRole("button", { name: "Review checkpoint recovery" }).count(),
+        ).toBe(0);
+        expect(await page.getByText("Could not load pending Skill reviews.").count()).toBe(0);
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+        if (evidenceDir)
+          await page.screenshot({
+            path: `${evidenceDir}/automatic-${lane}-retry-${size}.png`,
+            fullPage: true,
+          });
+        await banner.getByRole("button", { name: "Retry", exact: true }).click();
+        await banner.getByRole("button", { name: "Check retry", exact: true }).waitFor();
+        expect(retries).toHaveLength(1);
+      } finally {
+        await page.close();
+      }
+    }
+  }, 120_000);
+}
+
 test("a failure without a retained logical turn never offers Retry", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   try {
@@ -278,6 +324,7 @@ async function installApi(
   retries: unknown[],
   retainedTurn = true,
   canControl = true,
+  automaticLane: "checkpoint" | "fresh_workspace" | null = null,
 ) {
   const workspace = {
     id: workspaceId,
@@ -319,7 +366,7 @@ async function installApi(
     model: "gpt-5.6-sol",
     reasoningEffort: "low",
     latencyMode: "standard",
-    sandboxBackend: "none",
+    sandboxBackend: automaticLane ? "modal" : "none",
     sandboxOs: "linux",
     sandboxGroupId: sessionId,
     activeSandboxId: null,
@@ -361,7 +408,12 @@ async function installApi(
       payload: {
         error: unsupported
           ? "The model `example` is not supported with this account."
-          : "Connection interrupted.",
+          : automaticLane
+            ? "Sandbox recovery is degraded."
+            : "Connection interrupted.",
+        ...(automaticLane
+          ? { failureCategory: "archive_recovery", failureCode: "restore_degraded" }
+          : {}),
       },
     },
   };
@@ -434,6 +486,8 @@ async function installApi(
       });
     if (path === "/v1/workspaces") return json([workspace]);
     if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
+    if (path === `/v1/workspaces/${workspaceId}/skills/content`)
+      return json({ skills: [], nextCursor: null });
     if (path.endsWith("/sessions"))
       return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
     if (path.endsWith(`/sessions/${sessionId}`)) return json(session);
@@ -441,9 +495,43 @@ async function installApi(
       request.method() === "GET" &&
       path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`
     ) {
-      // Recovery reads require session control. This fixture has no sandbox,
-      // so an authorized read reports unsupported, never checkpoint eligibility.
+      // Preview-only API wiring: the automatic cases represent a provider-lost
+      // group's verified checkpoint or its empty-workspace continuation; no
+      // restore is performed.
       if (!canControl) return json({ error: "Permission denied" }, 403);
+      if (automaticLane === "fresh_workspace")
+        return json({
+          version: 1,
+          status: "eligible",
+          reason: null,
+          operationId: null,
+          automaticAvailable: true,
+          automaticLane,
+          checkpoint: null,
+        } satisfies SandboxRecoveryProjection);
+      if (automaticLane)
+        return json({
+          version: 1,
+          status: "eligible",
+          reason: null,
+          operationId: null,
+          automaticAvailable: true,
+          automaticLane,
+          checkpoint: {
+            version: 1,
+            sessionId,
+            sandboxGroupId: sessionId,
+            leaseId: "77777777-7777-4777-8777-777777777777",
+            routeEpoch: 0,
+            authorityEpoch: 1,
+            leaseEpoch: 2,
+            workspaceGeneration: 639,
+            archiveGeneration: 456,
+            artifactId: "88888888-8888-4888-8888-888888888888",
+            revision: "wa2:sample-checkpoint",
+            capturedAt: "2026-09-24T07:50:31.000Z",
+          },
+        } satisfies SandboxRecoveryProjection);
       return json({
         version: 1,
         status: "unsupported",
@@ -492,6 +580,33 @@ async function installApi(
     if (path.endsWith("/models") || path.endsWith("/model-catalog"))
       return json({
         models: [
+          // The unsupported lane's session model is absent from the catalog,
+          // exactly as for a model removed from it; other lanes list it.
+          ...(unsupported
+            ? []
+            : [
+                {
+                  id: "gpt-5.6-sol",
+                  label: "GPT-5.6 Sol",
+                  provider: "openai",
+                  providerLabel: "OpenAI",
+                  api: "responses",
+                  source: "opengeni",
+                  cost: "credits",
+                  credentialReadiness: {
+                    status: "ready",
+                    reason: null,
+                    basis: "configuration",
+                    checkedAt: null,
+                  },
+                  availability: {
+                    status: "available",
+                    selectable: true,
+                    reason: null,
+                    checkedAt: null,
+                  },
+                },
+              ]),
           {
             id: "supported-model",
             label: "Supported model",

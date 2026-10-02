@@ -65,8 +65,13 @@ explicit. Read existing content before editing it. If a save reports a stale
 edit, re-read and reconcile the change instead of forcing an overwrite.
 
 Use `skill_checkout` only when you need files on disk, for example to run a
-script or edit a larger directory. Edit with ordinary filesystem tools, then
-use `skill_publish` to save the directory. Do not repeat the whole folder's
+script or edit a larger directory. The default `skill_read` lists the Skill's
+scripts with their usage lines; to run one, pass its path in `paths` to copy
+only that file. Checkout never overwrites: repeating it into the same directory
+keeps identical files and fails if a file there differs. To edit, check out the
+complete Skill into a new directory, which returns the revision and scope
+version for `skill_publish`. Edit with ordinary filesystem tools, then use
+`skill_publish` to save the directory. Do not repeat the whole folder's
 contents in a tool argument. Checkout alone does not publish changes.
 Stop processes editing the directory before publishing it. Publishing reads the
 whole folder; server revision checks prevent overwriting a newer saved revision,

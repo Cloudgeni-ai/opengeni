@@ -1719,6 +1719,12 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("explains a checkpoint that cannot fit the selected model", () => {
+    expect(compactionSkipSubtitle("replacement_exceeds_model_budget")).toContain(
+      "Chat history is unchanged",
+    );
+  });
+
   test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
     const items = buildTimeline([
@@ -1867,6 +1873,18 @@ describe("buildTimeline", () => {
     ]);
     const phase = items.find((item): item is StartupPhaseItem => item.kind === "startup-phase");
     expect(phase).toMatchObject({ phase: "repository", status: "failed", durationMs: 1_000 });
+  });
+
+  test("a skipped optional repository report adds no transcript row", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.completed", {
+        name: "optional-repository-access",
+        repositoryCount: 2,
+        skippedOptionalRepositories: ["repos/github.com/example-org/removed"],
+      }),
+    ]);
+    expect(items).toEqual([]);
   });
 
   test("file materialization is a distinct settled startup span", () => {
@@ -2722,6 +2740,34 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "opengeni",
+        toolName: "custom_mcp_setup_request",
+        providerDomain: "mcp.example.test",
+        reason: "missing_connection",
+        setupRequest: {
+          kind: "mcp",
+          name: "Records MCP",
+          endpointUrl: "https://mcp.example.test/mcp",
+          rationale: "Find the requested records.",
+        },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      source: "capability",
+      capability: null,
+      setupRequest: {
+        endpointUrl: "https://mcp.example.test/mcp",
+        rationale: "Find the requested records.",
+      },
+    });
+  });
+
   test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([
@@ -2868,6 +2914,72 @@ describe("groupTimeline", () => {
     expect(final?.kind === "item" ? final.item : null).toMatchObject({
       kind: "agent-message",
       text: "Final answer: tests are green.",
+    });
+  });
+
+  test("worker-shaped phased messages classify live commentary and fold it at settlement", () => {
+    reset();
+    // The worker streams phase on deltas, one identified completion per
+    // message, and no phase-less copy when the final message already landed.
+    const live = [
+      event("agent.message.delta", {
+        text: "Checking the ",
+        messageId: "msg_note",
+        phase: "commentary",
+      }),
+      event("agent.message.delta", { text: "logs.", messageId: "msg_note", phase: "commentary" }),
+    ];
+    const streaming = buildTimeline(live);
+    expect(streaming).toEqual([
+      expect.objectContaining({
+        kind: "agent-message",
+        text: "Checking the logs.",
+        phase: "commentary",
+        streaming: true,
+      }),
+    ]);
+
+    const settled = [
+      ...live,
+      event("agent.message.completed", {
+        text: "Checking the logs.",
+        messageId: "msg_note",
+        phase: "commentary",
+      }),
+      event("agent.toolCall.created", {
+        id: "call-logs",
+        name: "exec_command",
+        arguments: { cmd: "tail app.log" },
+      }),
+      event("agent.toolCall.output", { id: "call-logs", output: "ok" }),
+      event("agent.message.delta", {
+        text: "The logs are clean.",
+        messageId: "msg_answer",
+        phase: "final_answer",
+      }),
+      event("agent.message.completed", {
+        text: "The logs are clean.",
+        messageId: "msg_answer",
+        phase: "final_answer",
+      }),
+      event("turn.completed", { output: "The logs are clean." }),
+    ];
+    const items = buildTimeline(settled);
+    expect(
+      items
+        .filter((item): item is AgentMessageItem => item.kind === "agent-message")
+        .map((item) => [item.text, item.phase]),
+    ).toEqual([
+      ["Checking the logs.", "commentary"],
+      ["The logs are clean.", "final_answer"],
+    ]);
+    const groups = groupTimeline(items);
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "The logs are clean.",
+      phase: "final_answer",
+      streaming: false,
     });
   });
 
@@ -3154,6 +3266,51 @@ describe("groupTimeline", () => {
       tone: "waiting",
       text: `Waiting: ${reason}`,
     });
+  });
+
+  test("shows a status reply recorded on a wait-ended turn once, outside the work", () => {
+    reset();
+    const reason = "Eight reviews are still running.";
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: status,
+          messageId: "msg_status",
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("turn.completed", { output: "", reply: status }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: status,
+    });
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === status,
+      ),
+    ).toHaveLength(1);
   });
 
   test.each([
@@ -4227,8 +4384,81 @@ describe("buildTimeline — memory writes", () => {
 });
 
 describe("delivered-input landmarks", () => {
+  test("command-only delivery does not split an in-flight agent message", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking " }),
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "command",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+        ],
+      }),
+      event("agent.message.delta", { text: "the result." }),
+    ]);
+    expect(items).toMatchObject([
+      { kind: "agent-message", text: "Checking the result.", streaming: true },
+    ]);
+  });
+
+  test("omits background command receipts, including failed results, from the chat timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "success",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+          {
+            id: "failure",
+            kind: "background_command_result",
+            sourceId: "command-2",
+            summary: "execCommand: failed.",
+            classification: "failure",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("keeps other updates in a batch without showing its command receipts", () => {
+    reset();
+    const items = buildTimeline([
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "command",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+          {
+            id: "agent",
+            kind: "agent_message",
+            sourceId: "agent-1",
+            summary: "Verification finished.",
+            classification: "info",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toMatchObject([
+      { kind: "machine-input-batch", members: [{ id: "agent", kind: "agent_message" }] },
+    ]);
+  });
+
   for (const kind of [
-    "background_command_result",
     "session_wait_timeout",
     "agent_message",
     "child_terminal_result",

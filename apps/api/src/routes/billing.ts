@@ -13,6 +13,7 @@ import {
   applyCreditLedgerEntry,
   getBillingBalance,
   getBillingCustomer,
+  getCreditLedgerEntry,
   hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
@@ -126,6 +127,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         amountMicros,
         creditsProductId: deps.settings.stripeCreditsProductId,
         publicBaseUrl: deps.settings.publicBaseUrl,
+        webBaseUrl: deps.settings.webBaseUrl,
         successUrl: body.successUrl,
         cancelUrl: body.cancelUrl,
         idempotencyKey,
@@ -161,6 +163,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       stripeBillingPortalSessionCreateParams({
         customerId,
         publicBaseUrl: deps.settings.publicBaseUrl,
+        webBaseUrl: deps.settings.webBaseUrl,
         returnUrl: parsed.data.returnUrl,
       }),
     );
@@ -226,24 +229,28 @@ export function stripeCheckoutSessionCreateParams(input: {
   amountMicros: number;
   creditsProductId?: string | undefined;
   publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
   idempotencyKey: string;
 }): Stripe.Checkout.SessionCreateParams {
   const successUrl = checkoutReturnUrl(
     input.publicBaseUrl,
+    input.webBaseUrl,
     input.successUrl,
     "/billing?checkout=success",
     "successUrl",
   );
   const cancelUrl = checkoutReturnUrl(
     input.publicBaseUrl,
+    input.webBaseUrl,
     input.cancelUrl,
     "/billing?checkout=cancelled",
     "cancelUrl",
   );
   return {
     mode: "payment",
+    allow_promotion_codes: true,
     customer: input.customerId,
     customer_update: {
       address: "auto",
@@ -278,6 +285,7 @@ export function stripeCheckoutSessionCreateParams(input: {
       opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
       opengeni_credit_micros: String(input.amountMicros),
       opengeni_credit_idempotency_key: input.idempotencyKey,
+      opengeni_credit_coupon_v1: "1",
     },
     payment_intent_data: {
       metadata: {
@@ -285,6 +293,7 @@ export function stripeCheckoutSessionCreateParams(input: {
         opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
         opengeni_credit_micros: String(input.amountMicros),
         opengeni_credit_idempotency_key: input.idempotencyKey,
+        opengeni_credit_coupon_v1: "1",
       },
     },
     invoice_creation: {
@@ -295,6 +304,7 @@ export function stripeCheckoutSessionCreateParams(input: {
           opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
           opengeni_credit_micros: String(input.amountMicros),
           opengeni_credit_idempotency_key: input.idempotencyKey,
+          opengeni_credit_coupon_v1: "1",
         },
       },
     },
@@ -304,16 +314,24 @@ export function stripeCheckoutSessionCreateParams(input: {
 export function stripeBillingPortalSessionCreateParams(input: {
   customerId: string;
   publicBaseUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
   returnUrl?: string | undefined;
 }): Stripe.BillingPortal.SessionCreateParams {
   return {
     customer: input.customerId,
-    return_url: checkoutReturnUrl(input.publicBaseUrl, input.returnUrl, "/billing", "returnUrl"),
+    return_url: checkoutReturnUrl(
+      input.publicBaseUrl,
+      input.webBaseUrl,
+      input.returnUrl,
+      "/billing",
+      "returnUrl",
+    ),
   };
 }
 
 function checkoutReturnUrl(
   publicBaseUrl: string | undefined,
+  webBaseUrl: string | undefined,
   candidate: string | undefined,
   fallbackPath: string,
   field: string,
@@ -323,14 +341,17 @@ function checkoutReturnUrl(
       message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe redirects",
     });
   }
-  const base = new URL(publicBaseUrl);
+  const base = new URL(webBaseUrl ?? publicBaseUrl);
   const fallback = new URL(fallbackPath, base).toString();
   if (!candidate) {
     return fallback;
   }
   const parsed = new URL(candidate);
-  if (parsed.origin !== base.origin) {
-    throw new HTTPException(400, { message: `${field} must use the OpenGeni public origin` });
+  const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin]);
+  if (!allowedOrigins.has(parsed.origin)) {
+    throw new HTTPException(400, {
+      message: `${field} must use the OpenGeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
+    });
   }
   return parsed.toString();
 }
@@ -342,7 +363,12 @@ async function handleStripeWebhookEvent(
 ): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed":
-      await handleCheckoutSessionCompleted(deps, event);
+    case "checkout.session.async_payment_succeeded":
+      await handleCheckoutSessionPayment(deps, event);
+      return;
+    case "checkout.session.async_payment_failed":
+      // A delayed payment method failed. Completion reported it `unpaid`, so
+      // no credit was granted and there is nothing to reverse.
       return;
     case "checkout.session.expired":
     case "payment_intent.succeeded":
@@ -378,15 +404,90 @@ async function handleStripeWebhookEvent(
   }
 }
 
-async function handleCheckoutSessionCompleted(
+export type StripeCheckoutCreditDecision =
+  | { action: "grant"; credit: CheckoutCreditMetadata }
+  | { action: "ignore"; reason: "foreign_checkout" | "not_payment_mode" | "payment_not_paid" };
+
+/**
+ * Decides whether a Checkout Session webhook grants OpenGeni credits.
+ *
+ * Sessions created outside OpenGeni on the same Stripe account carry no
+ * `opengeni_` metadata and are acknowledged without effect. An OpenGeni
+ * session with malformed credit metadata still throws so the failure stays
+ * visible. Credits are granted once Stripe reports the payment `paid` or a
+ * completed checkout fully covered by a coupon:
+ * on `checkout.session.completed` for immediate methods, or on
+ * `checkout.session.async_payment_succeeded` for delayed methods, whose
+ * completion event arrives `unpaid`. Both events carry the same session
+ * metadata, so the ledger idempotency key grants at most once.
+ */
+export function stripeCheckoutCreditDecision(
+  session: Stripe.Checkout.Session,
+): StripeCheckoutCreditDecision {
+  if (!Object.keys(session.metadata ?? {}).some((key) => key.startsWith("opengeni_"))) {
+    return { action: "ignore", reason: "foreign_checkout" };
+  }
+  if (session.mode !== "payment") {
+    return { action: "ignore", reason: "not_payment_mode" };
+  }
+  if (session.payment_status !== "paid" && !isFreeCouponCheckout(session)) {
+    return { action: "ignore", reason: "payment_not_paid" };
+  }
+  const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+  if (
+    session.metadata?.opengeni_credit_coupon_v1 === "1" &&
+    (session.currency !== "usd" ||
+      session.amount_subtotal !== credit.amountMicros / 10_000 ||
+      typeof session.amount_total !== "number" ||
+      !Number.isSafeInteger(session.amount_total) ||
+      session.amount_total < 0)
+  ) {
+    throw new Error(`Stripe checkout session ${session.id} has invalid credit package totals`);
+  }
+  return { action: "grant", credit };
+}
+
+function isFreeCouponCheckout(session: Stripe.Checkout.Session): boolean {
+  return (
+    (session.payment_status === "paid" || session.payment_status === "no_payment_required") &&
+    session.status === "complete" &&
+    session.amount_total === 0 &&
+    typeof session.amount_subtotal === "number" &&
+    session.amount_subtotal > 0 &&
+    (session.total_details?.amount_discount ?? 0) >= session.amount_subtotal
+  );
+}
+
+async function handleCheckoutSessionPayment(
   deps: ApiRouteDeps,
   event: Stripe.Event,
 ): Promise<void> {
   const session = event.data.object as Stripe.Checkout.Session;
-  if (session.mode !== "payment" || session.payment_status !== "paid") {
+  const decision = stripeCheckoutCreditDecision(session);
+  if (decision.action === "ignore") {
+    if (decision.reason === "foreign_checkout") {
+      console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
+        stripeEventType: event.type,
+        livemode: event.livemode,
+      });
+    }
     return;
   }
-  const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+  const credit = decision.credit;
+  const freeCouponCheckout = isFreeCouponCheckout(session);
+  if (!(await getManagedAccount(deps.db, credit.accountId))) {
+    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // removed before a delayed payment settled). Retrying cannot succeed, so
+    // acknowledge instead of failing the delivery for days.
+    console.info(
+      "[api] stripe webhook ignored a checkout session for an account not in this deployment",
+      {
+        stripeEventType: event.type,
+        livemode: event.livemode,
+      },
+    );
+    return;
+  }
   const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
@@ -398,9 +499,9 @@ async function handleCheckoutSessionCompleted(
   }
   await applyCreditLedgerEntry(deps.db, {
     accountId: credit.accountId,
-    type: "credit_topup",
+    type: freeCouponCheckout ? "grant" : "credit_topup",
     amountMicros: credit.amountMicros,
-    sourceType: "stripe_checkout_session",
+    sourceType: freeCouponCheckout ? "stripe_checkout_coupon" : "stripe_checkout_session",
     sourceId: session.id,
     idempotencyKey: credit.idempotencyKey,
     metadata: {
@@ -411,9 +512,15 @@ async function handleCheckoutSessionCompleted(
           : (session.payment_intent?.id ?? null),
       stripePackageId: credit.packageId,
       stripeCreditAmountUsd: credit.amountUsd,
+      ...(session.metadata?.opengeni_credit_coupon_v1 === "1"
+        ? {
+            stripeAmountTotalCents: session.amount_total,
+            stripeDiscountCents: session.total_details?.amount_discount ?? 0,
+          }
+        : {}),
     },
   });
-  recordCreditMicrosMetric(deps, "topup", credit.amountMicros);
+  recordCreditMicrosMetric(deps, freeCouponCheckout ? "grant" : "topup", credit.amountMicros);
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {
@@ -466,19 +573,21 @@ async function applyRefundDebit(
   if (await hasCreditLedgerEntry(deps.db, accountId, idempotencyKey)) {
     return;
   }
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, refund.amount);
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_refund",
-    amountMicros: -centsToMicros(refund.amount),
+    amountMicros: -debitMicros,
     sourceType: "stripe_refund",
     sourceId: refund.id,
     idempotencyKey,
     metadata: {
       stripeRefundId: refund.id,
       stripePaymentIntentId: paymentIntentId(refund.payment_intent),
+      stripeRefundAmountCents: refund.amount,
     },
   });
-  recordCreditMicrosMetric(deps, "refund", centsToMicros(refund.amount));
+  recordCreditMicrosMetric(deps, "refund", debitMicros);
 }
 
 async function holdDisputedCredits(
@@ -492,10 +601,11 @@ async function holdDisputedCredits(
   if (!accountId) {
     return;
   }
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_dispute_hold",
-    amountMicros: -centsToMicros(dispute.amount),
+    amountMicros: -debitMicros,
     sourceType: "stripe_dispute",
     sourceId: dispute.id,
     idempotencyKey: `stripe:dispute_hold:${dispute.id}`,
@@ -521,15 +631,44 @@ async function releaseDisputedCredits(
   if (!(await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey))) {
     return;
   }
+  const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_dispute_release",
-    amountMicros: centsToMicros(dispute.amount),
+    amountMicros: debitMicros,
     sourceType: "stripe_dispute",
     sourceId: dispute.id,
     idempotencyKey: `stripe:dispute_release:${dispute.id}`,
     metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
   });
+}
+
+async function creditAdjustmentMicros(
+  deps: ApiRouteDeps,
+  metadata: Stripe.Metadata | null,
+  amountCents: number,
+): Promise<number> {
+  if (metadata?.opengeni_credit_coupon_v1 !== "1") return centsToMicros(amountCents);
+  const credit = creditMetadata(metadata, "Stripe adjustment");
+  const entry = await getCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey);
+  const paidCents = entry?.metadata.stripeAmountTotalCents;
+  if (
+    entry?.sourceType !== "stripe_checkout_session" ||
+    entry.amountMicros !== credit.amountMicros ||
+    typeof paidCents !== "number" ||
+    !Number.isSafeInteger(paidCents) ||
+    paidCents <= 0 ||
+    !Number.isSafeInteger(amountCents) ||
+    amountCents <= 0
+  ) {
+    throw new Error("Stripe credit adjustment is missing a settled checkout");
+  }
+  const proportionalMicros =
+    (BigInt(entry.amountMicros) * BigInt(amountCents) + BigInt(Math.floor(paidCents / 2))) /
+    BigInt(paidCents);
+  return Number(
+    proportionalMicros > BigInt(entry.amountMicros) ? entry.amountMicros : proportionalMicros,
+  );
 }
 
 async function mirrorCustomer(
@@ -569,18 +708,20 @@ async function metadataForRefund(
   stripe: Stripe,
   refund: Stripe.Refund,
 ): Promise<Stripe.Metadata | null> {
-  if (Object.keys(refund.metadata ?? {}).length > 0) {
+  if (refund.metadata?.opengeni_credit_idempotency_key) {
     return refund.metadata;
   }
   const paymentIntent = paymentIntentId(refund.payment_intent);
-  return paymentIntent ? (await stripe.paymentIntents.retrieve(paymentIntent)).metadata : null;
+  return paymentIntent
+    ? (await stripe.paymentIntents.retrieve(paymentIntent)).metadata
+    : refund.metadata;
 }
 
 async function metadataForDispute(
   stripe: Stripe,
   dispute: Stripe.Dispute,
 ): Promise<Stripe.Metadata | null> {
-  if (Object.keys(dispute.metadata ?? {}).length > 0) {
+  if (dispute.metadata?.opengeni_credit_idempotency_key) {
     return dispute.metadata;
   }
   const paymentIntent = paymentIntentId(
@@ -592,7 +733,7 @@ async function metadataForDispute(
   }
   const chargeId = typeof dispute.charge === "string" ? dispute.charge : dispute.charge?.id;
   if (!chargeId) {
-    return null;
+    return dispute.metadata;
   }
   const charge = await stripe.charges.retrieve(chargeId);
   const chargePaymentIntent = paymentIntentId(charge.payment_intent);
@@ -601,16 +742,18 @@ async function metadataForDispute(
     : charge.metadata;
 }
 
-function creditMetadata(
-  metadata: Stripe.Metadata | null | undefined,
-  label: string,
-): {
+export type CheckoutCreditMetadata = {
   accountId: string;
   amountMicros: number;
   idempotencyKey: string;
   amountUsd?: string;
   packageId?: string;
-} {
+};
+
+function creditMetadata(
+  metadata: Stripe.Metadata | null | undefined,
+  label: string,
+): CheckoutCreditMetadata {
   const accountId = metadata?.opengeni_account_id;
   const amountMicros = Number(metadata?.opengeni_credit_micros);
   const idempotencyKey = metadata?.opengeni_credit_idempotency_key;

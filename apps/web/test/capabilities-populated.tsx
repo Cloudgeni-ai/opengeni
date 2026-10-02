@@ -8,6 +8,7 @@ import {
   CapabilityCatalogRow,
 } from "@opengeni/react/connect";
 import { CatalogHeader, CatalogActionContext } from "../src/components/capabilities/catalog-header";
+import { ConnectionAccessNotice } from "../src/components/capabilities/connection-access-notice";
 import { Button } from "../src/components/ui/button";
 import { Input } from "../src/components/ui/input";
 import { Dialog, DialogTitle, DialogDescription } from "../src/components/ui/dialog";
@@ -72,6 +73,7 @@ const samples = {
 type Category = keyof typeof samples;
 type Tab = "All" | Category;
 function Fixture() {
+  const [denied, setDenied] = useState(true);
   const [tab, setTab] = useState<Tab>("All");
   const [target, setTarget] = useState<HTMLDivElement | null>(null);
   const toolbar = useMemo(() => ({ target, activeTitle: tab }), [target, tab]);
@@ -103,11 +105,17 @@ function Fixture() {
       <main className="mx-auto max-w-6xl px-6 py-10 text-fg">
         <div className="mb-8 flex flex-wrap items-center justify-between gap-3 text-sm text-fg-muted">
           <p>Local sample view · example data, no accounts connected</p>
+          <Button variant="secondary" size="sm" onClick={() => setDenied((value) => !value)}>
+            {denied
+              ? "Show member with connection access"
+              : "Show member without connection access"}
+          </Button>
           <a className="underline underline-offset-4" href="/">
             Back to your workspace
           </a>
         </div>
         <h1 className="mb-6 text-2xl font-semibold">Capabilities</h1>
+        {denied ? <ConnectionAccessNotice /> : null}
         <div className="relative mb-6">
           <SearchIcon aria-hidden="true" className="absolute left-4 top-3 size-4 text-fg-muted" />
           <Input

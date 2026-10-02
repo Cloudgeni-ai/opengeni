@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { modelUnavailableHttpException, requireAgentConfigAdmission } from "@opengeni/core";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   AUTOMATION_MAX_MATCHED_TRIGGERS,
@@ -15,6 +16,7 @@ import {
   type BundledSkillId,
 } from "@opengeni/contracts";
 import {
+  AutomationCredentialRestrictionConflictError,
   AutomationDeliveryConflictError,
   AutomationRevisionConflictError,
   createAutomationRun,
@@ -39,6 +41,7 @@ import {
 } from "@opengeni/db";
 import {
   automationRequestDigest,
+  automationCredentialRestrictionForGrant,
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
@@ -48,11 +51,13 @@ import {
   requireAccessGrant,
   requireAutomationAdapter,
   requirePermission,
+  requireAutomationCredentialRestrictionPermissions,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { parseRequestJson } from "../http/request-body";
 
 async function callerBundleSelection(
   deps: ApiRouteDeps,
@@ -87,7 +92,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
-    const request = CreateAutomationSourceRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, CreateAutomationSourceRequest);
     assertGenericTriggerMutable(request);
     requireAutomationAdapter(request.adapterId).validateSourceConfiguration(request.configuration);
     const key = requireEncryptionKey(deps);
@@ -104,7 +109,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/automations/sources/:sourceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = UpdateAutomationSourceRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, UpdateAutomationSourceRequest);
     const current = await requireSource(
       deps,
       grant.accountId,
@@ -171,7 +176,12 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/automations/triggers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = CreateAutomationTriggerRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, CreateAutomationTriggerRequest);
+    const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
+    requireAutomationCredentialRestrictionPermissions(
+      credentialRestriction,
+      request.sessionTemplate.firstPartyMcpPermissions,
+    );
     request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
       deps,
       grant,
@@ -190,6 +200,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
       requirePermission(grant, permission);
     }
+    requireAgentConfigAdmission(deps.settings, request.sessionTemplate.agent);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
         accountId: grant.accountId,
@@ -219,6 +230,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         createdBySubjectId: grant.subjectId,
         request: normalizedRequest,
         adapterId: adapter.id,
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       }),
       201,
@@ -228,7 +240,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/automations/triggers/:triggerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = UpdateAutomationTriggerRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, UpdateAutomationTriggerRequest);
     const existing = (await listAutomationTriggers(deps.db, workspaceId)).find(
       (trigger) => trigger.id === c.req.param("triggerId"),
     );
@@ -237,6 +249,13 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "automation trigger not found",
       });
     assertGenericTriggerMutable(existing);
+    const credentialRestriction =
+      existing.sessionTemplate.credentialRestriction ??
+      (await automationCredentialRestrictionForGrant(deps.db, grant));
+    requireAutomationCredentialRestrictionPermissions(
+      credentialRestriction,
+      (request.sessionTemplate ?? existing.sessionTemplate).firstPartyMcpPermissions,
+    );
     if (request.configuration) {
       requireAutomationAdapter(existing.adapterId).validateTriggerConfiguration(
         request.configuration,
@@ -254,6 +273,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
         requirePermission(grant, permission);
       }
+      requireAgentConfigAdmission(deps.settings, request.sessionTemplate.agent);
     }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
@@ -302,6 +322,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         triggerId: c.req.param("triggerId"),
         subjectId: grant.subjectId,
         request: normalizedRequest,
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         ...(beforeUpdateCommit ? { beforeUpdateCommit } : {}),
       });
       if (!trigger)
@@ -363,7 +384,8 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/automations/sources/:sourceId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const request = TriggerAutomationManuallyRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, TriggerAutomationManuallyRequest);
+    const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
     const source = await requireSource(deps, grant.accountId, workspaceId, c.req.param("sourceId"));
     if (source.status !== "active") {
       throw new HTTPException(409, {
@@ -380,15 +402,26 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload: request.payload,
     });
     const bytes = new TextEncoder().encode(stableJson(request));
-    return c.json(
-      await acceptAutomationEvent(deps, source, {
-        deliveryKey:
-          request.deliveryId ?? `manual:${automationRequestDigest(source.adapterId, bytes)}`,
-        requestDigest: automationRequestDigest(source.adapterId, bytes),
-        normalizedEvent,
-      }),
-      202,
-    );
+    try {
+      return c.json(
+        await acceptAutomationEvent(deps, source, {
+          deliveryKey:
+            request.deliveryId ?? `manual:${automationRequestDigest(source.adapterId, bytes)}`,
+          requestDigest: automationRequestDigest(source.adapterId, bytes),
+          normalizedEvent,
+          ...(credentialRestriction ? { credentialRestriction } : {}),
+        }),
+        202,
+      );
+    } catch (error) {
+      if (
+        error instanceof AutomationDeliveryConflictError ||
+        error instanceof AutomationCredentialRestrictionConflictError
+      ) {
+        throw new HTTPException(409, { message: error.message });
+      }
+      throw error;
+    }
   });
 
   app.post("/v1/webhooks/automations/:endpointId", async (c) => {
@@ -452,7 +485,10 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(result, 202);
     } catch (error) {
-      if (error instanceof AutomationDeliveryConflictError) {
+      if (
+        error instanceof AutomationDeliveryConflictError ||
+        error instanceof AutomationCredentialRestrictionConflictError
+      ) {
         throw new HTTPException(409, { message: error.message });
       }
       throw error;
@@ -467,9 +503,13 @@ export async function acceptAutomationEvent(
     deliveryKey: string;
     requestDigest: string;
     normalizedEvent: AutomationNormalizedEvent;
+    /** Canonical manual caller restriction, not normalized event metadata. */
+    credentialRestriction?: "developer_setup";
   },
 ) {
-  if (input.normalizedEvent.adapterId !== source.adapterId) {
+  const { credentialRestriction: _untrustedRestriction, ...eventData } = input.normalizedEvent;
+  const normalizedEvent = AutomationNormalizedEvent.parse(eventData);
+  if (normalizedEvent.adapterId !== source.adapterId) {
     throw new HTTPException(422, {
       message: "automation event adapter does not match source",
     });
@@ -481,7 +521,7 @@ export async function acceptAutomationEvent(
     sourceId: source.id,
   });
   const matchingByEvent = triggers.filter((trigger) =>
-    adapter.matches({ event: input.normalizedEvent, trigger }),
+    adapter.matches({ event: normalizedEvent, trigger }),
   );
   if (matchingByEvent.length > AUTOMATION_MAX_MATCHED_TRIGGERS) {
     throw new HTTPException(422, {
@@ -499,7 +539,10 @@ export async function acceptAutomationEvent(
           matchedTriggerRevisions: [],
           deliveryKey: input.deliveryKey,
           requestDigest: input.requestDigest,
-          normalizedEvent: input.normalizedEvent,
+          normalizedEvent,
+          ...(input.credentialRestriction
+            ? { credentialRestriction: input.credentialRestriction }
+            : {}),
           ignoredReason: "no_matching_triggers",
         })
       : await withWorkspaceGatewayCustomModelReadLock(
@@ -521,10 +564,14 @@ export async function acceptAutomationEvent(
                 for (const trigger of matchingByEvent) {
                   try {
                     const render = adapter.render({
-                      event: input.normalizedEvent,
+                      event: normalizedEvent,
                       trigger,
                       source,
                     });
+                    requireAutomationCredentialRestrictionPermissions(
+                      trigger.sessionTemplate.credentialRestriction ?? input.credentialRestriction,
+                      render.sessionTemplate.firstPartyMcpPermissions,
+                    );
                     const requestedModel =
                       render.sessionTemplate.model ?? catalogSettings.openaiModel;
                     const model = canonicalConfiguredModel(catalogSettings, requestedModel);
@@ -553,7 +600,10 @@ export async function acceptAutomationEvent(
                   })),
                   deliveryKey: input.deliveryKey,
                   requestDigest: input.requestDigest,
-                  normalizedEvent: input.normalizedEvent,
+                  normalizedEvent,
+                  ...(input.credentialRestriction
+                    ? { credentialRestriction: input.credentialRestriction }
+                    : {}),
                   ignoredReason:
                     matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
                 });
@@ -569,6 +619,7 @@ export async function acceptAutomationEvent(
     version: stored.event.sourceVersion,
     configuration: stored.event.sourceConfiguration,
   };
+  const { credentialRestriction, ...acceptedEvent } = stored.event.normalizedEvent;
   const runIds: string[] = [];
   const triggerAutomationRun = deps.workflowClient.triggerAutomationRun;
   if (matching.length > 0 && !triggerAutomationRun) {
@@ -578,7 +629,7 @@ export async function acceptAutomationEvent(
   }
   for (const trigger of matching) {
     const render = adapter.render({
-      event: stored.event.normalizedEvent,
+      event: acceptedEvent,
       trigger,
       source: acceptedSource,
     });
@@ -588,8 +639,9 @@ export async function acceptAutomationEvent(
       source: acceptedSource,
       trigger,
       eventId: stored.event.id,
-      event: stored.event.normalizedEvent,
+      event: acceptedEvent,
       render,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
     });
     const { run } = await createAutomationRun(deps.db, {
       accountId: source.accountId,
@@ -640,9 +692,7 @@ function workspaceCustomModelCommitGuard(input: {
       reference,
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }

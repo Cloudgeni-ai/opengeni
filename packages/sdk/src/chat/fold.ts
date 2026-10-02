@@ -1,4 +1,8 @@
 import type { SessionEvent } from "../types";
+import {
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
+} from "@opengeni/contracts/session-final-reply";
 import { OpenGeniChatError, type ChatChunk, type ChatPending, type ChatReply } from "./types";
 
 /**
@@ -10,6 +14,16 @@ import { OpenGeniChatError, type ChatChunk, type ChatPending, type ChatReply } f
  * settles on a terminal event or a human wait. Events that carry a different
  * turn id than the expected one are ignored so a queued follow-up never ends
  * early on the previous turn's settlement.
+ *
+ * A segment belongs to one provider message when events carry `messageId`: a
+ * delta for another message starts a new segment, and a completion reconciles
+ * only the segment of its own message. Completions may arrive after later
+ * messages already streamed, so matching by position would let one message's
+ * completion close another's segment and repeat its text.
+ *
+ * Commentary (`phase: "commentary"`) narrates the work, like a tool chunk, so
+ * it is held back from the reply text. Only a turn that settles without any
+ * answer text falls back to its latest commentary, emitted at settlement.
  */
 
 export type ChatTurnTerminal = "completed" | "failed" | "cancelled" | "pending";
@@ -64,13 +78,24 @@ export class ChatPendingFold {
   }
 }
 
-type Segment = { text: string; open: boolean };
+type Segment = {
+  text: string;
+  open: boolean;
+  commentary: boolean;
+  /** Provider message identity; `null` for events that carry none. */
+  messageId: string | null;
+};
+
+function noStep(): ChatFoldStep {
+  return { chunks: [], terminal: null };
+}
 
 export class ChatTurnFold {
   readonly events: SessionEvent[] = [];
   turnId: string | null;
   pending: ChatPending | null = null;
   failure: SessionEvent | null = null;
+  private emptyFinalReply = false;
   private readonly segments: Segment[] = [];
   private readonly openTools = new Map<string, string>();
 
@@ -84,6 +109,7 @@ export class ChatTurnFold {
 
   get text(): string {
     return this.segments
+      .filter((segment) => !segment.commentary)
       .map((segment) => segment.text)
       .filter((text) => text.length > 0)
       .join("\n\n");
@@ -102,36 +128,63 @@ export class ChatTurnFold {
     switch (event.type) {
       case "agent.message.delta": {
         const text = stringValue(payload.text);
-        if (!text) return { chunks: [], terminal: null };
+        if (!text) return noStep();
+        const messageId = stringValue(payload.messageId) || null;
+        if (messageId) return this.messageDelta(messageId, text, isCommentary(payload));
         const open = this.segments.at(-1);
-        if (open?.open) {
+        if (isCommentary(payload)) {
+          if (open?.open && open.commentary) {
+            open.text += text;
+          } else {
+            this.closeSegments();
+            this.segments.push({ text, open: true, commentary: true, messageId: null });
+          }
+          return noStep();
+        }
+        if (open?.open && !open.commentary) {
           open.text += text;
         } else {
-          return { chunks: [this.startSegment(text, true)], terminal: null };
+          this.closeSegments();
+          return { chunks: [this.startSegment(text, true, null)], terminal: null };
         }
         return { chunks: [{ type: "text", text }], terminal: null };
       }
       case "agent.message.completed": {
         const text = stringValue(payload.text) ?? "";
-        const target = this.segments.at(-1);
+        const messageId = stringValue(payload.messageId) || null;
+        if (messageId) return this.messageCompleted(messageId, text, isCommentary(payload));
+        const last = this.segments.at(-1);
+        if (isCommentary(payload)) {
+          if (last?.commentary && (last.open || text.startsWith(last.text))) {
+            last.open = false;
+            if (text) last.text = text;
+            return noStep();
+          }
+          // Undeclared deltas that the completion reveals as commentary were
+          // already streamed as reply text; keep the reply equal to the stream.
+          const streamed = last && !last.commentary && last.open && text.startsWith(last.text);
+          if (!streamed) {
+            if (text) {
+              this.closeSegments();
+              this.segments.push({ text, open: false, commentary: true, messageId: null });
+            }
+            return noStep();
+          }
+        }
+        const target = last?.commentary ? undefined : last;
         if (!target || (!target.open && target.text && !text.startsWith(target.text))) {
-          if (!text) return { chunks: [], terminal: null };
-          return { chunks: [this.startSegment(text, false)], terminal: null };
+          if (!text) return noStep();
+          // The phase-less settlement copy of an answer this turn already
+          // completed message by message.
+          if (payload.phase === undefined && this.latestAnswer()?.text === text) return noStep();
+          this.closeSegments();
+          return { chunks: [this.startSegment(text, false, null)], terminal: null };
         }
         target.open = false;
-        if (text.length > target.text.length && text.startsWith(target.text)) {
-          const remainder = text.slice(target.text.length);
-          target.text = text;
-          return { chunks: [{ type: "text", text: remainder }], terminal: null };
-        }
-        if (!target.text && text) {
-          target.text = text;
-          return { chunks: [{ type: "text", text }], terminal: null };
-        }
-        return { chunks: [], terminal: null };
+        return { chunks: this.extendAnswer(target, text), terminal: null };
       }
       case "agent.toolCall.created": {
-        this.closeSegment();
+        this.closeSegments();
         const name = stringValue(payload.name) ?? "tool";
         const callId = stringValue(payload.id);
         if (callId) this.openTools.set(callId, name);
@@ -167,27 +220,29 @@ export class ChatTurnFold {
       case "session.requiresAction": {
         const pending = approvalPending(payload);
         if (!pending) return { chunks: [], terminal: null };
-        this.closeSegment();
         this.pending = pending;
-        return { chunks: [{ type: "pending", pending }], terminal: "pending" };
+        return {
+          chunks: [...this.settleSegments(), { type: "pending", pending }],
+          terminal: "pending",
+        };
       }
       case "session.humanInput.requested": {
         const pending = humanInputPending(payload);
         if (!pending) return { chunks: [], terminal: null };
-        this.closeSegment();
         this.pending = pending;
-        return { chunks: [{ type: "pending", pending }], terminal: "pending" };
+        return {
+          chunks: [...this.settleSegments(), { type: "pending", pending }],
+          terminal: "pending",
+        };
       }
       case "turn.completed":
-        this.closeSegment();
-        return { chunks: [], terminal: "completed" };
+        this.emptyFinalReply = turnCompletedWithEmptyFinalReply(payload);
+        return { chunks: this.settleSegments(), terminal: "completed" };
       case "turn.failed":
-        this.closeSegment();
         this.failure = event;
-        return { chunks: [], terminal: "failed" };
+        return { chunks: this.settleSegments(), terminal: "failed" };
       case "turn.cancelled":
-        this.closeSegment();
-        return { chunks: [], terminal: "cancelled" };
+        return { chunks: this.settleSegments(), terminal: "cancelled" };
       default:
         return { chunks: [], terminal: null };
     }
@@ -203,6 +258,9 @@ export class ChatTurnFold {
       status:
         terminal === "pending" ? "pending" : terminal === "cancelled" ? "cancelled" : "completed",
       pending: this.pending,
+      ...(this.emptyFinalReply
+        ? { emptyFinalReply: true as const, notice: EMPTY_FINAL_REPLY_NOTICE }
+        : {}),
       events: [...this.events],
       toString: () => text,
     };
@@ -217,18 +275,110 @@ export class ChatTurnFold {
     return new OpenGeniChatError(code, message, this.failure);
   }
 
-  private closeSegment(): void {
-    const open = this.segments.at(-1);
-    if (open) open.open = false;
+  private messageDelta(messageId: string, text: string, commentary: boolean): ChatFoldStep {
+    const segment = this.segmentOf(messageId);
+    if (segment?.open) {
+      segment.text += text;
+      return segment.commentary ? noStep() : { chunks: [{ type: "text", text }], terminal: null };
+    }
+    // Providers stream messages one after another: every earlier one is done.
+    this.closeSegments();
+    if (commentary) {
+      this.segments.push({ text, open: true, commentary: true, messageId });
+      return noStep();
+    }
+    return { chunks: [this.startSegment(text, true, messageId)], terminal: null };
   }
 
-  private startSegment(text: string, open: boolean): ChatChunk {
+  private messageCompleted(messageId: string, text: string, commentary: boolean): ChatFoldStep {
+    const segment = this.segmentOf(messageId) ?? this.unidentifiedStreamingSegment(text);
+    if (segment) {
+      segment.messageId = messageId;
+      segment.open = false;
+      if (segment.commentary) {
+        if (text) segment.text = text;
+        return noStep();
+      }
+      // Streamed as reply text, even when the completion reveals commentary:
+      // the reply stays equal to what append-only consumers already have.
+      return { chunks: this.extendAnswer(segment, text), terminal: null };
+    }
+    if (!text) return noStep();
+    if (commentary) {
+      this.segments.push({ text, open: false, commentary: true, messageId });
+      return noStep();
+    }
+    return { chunks: [this.startSegment(text, false, messageId)], terminal: null };
+  }
+
+  private segmentOf(messageId: string): Segment | undefined {
+    return this.findLastSegment((segment) => segment.messageId === messageId);
+  }
+
+  /** Deltas that carried no identity, still streaming the text this completion names. */
+  private unidentifiedStreamingSegment(text: string): Segment | undefined {
+    const last = this.segments.at(-1);
+    return last?.open && last.messageId === null && text.startsWith(last.text) ? last : undefined;
+  }
+
+  private latestAnswer(): Segment | undefined {
+    return this.findLastSegment((segment) => !segment.commentary);
+  }
+
+  private findLastSegment(predicate: (segment: Segment) => boolean): Segment | undefined {
+    for (let index = this.segments.length - 1; index >= 0; index -= 1) {
+      const segment = this.segments[index]!;
+      if (predicate(segment)) return segment;
+    }
+    return undefined;
+  }
+
+  /**
+   * Complete an answer segment. Only the newest answer can grow: a remainder
+   * for an earlier one would land after later text for append-only consumers.
+   */
+  private extendAnswer(segment: Segment, text: string): ChatChunk[] {
+    if (text.length <= segment.text.length || !text.startsWith(segment.text)) return [];
+    if (segment !== this.latestAnswer()) return [];
+    const remainder = text.slice(segment.text.length);
+    segment.text = text;
+    return [{ type: "text", text: remainder }];
+  }
+
+  private closeSegments(): void {
+    for (const segment of this.segments) segment.open = false;
+  }
+
+  /**
+   * Close the turn's text. A turn that produced commentary but no answer text
+   * (for example one that ends waiting for a worker) replies with its latest
+   * commentary rather than nothing.
+   */
+  private settleSegments(): ChatChunk[] {
+    this.closeSegments();
+    // A typed missing-final notice must not turn progress commentary into
+    // the missing answer. Ordinary waits retain their historical fallback.
+    if (this.emptyFinalReply) return [];
+    if (this.segments.some((segment) => !segment.commentary)) return [];
+    const latest = [...this.segments]
+      .reverse()
+      .find((segment) => segment.commentary && segment.text);
+    if (!latest) return [];
+    latest.commentary = false;
+    return [{ type: "text", text: latest.text }];
+  }
+
+  private startSegment(text: string, open: boolean, messageId: string | null): ChatChunk {
     // Match the separator used by `text` before exposing the next segment to
     // append-only consumers (React and both protocol adapters).
-    const separator = this.segments.length > 0 ? "\n\n" : "";
-    this.segments.push({ text, open });
+    const separator = this.segments.some((segment) => !segment.commentary) ? "\n\n" : "";
+    this.segments.push({ text, open, commentary: false, messageId });
     return { type: "text", text: separator + text };
   }
+}
+
+function isCommentary(payload: Record<string, unknown>): boolean {
+  return payload.phase === "commentary";
 }
 
 function isTurnScopedType(type: string): boolean {

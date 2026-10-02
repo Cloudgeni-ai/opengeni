@@ -34,18 +34,23 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Report delivery
 
-A user-facing report is a native document Artifact by default. This includes a
-secondary output such as an audit produced while organizing Knowledge. Routing
-lives in the provider-neutral operational instructions; the bundled
-`opengeni-documents` Skill owns the authoring procedure. The artifact is the
-working document from the start, not a published copy of a sandbox Markdown or
-DOCX report.
+Agents answer in chat by default, including summaries and reports. A native
+document Artifact is the deliverable when the user asks for a document or file,
+or when the result is large (multi-page) or clearly meant to be kept or shared.
+That can include a secondary output such as an audit produced while organizing
+Knowledge. The chat reply then gives a short summary and the artifact link
+rather than restating the document. Routing lives in the provider-neutral
+operational instructions; the bundled `opengeni-documents` Skill owns the
+authoring procedure. The artifact is the working document from the start, not a
+published copy of a sandbox Markdown or DOCX report.
 
 Report requirements are explicit, typed declarations, not a heuristic scan of
-goal text, conversation content or local links. Declare them before authoring:
-initial reports belong in `goal_set` / `GoalSpec.reportRequirements`; reports
-discovered during an active goal are appended through `goal_progress` without
-replacing the objective. Each requirement has a stable `id` and `title`.
+goal text, conversation content or local links. Inside a goal, declare them
+before authoring: initial reports belong in `goal_set` /
+`GoalSpec.reportRequirements`; reports discovered during an active goal are
+appended through `goal_progress` without replacing the objective. Each
+requirement has a stable `id` and `title`. A session without a goal does not
+create one only to declare a document.
 
 Completion must match every persisted requirement to a native document and a
 server-authored inspection receipt. The receipt identifies the exact inspected
@@ -60,9 +65,9 @@ When artifact tooling is unavailable, do not invent a receipt or silently
 substitute a sandbox link. Explain the concrete blocker and retain the unfinished
 deliverable. Ordinary in-chat answers, brief status updates, internal worker
 findings, source-code navigation, and explicitly requested local-file workflows
-are outside this report contract. Without goal tools, the artifact-first
-authoring and handoff procedure still applies, but no goal-completion guard can
-run.
+are outside this report contract. Without a goal, the artifact-first authoring
+and handoff procedure still applies to a document deliverable, but nothing is
+declared and no goal-completion guard runs.
 
 The guard proves delivery of **declared** reports, not the semantic quality or
 completeness of arbitrary prose. Routing instructions make declaration part of
@@ -132,11 +137,24 @@ A goal is `active`, `paused`, or `completed`.
   redirect live intent.
 - `goal_update` declares `refinement`, `adaptation`, or `replacement`, a
   rationale, and the expected objective revision. `review_changes` always
-  records an immutable proposal; `preserve_intent` directly applies only a
-  refinement; `autonomous_adaptation` may apply every declared kind. API/user
+  records an immutable proposal when deliberately configured by the user/API;
+  the default `preserve_intent` and `autonomous_adaptation` directly apply every
+  declared kind. These classifications describe the audit history, not separate
+  approval gates. The agent maintains its operational goal in response to human
+  direction and relevant evidence, without requiring the human to approve the
+  same direction again through a second UI/API action. API/user
   redirects apply directly. An applied semantic change advances both objective
   and lifecycle revisions but is not execution progress. Proposed content is
   not composed into model instructions until a user applies it.
+- Goal edits do not grant permissions, change root constraints, or authorize
+  work beyond the human's actual request. Preserve the intended outcome rather
+  than shrinking it to fit completed work. Internal revision numbers remain
+  optimistic-concurrency fences and immutable audit history, not user rituals.
+  Existing default-policy goals receive this behavior when the new API and
+  worker code is deployed; no database rewrite or automatic replay of pending
+  proposals occurs. A previously proposed change must be reconciled against
+  the current goal and submitted as a fresh update if it is still warranted.
+  Explicit `review_changes` goals retain their configured review requirement.
 - Root constraints are bounded, normalized standing constraints that may be
   changed only through the direct human/API path. Every accepted turn freezes
   them with its goal snapshot. A goal-bearing child inherits the calling
@@ -152,14 +170,33 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal. Only a new `goal_set` can replace a
-  completed goal.
+- `goal_complete { evidence }` is terminal for the goal, not the current turn.
+  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
+  has an explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The agent must still send the requested final answer (or summary
+  and retained artifact link) in the same turn. The tool receipt reminds it to
+  do so. Late child results remain context to integrate and deliver, not a
+  command to stay silent or restart completed work.
+  If one same-turn reply reminder still produces an empty final, the turn
+  completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
+  The goal is untouched: active goals can continue, and later child results
+  remain deliverable. The marker records missing answer delivery, not success
+  of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  The agent is told to resume only when the user asks it to continue or the
+  blocker it paused for has cleared. A user's question alone is not a reason:
+  the agent answers it and leaves the goal paused. An active goal still
+  continues through its ordinary continuation after that answer. When work the
+  agent started is still in flight (a child, a command, or a timed recheck), it
+  answers and registers `wait_for_input` again instead, even with an active
+  goal, so no continuation spends a turn rediscovering that wait. Each turn's
+  wait sets a fresh deadline, so a re-wait reuses the earlier reason and passes
+  only the time left before the earlier deadline.
 
 Long waits are session-level rather than goal mutations. `wait_for_input {
 reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and
@@ -170,7 +207,13 @@ the session. An active goal remains active while the session waits; use
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
-and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
+and pause rationales to 2 KiB, and progress notes to 8 KiB. Agent schemas expose
+the character upper bound plus the exact UTF-8 byte limit and purpose.
+Progress is a short human-readable status, rationale is a short explanation,
+and objective/criteria describe the intended outcome—not the deliverable.
+Use normal spacing; summarize unnecessary detail instead of squeezing words.
+Evidence remains short ledger proof with an explicit 8192-character cap; the
+requested answer must still appear in the final user-facing reply. Root constraints
 are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
 Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
@@ -223,17 +266,22 @@ The locked decision applies these rules:
    them cannot be missed. See [`durable-agent-inputs.md`](durable-agent-inputs.md)
    for the wake classes.
 3. Before the goal materializer runs, `peekSessionWork` evaluates a current
-   session-level `wait_for_input`. It is current only while the declaring turn
-   remains the newest finished turn and the database deadline is ahead. While
+   session-level `wait_for_input`. It is current only while no newer finished
+   turn has retired it (a turn a person did not start, or a person's turn that
+   consumed immediate machine input) and the database deadline is ahead. While
    held, the workflow re-arms `session_input_wait_deadline` in the durable wake
    outbox and closes without consuming a goal revision. Immediate machine input
    or a queued human/API turn wins and runs normally; deferred child notices
-   remain parked. A newer finished turn clears the wait with
+   remain parked. A human or API turn that neither waits again nor consumes
+   immediate machine input leaves the wait held, so it neither triggers a
+   continuation that only rediscovers the wait nor strands a later child
+   result. A newer finished goal, system, or other machine-input turn, or a
+   person's turn that consumed the awaited input, clears the wait with
    `session.wait.finished{outcome:"input"}`. An unchanged expired deadline
    atomically clears it and queues `session_wait_timeout` input. The active-goal
    projection may report this independent session wait as `blocked` /
-   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations do
-   not own or clear it.
+   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations
+   do not own or clear it.
 4. Consecutive no-input continuations are paced, not capped. `auto_continuations`
    counts only consecutive synthesized continuations whose claimed batch
    contained no other machine input and that no human/API/Steer turn
@@ -292,13 +340,61 @@ The locked decision applies these rules:
    That conversation comes from `session_history_items`, the one SDK-native
    model-memory store (see `docs/run-lifecycle.md`).
 
-The canonical continuation prompt treats every continuation as re-entry into
-the full objective, not as a request to perform one more step. It first
-reconciles authoritative current state, treats prior assistant claims only as
-pointers to evidence, continues through the full requested end state within the
-turn, and avoids repeating a state-setting action whose desired state already
-holds. It calls `goal_complete` only after authoritative evidence proves the
-whole objective.
+The canonical continuation prompt identifies itself as generated input, not a
+new user request or grant of authority. The current applied goal frozen for the
+turn, its criteria, root constraints, and report requirements remain the
+objective; no revision summary, synthesized progress, or evidence-validity
+claim is injected. Pending proposals and historical objectives do not replace
+that objective.
+
+Ordinary continuation resumes established work rather than restarting discovery
+or full reconciliation on every turn. Reuse authoritative evidence only for the
+requirement, scope, version, and state it establishes; recheck changed, stale,
+uncertain, or insufficient evidence. Assistant claims and summaries locate
+evidence, not prove it. Full reconciliation or a comprehensive audit remains
+substantive work when the goal, user, or applicable Skill requests it, when
+uncertainty or recovery warrants it, or when risk or gates require it. Before
+`goal_complete`, the full completion audit still covers every requirement and
+deliverable with authoritative evidence, including fresh checks wherever
+required. Evidence reuse does not weaken report-delivery or other gates.
+
+Persistence is evidence-based, not a minimum number of blocked turns. Try
+plausible safe authorized alternatives for recoverable failures; neither
+unbounded exhaustion nor repeated unchanged failure is required. A definitive
+missing permission, human decision, or external prerequisite with no actionable
+authorized path can justify an immediate pause, with the blocker, evidence or
+attempted alternatives, and the change needed to resume. Tool approvals remain
+human-only. Work in flight or a meaningful timed recheck uses the available
+waiting mechanism instead; continue independent authorized work first.
+
+There is no required preliminary short wait or status recheck before
+`wait_for_input`. Its safety deadline follows the dependency or a meaningful
+monitoring cadence, potentially hours or days within the tool's limits, not the
+execution-wait limits of `session_wait` or `command_wait`. Monitoring and user
+notification cadences are separate. Active work gets useful milestone/context
+updates; suspended work does not wake just to reassure, unless an explicit
+user/task/Skill update cadence calls for it. Existing live-attempt limitations
+(including pending Codemode calls), event cursors, wake registration, and
+question-turn deadline preservation still apply.
+
+### Guidance validation scenarios
+
+These are review cases for the instruction contract, not claims of measured
+model behavior. Source tests pin the emitted guidance and retained safeguards;
+they do not establish that a model follows them in live execution.
+
+| Scenario | Expected instruction-level decision |
+| --- | --- |
+| Goal explicitly requires a comprehensive audit | Audit/reconcile the whole requested scope; proportionality must not shrink it. |
+| Ordinary continuation with valid exact-scope evidence | Resume established work and reuse that evidence; still audit all requirements before completion. |
+| Evidence is stale, changed, uncertain, or insufficient | Recheck the affected state; broaden reconciliation when the uncertainty or required gate warrants it. |
+| Child will run overnight | With no other work, register an out-of-turn wait and an appropriate safety deadline; no preliminary poll or short wait. Consume the terminal result before dependent completion. |
+| External deployment needs checks at a meaningful interval | Use the available monitoring/wait mechanism at that cadence; notify on useful changes rather than at every check by default. |
+| User requests frequent updates even while waiting | Honor the explicit cadence within authority and tool limits; this is an exception to the no-reassurance-wake default. |
+| User asks a question during an existing wait | Answer only the question and preserve the original deadline using the time remaining. Below the tool minimum or after expiry, a question-only human/API turn consuming no immediate machine input can finish without replacing the retained wait. Never send an invalid timeout or silently extend the deadline; outside that retained-wait case, register a valid wait if needed and disclose any unavoidable adjustment. |
+| Definitive missing permission or required human choice | Pause immediately if no meaningful authorized work remains; identify what must change. Never approve a tool for a human. |
+| Recoverable transient failure | Investigate and try plausible authorized alternatives; retry only with reason to expect progress, not a fixed quota or unlimited search. |
+| Short task explicitly requires a fresh independent worker | Honor the request despite the direct-handling/reuse default; keep the independent deliverable distinct and join its result. |
 
 The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a
@@ -324,6 +420,10 @@ recovery of the same turn, not creation or charging of another continuation.
   a goal that the user paused. Only a goal paused by the continuation ceiling
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
+- Terminal sessions skip catalog/model validation entirely. An eligible goal
+  whose inherited model is missing, retired, or disallowed pauses visibly with
+  `limits` and a model-specific rationale. It never silently chooses another
+  model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.

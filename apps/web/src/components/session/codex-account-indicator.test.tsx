@@ -77,6 +77,37 @@ test("shows the blocked account instead of a healthy default and permits repeati
     listCodexAccounts: async () => {
       throw new Error("workspace pool must not drive a session retry picker");
     },
+    refreshCodexUsage: async () => ({
+      usage: {
+        blocked: {
+          status: "limit_reached" as const,
+          usage: {
+            status: "limit_reached" as const,
+            planType: "pro",
+            fiveHour: {
+              used: 100,
+              limit: 100,
+              remaining: 0,
+              percent: 100,
+              resetAt: null,
+              resetAfterSeconds: null,
+              limitWindowSeconds: 18000,
+            },
+            weekly: {
+              used: 10,
+              limit: 100,
+              remaining: 90,
+              percent: 10,
+              resetAt: null,
+              resetAfterSeconds: null,
+              limitWindowSeconds: 604800,
+            },
+            limitReached: true,
+            fetchedAt: new Date().toISOString(),
+          },
+        },
+      },
+    }),
     listSessionCodexAccounts: async () => ({
       pinnedAccountId: null,
       lastAccountId: null,
@@ -152,6 +183,97 @@ test("shows the blocked account instead of a healthy default and permits repeati
     await act(async () => auto!.click());
     expect(calls).toEqual(["auto"]);
     expect(document.body.textContent).toContain("Selection saved. Capacity is being rechecked.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("weekly-only live usage replaces a mislabeled cached 5-hour reading", async () => {
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => ({
+      accounts: [
+        {
+          id: "weekly-only",
+          label: "Weekly-only account",
+          status: "active",
+          plan: "pro",
+          allocatorEnabled: true,
+          fiveHour: { percent: 66, remaining: 34 },
+          weekly: { percent: 0, remaining: 100 },
+        },
+      ],
+      currentAccount: {
+        id: "weekly-only",
+        label: "Weekly-only account",
+        status: "active",
+        plan: "pro",
+        allocatorEnabled: true,
+        fiveHour: { percent: 66, remaining: 34 },
+        weekly: { percent: 0, remaining: 100 },
+      },
+      currentSelection: { credentialId: "weekly-only", waiting: false },
+      pinnedAccountId: "weekly-only",
+      lastAccountId: "weekly-only",
+      activeAccountId: "weekly-only",
+      settings: {
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        activeCredentialId: "weekly-only",
+      },
+    }),
+    refreshCodexUsage: async () => ({
+      usage: {
+        "weekly-only": {
+          status: "ok" as const,
+          usage: {
+            status: "ok" as const,
+            planType: "pro",
+            fiveHour: null,
+            weekly: {
+              used: 66,
+              limit: 100,
+              remaining: 34,
+              percent: 66,
+              resetAt: null,
+              resetAfterSeconds: null,
+              limitWindowSeconds: 604800,
+            },
+            limitReached: false,
+            fetchedAt: new Date().toISOString(),
+          },
+        },
+      },
+    }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="weekly"
+            model="codex/gpt-5.6-sol"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    await act(async () =>
+      container
+        .querySelector("button")!
+        .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false })),
+    );
+    const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
+    expect(bars).toHaveLength(1);
+    expect(bars[0]!.getAttribute("aria-label")).toBe("Week remaining");
+    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("34% remaining");
+    expect(document.body.textContent).not.toContain("5h");
+    expect(document.body.textContent).not.toContain("100% remaining");
+    expect(document.body.textContent).toContain("Weekly-only account");
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -33,6 +33,34 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
+  test("includes an open computer controller in the private update idle proof", async () => {
+    await withServer(async ({ server, reference }) => {
+      const idle = async () =>
+        await json(await request(server, "/v1/runtime", { token: adminToken }));
+      expect((await idle()).data).toEqual({ idle: true });
+      expect(
+        (
+          await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      expect((await idle()).data).toEqual({ idle: false });
+      expect(
+        (
+          await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await idle()).data).toEqual({ idle: true });
+    });
+  });
+
   test("share Browser authority, fencing, media, rotation, and lifecycle semantics", async () => {
     await withServer(async ({ server, reference }) => {
       expect(

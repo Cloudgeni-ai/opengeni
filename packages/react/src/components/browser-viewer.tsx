@@ -2,6 +2,7 @@ import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserActionBatch,
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDownload,
@@ -50,6 +51,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -61,17 +63,22 @@ import {
 import { useAttachedBrowsers } from "../hooks/use-attached-browsers";
 import { useBrowserIdentities } from "../hooks/use-browser-identities";
 import { useBrowserDownloads } from "../hooks/use-browser-downloads";
-import { useBrowserSession } from "../hooks/use-browser-session";
+import { useBrowserSession, type BrowserFrameInputFence } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { useSiteAuthConnections } from "../hooks/use-site-auth-connections";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
-import { isSourcePlacementChangedError } from "../lib/interaction-errors";
+import {
+  isInteractionControlUnavailable,
+  isSourcePlacementChangedError,
+} from "../lib/interaction-errors";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
+import { BrowserSelectControl } from "./browser-select-control";
+import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -114,11 +121,15 @@ type BrowserLaunchChoice =
   | { kind: "clean" }
   | { kind: "profile"; identityId: string; baseRevisionId?: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
+// ArrayBuffer is opaque to React development prop diagnostics; a Uint8Array
+// exposes every image byte as an enumerable property retained in timing entries.
+type BrowserViewportFrame = Omit<BrowserFrame, "data"> & { data: ArrayBuffer };
+
 type PointerStart = {
   x: number;
   y: number;
   pointerId: number;
-  frame: BrowserFrame;
+  frame: BrowserViewportFrame;
 };
 type BrowserResumeAttempt = {
   operationId: string;
@@ -195,16 +206,15 @@ export function BrowserViewer({
       });
     }
   }, [enabled, endStaleBrowser, registry.sessions]);
-  const replacementChromeDevice = useMemo(() => {
-    if (!attachedGenerationLoss) return null;
-    return (
-      attached.devices.find((candidate) => candidate.id === attachedGenerationLoss.deviceId) ?? null
-    );
-  }, [attached.devices, attachedGenerationLoss]);
   const relevant = useMemo(
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
   );
+  const latestRelevantBrowser = registry.relevantSessions[0];
+  const unavailableBrowser =
+    latestRelevantBrowser?.lifecycle === "lost" || latestRelevantBrowser?.lifecycle === "failed"
+      ? latestRelevantBrowser
+      : undefined;
   const [selection, setSelection] = useState<BrowserSelection>(() =>
     initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
   );
@@ -236,6 +246,7 @@ export function BrowserViewer({
   const previousSessionIdRef = useRef(sessionId);
   const seenInterventionIdsRef = useRef(new Set<string>());
   const diagnosticRequestRef = useRef(0);
+  const viewportFocusHandoffRef = useRef<string | null>(null);
   const [diagnosticsView, setDiagnosticsView] = useState<BrowserDiagnosticsView | null>(null);
 
   const notifyError = useCallback(
@@ -342,12 +353,8 @@ export function BrowserViewer({
       setResumeAttempt((visible) =>
         visible?.sessionId === selectedRegistrySession.id ? null : visible,
       );
-      return;
     }
-    if (selectedRegistrySession.lifecycle === "suspended") {
-      void wakeBrowser(selectedRegistrySession);
-    }
-  }, [selectedRegistrySession, wakeBrowser]);
+  }, [selectedRegistrySession]);
 
   const browser = useBrowserSession({
     ...override,
@@ -412,23 +419,47 @@ export function BrowserViewer({
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
-  const displayedFrame = frameMatchesSelectedTarget(
+  const receivedFrame = frameMatchesSelectedTarget(
     frames.frame,
     browser.session,
     browser.selectedTarget,
   )
     ? frames.frame
     : null;
+  const displayedFrame = useMemo<BrowserViewportFrame | null>(
+    () => (receivedFrame ? { ...receivedFrame, data: receivedFrame.data.slice().buffer } : null),
+    [receivedFrame],
+  );
   const frameIsLive = frames.state === "live" && displayedFrame !== null;
   useEffect(() => {
     setHasLiveFrame(frameIsLive);
   }, [frameIsLive]);
-  const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
-  const displayConnectionState = supportsLiveFrames
-    ? frames.state === "live" && !displayedFrame
-      ? "connecting"
-      : frames.state
-    : "semantic";
+  const supportsLiveFrames =
+    (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
+  const controlUnavailable = isInteractionControlUnavailable(browser.error);
+  const connectionError = controlUnavailable ? browser.error : (frames.error ?? browser.error);
+  // A managed controller can reject a stale attachment while the same browser
+  // remains healthy. Only extension-attached Chrome requires a new browser on
+  // connection-generation loss; an unrelated lost Chrome must not poison the
+  // selected managed browser's recovery UI.
+  const selectedPlacement = (browser.session ?? selectedRegistrySession)?.placement;
+  const selectedChromeGenerationLoss =
+    selectedPlacement?.kind === "attached_device" &&
+    isAttachedChromeGenerationLossError(connectionError);
+  const replacementChromeDevice =
+    selectedChromeGenerationLoss && selectedPlacement.kind === "attached_device"
+      ? attached.devices.find((candidate) => candidate.id === selectedPlacement.deviceId)
+      : null;
+  const displayConnectionState =
+    connectionError && (!frameIsLive || controlUnavailable)
+      ? "error"
+      : !browser.session
+        ? "connecting"
+        : supportsLiveFrames
+          ? frames.state === "live" && !displayedFrame
+            ? "connecting"
+            : frames.state
+          : "semantic";
   const selectedProfile = useMemo(
     () =>
       profiles.identities.find(
@@ -745,25 +776,32 @@ export function BrowserViewer({
     );
   }
   if (liveSessions.length === 0) {
-    if (renderEmpty) return <>{renderEmpty(() => createBrowser(), creating)}</>;
+    if (renderEmpty && !unavailableBrowser)
+      return <>{renderEmpty(() => createBrowser(), creating)}</>;
     return (
       <div
         className={cn("flex h-full min-h-0 items-center justify-center bg-og-bg p-6", className)}
       >
         <div className="max-w-sm text-center">
-          <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+          <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
             <Globe2Icon className="size-4.5" />
           </span>
-          <p className="mt-3 text-og-menu font-medium text-og-fg">
-            {attachedGenerationLoss
-              ? "Chrome reconnected—open a fresh browser/desktop."
-              : "No browser open"}
-          </p>
-          <p className="mt-1 text-og-control leading-5 text-og-muted">
-            {attachedGenerationLoss
-              ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
-              : "A browser appears here when this agent—or another agent in the workspace—opens one."}
-          </p>
+          {unavailableBrowser && !attachedGenerationLoss ? (
+            <BrowserUnavailableNotice session={unavailableBrowser} />
+          ) : (
+            <>
+              <p className="mt-3 text-og-menu font-medium text-og-fg">
+                {attachedGenerationLoss
+                  ? "Chrome reconnected—open a fresh browser/desktop."
+                  : "No browser open"}
+              </p>
+              <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
+                {attachedGenerationLoss
+                  ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+                  : "A browser appears here when this agent—or another agent in the workspace—opens one."}
+              </p>
+            </>
+          )}
           <BrowserLaunchMenu
             attachedBridges={onlineAttachedBridges}
             attachedDevices={attached.devices}
@@ -776,7 +814,7 @@ export function BrowserViewer({
             prominent
           />
           {registry.error ? (
-            <p className="mt-3 text-og-control text-og-status-error">{registry.error.message}</p>
+            <p className="mt-3 text-og-control text-og-danger">{registry.error.message}</p>
           ) : null}
         </div>
       </div>
@@ -831,6 +869,7 @@ export function BrowserViewer({
       />
       {!selectedRegistrySession ? (
         <BrowserUnselectedPanel
+          unavailableBrowser={unavailableBrowser}
           peerCount={liveSessions.length}
           creating={creating}
           onCreate={() => createBrowser()}
@@ -882,52 +921,136 @@ export function BrowserViewer({
                   .catch((cause) => notifyError(cause, "Could not reload."));
             }}
           />
-          <BrowserViewport
-            frame={displayedFrame}
-            connectionState={displayConnectionState}
-            supportsLiveFrames={supportsLiveFrames}
-            connectionError={frames.error}
-            observation={browser.observation}
-            mutating={browser.mutating || savingProfile}
-            activityLabel={savingProfile ? "Saving browser version…" : undefined}
-            clipboardEnabled={browser.session?.capabilities.clipboard === true}
-            onAction={async (action, frame) => {
-              const receipt = frame
-                ? await browser.actFromFrame(action, frame)
-                : await browser.act(action);
-              if (receipt.state !== "completed") {
-                throw new Error(receipt.error?.message ?? "Browser input did not complete.");
-              }
-              return receipt;
-            }}
-            onReadClipboard={browser.readClipboard}
-            onReconnect={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
-                ? () => {
-                    if (replacementChromeDevice) {
-                      createBrowser({ kind: "attached", device: replacementChromeDevice });
+          {browser.inputFailure ? (
+            <div
+              role="alert"
+              aria-label="Browser input status"
+              className="flex shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-3 py-2 text-og-xs"
+            >
+              <CircleAlertIcon className="size-4 shrink-0 text-og-status-failed" />
+              <div className="min-w-0 flex-1">
+                <span className="font-medium">
+                  {browser.inputFailure.state === "failed"
+                    ? "Browser input failed"
+                    : "Input result unknown"}
+                </span>
+                <p className="text-og-fg-subtle">
+                  {browser.inputFailure.error?.message ?? "Inspect the page before continuing."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void browser.refresh()}
+                className="shrink-0 rounded border border-og-border px-2 py-1 transition hover:bg-og-surface-2"
+              >
+                Check browser
+              </button>
+            </div>
+          ) : null}
+          <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+            <BrowserViewport
+              // A new control scope must discard every buffered gesture and queued action.
+              key={JSON.stringify([
+                selection?.sessionId,
+                browser.selectedTarget?.id,
+                browser.selectedTarget?.targetGeneration,
+                browser.selectedTarget?.documentGeneration,
+                frames.attachment?.controllerGeneration,
+              ])}
+              focusHandoffRef={viewportFocusHandoffRef}
+              focusScope={JSON.stringify([
+                selection?.sessionId,
+                browser.selectedTarget?.id,
+                browser.selectedTarget?.targetGeneration,
+              ])}
+              frame={displayedFrame}
+              connectionState={displayConnectionState}
+              supportsLiveFrames={supportsLiveFrames}
+              connectionError={connectionError}
+              controlUnavailable={controlUnavailable}
+              observation={browser.observation}
+              mutating={browser.mutating || savingProfile}
+              activityLabel={savingProfile ? "Saving browser version…" : undefined}
+              clipboardEnabled={browser.session?.capabilities.clipboard === true}
+              inputBatchAttachment={frames.attachment}
+              onAction={async (action, frame) => {
+                const focusedInput =
+                  frame &&
+                  action.type === "pointer" &&
+                  action.action === "click" &&
+                  (action.button === undefined || action.button === "left") &&
+                  frames.attachment?.focusedInputObservations === true &&
+                  frames.attachment.browserSessionId === frame.browserSessionId &&
+                  frames.attachment.controllerGeneration === frame.controllerGeneration &&
+                  frames.attachment.targetId === frame.targetId &&
+                  Date.parse(frames.attachment.expiresAt) > Date.now();
+                const receipt = frame
+                  ? await browser.actFromFrame(
+                      action,
+                      frame,
+                      undefined,
+                      focusedInput ? "input" : "none",
+                    )
+                  : await browser.act(action);
+                if (receipt.state !== "completed") {
+                  throw new Error(receipt.error?.message ?? "Browser input did not complete.");
+                }
+                return receipt;
+              }}
+              onReadClipboard={browser.readClipboard}
+              onObserveForInput={browser.observeForInput}
+              onSelectFromObservation={browser.actFromObservation}
+              onReconnect={
+                selectedChromeGenerationLoss
+                  ? () => {
+                      if (replacementChromeDevice) {
+                        createBrowser({ kind: "attached", device: replacementChromeDevice });
+                      }
                     }
-                  }
-                : frames.reconnect
-            }
-            reconnectLabel={
-              (attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)) &&
-              replacementChromeDevice
-                ? "Open a fresh Connected Chrome"
-                : undefined
-            }
-            reconnectMessage={
-              attachedGenerationLoss || isAttachedChromeGenerationLossError(frames.error)
-                ? "Chrome reconnected—open a fresh browser/desktop."
-                : undefined
-            }
-            onError={(cause) => notifyError(cause, "Browser input failed.")}
-          />
+                  : () => {
+                      void browser.refresh();
+                      frames.reconnect();
+                    }
+              }
+              reconnectLabel={
+                selectedChromeGenerationLoss && replacementChromeDevice
+                  ? "Open a fresh Connected Chrome"
+                  : undefined
+              }
+              reconnectMessage={
+                selectedChromeGenerationLoss
+                  ? "Chrome reconnected—open a fresh browser/desktop."
+                  : undefined
+              }
+              onError={(cause) => notifyError(cause, "Browser input failed.")}
+            />
+            {diagnosticsView ? (
+              <BrowserDiagnosticsDrawer
+                session={browser.session}
+                profile={selectedProfile}
+                target={browser.selectedTarget}
+                observation={browser.observation}
+                baseRevisionOrdinal={baseRevisionOrdinal}
+                state={diagnosticsView}
+                downloads={downloads.downloads}
+                downloadsEnabled={browser.session?.capabilities.downloads === true}
+                downloadsLoading={downloads.loading}
+                downloadsRefreshing={downloads.refreshing}
+                downloadsError={downloads.error}
+                savingDownloadIds={downloads.savingDownloadIds}
+                onSaveDownload={saveDownload}
+                onRefreshDownloads={() => void downloads.refresh()}
+                onRefresh={refreshDiagnostics}
+                onClose={closeDiagnostics}
+              />
+            ) : null}
+          </div>
           <BrowserStatusBar
             session={browser.session}
             profile={selectedProfile}
             target={browser.selectedTarget}
             observation={browser.observation}
+            inputFailure={browser.inputFailure}
             connectionState={displayConnectionState}
             refreshing={registry.refreshing}
             diagnosticsOpen={diagnosticsView !== null}
@@ -943,26 +1066,6 @@ export function BrowserViewer({
           />
         </>
       )}
-      {diagnosticsView ? (
-        <BrowserDiagnosticsDrawer
-          session={browser.session}
-          profile={selectedProfile}
-          target={browser.selectedTarget}
-          observation={browser.observation}
-          baseRevisionOrdinal={baseRevisionOrdinal}
-          state={diagnosticsView}
-          downloads={downloads.downloads}
-          downloadsEnabled={browser.session?.capabilities.downloads === true}
-          downloadsLoading={downloads.loading}
-          downloadsRefreshing={downloads.refreshing}
-          downloadsError={downloads.error}
-          savingDownloadIds={downloads.savingDownloadIds}
-          onSaveDownload={saveDownload}
-          onRefreshDownloads={() => void downloads.refresh()}
-          onRefresh={refreshDiagnostics}
-          onClose={closeDiagnostics}
-        />
-      ) : null}
     </div>
   );
 }
@@ -990,20 +1093,20 @@ function BrowserLifecyclePanel(props: {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
-        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           {failed ? (
-            <CircleAlertIcon className="size-4.5 text-og-status-error" />
+            <CircleAlertIcon className="size-4.5 text-og-danger" />
           ) : (
             <LoaderCircleIcon className="size-4.5 animate-spin" />
           )}
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">{label}</p>
-        <p className="mt-1 text-og-control leading-5 text-og-muted">{detail}</p>
+        <p className="mt-1 text-og-control leading-5 text-og-fg-muted">{detail}</p>
         {failed || (props.session.lifecycle === "suspended" && !props.attempt?.running) ? (
           <button
             type="button"
             onClick={props.onResume}
-            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2"
+            className="mt-4 inline-flex h-8 items-center rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover"
           >
             Open browser
           </button>
@@ -1040,7 +1143,7 @@ function BrowserToolbar(props: {
   onRefresh: () => void;
   setupUrl?: string | undefined;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
   const others = props.sessions.filter((session) => !props.relevantSessionIds.has(session.id));
@@ -1049,34 +1152,36 @@ function BrowserToolbar(props: {
     detailsRef.current?.removeAttribute("open");
   };
   return (
-    <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-0 px-2">
-      <details ref={detailsRef} className="relative min-w-0">
+    <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-1 px-2">
+      <details ref={detailsRef} className="min-w-0">
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
-          <Globe2Icon className="size-3.5 shrink-0 text-og-muted" />
+          <Globe2Icon className="size-3.5 shrink-0 text-og-fg-muted" />
           <span className="truncate font-medium">{selected?.name ?? "Browser"}</span>
           {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
             <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
           ) : null}
-          <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
+          <ChevronDownIcon className="size-3 shrink-0 text-og-fg-subtle" />
         </summary>
-        <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-          <BrowserSessionGroup
-            label="Current agent"
-            sessions={current}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <BrowserSessionGroup
-            label="Workspace browsers"
-            sessions={others}
-            identities={props.identities}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
+        <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+          <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
+            <BrowserSessionGroup
+              label="Current agent"
+              sessions={current}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+            <BrowserSessionGroup
+              label="Workspace browsers"
+              sessions={others}
+              identities={props.identities}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+          </div>
+          <div className="mt-1 flex shrink-0 gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
               <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
             ) : null}
@@ -1086,7 +1191,7 @@ function BrowserToolbar(props: {
           </div>
         </div>
       </details>
-      <span className="min-w-0 flex-1 truncate text-og-xs text-og-subtle">
+      <span className="min-w-0 flex-1 truncate text-og-xs text-og-fg-subtle">
         {placementLabel(selected)}
       </span>
       <BrowserProfileMenu
@@ -1103,7 +1208,7 @@ function BrowserToolbar(props: {
       <button
         type="button"
         onClick={props.onRefresh}
-        className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
         aria-label="Refresh browsers"
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
@@ -1123,6 +1228,7 @@ function BrowserToolbar(props: {
 }
 
 function BrowserUnselectedPanel(props: {
+  unavailableBrowser: BrowserSession | undefined;
   peerCount: number;
   creating: boolean;
   onCreate: () => void;
@@ -1130,11 +1236,15 @@ function BrowserUnselectedPanel(props: {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
-        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           <Globe2Icon className="size-4.5" />
         </span>
-        <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
-        <p className="mt-1 text-og-control leading-5 text-og-muted">
+        {props.unavailableBrowser ? (
+          <BrowserUnavailableNotice session={props.unavailableBrowser} />
+        ) : (
+          <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+        )}
+        <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {props.peerCount === 1
             ? "One workspace browser is available from the browser menu."
             : `${props.peerCount} workspace browsers are available from the browser menu.`}
@@ -1143,12 +1253,31 @@ function BrowserUnselectedPanel(props: {
           type="button"
           disabled={props.creating}
           onClick={props.onCreate}
-          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary px-3 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <PlusIcon className="size-3.5" />
           {props.creating ? "Opening…" : "New browser"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
+  const reason =
+    session.failureCode === "provider_deadline_rotation"
+      ? "The computer running it reached its time limit."
+      : session.failureCode === "source_placement_changed"
+        ? "This chat moved to another computer."
+        : session.lifecycle === "failed"
+          ? "It stopped unexpectedly."
+          : "The connection to it was lost.";
+  return (
+    <div role="status">
+      <p className="mt-3 text-og-menu font-medium text-og-fg">Browser unavailable</p>
+      <p className="mt-1 break-words text-og-control leading-5 text-og-fg-muted">
+        {session.name}. {reason} Open a new browser to continue.
+      </p>
     </div>
   );
 }
@@ -1164,7 +1293,7 @@ function BrowserSessionGroup(props: {
   if (props.sessions.length === 0) return null;
   return (
     <div className="py-1">
-      <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+      <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
         {props.label}
       </p>
       {props.sessions.map((session) => {
@@ -1174,6 +1303,8 @@ function BrowserSessionGroup(props: {
           <button
             key={session.id}
             type="button"
+            aria-label={`${session.name}${identity ? ` · ${identity.name}` : ""} · ${placementLabel(session)}`}
+            aria-pressed={session.id === props.selectedId}
             onClick={() => props.onSelect(session.id)}
             className={cn(
               "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
@@ -1188,7 +1319,7 @@ function BrowserSessionGroup(props: {
             />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-og-control text-og-fg">{session.name}</span>
-              <span className="block truncate text-og-xs text-og-subtle">
+              <span className="block truncate text-og-xs text-og-fg-subtle">
                 {identity ? `${identity.name} · ` : ""}
                 {placementLabel(session)}
               </span>
@@ -1216,7 +1347,7 @@ function BrowserLaunchMenu(props: {
   setupUrl?: string | undefined;
   prominent?: boolean;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const choose = (choice?: BrowserLaunchChoice) => {
     detailsRef.current?.removeAttribute("open");
     props.onCreate(choice);
@@ -1228,13 +1359,13 @@ function BrowserLaunchMenu(props: {
   const activeIdentities = props.identities.filter((identity) => identity.status === "active");
   const archivedIdentities = props.identities.filter((identity) => identity.status === "archived");
   return (
-    <details ref={detailsRef} className={cn("relative", props.prominent && "mt-4 inline-block")}>
+    <details ref={detailsRef} className={cn(props.prominent && "mt-4 inline-block")}>
       <summary
         onClick={(event) => {
           if (busy) event.preventDefault();
         }}
         className={cn(
-          "cursor-pointer list-none items-center justify-center gap-1.5 text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden",
+          "cursor-pointer list-none items-center justify-center gap-1.5 text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden",
           props.prominent
             ? "inline-flex h-8 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg"
             : "grid size-7 place-items-center rounded-og-sm",
@@ -1252,13 +1383,13 @@ function BrowserLaunchMenu(props: {
       </summary>
       <div
         className={cn(
-          "absolute z-40 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
-          props.prominent ? "left-1/2 top-10 -translate-x-1/2" : "right-0 top-8",
+          "absolute z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-1 text-left shadow-xl",
+          props.prominent ? "left-1/2 top-2 -translate-x-1/2" : "right-2 top-10",
         )}
       >
         {props.attachedDevices.length > 0 || props.attachedBridges.length > 0 ? (
           <div className="pb-1">
-            <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+            <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
               Connected Chrome
             </p>
             {props.attachedDevices.map((device) => (
@@ -1268,12 +1399,12 @@ function BrowserLaunchMenu(props: {
                 onClick={() => choose({ kind: "attached", device })}
                 className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
               >
-                <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
+                <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-og-control text-og-fg">
                     {device.profileLabel ?? device.name}
                   </span>
-                  <span className="block truncate text-og-xs text-og-subtle">
+                  <span className="block truncate text-og-xs text-og-fg-subtle">
                     {device.browserName} · {device.tabCount} open{" "}
                     {device.tabCount === 1 ? "tab" : "tabs"}
                   </span>
@@ -1290,27 +1421,27 @@ function BrowserLaunchMenu(props: {
                   onClick={() => detailsRef.current?.removeAttribute("open")}
                   className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
                 >
-                  <PlusIcon className="size-3.5 shrink-0 text-og-muted" />
+                  <PlusIcon className="size-3.5 shrink-0 text-og-fg-muted" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-og-control text-og-fg">
                       {props.attachedDevices.length > 0
                         ? "Connect another Chrome profile"
                         : "Connect this Chrome profile"}
                     </span>
-                    <span className="block truncate text-og-xs text-og-subtle">
+                    <span className="block truncate text-og-xs text-og-fg-subtle">
                       Machine connected · Chrome extension missing
                     </span>
                   </span>
                 </a>
               ) : (
                 <div className="flex w-full items-center gap-2 px-2 py-2 text-left">
-                  <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
+                  <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-og-control text-og-fg">
                       Chrome connection ready
                     </span>
-                    <span className="block text-og-xs leading-4 text-og-subtle">
-                      Install the OpenGeni Browser extension in the profile you want to use.
+                    <span className="block text-og-xs leading-4 text-og-fg-subtle">
+                      Install the Opengeni Browser extension in the profile you want to use.
                     </span>
                   </span>
                 </div>
@@ -1320,7 +1451,7 @@ function BrowserLaunchMenu(props: {
         ) : null}
         <p
           className={cn(
-            "px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle",
+            "px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle",
             (props.attachedDevices.length > 0 || props.attachedBridges.length > 0) &&
               "border-t border-og-border",
           )}
@@ -1332,10 +1463,12 @@ function BrowserLaunchMenu(props: {
           onClick={() => choose({ kind: "clean" })}
           className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
         >
-          <Globe2Icon className="size-3.5 text-og-muted" />
+          <Globe2Icon className="size-3.5 text-og-fg-muted" />
           <span>
             <span className="block text-og-control text-og-fg">Fresh browser</span>
-            <span className="block text-og-xs text-og-subtle">Visual browser · no saved state</span>
+            <span className="block text-og-xs text-og-fg-subtle">
+              Visual browser · no saved state
+            </span>
           </span>
         </button>
         {activeIdentities.length > 0 ? (
@@ -1347,10 +1480,10 @@ function BrowserLaunchMenu(props: {
                 onClick={() => choose({ kind: "profile", identityId: identity.id })}
                 className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
               >
-                <UserRoundIcon className="size-3.5 text-og-muted" />
+                <UserRoundIcon className="size-3.5 text-og-fg-muted" />
                 <span className="min-w-0">
                   <span className="block truncate text-og-control text-og-fg">{identity.name}</span>
-                  <span className="block text-og-xs text-og-subtle">
+                  <span className="block text-og-xs text-og-fg-subtle">
                     {identity.defaultRevisionId
                       ? `${identity.revisionCount} saved version${identity.revisionCount === 1 ? "" : "s"}`
                       : "Ready for first sign-in"}
@@ -1362,7 +1495,7 @@ function BrowserLaunchMenu(props: {
         ) : null}
         {archivedIdentities.length > 0 ? (
           <details className="mt-1 border-t border-og-border pt-1">
-            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 py-1.5 text-og-xs text-og-subtle transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 py-1.5 text-og-xs text-og-fg-subtle transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
               <ArchiveIcon className="size-3" /> Hidden profiles · {archivedIdentities.length}
               <ChevronDownIcon className="ml-auto size-3" />
             </summary>
@@ -1374,7 +1507,7 @@ function BrowserLaunchMenu(props: {
                 onClick={() => void restore(identity)}
                 className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2 disabled:opacity-50"
               >
-                <RotateCcwIcon className="size-3.5 text-og-muted" />
+                <RotateCcwIcon className="size-3.5 text-og-fg-muted" />
                 <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
                   Restore {identity.name}
                 </span>
@@ -1401,7 +1534,7 @@ function BrowserProfileMenu(props: {
   ) => Promise<boolean>;
   onOpenVersion: (identityId: string, baseRevisionId: string) => void;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const nameInputId = useId();
   const [name, setName] = useState("");
   const attached = props.session?.placement.kind === "attached_device";
@@ -1432,8 +1565,8 @@ function BrowserProfileMenu(props: {
           : "unsaved"
       : "temporary";
   return (
-    <details ref={detailsRef} className="relative min-w-0">
-      <summary className="flex h-7 max-w-40 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
+    <details ref={detailsRef} className="min-w-0">
+      <summary className="flex h-7 max-w-40 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-xs text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
         {props.saving ? (
           <LoaderCircleIcon className="size-3 animate-spin" />
         ) : attached ? (
@@ -1445,13 +1578,13 @@ function BrowserProfileMenu(props: {
           {attached ? props.session?.name : (props.identity?.name ?? "Temporary")}
         </span>
         {attached || props.identity ? (
-          <span className="shrink-0 text-og-subtle">· {versionLabel}</span>
+          <span className="shrink-0 text-og-fg-subtle">· {versionLabel}</span>
         ) : null}
-        <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
+        <ChevronDownIcon className="size-3 shrink-0 text-og-fg-subtle" />
       </summary>
-      <div className="absolute right-0 top-8 z-40 w-72 rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
+      <div className="absolute right-2 top-10 z-40 max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-xl">
         <div className="flex items-start gap-2">
-          <span className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-2 text-og-muted">
+          <span className="grid size-7 shrink-0 place-items-center rounded-og-sm bg-og-surface-2 text-og-fg-muted">
             {attached ? (
               <MonitorIcon className="size-3.5" />
             ) : (
@@ -1462,7 +1595,7 @@ function BrowserProfileMenu(props: {
             <p className="truncate text-og-control font-medium text-og-fg">
               {attached ? props.session?.name : (props.identity?.name ?? "Temporary browser")}
             </p>
-            <p className="mt-0.5 text-og-xs leading-4 text-og-subtle">
+            <p className="mt-0.5 text-og-xs leading-4 text-og-fg-subtle">
               {attached
                 ? "This session drives the existing Chrome profile and its current login state."
                 : props.identity?.status === "archived"
@@ -1477,7 +1610,7 @@ function BrowserProfileMenu(props: {
         </div>
         {props.identity && revisions.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-2">
-            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
               Saved versions
             </p>
             <div className="mt-1 max-h-40 overflow-y-auto">
@@ -1497,19 +1630,19 @@ function BrowserProfileMenu(props: {
                       onClick={() => openVersion(props.identity!.id, revision.id)}
                       className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-50"
                     >
-                      <span className="grid size-4 place-items-center text-og-muted">
+                      <span className="grid size-4 place-items-center text-og-fg-muted">
                         {isCurrent ? <CheckIcon className="size-3.5 text-og-accent" /> : null}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block text-og-control text-og-fg">
                           Version {revision.ordinal}
                         </span>
-                        <span className="block truncate text-[10px] text-og-subtle">
+                        <span className="block truncate text-[10px] text-og-fg-subtle">
                           {materialization.label}
                         </span>
                       </span>
                       {isCurrent ? (
-                        <span className="text-[10px] text-og-subtle">Current</span>
+                        <span className="text-[10px] text-og-fg-subtle">Current</span>
                       ) : null}
                     </button>
                     <button
@@ -1524,7 +1657,7 @@ function BrowserProfileMenu(props: {
                       onClick={() =>
                         void props.onUpdate(props.identity!, { defaultRevisionId: revision.id })
                       }
-                      className="mr-1 shrink-0 rounded-og-sm px-2 py-1 text-[10px] text-og-subtle transition hover:bg-og-surface-3 hover:text-og-fg disabled:cursor-default disabled:opacity-70"
+                      className="mr-1 shrink-0 rounded-og-sm px-2 py-1 text-[10px] text-og-fg-subtle transition hover:bg-og-surface-3 hover:text-og-fg disabled:cursor-default disabled:opacity-70"
                     >
                       {isDefault ? "Default" : "Make default"}
                     </button>
@@ -1532,7 +1665,7 @@ function BrowserProfileMenu(props: {
                 );
               })}
             </div>
-            <p className="mt-1 px-2 text-[10px] leading-4 text-og-subtle">
+            <p className="mt-1 px-2 text-[10px] leading-4 text-og-fg-subtle">
               Changing the default affects only browsers opened later. Saved browser data can be
               copied; a website may still expire or re-verify its own session.
             </p>
@@ -1540,13 +1673,13 @@ function BrowserProfileMenu(props: {
         ) : props.identity &&
           props.history?.identityId === props.identity.id &&
           props.history.loading ? (
-          <p className="mt-3 flex items-center gap-1.5 border-t border-og-border px-2 pt-2 text-og-xs text-og-subtle">
+          <p className="mt-3 flex items-center gap-1.5 border-t border-og-border px-2 pt-2 text-og-xs text-og-fg-subtle">
             <LoaderCircleIcon className="size-3 animate-spin" /> Loading saved versions…
           </p>
         ) : null}
         {props.identity && props.authConnections.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-2">
-            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
               Login health
             </p>
             <div className="mt-1 space-y-1">
@@ -1562,7 +1695,7 @@ function BrowserProfileMenu(props: {
                       <span className="block truncate text-og-control text-og-fg">
                         {connection.name}
                       </span>
-                      <span className="block truncate text-[10px] text-og-subtle">
+                      <span className="block truncate text-[10px] text-og-fg-subtle">
                         {connection.accountLabel} · {health.label}
                       </span>
                     </span>
@@ -1595,7 +1728,7 @@ function BrowserProfileMenu(props: {
                 if (name.trim()) void save(name);
               }}
             >
-              <label className="text-og-xs font-medium text-og-muted" htmlFor={nameInputId}>
+              <label className="text-og-xs font-medium text-og-fg-muted" htmlFor={nameInputId}>
                 Profile name
               </label>
               <div className="mt-1 flex gap-1.5">
@@ -1605,12 +1738,12 @@ function BrowserProfileMenu(props: {
                   onInput={(event) => setName(event.currentTarget.value)}
                   maxLength={200}
                   placeholder="Work"
-                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-subtle focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-fg-subtle focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 />
                 <button
                   type="submit"
                   disabled={!name.trim() || props.saving}
-                  className="inline-flex h-8 items-center gap-1 rounded-og-sm bg-og-accent px-2.5 text-og-control font-medium text-white transition hover:opacity-90 disabled:opacity-40"
+                  className="inline-flex h-8 items-center gap-1 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2.5 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
                 >
                   {props.saving ? (
                     <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -1623,9 +1756,9 @@ function BrowserProfileMenu(props: {
             </form>
           )
         ) : (
-          <p className="mt-3 rounded-og-sm bg-og-surface-2 px-2.5 py-2 text-og-xs text-og-subtle">
+          <p className="mt-3 rounded-og-sm bg-og-surface-2 px-2.5 py-2 text-og-xs text-og-fg-subtle">
             {attached
-              ? "Chrome keeps this profile's state directly; OpenGeni does not copy it automatically."
+              ? "Chrome keeps this profile's state directly; Opengeni does not copy it automatically."
               : props.identity?.status === "archived"
                 ? "Restore this profile before saving another version."
                 : "This browser cannot save reusable profile state."}
@@ -1640,7 +1773,7 @@ function BrowserProfileMenu(props: {
                 status: props.identity!.status === "active" ? "archived" : "active",
               })
             }
-            className="mt-2 flex h-8 w-full items-center justify-center gap-1.5 rounded-og-sm px-3 text-og-control text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+            className="mt-2 flex h-8 w-full items-center justify-center gap-1.5 rounded-og-sm px-3 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
           >
             {props.identity.status === "active" ? (
               <ArchiveIcon className="size-3.5" />
@@ -1651,8 +1784,9 @@ function BrowserProfileMenu(props: {
           </button>
         ) : null}
         {canSave ? (
-          <p className="mt-2 text-[10px] leading-4 text-og-subtle">
-            Saving briefly restarts this browser. Other open browsers are unchanged.
+          <p className="mt-2 text-[10px] leading-4 text-og-fg-subtle">
+            Saving restarts this browser. Save unfinished work on its pages first; unsaved form
+            entries may be lost. Other open browsers are unchanged.
           </p>
         ) : null}
       </div>
@@ -1705,7 +1839,7 @@ function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?
       type="button"
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex h-7 flex-1 items-center justify-center gap-1 rounded-og-sm px-2 text-og-control text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+      className="flex h-7 flex-1 items-center justify-center gap-1 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
     >
       {props.children}
     </button>
@@ -1723,7 +1857,7 @@ function BrowserTabs(props: {
 }) {
   const pages = props.targets.filter((target) => target.kind === "page" || target.kind === "popup");
   return (
-    <div className="flex h-9 shrink-0 items-end gap-px overflow-x-auto border-b border-og-border bg-og-surface-0 px-1 pt-1">
+    <div className="flex h-9 shrink-0 items-end gap-px overflow-x-auto border-b border-og-border bg-og-surface-1 px-1 pt-1">
       {pages.map((target) => (
         <div
           key={target.id}
@@ -1731,7 +1865,7 @@ function BrowserTabs(props: {
             "group flex h-8 min-w-24 max-w-48 items-center rounded-t-og-sm border border-b-0 border-transparent px-2",
             target.id === props.selectedTargetId
               ? "border-og-border bg-og-bg text-og-fg"
-              : "text-og-muted hover:bg-og-surface-1",
+              : "text-og-fg-muted hover:bg-og-surface-1",
           )}
         >
           <button
@@ -1759,7 +1893,7 @@ function BrowserTabs(props: {
           type="button"
           onClick={props.onOpen}
           disabled={props.mutating}
-          className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
           aria-label="New tab"
         >
           <PlusIcon className="size-3.5" />
@@ -1794,13 +1928,13 @@ function BrowserAddressBar(props: {
         type="button"
         onClick={props.onReload}
         disabled={!props.target || props.loading}
-        className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-35"
+        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-35"
         aria-label="Reload"
       >
         <RefreshCwIcon className={cn("size-3.5", props.loading && "animate-spin")} />
       </button>
-      <div className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-og-sm border border-og-border bg-og-surface-0 px-2 focus-within:border-og-accent/60">
-        <Globe2Icon className="size-3 shrink-0 text-og-subtle" />
+      <div className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-og-sm border border-og-border bg-og-surface-1 px-2 focus-within:border-og-accent/60">
+        <Globe2Icon className="size-3 shrink-0 text-og-fg-subtle" />
         <input
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -1817,7 +1951,7 @@ function BrowserAddressBar(props: {
             if (normalized) props.onNavigate(normalized);
           }}
           disabled={!props.target}
-          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-fg-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
           aria-label="Address"
           spellCheck={false}
           placeholder="Search or enter address"
@@ -1828,16 +1962,35 @@ function BrowserAddressBar(props: {
 }
 
 function BrowserViewport(props: {
-  frame: BrowserFrame | null;
+  focusHandoffRef: { current: string | null };
+  focusScope: string;
+  frame: BrowserViewportFrame | null;
   connectionState: string;
   supportsLiveFrames: boolean;
   connectionError: Error | null;
+  controlUnavailable: boolean;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
   clipboardEnabled: boolean;
+  inputBatchAttachment?: {
+    browserSessionId: string;
+    controllerGeneration: string;
+    targetId: string;
+    fencedInputBatches?: true | undefined;
+    focusedInputObservations?: true | undefined;
+    expiresAt: string;
+  } | null;
   activityLabel?: string | undefined;
-  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
+  onAction: (
+    action: BrowserAction | BrowserActionBatch,
+    frame: BrowserFrameInputFence | null,
+  ) => Promise<BrowserActionReceipt>;
   onReadClipboard: () => Promise<{ text: string }>;
+  onObserveForInput: () => Promise<BrowserObservation>;
+  onSelectFromObservation: (
+    action: BrowserAction,
+    observation: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
@@ -1845,38 +1998,70 @@ function BrowserViewport(props: {
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [selectPopup, setSelectPopup] = useState<{
+    observation: BrowserObservation | null;
+    anchor: { x: number; y: number } | null;
+  } | null>(null);
+  const inputSequenceRef = useRef(0);
+  const dismissSelectPopup = useCallback(() => {
+    inputSequenceRef.current += 1;
+    setSelectPopup({ observation: null, anchor: null });
+  }, []);
   const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const lastClickRef = useRef<{
     at: number;
     x: number;
     y: number;
-    frame: BrowserFrame;
+    frame: BrowserViewportFrame;
   } | null>(null);
   const wheelRef = useRef<{
     x: number;
     y: number;
     deltaX: number;
     deltaY: number;
-    frame: BrowserFrame;
+    frame: BrowserViewportFrame;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
   const pendingTextRef = useRef<{
     text: string;
-    frame: BrowserFrame | null;
+    frame: BrowserViewportFrame | null;
     timer: ReturnType<typeof setTimeout>;
   } | null>(null);
   const actionRef = useRef(props.onAction);
   const readClipboardRef = useRef(props.onReadClipboard);
+  const observeInputRef = useRef(props.onObserveForInput);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
-  const queuedFrameRef = useRef<BrowserFrame | null>(null);
+  const queuedTypingRef = useRef<{
+    actions: BrowserAction[];
+    frame: BrowserFrameInputFence;
+    epoch: number;
+  } | null>(null);
+  const queuedFrameRef = useRef<BrowserViewportFrame | null>(null);
+  const currentFrameRef = useRef<BrowserViewportFrame | null>(props.frame);
+  const paintedFrameRef = useRef<BrowserViewportFrame | null>(null);
+  const [paintedFrame, setPaintedFrame] = useState<BrowserViewportFrame | null>(null);
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
+  observeInputRef.current = props.onObserveForInput;
   errorRef.current = props.onError;
+
+  const clearBufferedInput = useCallback(() => {
+    dismissSelectPopup();
+    if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+    if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
+    wheelRef.current = null;
+    pendingTextRef.current = null;
+    queuedTypingRef.current = null;
+    pointerStartRef.current = null;
+    lastClickRef.current = null;
+    composingRef.current = false;
+    if (inputRef.current) inputRef.current.value = "";
+  }, [dismissSelectPopup]);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1890,15 +2075,22 @@ function BrowserViewport(props: {
 
           let objectUrl: string | null = null;
           try {
-            const blob = new Blob([frame.data.slice().buffer], {
+            const blob = new Blob([frame.data], {
               type: frame.mediaType,
             });
             if (typeof createImageBitmap === "function") {
               const bitmap = await createImageBitmap(blob);
               try {
                 const canvas = canvasRef.current;
-                if (mountedRef.current && canvas) {
+                if (
+                  mountedRef.current &&
+                  canvas &&
+                  currentFrameRef.current &&
+                  sameBrowserDocument(frame, currentFrameRef.current)
+                ) {
                   paintCanvas(canvas, bitmap, frame.width, frame.height);
+                  paintedFrameRef.current = frame;
+                  setPaintedFrame(frame);
                 }
               } finally {
                 bitmap.close();
@@ -1908,11 +2100,23 @@ function BrowserViewport(props: {
             objectUrl = URL.createObjectURL(blob);
             const image = await loadImage(objectUrl);
             const canvas = canvasRef.current;
-            if (mountedRef.current && canvas) {
+            if (
+              mountedRef.current &&
+              canvas &&
+              currentFrameRef.current &&
+              sameBrowserDocument(frame, currentFrameRef.current)
+            ) {
               paintCanvas(canvas, image, frame.width, frame.height);
+              paintedFrameRef.current = frame;
+              setPaintedFrame(frame);
             }
           } catch (cause) {
-            if (mountedRef.current) errorRef.current(cause);
+            if (
+              mountedRef.current &&
+              currentFrameRef.current &&
+              sameBrowserDocument(frame, currentFrameRef.current)
+            )
+              errorRef.current(cause);
           } finally {
             if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
@@ -1924,53 +2128,135 @@ function BrowserViewport(props: {
     })();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const keyboardInput = inputRef.current;
+    const focusHandoff = props.focusHandoffRef;
     mountedRef.current = true;
+    if (focusHandoff.current === props.focusScope) {
+      keyboardInput?.focus({ preventScroll: true });
+    }
+    focusHandoff.current = null;
     return () => {
+      // Only a same-target replacement may inherit focus the keyboard sink owned.
+      if (document.activeElement === keyboardInput) {
+        focusHandoff.current = props.focusScope;
+      }
       mountedRef.current = false;
+      actionQueueEpochRef.current += 1;
       queuedFrameRef.current = null;
+      clearBufferedInput();
     };
-  }, []);
+  }, [clearBufferedInput, props.focusHandoffRef, props.focusScope]);
 
-  useEffect(() => {
-    if (!props.frame) return;
+  useLayoutEffect(() => {
+    if (currentFrameRef.current && !props.frame) {
+      actionQueueEpochRef.current += 1;
+      clearBufferedInput();
+    }
+    currentFrameRef.current = props.frame;
+    if (!props.frame) {
+      queuedFrameRef.current = null;
+      paintedFrameRef.current = null;
+      setPaintedFrame(null);
+      return;
+    }
     queuedFrameRef.current = props.frame;
     paintQueuedFrames();
-  }, [paintQueuedFrames, props.frame]);
-
-  useEffect(
-    () => () => {
-      if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
-      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
-    },
-    [],
-  );
+  }, [clearBufferedInput, paintQueuedFrames, props.frame]);
 
   const enqueue = useCallback(
     (
       action: BrowserAction,
-      frame: BrowserFrame | null,
+      frame: BrowserFrameInputFence | null,
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
+      selectAnchor?: { x: number; y: number },
     ) => {
+      const inputSequence = ++inputSequenceRef.current;
+      setSelectPopup({ observation: null, anchor: null });
+      // Detach image bytes even when the caller supplied a complete painted frame.
+      frame = frame
+        ? {
+            browserSessionId: frame.browserSessionId,
+            controllerGeneration: frame.controllerGeneration,
+            targetId: frame.targetId,
+            targetGeneration: frame.targetGeneration,
+            documentGeneration: frame.documentGeneration,
+            frameId: frame.frameId,
+          }
+        : null;
       const epoch = actionQueueEpochRef.current;
+      const attachment = props.inputBatchAttachment;
+      const canBatchTyping =
+        action.type === "type" &&
+        !after &&
+        frame &&
+        attachment?.fencedInputBatches === true &&
+        attachment.browserSessionId === frame.browserSessionId &&
+        attachment.controllerGeneration === frame.controllerGeneration &&
+        attachment.targetId === frame.targetId &&
+        Date.parse(attachment.expiresAt) > Date.now();
+      const previous = queuedTypingRef.current;
+      if (
+        canBatchTyping &&
+        frame &&
+        previous &&
+        previous.epoch === epoch &&
+        sameFrameFence(previous.frame, frame) &&
+        previous.actions.length < 16
+      ) {
+        // Keep every existing text/input event boundary. Only share transport.
+        previous.actions.push(action);
+        return;
+      }
+      const typing = canBatchTyping && frame ? { actions: [action], frame, epoch } : null;
+      // Every non-typing action is an ordering barrier, including keys and paste.
+      queuedTypingRef.current = typing;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
-          if (epoch !== actionQueueEpochRef.current) return;
-          const receipt = await actionRef.current(action, frame);
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
+          if (queuedTypingRef.current === typing) queuedTypingRef.current = null;
+          const dispatchedAction =
+            typing && typing.actions.length > 1
+              ? { type: "batch" as const, actions: typing.actions, fenceEachAction: true as const }
+              : action;
+          // Read after the epoch guard: a queued render callback can retain every
+          // frame from that render even when its input fence contains no bytes.
+          const receipt = await actionRef.current(dispatchedAction, frame);
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
+          // Alt+Down explicitly opens a native dropdown from the keyboard.
+          // Existing controllers return focused-input metadata for clicks only,
+          // so use the ordinary authorized read for this explicit gesture.
+          const keyboardSelect =
+            dispatchedAction.type === "press" && dispatchedAction.key === "Alt+ArrowDown";
+          if ((selectAnchor || keyboardSelect) && inputSequence === inputSequenceRef.current) {
+            const observation = keyboardSelect
+              ? await observeInputRef.current()
+              : receipt.observation;
+            if (
+              mountedRef.current &&
+              epoch === actionQueueEpochRef.current &&
+              inputSequence === inputSequenceRef.current &&
+              observation
+            ) {
+              setSelectPopup({ observation, anchor: selectAnchor ?? null });
+            }
+          }
           await after?.(receipt);
         })
         .catch((cause) => {
+          if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
           // Do not replay or continue input collected behind a failed request.
           actionQueueEpochRef.current += 1;
+          clearBufferedInput();
           errorRef.current(cause);
         });
     },
-    [],
+    [clearBufferedInput, props.inputBatchAttachment],
   );
 
   const point = useCallback(
-    (frame: BrowserFrame, clientX: number, clientY: number) =>
+    (frame: BrowserViewportFrame, clientX: number, clientY: number) =>
       browserPoint(canvasRef.current, frame, clientX, clientY),
     [],
   );
@@ -1987,19 +2273,40 @@ function BrowserViewport(props: {
     lastClickRef.current = null;
   }, []);
 
+  const flushPendingWheel = useCallback(() => {
+    const batch = wheelRef.current;
+    if (!batch) return;
+    if (batch.timer) clearTimeout(batch.timer);
+    wheelRef.current = null;
+    enqueue(
+      {
+        type: "pointer",
+        action: "scroll",
+        x: batch.x,
+        y: batch.y,
+        deltaX: batch.deltaX,
+        deltaY: batch.deltaY,
+      },
+      batch.frame,
+    );
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || event.button !== 0) return;
+    const frame = paintedFrameRef.current;
+    if (!frame || event.button !== 0) return;
     // Keep the hidden keyboard sink focused after the browser performs the
     // pointerdown default action for the canvas. Without preventing that
     // default, Chrome immediately moves focus back to the document and all
     // subsequent typing/paste is silently lost.
     event.preventDefault();
+    dismissSelectPopup();
+    flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
       pointerId: event.pointerId,
-      frame: props.frame,
+      frame,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
     inputRef.current?.focus({ preventScroll: true });
@@ -2043,13 +2350,22 @@ function BrowserViewport(props: {
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
-    enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
+    const viewportBounds = canvasRef.current?.parentElement?.getBoundingClientRect();
+    enqueue(
+      { type: "pointer", action: "click", x: to.x, y: to.y },
+      start.frame,
+      undefined,
+      viewportBounds
+        ? { x: event.clientX - viewportBounds.left, y: event.clientY - viewportBounds.top + 8 }
+        : undefined,
+    );
   };
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
-    const frame = props.frame;
+    const frame = paintedFrameRef.current;
     if (!frame) return;
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
@@ -2057,41 +2373,47 @@ function BrowserViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
-    const frame = props.frame;
+    dismissSelectPopup();
+    const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
     flushPendingText();
     flushPendingClick();
     event.preventDefault();
-    const pending = wheelRef.current;
-    if (pending?.timer) clearTimeout(pending.timer);
+    let pending = wheelRef.current;
+    if (
+      pending &&
+      (!sameBrowserDocument(pending.frame, frame) ||
+        Math.hypot(pending.x - at.x, pending.y - at.y) > 6)
+    ) {
+      flushPendingWheel();
+      pending = null;
+    }
     wheelRef.current = {
       x: at.x,
       y: at.y,
-      deltaX: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaX : 0) + event.deltaX,
-      deltaY: (pending && sameFrameFence(pending.frame, frame) ? pending.deltaY : 0) + event.deltaY,
+      deltaX: (pending?.deltaX ?? 0) + event.deltaX,
+      deltaY: (pending?.deltaY ?? 0) + event.deltaY,
       frame,
-      timer: setTimeout(() => {
-        const batch = wheelRef.current;
-        wheelRef.current = null;
-        if (batch)
-          enqueue(
-            {
-              type: "pointer",
-              action: "scroll",
-              x: batch.x,
-              y: batch.y,
-              deltaX: batch.deltaX,
-              deltaY: batch.deltaY,
-            },
-            batch.frame,
-          );
-      }, 45),
+      // Retain the first event's deadline so a continuous gesture keeps moving.
+      timer: pending?.timer ?? setTimeout(flushPendingWheel, 45),
     };
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Candidate selection/editing belongs to the local IME. Forward only the
+    // committed text; Enter must not submit the remote page during composition.
+    // Safari can end composition before keydown while retaining keyCode 229.
+    if (
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
+    dismissSelectPopup();
+    flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
       props.clipboardEnabled &&
@@ -2107,26 +2429,31 @@ function BrowserViewport(props: {
     event.preventDefault();
     flushPendingText();
     flushPendingClick();
-    enqueue({ type: "press", key }, props.frame);
+    enqueue({ type: "press", key }, paintedFrameRef.current);
   };
+
+  const finishCopy = useCallback(async () => {
+    const clipboard = await readClipboardRef.current();
+    if (!mountedRef.current) return;
+    if (clipboard.text.length === 0) return;
+    if (!(await copyTextToClipboard(clipboard.text))) {
+      throw new Error("Browser text could not be copied to the local clipboard");
+    }
+  }, []);
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
-    enqueue({ type: "clipboard", operation: "copy" }, props.frame, async () => {
-      const clipboard = await readClipboardRef.current();
-      if (clipboard.text.length === 0) return;
-      if (!(await copyTextToClipboard(clipboard.text))) {
-        throw new Error("Browser text could not be copied to the local clipboard");
-      }
-    });
+    enqueue({ type: "clipboard", operation: "copy" }, paintedFrameRef.current, finishCopy);
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingWheel();
     flushPendingText();
     flushPendingClick();
     enqueue(
@@ -2135,16 +2462,18 @@ function BrowserViewport(props: {
         operation: "paste",
         text: event.clipboardData.getData("text/plain"),
       },
-      props.frame,
+      paintedFrameRef.current,
     );
   };
 
   const input = (value: string, nativeComposing = false) => {
+    dismissSelectPopup();
     if (composingRef.current || nativeComposing) return;
     if (!value) return;
+    flushPendingWheel();
     flushPendingClick();
     const pending = pendingTextRef.current;
-    if (pending && sameOptionalBrowserFrame(pending.frame, props.frame)) {
+    if (pending && sameOptionalBrowserFrame(pending.frame, paintedFrameRef.current)) {
       clearTimeout(pending.timer);
       pending.text += value;
       pending.timer = setTimeout(flushPendingText, 16);
@@ -2152,7 +2481,7 @@ function BrowserViewport(props: {
       flushPendingText();
       pendingTextRef.current = {
         text: value,
-        frame: props.frame,
+        frame: paintedFrameRef.current,
         timer: setTimeout(flushPendingText, 16),
       };
     }
@@ -2168,7 +2497,11 @@ function BrowserViewport(props: {
     input(event.currentTarget.value || event.data);
   };
 
-  const showCanvas = props.frame !== null;
+  const showCanvas =
+    !props.controlUnavailable &&
+    props.frame !== null &&
+    paintedFrame !== null &&
+    sameBrowserDocument(props.frame, paintedFrame);
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
       <canvas
@@ -2188,6 +2521,7 @@ function BrowserViewport(props: {
       />
       <textarea
         ref={inputRef}
+        disabled={props.controlUnavailable}
         defaultValue=""
         onInput={(event) =>
           input(event.currentTarget.value, (event.nativeEvent as InputEvent).isComposing)
@@ -2199,6 +2533,7 @@ function BrowserViewport(props: {
         onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
         aria-label="Browser keyboard input"
+        aria-keyshortcuts="Alt+ArrowDown"
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
@@ -2209,10 +2544,26 @@ function BrowserViewport(props: {
           connectionState={props.connectionState}
           supportsLiveFrames={props.supportsLiveFrames}
           error={props.connectionError}
+          controlUnavailable={props.controlUnavailable}
           onAction={(action) => enqueue(action, null)}
           onReconnect={props.onReconnect}
           reconnectLabel={props.reconnectLabel}
           reconnectMessage={props.reconnectMessage}
+        />
+      ) : null}
+      {showCanvas ? (
+        <BrowserSelectControl
+          manualFallback={props.inputBatchAttachment?.focusedInputObservations !== true}
+          activation={selectPopup}
+          onDismiss={() => inputRef.current?.focus({ preventScroll: true })}
+          observe={async () => {
+            flushPendingText();
+            flushPendingWheel();
+            await actionTailRef.current;
+            if (!mountedRef.current) throw new Error("The browser page changed.");
+            return await props.onObserveForInput();
+          }}
+          act={props.onSelectFromObservation}
         />
       ) : null}
       {props.mutating ? (
@@ -2229,47 +2580,52 @@ function SemanticBrowserFallback(props: {
   connectionState: string;
   supportsLiveFrames: boolean;
   error: Error | null;
+  controlUnavailable: boolean;
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
   reconnectLabel?: string | undefined;
   reconnectMessage?: string | undefined;
 }) {
   const controlFailure = interactionControlFailureFromError(props.error);
-  const generationLoss =
-    Boolean(props.reconnectMessage) || isAttachedChromeGenerationLossError(props.error);
+  const { controlUnavailable } = props;
+  const generationLoss = Boolean(props.reconnectMessage);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
   );
   const interactive = nodes.filter((node) => node.actions.includes("click")).slice(0, 8);
   return (
     <div className="absolute inset-0 grid place-items-center bg-og-bg p-6">
-      <div className="w-full max-w-md rounded-og-lg border border-og-border bg-og-surface-0 p-4 shadow-lg">
+      <div className="w-full max-w-md rounded-og-lg border border-og-border bg-og-surface-1 p-4 shadow-lg">
         <div className="flex items-center gap-2">
           {props.error ? (
-            <CircleAlertIcon className="size-4 text-og-status-error" />
-          ) : !props.supportsLiveFrames ? (
-            <ZapIcon className="size-4 text-og-muted" />
+            <CircleAlertIcon className="size-4 text-og-danger" />
+          ) : props.connectionState === "semantic" ? (
+            <ZapIcon className="size-4 text-og-fg-muted" />
           ) : (
-            <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
+            <LoaderCircleIcon className="size-4 animate-spin text-og-fg-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
             {generationLoss
               ? "Chrome reconnected—open a fresh browser/desktop."
-              : props.error
-                ? "Live view disconnected"
-                : props.supportsLiveFrames
-                  ? browserConnectionLabel(props.connectionState)
-                  : "Semantic browser"}
+              : controlUnavailable
+                ? "Browser controls unavailable"
+                : props.error
+                  ? props.supportsLiveFrames
+                    ? "Live view disconnected"
+                    : "Browser unavailable"
+                  : props.connectionState === "semantic"
+                    ? "Semantic browser"
+                    : browserConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error || props.reconnectMessage ? (
-          <p className="mt-2 text-og-control leading-5 text-og-muted">
+          <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
             {props.reconnectMessage ?? controlFailure?.message ?? props.error?.message}
           </p>
         ) : null}
-        {interactive.length > 0 ? (
+        {interactive.length > 0 && !controlUnavailable ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-subtle">
+            <p className="mb-2 text-og-xs text-og-fg-subtle">
               {props.supportsLiveFrames
                 ? "Page controls remain available"
                 : "Available page controls"}
@@ -2293,7 +2649,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error && props.supportsLiveFrames && (!generationLoss || props.reconnectLabel) ? (
+        {props.error && (!generationLoss || props.reconnectLabel) ? (
           <button
             type="button"
             onClick={props.onReconnect}
@@ -2313,6 +2669,7 @@ function BrowserStatusBar(props: {
   profile: BrowserIdentity | null;
   target: BrowserTarget | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
+  inputFailure: ReturnType<typeof useBrowserSession>["inputFailure"];
   connectionState: string;
   refreshing: boolean;
   diagnosticsOpen: boolean;
@@ -2324,7 +2681,7 @@ function BrowserStatusBar(props: {
     (props.observation?.diagnostics.pageErrorCount ?? 0);
   const failed = props.observation?.diagnostics.failedRequestCount ?? 0;
   return (
-    <div className="flex h-7 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-0 px-2 text-og-xs text-og-subtle">
+    <div className="flex h-7 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-2 text-og-xs text-og-fg-subtle">
       <span
         className={cn(
           "size-1.5 rounded-full",
@@ -2340,6 +2697,11 @@ function BrowserStatusBar(props: {
             ? "Semantic"
             : browserConnectionLabel(props.connectionState)}
       </span>
+      {props.inputFailure ? (
+        <span className="text-og-status-failed">
+          {props.inputFailure.state === "failed" ? "Input failed" : "Input result unknown"}
+        </span>
+      ) : null}
       <span>{props.profile?.name ?? "Temporary browser"}</span>
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
@@ -2405,13 +2767,13 @@ function BrowserDiagnosticsDrawer(props: {
       id="browser-diagnostics-drawer"
       role="region"
       aria-label="Browser diagnostics"
-      className="absolute bottom-7 right-0 top-10 z-40 flex w-full max-w-md flex-col border-l border-og-border bg-og-surface-0 shadow-2xl"
+      className="absolute inset-y-0 right-0 z-40 flex min-h-0 w-full max-w-md flex-col border-l border-og-border bg-og-surface-1 shadow-2xl"
     >
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-og-border px-3">
-        <BugIcon className="size-4 text-og-muted" />
+      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-og-border px-3 py-2">
+        <BugIcon className="size-4 shrink-0 text-og-fg-muted" />
         <div className="min-w-0 flex-1">
           <p className="text-og-control font-semibold text-og-fg">Browser diagnostics</p>
-          <p className="truncate text-og-xs text-og-subtle">
+          <p className="truncate text-og-xs text-og-fg-subtle">
             {props.target?.title || shortUrl(props.target?.url ?? "") || "Current tab"}
           </p>
         </div>
@@ -2419,7 +2781,7 @@ function BrowserDiagnosticsDrawer(props: {
           type="button"
           onClick={props.onRefresh}
           disabled={props.state.loading}
-          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
           aria-label="Refresh browser diagnostics"
         >
           <RefreshCwIcon className={cn("size-3.5", props.state.loading && "animate-spin")} />
@@ -2427,7 +2789,7 @@ function BrowserDiagnosticsDrawer(props: {
         <button
           type="button"
           onClick={props.onClose}
-          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+          className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
           aria-label="Close browser diagnostics"
         >
           <XIcon className="size-3.5" />
@@ -2438,7 +2800,7 @@ function BrowserDiagnosticsDrawer(props: {
         <section className="border-b border-og-border p-3" aria-labelledby="browser-runtime-title">
           <h3
             id="browser-runtime-title"
-            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
           >
             Runtime
           </h3>
@@ -2469,18 +2831,19 @@ function BrowserDiagnosticsDrawer(props: {
         <section className="border-b border-og-border p-3" aria-labelledby="browser-page-title">
           <h3
             id="browser-page-title"
-            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
           >
-            Current page
+            Tab diagnostics
           </h3>
+          <p className="mt-1 text-og-xs text-og-fg-subtle">Includes earlier pages in this tab.</p>
           <dl className="mt-2 grid grid-cols-2 gap-2">
-            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount ?? 0} />
-            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount ?? 0} />
-            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount ?? 0} />
-            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount ?? 0} />
+            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount} />
+            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount} />
+            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount} />
+            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount} />
           </dl>
           {session?.failureCode ? (
-            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-status-error">
+            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-danger">
               Browser state: {session.failureCode}
             </p>
           ) : null}
@@ -2502,21 +2865,21 @@ function BrowserDiagnosticsDrawer(props: {
           <div className="flex items-center justify-between gap-2">
             <h3
               id="browser-events-title"
-              className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+              className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
             >
               Recent events
             </h3>
             {props.state.batch?.truncated ? (
-              <span className="text-[10px] text-og-subtle">Newest 100</span>
+              <span className="text-[10px] text-og-fg-subtle">Newest 100</span>
             ) : null}
           </div>
           {props.state.loading && !props.state.batch ? (
-            <div className="flex items-center gap-2 py-6 text-og-control text-og-muted">
+            <div className="flex items-center gap-2 py-6 text-og-control text-og-fg-muted">
               <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading diagnostics…
             </div>
           ) : props.state.error ? (
             <div className="py-5">
-              <p className="text-og-control text-og-status-error">{props.state.error.message}</p>
+              <p className="text-og-control text-og-danger">{props.state.error.message}</p>
               <button
                 type="button"
                 onClick={props.onRefresh}
@@ -2532,7 +2895,7 @@ function BrowserDiagnosticsDrawer(props: {
                   key={entry.sequence}
                   className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
                 >
-                  <div className="flex items-center gap-2 text-[10px] text-og-subtle">
+                  <div className="flex items-center gap-2 text-[10px] text-og-fg-subtle">
                     <span
                       className={cn(
                         "font-semibold uppercase tracking-wide",
@@ -2547,7 +2910,7 @@ function BrowserDiagnosticsDrawer(props: {
                     {entry.message}
                   </p>
                   {entry.url || entry.filename || entry.method || entry.status ? (
-                    <p className="mt-1 truncate font-og-mono text-[10px] text-og-subtle">
+                    <p className="mt-1 truncate font-og-mono text-[10px] text-og-fg-subtle">
                       {[entry.method, entry.status, entry.filename, entry.url]
                         .filter((value) => value !== null)
                         .join(" · ")}
@@ -2557,7 +2920,7 @@ function BrowserDiagnosticsDrawer(props: {
               ))}
             </ol>
           ) : (
-            <p className="py-6 text-og-control text-og-muted">No diagnostics for this tab.</p>
+            <p className="py-6 text-og-control text-og-fg-muted">No diagnostics for this tab.</p>
           )}
         </section>
       </div>
@@ -2604,25 +2967,25 @@ function BrowserDownloadsPanel(props: {
   return (
     <section className="border-b border-og-border p-3" aria-labelledby="browser-downloads-title">
       <div className="flex items-center gap-2">
-        <DownloadIcon className="size-3.5 text-og-muted" />
+        <DownloadIcon className="size-3.5 text-og-fg-muted" />
         <h3
           id="browser-downloads-title"
-          className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+          className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
         >
           Downloads
         </h3>
         {props.refreshing ? (
-          <LoaderCircleIcon className="ml-auto size-3 animate-spin text-og-muted" />
+          <LoaderCircleIcon className="ml-auto size-3 animate-spin text-og-fg-muted" />
         ) : null}
       </div>
 
       {props.loading ? (
-        <div className="flex items-center gap-2 py-5 text-og-control text-og-muted">
+        <div className="flex items-center gap-2 py-5 text-og-control text-og-fg-muted">
           <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading downloads…
         </div>
       ) : props.error ? (
         <div className="py-4">
-          <p className="text-og-control text-og-status-error">{props.error.message}</p>
+          <p className="text-og-control text-og-danger">{props.error.message}</p>
           <button
             type="button"
             onClick={props.onRefresh}
@@ -2632,7 +2995,7 @@ function BrowserDownloadsPanel(props: {
           </button>
         </div>
       ) : props.downloads.length === 0 ? (
-        <p className="py-4 text-og-control text-og-muted">No files downloaded yet.</p>
+        <p className="py-4 text-og-control text-og-fg-muted">No files downloaded yet.</p>
       ) : (
         <ol className="mt-2 space-y-2">
           {props.downloads.map((download) => {
@@ -2645,9 +3008,9 @@ function BrowserDownloadsPanel(props: {
                 className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
               >
                 <div className="flex min-w-0 items-start gap-2">
-                  <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded bg-og-surface-2 text-og-muted">
+                  <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded bg-og-surface-2 text-og-fg-muted">
                     {isSaved ? (
-                      <FileCheck2Icon className="size-3.5 text-og-status-success" />
+                      <FileCheck2Icon className="size-3.5 text-og-status-idle" />
                     ) : (
                       <DownloadIcon className="size-3.5" />
                     )}
@@ -2659,7 +3022,7 @@ function BrowserDownloadsPanel(props: {
                     >
                       {download.filename}
                     </p>
-                    <p className="mt-0.5 text-[10px] text-og-subtle">
+                    <p className="mt-0.5 text-[10px] text-og-fg-subtle">
                       {downloadStatusLabel(download)}
                     </p>
                   </div>
@@ -2681,7 +3044,7 @@ function BrowserDownloadsPanel(props: {
                         }}
                         disabled={isSaving}
                         aria-label={`Workspace path for ${download.filename}`}
-                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-0 px-2 font-og-mono text-[10px] text-og-fg transition focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-og-mono text-[10px] text-og-fg transition focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
                       />
                       <button
                         type="button"
@@ -2707,7 +3070,7 @@ function BrowserDownloadsPanel(props: {
                               : "Save"}
                       </button>
                     </div>
-                    <label className="mt-1.5 flex w-fit items-center gap-1.5 text-[10px] text-og-subtle">
+                    <label className="mt-1.5 flex w-fit items-center gap-1.5 text-[10px] text-og-fg-subtle">
                       <input
                         type="checkbox"
                         checked={overwrite[download.id] ?? false}
@@ -2724,7 +3087,7 @@ function BrowserDownloadsPanel(props: {
                       Replace an existing workspace file
                     </label>
                     {errors[download.id] ? (
-                      <p className="mt-1.5 break-words text-[10px] text-og-status-error">
+                      <p className="mt-1.5 break-words text-[10px] text-og-danger">
                         {errors[download.id]}
                       </p>
                     ) : null}
@@ -2767,7 +3130,7 @@ function defaultDownloadDestination(download: BrowserDownload): string {
 function DiagnosticFact(props: { label: string; value: string }) {
   return (
     <>
-      <dt className="text-og-subtle">{props.label}</dt>
+      <dt className="text-og-fg-subtle">{props.label}</dt>
       <dd className="min-w-0 truncate text-og-fg" title={props.value}>
         {props.value}
       </dd>
@@ -2775,17 +3138,17 @@ function DiagnosticFact(props: { label: string; value: string }) {
   );
 }
 
-function DiagnosticCount(props: { label: string; value: number }) {
+function DiagnosticCount(props: { label: string; value: number | undefined }) {
   return (
     <div className="rounded-og-sm border border-og-border bg-og-bg px-2.5 py-2">
-      <dt className="text-[10px] text-og-subtle">{props.label}</dt>
+      <dt className="text-[10px] text-og-fg-subtle">{props.label}</dt>
       <dd
         className={cn(
           "mt-0.5 text-og-sm font-semibold",
-          props.value ? "text-og-fg" : "text-og-muted",
+          props.value ? "text-og-fg" : "text-og-fg-muted",
         )}
       >
-        {props.value}
+        {props.value ?? "Unavailable"}
       </dd>
     </div>
   );
@@ -2816,9 +3179,9 @@ function diagnosticKindLabel(kind: BrowserDiagnosticBatch["entries"][number]["ki
 }
 
 function diagnosticTone(level: BrowserDiagnosticBatch["entries"][number]["level"]): string {
-  if (level === "error") return "text-og-status-error";
+  if (level === "error") return "text-og-danger";
   if (level === "warning") return "text-og-status-waiting";
-  return "text-og-muted";
+  return "text-og-fg-muted";
 }
 
 function formatDiagnosticTime(value: string): string {
@@ -2832,7 +3195,7 @@ function BrowserNotice(props: { icon: ReactNode; text: string; className?: strin
   return (
     <div
       className={cn(
-        "grid h-full place-items-center bg-og-bg text-og-control text-og-muted",
+        "grid h-full place-items-center bg-og-bg text-og-control text-og-fg-muted",
         props.className,
       )}
     >
@@ -2868,7 +3231,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 
 function browserPoint(
   canvas: HTMLCanvasElement | null,
-  frame: BrowserFrame | null,
+  frame: BrowserViewportFrame | null,
   clientX: number,
   clientY: number,
 ): { x: number; y: number } | null {
@@ -2915,18 +3278,24 @@ function frameMatchesSelectedTarget(
   );
 }
 
-function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
+function sameFrameFence(left: BrowserFrameInputFence, right: BrowserFrameInputFence): boolean {
+  return sameBrowserDocument(left, right) && left.frameId === right.frameId;
+}
+
+function sameBrowserDocument(left: BrowserFrameInputFence, right: BrowserFrameInputFence): boolean {
   return (
     left.browserSessionId === right.browserSessionId &&
     left.controllerGeneration === right.controllerGeneration &&
     left.targetId === right.targetId &&
     left.targetGeneration === right.targetGeneration &&
-    left.documentGeneration === right.documentGeneration &&
-    left.frameId === right.frameId
+    left.documentGeneration === right.documentGeneration
   );
 }
 
-function sameOptionalBrowserFrame(left: BrowserFrame | null, right: BrowserFrame | null): boolean {
+function sameOptionalBrowserFrame(
+  left: BrowserViewportFrame | null,
+  right: BrowserViewportFrame | null,
+): boolean {
   return left === null || right === null ? left === right : sameFrameFence(left, right);
 }
 

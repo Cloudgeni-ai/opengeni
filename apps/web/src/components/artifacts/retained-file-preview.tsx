@@ -1,10 +1,11 @@
+import { Link } from "@tanstack/react-router";
 import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { InlineChatImage } from "./inline-chat-image";
-import { DeferredChatMedia } from "./deferred-chat-media";
+import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import { isRetainedTextPreview } from "./retained-text-preview-policy";
 const RetainedTextPreview = lazy(() => import("./retained-text-preview"));
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));
@@ -37,6 +38,8 @@ type PreviewProps = {
   filename?: string;
   /** Explicit opt-in for the workbench; chat and other viewers stay unchanged. */
   workbenchTextPreview?: boolean;
+  /** Let image detail pages fill the available viewer instead of the chat slot. */
+  fullSizeImage?: boolean;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
@@ -70,6 +73,7 @@ function RetainedFilePreviewBody({
   artifact: initialArtifact,
   title,
   filename,
+  fullSizeImage,
 }: PreviewProps) {
   // The parent remounts on receipt changes, not object allocation on a rerender.
   const [artifact] = useState(initialArtifact);
@@ -132,7 +136,12 @@ function RetainedFilePreviewBody({
   }, [client, key, kind, workspaceId, artifact]);
   if (kind === "image")
     return (
-      <InlineChatImage workspaceId={workspaceId} artifactId={artifact.artifactId} alt={title} />
+      <InlineChatImage
+        workspaceId={workspaceId}
+        artifactId={artifact.artifactId}
+        alt={title}
+        viewer={fullSizeImage}
+      />
     );
   if (!kind)
     return (
@@ -300,12 +309,13 @@ function InlineArtifactBody({
           </Button>
         </p>
       )}
-      <a
-        href={`/workspaces/${workspaceId}/artifacts/files/${artifactId}`}
+      <Link
+        to="/workspaces/$workspaceId/artifacts/files/$artifactId"
+        params={{ workspaceId, artifactId }}
         className="text-sm underline"
       >
         Open {alt || "artifact"} in Artifacts
-      </a>
+      </Link>
     </div>
   );
 }

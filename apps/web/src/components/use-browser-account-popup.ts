@@ -9,6 +9,8 @@ import {
   accountAuthPopupPath,
   postAccountAuthPopupAcknowledgement,
 } from "@/lib/browser-account-popup";
+import { userErrorText } from "@/lib/api-error";
+import { signupReturnPath } from "@/lib/signup-attribution";
 
 type PendingPopup = {
   popup: Window;
@@ -67,8 +69,8 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
       void settle
         .then(() => onSettled?.())
         .catch((error) =>
-          toast.error("Account authentication did not settle", {
-            description: String(error),
+          toast.error("Couldn't finish account authentication", {
+            description: userErrorText(error),
           }),
         );
     };
@@ -91,7 +93,7 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
           .then(() => onSettled?.())
           .catch((error) =>
             toast.error("Couldn't cancel account authentication", {
-              description: String(error),
+              description: userErrorText(error),
             }),
           );
       }, 0);
@@ -127,7 +129,9 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
       accountAuthPopupFeatures(window),
     );
     if (!popup) {
-      const error = new Error("The account authentication popup was blocked");
+      const error = new Error(
+        "The account window was blocked. Allow popups for this site, then try again.",
+      );
       options?.onError?.(error);
       if (!options?.onError) {
         toast.error("The account window was blocked", {
@@ -147,7 +151,10 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
         }
         startingPopupRef.current = null;
         pendingRef.current = { popup, transactionId: transaction.id };
-        popup.location.replace(accountAuthPopupPath(transaction.id));
+        // An Add window may create a new account through a social provider;
+        // carry this page's in-memory first-touch campaign tokens into it.
+        const path = accountAuthPopupPath(transaction.id);
+        popup.location.replace(transaction.kind === "add" ? signupReturnPath(path) : path);
       })
       .catch((error) => {
         if (startingPopupRef.current === popup) startingPopupRef.current = null;
@@ -155,7 +162,7 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
         options?.onError?.(error);
         if (!options?.onError) {
           toast.error("Couldn't start account authentication", {
-            description: String(error),
+            description: userErrorText(error),
           });
         }
         options?.onSettled?.();

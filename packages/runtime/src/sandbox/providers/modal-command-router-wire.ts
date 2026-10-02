@@ -1,5 +1,6 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
 import protobuf from "protobufjs";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
@@ -32,7 +33,12 @@ message Empty {}
 `).root;
 
 const prefix = "/modal.task_command_router.TaskCommandRouter/";
-const maxPageBytes = 64 * 1024;
+/** Upper bound on one stream's bytes per read. A command's exit is reported
+ * only after both streams reach EOF, and after its turn ends the reaper reads
+ * once per sweep, so a small page left finished large-output commands running
+ * for hours. Invalid UTF-8 can decode to three bytes per input byte, so 1 MiB
+ * stays below the 4 MiB per-stream capture bound after decoding. */
+export const MODAL_ROUTER_READ_PAGE_BYTES = 1024 * 1024;
 const maxWireBytes = 4 * 1024 * 1024;
 
 /** Only constructed at the authenticated Start RPC boundary. Transport loss,
@@ -56,6 +62,24 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
     this.name = "ModalCommandStartPreDispatchUnavailableError";
   }
 
+  /** The supplied operation must contain only read-only preparation, never
+   * Start itself. Its transport failure therefore proves non-dispatch. */
+  static async beforeDispatch<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    try {
+      return await operation();
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = (error as Partial<ServiceError> | null)?.code;
+      if (
+        error instanceof Error &&
+        (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED)
+      )
+        throw new ModalCommandStartPreDispatchUnavailableError(error);
+      throw error;
+    }
+  }
+
   static async ensureReady(client: Client, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     await new Promise<void>((resolve, reject) => {
@@ -73,6 +97,17 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
       client.waitForReady(Date.now() + 5_000, finish);
       if (signal?.aborted) abort();
     });
+  }
+}
+
+/** Local cancellation/closure before Start dispatch. This permits exact
+ * never-started reservation settlement, NOT another launch or turn recovery. */
+export class ModalCommandStartNotDispatchedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Modal command Start was never dispatched", {
+      cause,
+    });
+    this.name = "ModalCommandStartNotDispatchedError";
   }
 }
 
@@ -118,6 +153,10 @@ export class ModalCommandRouterWire {
         "grpc.max_receive_message_length": maxWireBytes,
         "grpc.max_send_message_length": maxWireBytes,
         "grpc.enable_retries": 0,
+        // The HTTP/2 default 64 KiB window caps one read at 64 KiB per round
+        // trip. Two pages lets stdout and stderr each fill a page in one trip
+        // while bounding bytes discarded when a full read cancels its stream.
+        "grpc-node.flow_control_window": 2 * MODAL_ROUTER_READ_PAGE_BYTES,
       },
     );
     this.metadata = new Metadata();
@@ -161,12 +200,18 @@ export class ModalCommandRouterWire {
   }
 
   async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
-    if (this.closed) throw new Error("Modal command router is closed");
     try {
+      if (this.closed) throw new Error("Modal command router is closed");
       await ModalCommandStartPreDispatchUnavailableError.ensureReady(this.client, signal);
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
     } catch (error) {
-      if (this.closed) throw new Error("Modal command router is closed", { cause: error });
-      throw error;
+      if (this.closed)
+        throw new ModalCommandStartNotDispatchedError(
+          new Error("Modal command router is closed", { cause: error }),
+        );
+      if (error instanceof ModalCommandStartPreDispatchUnavailableError) throw error;
+      throw new ModalCommandStartNotDispatchedError(error);
     }
     try {
       await this.unary(
@@ -193,7 +238,7 @@ export class ModalCommandRouterWire {
         ].includes(code)
       )
         throw new ModalCommandStartRejectedError(code, error);
-      throw error;
+      throw new ModalCommandStartOutcomeUnknownError(request.taskId, request.execId, error);
     }
   }
 
@@ -266,12 +311,12 @@ export class ModalCommandRouterWire {
       };
       call.on("data", (value: { data: Uint8Array }) => {
         if (limited) return;
-        const part = Buffer.from(value.data).subarray(0, maxPageBytes - length);
+        const part = Buffer.from(value.data).subarray(0, MODAL_ROUTER_READ_PAGE_BYTES - length);
         if (part.length) {
           chunks.push(part);
           length += part.length;
         }
-        if (length === maxPageBytes) {
+        if (length === MODAL_ROUTER_READ_PAGE_BYTES) {
           limited = true;
           call.cancel();
         }

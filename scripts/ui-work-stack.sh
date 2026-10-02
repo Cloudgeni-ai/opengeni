@@ -79,6 +79,7 @@ if ! port_in_use "$OPENGENI_API_PORT"; then
     OPENGENI_WORKER_HTTP_PORT="$OPENGENI_WORKER_HTTP_PORT" \
     OPENGENI_OBJECT_STORAGE_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT:-}" \
     OPENGENI_SANDBOX_BACKEND="$OPENGENI_SANDBOX_BACKEND" \
+    OPENGENI_WEB_BASE_URL="${OPENGENI_WEB_BASE_URL:-http://127.0.0.1:${OPENGENI_WEB_PORT}}" \
     bun --env-file=/dev/null run --bun "$ROOT/apps/api/src/index.ts" \
     >"$LOG_DIR/api.log" 2>&1 &
   echo $! >"$LOG_DIR/api.pid"

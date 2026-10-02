@@ -26,6 +26,7 @@ export {
   toolDisplayName,
   toolMatchesLeaf,
 } from "./projection";
+export type { GroupTimelineOptions } from "./projection";
 
 // item types
 export type {
@@ -119,6 +120,7 @@ export type {
   TurnSummaryFacetResult,
   TurnSummaryOptions,
   TurnSummaryProps,
+  TurnSummaryStatus,
 } from "./turn-summary";
 
 // parsers (pure, reusable by custom renderers)

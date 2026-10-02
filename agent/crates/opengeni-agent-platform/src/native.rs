@@ -852,28 +852,30 @@ impl Platform for NativePlatform {
 
     async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
         let path = self.resolve_path(&req.path)?;
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))?;
-        let total_size = bytes.len() as u64;
+        let offset = req.offset;
+        let length = req.length;
+        let (content, total_size) = tokio::task::spawn_blocking(move || {
+            use std::io::{copy, sink, Read};
 
-        // Apply the optional ranged read over the in-memory buffer.
-        let content = if req.offset == 0 && req.length == 0 {
-            bytes
-        } else {
-            // Clamp the 64-bit wire offsets into the in-memory buffer; on a
-            // 32-bit target an out-of-range offset simply saturates to the len.
-            let start = usize::try_from(req.offset)
-                .unwrap_or(usize::MAX)
-                .min(bytes.len());
-            let end = if req.length == 0 {
-                bytes.len()
-            } else {
-                let len = usize::try_from(req.length).unwrap_or(usize::MAX);
-                start.saturating_add(len).min(bytes.len())
+            let read = || -> std::io::Result<(Vec<u8>, u64)> {
+                let mut file = std::fs::File::open(&path)?;
+                // Drain unrequested bytes without retaining them. Metadata is
+                // not the byte count for procfs/sysfs and other virtual files;
+                // keep the existing actual-stream total_size contract.
+                let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
+                let mut content = Vec::new();
+                let selected = if length == 0 {
+                    file.read_to_end(&mut content)?
+                } else {
+                    file.by_ref().take(length).read_to_end(&mut content)?
+                };
+                let remaining = copy(&mut file, &mut sink())?;
+                Ok((content, skipped + selected as u64 + remaining))
             };
-            bytes[start..end].to_vec()
-        };
+            read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
+        })
+        .await
+        .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
 
         Ok(v1::FsReadResponse {
             content: prost::bytes::Bytes::from(content),
@@ -882,7 +884,7 @@ impl Platform for NativePlatform {
     }
 
     fn transactional_fs_write_supported(&self) -> bool {
-        cfg!(target_os = "linux")
+        cfg!(any(target_os = "linux", target_os = "macos"))
     }
 
     fn fs_write_begin(
@@ -1469,8 +1471,13 @@ mod tests {
     fn exec_descendant_fixture() {
         let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
             .expect("descendant fixture pid-file env");
-        std::fs::write(pid_file, std::process::id().to_string())
+        let pid_file = Path::new(&pid_file);
+        let pending_pid_file = pid_file.with_extension("pending");
+        std::fs::write(&pending_pid_file, std::process::id().to_string())
             .expect("write descendant fixture pid");
+        // Existence is the parent's exit signal. Publish a complete PID before
+        // it can exit and cause containment to terminate this child.
+        std::fs::rename(&pending_pid_file, pid_file).expect("publish descendant fixture pid");
         // Bound the fixture itself so a failing containment regression cannot leave
         // permanent test work behind. Production cleanup should terminate it well
         // before this fallback expires.
@@ -2032,6 +2039,51 @@ mod tests {
             .await
             .expect_err("missing read must error");
         assert!(matches!(err, PlatformError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn fs_read_ranges_preserve_actual_size_at_eof_and_wire_limits() {
+        let (platform, dir) = rooted();
+        std::fs::write(dir.path().join("ranges"), b"0123456789").expect("fixture");
+        for (offset, length, expected) in [
+            (0, 0, b"0123456789".as_slice()),
+            (4, 0, b"456789".as_slice()),
+            (8, 100, b"89".as_slice()),
+            (10, 1, b"".as_slice()),
+            (u64::MAX, u64::MAX, b"".as_slice()),
+            (8, u64::MAX, b"89".as_slice()),
+        ] {
+            let response = platform
+                .fs_read(&FsReadRequest {
+                    path: "ranges".to_string(),
+                    offset,
+                    length,
+                })
+                .await
+                .expect("read range");
+            assert_eq!(&response.content[..], expected);
+            assert_eq!(response.total_size, 10);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fs_read_virtual_file_uses_stream_length_instead_of_stat_size() {
+        let (platform, _dir) = rooted();
+        let path = "/proc/sys/kernel/ostype";
+        let expected = std::fs::read(path).expect("procfs fixture");
+        assert_eq!(std::fs::metadata(path).expect("metadata").len(), 0);
+        assert!(expected.len() > 4);
+        let response = platform
+            .fs_read(&FsReadRequest {
+                path: path.to_string(),
+                offset: 1,
+                length: 3,
+            })
+            .await
+            .expect("read virtual file");
+        assert_eq!(&response.content[..], &expected[1..4]);
+        assert_eq!(response.total_size, expected.len() as u64);
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 import type { OpenGeniRequestOptions } from "./client";
+import { browserSessionStorageMode } from "@opengeni/contracts/browser-storage";
 import type {
   BrowserDomReadRequest,
   BrowserDomReadResponse,
@@ -950,7 +951,11 @@ export type BrowserAction =
       timeoutMs?: number | undefined;
     };
 
-export type BrowserActionBatch = { type: "batch"; actions: BrowserAction[] };
+export type BrowserActionBatch = {
+  type: "batch";
+  actions: BrowserAction[];
+  fenceEachAction?: true | undefined;
+};
 
 export type InteractionError = {
   code:
@@ -1005,6 +1010,7 @@ export type CreateBrowserSessionRequest = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
+  storageMode?: "private_profile" | "ephemeral_context" | undefined;
   engine?: "chromium" | "lightpanda" | undefined;
   placement?: InteractionPlacement | undefined;
   identityId?: string | undefined;
@@ -1056,6 +1062,9 @@ export type BrowserSessionAttachment = {
   controllerGeneration: string;
   targetId: string;
   stream: InteractionFrameStreamAttachment<3>;
+  /** Negotiated from this attachment’s live controller, absent on older helpers. */
+  fencedInputBatches?: true | undefined;
+  focusedInputObservations?: true | undefined;
   expiresAt: string;
 };
 
@@ -1071,7 +1080,10 @@ export type BrowserActionRequest = {
   expectedTargetGeneration: string;
   expectedDocumentGeneration: string | null;
   expectedFrameId: string | null;
-  observationMode?: "full" | "none" | undefined;
+  /** `input` is negotiated by focusedInputObservations on a live attachment.
+   * It returns optional native-select metadata after a pointer click, and null
+   * for ordinary input. Use full for agent observations. */
+  observationMode?: "full" | "none" | "input" | undefined;
   action: BrowserAction | BrowserActionBatch;
 };
 
@@ -1105,6 +1117,8 @@ export type ComputerSessionCapabilities = {
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
+  /** Raw window input stays in the background. Absent means foreground-only. */
+  backgroundInput?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1689,6 +1703,7 @@ export type CurrentOrOpenBrowserOptions = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
+  storageMode?: "private_profile" | "ephemeral_context" | undefined;
   placement?: InteractionPlacement | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
@@ -2109,7 +2124,13 @@ export class BrowserSessionCollection {
   async currentOrOpen(options: CurrentOrOpenBrowserOptions): Promise<BrowserSessionResource> {
     const requestOptions = options.signal ? { signal: options.signal } : {};
     const listed = await this.list(options.workspaceId, requestOptions);
-    const current = newestRelevantBrowser(listed.sessions, options.associationSessionId);
+    const current = newestRelevantBrowser(
+      listed.sessions.filter(
+        (session) =>
+          browserSessionStorageMode(session) === (options.storageMode ?? "private_profile"),
+      ),
+      options.associationSessionId,
+    );
     if (current) {
       const resource = this.session(options.workspaceId, current.id);
       if (current.lifecycle === "suspended") {
@@ -2128,6 +2149,7 @@ export class BrowserSessionCollection {
         ...(options.name !== undefined ? { name: options.name } : {}),
         ...(options.initialUrl !== undefined ? { initialUrl: options.initialUrl } : {}),
         ...(options.headless !== undefined ? { headless: options.headless } : {}),
+        ...(options.storageMode !== undefined ? { storageMode: options.storageMode } : {}),
         ...(options.placement !== undefined ? { placement: options.placement } : {}),
         ...(options.identityId !== undefined ? { identityId: options.identityId } : {}),
         ...(options.baseRevisionId !== undefined ? { baseRevisionId: options.baseRevisionId } : {}),

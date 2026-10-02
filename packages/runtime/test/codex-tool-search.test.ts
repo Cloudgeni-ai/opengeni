@@ -10,7 +10,8 @@ import {
   type Tool,
 } from "@openai/agents";
 import { testSettings } from "@opengeni/testing";
-import { bm25RankTools, searchToolPool } from "../src/codex-tool-search";
+import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
+import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
   buildOpenGeniAgent,
   prepareRunInput,
@@ -97,7 +98,75 @@ describe("bm25RankTools", () => {
   });
 });
 
+describe("searchToolPool named tools", () => {
+  function opengeniTool(name: string, description: string): Tool {
+    return {
+      type: "function",
+      name: `opengeni__${name}`,
+      description,
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+  }
+  const GOALS: Tool[] = [
+    opengeniTool(
+      "goal_set",
+      "Set the goal; a goal stays active until complete. Complete goal tracking.",
+    ),
+    opengeniTool(
+      "goal_complete",
+      "Finish the current objective after verifying every requirement, recording evidence, summarizing outcomes and notifying the requester about what changed in the workspace",
+    ),
+    opengeniTool("session_send_message", "Send a message to another session"),
+    opengeniTool("session_events", "Read events"),
+  ];
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+
+  test("puts a tool named by its short name first", () => {
+    // BM25 alone prefers goal_set: its short description repeats "goal" and "complete".
+    expect(names(bm25RankTools(GOALS, "goal_complete", 1))).toEqual(["opengeni__goal_set"]);
+    expect(names(searchToolPool(GOALS, { query: "goal_complete", limit: 1 }))).toEqual([
+      "opengeni__goal_complete",
+    ]);
+  });
+
+  test("matches full model names and ignores case and punctuation", () => {
+    expect(names(searchToolPool(GOALS, { query: "+OpenGeni__Session_Events", limit: 1 }))).toEqual([
+      "opengeni__session_events",
+    ]);
+  });
+
+  test("returns every named tool even beyond the limit, then fills with BM25", () => {
+    expect(
+      names(searchToolPool(GOALS, { query: "session_events goal_complete", limit: 1 })),
+    ).toEqual(["opengeni__session_events", "opengeni__goal_complete"]);
+    expect(names(searchToolPool(GOALS, { query: "goal_complete tracking", limit: 2 }))).toEqual([
+      "opengeni__goal_complete",
+      "opengeni__goal_set",
+    ]);
+  });
+
+  test("single words are not treated as tool names", () => {
+    const pool = [opengeniTool("read", "Open a file"), opengeniTool("fetch_page", "Read a page")];
+    const typed = pool as Array<Tool & { name: string }>;
+    expect(toolsNamedInQuery(typed, "read the file")).toEqual([]);
+    expect(names(toolsNamedInQuery(typed, "read with fetch_page"))).toEqual([
+      "opengeni__fetch_page",
+    ]);
+  });
+});
+
 describe("searchToolPool disclosure bounds", () => {
+  test("discloses a rich nested schema admitted by discovery", () => {
+    const rich = connectorTool("rich", "Read a record");
+    if (rich.type !== "function") throw new Error("expected a function tool");
+    rich.parameters = {
+      type: "object",
+      properties: {},
+      description: "x".repeat(300 * 1024),
+    } as never;
+    expect(searchToolPool([rich], { names: ["codex_apps__rich"], query: "" })).toEqual([rich]);
+  });
   test("keyword search backfills beyond the original rank cutoff", () => {
     const oversized = connectorTool("first", "Find records");
     const small = connectorTool("second", "Find records");
@@ -105,7 +174,7 @@ describe("searchToolPool disclosure bounds", () => {
     oversized.parameters = {
       type: "object",
       properties: {},
-      description: "x".repeat(130 * 1024),
+      description: "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES),
     } as never;
     expect(bm25RankTools([oversized, small], "Find records", 1)).toEqual([oversized]);
     expect(searchToolPool([oversized, small], { query: "Find records", limit: 1 })).toEqual([
@@ -126,7 +195,7 @@ describe("searchToolPool disclosure bounds", () => {
   });
 
   test("backfills rank-limited results after rejecting an oversized definition", () => {
-    const oversized = connectorTool("oversized", "x".repeat(130 * 1024));
+    const oversized = connectorTool("oversized", "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES));
     const small = connectorTool("small", "Read an item");
     expect(
       searchToolPool([oversized, small], {
@@ -139,7 +208,7 @@ describe("searchToolPool disclosure bounds", () => {
 
   test("backfills smaller definitions after aggregate overflow without exceeding the budget", () => {
     const large = Array.from({ length: 3 }, (_, i) =>
-      connectorTool(`large_${i}`, "x".repeat(100 * 1024)),
+      connectorTool(`large_${i}`, "x".repeat(200 * 1024)),
     );
     const small = connectorTool("small", "Read an item");
     const pool = [...large, small];

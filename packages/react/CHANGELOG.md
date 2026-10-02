@@ -1,5 +1,329 @@
 # @opengeni/react
 
+## 7.6.1
+
+### Patch Changes
+
+- d03b4a8: Clarify that window app controls work in the background and label explicit foreground activation as “Bring to front”.
+- cf1570d: Keep desktop images usable in narrow panels by placing app controls below the image. Wider viewers retain their side panel. Keep the foreground activation button readable within the image bounds.
+- 09a991f: Hide Jump to latest when readers scroll back to the live bottom after returning to their question, preserving scroll intent across renders and releasing stale question focus.
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
+## 7.6.0
+
+### Patch Changes
+
+- 9b3c40e: Show factual response-waiting copy once a model request is dispatched, while preserving the loading indicator and host customization.
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- Updated dependencies [e5b0123]
+  - @opengeni/sdk@7.6.0
+
+## 7.5.0
+
+### Minor Changes
+
+- b45621d: Artifacts and Sites now work inside an embedding product with the same components the OpenGeni console uses. `@opengeni/react/artifacts` gains the console's inline Site/HTML preview (`ChatInteractiveBlock`, `ArtifactSandbox`, `DeferredChatMedia`), `SiteView`, `EditableArtifactView`, and a host-mountable `SessionArtifactViewer`; `SessionConversation` renders `opengeni-site` fences inline and opens agent artifact links through `onOpenArtifact` (`viewerLinkResolver` for a custom timeline). `createSessionProxyHandler({ artifacts: true })` serves only the artifacts OpenGeni lists for the requesting session (read, editor live ticket, Site detail and sandboxed HTML), and client config advertises the live socket URL and browser cache partition. The SDK client adds `withHeaders`, `apiUrl`, and `fetchApi` for host-authenticated transports. Every built-in artifact string is translatable through a `labels` prop (partial `ArtifactLabels`) on `SessionArtifactViewer` and `ChatInteractiveBlock`, or `ArtifactLabelsProvider`. Document and presentation editors compose one projection at a time, so opening an artifact with a long history no longer floods the artifact Worker's request queue.
+- 709eef2: Usage allowance UI. `@opengeni/react/usage` adds `useUsage`, `UsageMeter`,
+  `UsageLimitNotice` (the calm near/at-limit composer line) and
+  `UsageMemberList` (an admin roster with a share-of-budget slider that shows
+  oversubscription as allowed). The conversation renders an allowance refusal as
+  a structured "usage limit reached" row that hosts reword with
+  `allowanceExhaustedLabels` or replace with `renderAllowanceExhausted`, and a
+  queued prompt refused before it starts stays above that row.
+  `@opengeni/sdk/usage-allowances` exposes allowance reads and administration as
+  free functions over `requestJson` for browser code without the root client.
+
+### Patch Changes
+
+- c85f432: Show failed-send reasons inline rather than hiding them in a tooltip. Credit and usage-allowance refusals no longer offer an unchanged Retry; Edit message restores a definitively refused prompt and its attachments into an empty composer while preserving the current model selection. Transient and uncertain deliveries keep their existing retry and reconciliation behavior.
+- 2253be0: Clarify that browser diagnostic counts include earlier pages in the same tab. Show unavailable counts until an observation exists, preserving observed zero counts.
+- c9c59b5: Explain when a chat's browser was lost or failed instead of silently showing an empty viewer.
+- 726f09d: Respect the desktop backend's mouse and keyboard availability. Encoded-frame views allow supported input independently; RFB views require both capabilities for direct control. Keep screenshots visible and show a view-only notice when direct input is unavailable.
+- 28c2b3f: Show Latest question only after the chat's initial history is ready, so startup cannot silently cancel that navigation.
+- 5ba250d: Offer Add note for text selected while the timeline's annotation controls are still loading.
+- 45d1301: Expose repeated empty final replies as a typed, informational completed-turn notice without failing goals or deferring later updates.
+- b45621d: Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.
+
+  Source-bound editor sockets renew a 15-second lease through the host proxy, rechecking product authorization; existing unbound console sockets are unchanged. Compact authenticated source tickets remain within the existing wire limit.
+
+  Add server-only `@opengeni/sdk/session-proxy` helpers. Stream embedded Site HTML with backpressure and cancellation and enforce a 25 MiB actual-byte ceiling; oversized streams fail with `site_html_too_large`. Preserve the console's existing shared artifact components and list behavior.
+
+  Allow PostgreSQL test fixtures to use an explicitly configured native server while preserving restricted-role and FORCE-RLS verification.
+
+- d60f96a: Preserve history reading position when Markdown tables are remeasured during host rerenders or tail streaming, without changing table overflow, copy controls or viewport resizing.
+- 0bbe2e7: Keep all React root exports available without requiring optional workbench peers at build time. Add terminal, editor, and desktop opt-in loader subpaths; hosts mounting those surfaces enable the installed peers once, with optional grammar and WebGL loaders supplied by the host.
+- 45d1301: Load client-config model defaults for the exact workspace requested by the workspace model catalog hook.
+- 0bbe2e7: `@opengeni/react/session-ui` exports `OpenGeniProvider` and the tool-renderer
+  registry (`createDefaultToolRegistry`, `createToolRegistry`,
+  `defaultToolRegistry`), so a host can render `OpenGeniChat` or
+  `SessionConversation` from that entry alone without the root's optional
+  workbench peers.
+- 5f7aa12: The conversation's floating "Jump to latest" and "Latest question" pills slide sideways when their resting spot would cover a control, such as the active turn's "Working" row or an inline Site card's toolbar. Only the pill moves; the timeline's scroll geometry is unchanged.
+- 5b48f00: Add recoverable allowance lifecycle state and idempotent clear receipts.
+  Preserve typed allowance scope and reset details in web, MCP, and Slack
+  refusals with administrator-specific remedies.
+  Expose browser-safe refusal helpers through `@opengeni/sdk/allowance-refusal`
+  without widening React's runtime dependency boundary.
+
+  Recheck allowance after paid compaction and align continuation admission with
+  its frozen causal lineage. Keep allowance storage compatible with rolling
+  deployment, preserve settled usage across period edits, harden definer search
+  paths, and order organization locks before tenancy fences.
+
+- 5b48f00: Default missing webhook lanes only after signature verification, preserve the
+  public organization webhook event vocabulary while rejecting usage subscriptions,
+  and keep allowance refusal presentation schema-runtime-free for browsers and
+  React Native. Emit the focused integration and refusal entries in published builds.
+
+  Fence the next model dispatch on settled usage and frozen-human admission, refuse
+  fresh delegated work before interruption, and repair workspace-less Knowledge
+  indexing and historical migration fixture dependencies.
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [d9ec660]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/connect@0.3.1
+
+## 7.4.0
+
+### Minor Changes
+
+- 9a4a45c: Make long turns read like a coding agent in the compact progress presentation (`turnSummary={{ rolling: true }}`). Assistant commentary joins its activity cluster (a phase-less message of the running turn stays the live note until its turn ends or it outgrows a note), and each exchange folds behind one status row ("Working · 2m 14s · 12 steps" with the latest progress note and current step, or "Waiting for 2 agents · 3m") with the answer below a "Worked for …" separator. Routine machine inputs, recorded waits, and compaction fold inside the exchange; failures, approvals, auth recovery, human input, scheduled prompts, and images stay visible. Following the tip stops once an answer pushes its question to the top, and a "Your question" control returns to the question being read. Recorded waits now say "Waited for 1 agent · 3m 5s" instead of "Wait recorded".
+
+  New API: `groupTimeline(items, { foldExchanges: true })`, `TurnSummary`'s `status` prop, optional `waitingAgents` / `waitEndedAt` on recorded wait notices, and optional `startedAt` (when a streamed message began) on `AgentMessageItem`. `ActivityItem` now includes `AgentMessageItem` for folded commentary; exhaustive switches over activity kinds need an `agent-message` case.
+
+- a6644b6: Framework adapters for web-standard handlers such as
+  `createSessionProxyHandler` and `createChatHandler`: `@opengeni/sdk/next`
+  (`toNextRouteHandlers`, `createSessionProxyRoute` for an App Router catch-all
+  route), `@opengeni/sdk/express` (`toNodeMiddleware` for Express, Connect, and
+  `node:http`, streaming SSE and aborting on disconnect), and
+  `@opengeni/sdk/hono` (`toHonoHandler`).
+
+  The session proxy serves the chat list (`listSessionPage`, limited by default
+  to the chats the resolved user created; `sessionList: "visible" | false`) and
+  archive/restore (`archive: false` to disable). `@opengeni/react` adds
+  `SessionList` and `OpenGeniChat`, a list-plus-conversation experience with a
+  responsive sidebar/drawer, a new-chat composer, and rename/archive.
+
+- a6644b6: `OpenGeniProvider` no longer blocks or reloads the page when the server's API
+  contract revision differs from the bundle's; that stale-tab protection is now
+  the opt-in `reloadOnApiContractChange` prop used by the stock OpenGeni console,
+  so an OpenGeni deploy never reloads an embedding product's page. The session
+  proxy reports its own SDK contract revision in `/v1/config/client` and never
+  forwards the upstream `x-opengeni-api-contract` header to the browser.
+- d480872: Agent links to OpenGeni objects now work inside an embedding product. `artifact:` files download by default from `SessionConversation`; sandbox-path downloads require explicit proxy `sandboxFiles: true` and use bounded, no-symlink reads within the session working directory. Editable artifacts and Sites route through a new `resolveLink` prop (`MessageTimeline`, `SessionConversation`, `Markdown`, `OpenGeniLinkProvider`) instead of rendering console paths that 404 on the host origin. Invalid reserved references render unavailable. `parseOpenGeniLink` in `@opengeni/sdk` classifies the same hrefs for non-React clients and preserves validated console return hints. Editable-artifact export uses configured exporter capabilities and preflights the exact format and options before creating a snapshot or pinning a version. Stock deployments serve spreadsheet XLSX; the artifact Skills stop promising unsupported PDF/DOCX/PPTX exports.
+- a6644b6: `@opengeni/react` no longer names the optional `@pierre/diffs` peer in any
+  `import()` reachable from the conversation, so a Next.js (Turbopack) or Vite
+  host that imports only `OpenGeniProvider` and `SessionConversation` builds
+  without it. Hosts that install `@pierre/diffs` opt in once with
+  `enablePierreDiffs()` from the new `@opengeni/react/diffs` entry (or
+  `registerPierreDiffs(loader)`); otherwise diffs and file views are plain text.
+  `SessionConversation` hides its model picker when the client config reports
+  `modelSelection: false`, with a `modelPicker` prop to override.
+
+  `createSessionProxyHandler` adds `beforeForwardMessage`, which returns
+  server-owned `modelContext` and MCP credential rotations
+  (`mcpCredentialUpdates`) for every forwarded message, steer, composer submit,
+  and browser-started create, or a `Response` to refuse it. With
+  `modelSelection: false` the proxy reports it in the client config.
+  `ClientConfig` gains the optional `modelSelection` field.
+
+- a6644b6: `SessionConversation` now renders pending tool approvals with Approve/Reject
+  actions, wires composer file attachments into sent messages when the
+  deployment enables file uploads (opt out with `attachments={false}`), and
+  accepts a `toolRegistry` for product-specific tool-call rendering.
+
+### Patch Changes
+
+- d00a203: Keep every answer visible in the compact progress presentation (`turnSummary={{ rolling: true }}`). An answer was folded into the "Worked for …" row, and shown only as a muted two-line preview, as soon as another machine-triggered turn followed it in the same exchange (an agent message, child result, wait timeout, goal continuation, background command result, or steer instruction). Now only work folds: the later turns fold into a new row below the answer, which opens as soon as the input is delivered, and their own answers render below that row. A reader stopped at an answer stays in place while that later work runs.
+- 378327b: Emit one `agent.message.completed` per assistant message with its `phase` and, when the provider sent one, its `messageId`. Runtime normalization read a text field that Agents SDK message items do not have, so no per-message completion or phase ever reached events. Deltas now carry the phase a Responses provider declares, also through compact delta coalescing. An undeclared message gets the SDK's own rule: `commentary` when the same response asks for client tool work (including a client tool search) or ends with a later message, `final_answer` for the message the SDK returns. A Responses message completes as soon as it finishes, before the next message streams, instead of after the whole response. The worker skips the phase-less settlement copy once the stream completed the final text.
+
+  Commentary is activity: it no longer marks a session unread (rolling migration 0527 indexes the new attention predicate), wakes `session_wait` change mode, becomes a Slack post, or enters the SDK chat reply. A turn that settles with only commentary still replies with its latest note. When a human or API message's turn ends waiting for input (`wait_for_input`), settlement records its latest assistant message on `turn.completed` as `reply` (the output stays empty; a child an agent spawned and a scheduled, automation or maintenance session's first turn record none), so a status answer given before waiting again marks the session unread and becomes a Slack post with the requester mention while delivery stays open for the result; stored history keeps the provider's phase. The SDK chat fold completes each segment by `messageId`, so a note completed after its answer streamed never repeats the answer. The MCP conversation view labels commentary, `latest: "terminal"` skips it, and the React timeline knows a streaming note is commentary from its first delta. `phase` stays optional.
+
+  Older SDK clients see the new completions too: their live reply now separates a note from the answer that follows it in the same response with a blank line (it was run together before), and `history()` lists each completed note as its own assistant message. Roll the API before the workers: an older API process next to a newer worker can briefly post notes to Slack, wake `session_wait` change mode on them, and mark sessions unread for them.
+
+- 1503ad7: Report unavailable browser controls even while cached or live frames remain visible, and disable keyboard capture until control recovers.
+- 4f6d83a: Keep browser diagnostics opaque and confined to the page viewport, below tabs,
+  address controls, and human handoff banners. Correct missing browser and desktop
+  surface/text color utilities in both themes, and keep drawer actions usable in
+  narrow docks.
+- 7a3d134: Keep browser profile and launch menus within narrow viewer panels, with scrollable
+  content. Dismiss browser menus on outside pointer input or Escape without closing
+  the expanded workspace underneath.
+- 01f50bf: Mark the composer send and pause buttons and the queued-prompt Steer buttons
+  with a stable `data-analytics-action` attribute (`send`, `pause`, `steer`) that
+  a host's product analytics can read. The attribute is inert, and a host can
+  override it on `SendButton` and `PauseButton` through their props.
+- 0aa60a6: Keep a failed optional Files module inside its workspace tab with an explicit
+  reload action instead of replacing the conversation and composer with a route error.
+- 4b39032: Load the optional workspace Files renderer asynchronously when first mounted, keeping chat and workspace
+  state mounted while its renderer loads. Preserve file capability checks and the
+  existing visited-tab lifetime.
+- 454476c: Fence retained history-navigation callbacks and pending page reads to their owning
+  session, workspace, client, and replay lifetime. Stale navigation cannot stop a
+  replacement session's live feed, replace its history, or leave loading stuck.
+- 4b39032: Expose successful initial history readiness independently of loading and stream
+  errors, including empty histories. Clear stale initial-load errors on fenced retry
+  and successful window recovery without letting old sessions overwrite new state.
+- 4b39032: Give queued Latest question callbacks a current-navigation guard so a delayed
+  refresh cannot reopen the queue after another history jump. Reuse canonical
+  execution evidence when locating queued prompts whose ledger lacks turn.started,
+  including tools, startup, recovery, and capacity events.
+- 4b39032: Load the optional Latest question resolver on demand while preserving queued
+  destinations, bounded history, retryable lookup errors, and navigation guards
+  across the module-loading delay.
+- a6644b6: Diff and file views already on screen upgrade to highlighted rendering when a
+  host registers `@pierre/diffs` later, so hosts can call `enablePierreDiffs()`
+  from the lazily loaded route that renders diffs instead of at startup. The
+  OpenGeni console now does this, keeping the peer and its highlighter out of
+  the initial bundle.
+- dcb578d: Keep legacy timeline work without turn IDs aligned with approval, terminal status, and subsequent-work boundaries instead of leaving stale Working indicators.
+- b591ea1: Support native Claude Messages with separate encrypted Anthropic API-key and Claude subscription setup-token connections, workspace access policies, streaming tools and thinking, prompt caching and usage accounting. Add connection UI and payment-source labels. Migration 0544 expands organization connection kinds and lifecycle validation.
+
+  Pin the Claude subscription client identity headers, persist account/device metadata with encrypted credentials, and add request-scoped attribution. Existing token-only connections require replacement with identity metadata. The captured billing checksum remains unverified and is not replayed.
+
+  Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
+
+  Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
+
+  Polish Claude setup with local settings import, full-page token renewal, named model choices, provider marks, accurate subscription payment labels, and workspace discovery of organization-owned connections.
+
+  Support workspace-owned Claude credentials, model generations, access controls and setup/account screens alongside organization connections. Migration 0545 expands workspace custom-model provider kinds. Gate Claude subscriptions behind OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED (default off), leaving Anthropic API keys and other providers unchanged.
+
+- cabfc5e: Adopt the neutral theme: a shared `hover` token, unified menu and popover
+  styling across the composer, model picker, realtime control and file browser,
+  refreshed terminal colors, and "Opengeni" in user-visible copy.
+- a1b6b8e: An automatically attached (optional) repository that loses access after a task started no longer fails the task's later turns. Before the strict per-turn GitHub App allowlist recheck and installation-token mint, the worker drops, for that turn only, each optional repository the workspace allowlist no longer admits or the GitHub App installation can no longer reach, and reports it as `skippedOptionalRepositories` on a `sandbox.operation.completed` event named `optional-repository-access`. It only ever removes repositories; explicitly attached repositories keep the strict behavior.
+
+  Optional repository clones are also bounded (60 seconds each, 90 seconds together) when the sandbox has a `timeout` binary, so a hung fetch is skipped with the usual warning instead of failing sandbox setup. Explicit clones are unchanged.
+
+  `@opengeni/github` adds `findInaccessibleGitHubAppInstallationRepositories`. `@opengeni/runtime` exports `OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS`, and `repositoryCloneCommand` and `runRepositoryCloneHook` accept an optional per-repository timeout.
+
+  `@opengeni/react` keeps the `optional-repository-access` report out of the transcript, like the routine repository-clone event.
+
+- c2acd21: Show annotation-only queued turns in the compact session-chrome queue. A queued turn with an empty prompt and timeline annotations rendered as a blank row; it now shows a keyboard-reachable annotation-count chip ("Review 1 annotation") that opens the existing read-only review dialog, prompt-plus-annotation rows show both, and optimistic queue rows follow the same rule. The compact queue and `QueueSurface` share one presentation rule, and an item with neither a prompt nor annotations shows "Content unavailable" instead of blank space. `TimelineAnnotationsChip` accepts an optional `compact` prop for dense rows.
+- 4b39032: Keep assistant progress and prior replies readable in independent turn summaries,
+  with rolling tool activity and truthful Working/Worked timing. Remove cross-turn
+  folding, text-length display inference, and forced answer anchoring. Add a single
+  Latest question navigation callback backed by bounded durable history lookup.
+  Keep expanded outer work headers reachable with section-scoped stickiness,
+  without stacking nested headers or changing timeline scroll ownership.
+  Resolve Latest question against authoritative queue/lifecycle state: focus pending
+  prompts in SessionChrome, restore distant started prompts at their actual turn
+  boundary, and skip withdrawn prompts without getting stuck on invisible rows.
+- 4b39032: Keep standalone completed maintenance compaction visible without creating a live
+  work summary. Clear resolved approval waiting from same-turn lifecycle/tool-result
+  evidence while preserving historical attention landmarks and renewed approvals.
+- 9649fcc: Share retained-image retry and figure markup to keep the session bundle within its existing size budget.
+- a5da013: Allow retrying failed saved-image retrieval in the timeline without recapturing screenshots or modifying conversation history.
+- 8a9d19e: Add human-authorized removal of saved personal/workspace Skills with version checks and replay after deletion. Allow installed capability shortcuts to display their status visibly.
+- a12f4cf: Keep the model picker open after selecting a model so reasoning effort can be adjusted without reopening it.
+- e403746: Keep live per-turn progress above one trailing activity disclosure, then fold settled progress and tools together chronologically while leaving the final response visible. Preserve expanded work, manual-reader position and focus, phase-aware duration, attention surfaces, and classic grouping.
+- 4b39032: Keep Latest question and earlier-history controls in separate pointer regions
+  when both are visible, including narrow mobile layouts. Preserve existing
+  history navigation, callbacks, and scroll ownership.
+- d480872: An expanded turn's sticky work header now pins flush to the top of the timeline instead of 3.5rem below it, so rows no longer scroll visibly above it; the floating Latest question action sits below the header strip.
+- Updated dependencies [3f9c757]
+- Updated dependencies [304ddc5]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [a6644b6]
+- Updated dependencies [aad6598]
+- Updated dependencies [e14db2a]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a6644b6]
+- Updated dependencies [d480872]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a82657f]
+- Updated dependencies [3f9c757]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [12bc3de]
+- Updated dependencies [30414a0]
+- Updated dependencies [a6644b6]
+- Updated dependencies [8a9d19e]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [d1f4724]
+- Updated dependencies [c823664]
+  - @opengeni/sdk@7.4.0
+
+## 7.3.1
+
+### Patch Changes
+
+- 6cbccaa: Keep IME candidate-selection and commit keys local to the browser viewer so composing text cannot move the remote caret or submit a remote form. Continue forwarding committed text and subsequent ordinary keys.
+
+## 7.3.0
+
+### Patch Changes
+
+- 78f1d59: Offer native dropdown choices in BrowserViewer when Chromium page frames omit the popup. Keep selection bound to the observed control and preserve normal input/change events, private-field redaction, and disabled options.
+- 7f75daa: Keep long browser session lists scrollable with their action buttons visible, and label browser choices for assistive technology.
+- 889a360: Accept fresh browser frames when an attachment renews and its producer restarts the frame sequence for the same page.
+- ac83339: Show browser discovery failures and retry target loading instead of displaying a semantic-only browser when session loading fails.
+- 1fa1216: Bind browser viewer input to the frame actually painted, cancel stale queued input
+  across navigation and target changes, and preserve ordered scroll input. Treat
+  plain upstream gateway failures as transport errors without blindly replaying
+  browser mutations.
+- 1842911: Recover managed browser viewers through the existing session when an unrelated attached Chrome profile loses its connection. Negotiate focused-input observations so native select choices appear after a viewer click, with existing generation fences and explicit fallback for older controllers.
+- 6d4ccb9: Preserve keyboard focus after desktop canvas clicks, bind pointer input to the
+  painted frame, and discard stale queued gestures and clipboard continuations.
+  Keep continuous scrolling responsive while preserving ordered input and deltas.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- 212de3d: Keep queued browser input fences without retaining earlier screenshot bytes or render callbacks. Preserve input order and discard queued actions when their viewer generation changes.
+- cc4bc8e: Hide the agent workspace's machine-state chip while viewing independent Browser or Desktop resources. Those viewers retain their own runtime status, so a sleeping agent sandbox no longer makes an active browser appear asleep.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+  - @opengeni/sdk@7.3.0
+
+## 7.2.0
+
+### Patch Changes
+
+- 19ecc86: Composer `autoFocus` no longer moves focus out of an open menu, listbox, or dialog when the composer becomes interactive late, so a hydrating composer cannot dismiss a menu the person just opened.
+- b85a966: Keep suspended browsers asleep when their viewer opens, and resume only after an explicit Open browser action.
+- d0b6742: Detach live browser frames when the page has been hidden, and reconnect when it becomes visible.
+- 2eaeec6: Publish the `@opengeni/react/accounts` subpath with its built JavaScript and declaration files. The previous release mapped that export to a source file name the package does not ship, so importing it failed.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+  - @opengeni/sdk@7.2.0
+
 ## 7.1.2
 
 ### Patch Changes

@@ -21,6 +21,10 @@ import { createRoot } from "react-dom/client";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import { createDeterministicRealtimeHarness } from "./realtime-controller";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 const MOCK_WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const params = new URLSearchParams(window.location.search);

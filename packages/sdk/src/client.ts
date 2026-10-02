@@ -34,9 +34,25 @@ import type {
   WorkspaceArtifactMutationResponse,
 } from "./workspace-artifacts";
 import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
+import type {
+  CreateWorkspaceWebhookRequest,
+  CreateWorkspaceWebhookResponse,
+  GetWorkspaceCredentialProviderResponse,
+  ListWorkspaceWebhookDeliveriesResponse,
+  ListWorkspaceWebhooksResponse,
+  PutWorkspaceCredentialProviderRequest,
+  PutWorkspaceCredentialProviderResponse,
+  UpdateWorkspaceWebhookRequest,
+  WorkspaceSandboxImages,
+  WorkspaceWebhook,
+  WorkspaceWebhookDelivery,
+} from "./workspace-integrations";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
+  OpenGeniAllowanceExhaustedError,
+  allowanceExhaustedFields,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
@@ -47,11 +63,13 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import type {
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 import {
@@ -236,6 +254,10 @@ import type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -386,6 +408,7 @@ import type {
   WorkspaceVideoGenerationSettings,
   PreviewSkillImportRequest,
   ScheduledTask,
+  ScheduledTaskAccessAttention,
   ScheduledTaskRun,
   ForkSessionRequest,
   ForkSessionResponse,
@@ -395,6 +418,7 @@ import type {
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
   SessionListResponse,
+  SessionListEntryResponse,
   SessionTenancyCreateCapabilities,
   AgentTopologyPageResponse,
   UpdateSessionChannelRequest,
@@ -495,12 +519,14 @@ import type {
   TranscriptionRecordingResponse,
   UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
+  RefreshScheduledTaskAccessRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -611,12 +637,12 @@ function sessionListQuery(options: {
   scopeSubjectId?: SessionScopeSubjectId;
 }): Record<string, string> {
   const { limit, parentSessionId, scopeSubjectId } = options;
-  return {
-    ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
-    ...(limit === undefined ? {} : { limit: String(limit) }),
-    ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
-    ...(scopeSubjectId === undefined ? {} : { scopeSubjectId }),
-  };
+  const query: Record<string, string> = {};
+  if (options.originSiteId) query.originSiteId = options.originSiteId;
+  if (limit !== undefined) query.limit = String(limit);
+  if (parentSessionId !== undefined) query.parentSessionId = parentSessionId ?? "null";
+  if (scopeSubjectId !== undefined) query.scopeSubjectId = scopeSubjectId;
+  return query;
 }
 
 export type SessionListPageOptions = {
@@ -642,6 +668,8 @@ export type SessionListPageOptions = {
   createdBefore?: string;
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean;
+  /** Skip pinned details when the pinned section is loaded separately. Defaults to true. */
+  includePinned?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
   sortBy?: "updatedAt" | "createdAt" | "name";
@@ -650,16 +678,34 @@ export type SessionListPageOptions = {
   signal?: AbortSignal | undefined;
 };
 
+const SESSION_PAGE_FILTER_KEYS = [
+  "originSiteId",
+  "channelId",
+  "createdBy",
+  "updatedFrom",
+  "updatedBefore",
+  "createdFrom",
+  "createdBefore",
+] as const;
+const SESSION_PAGE_STRING_QUERY_KEYS = [
+  "updatedFrom",
+  "updatedBefore",
+  "createdFrom",
+  "createdBefore",
+  "sortBy",
+  "archiveStatus",
+] as const;
+
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
-  return (
-    options.originSiteId !== undefined ||
-    options.channelId !== undefined ||
-    options.createdBy !== undefined ||
-    options.updatedFrom !== undefined ||
-    options.updatedBefore !== undefined ||
-    options.createdFrom !== undefined ||
-    options.createdBefore !== undefined
-  );
+  return SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined);
+}
+
+function unsupportedSessionPage(feature: string): Error {
+  return new Error(`The connected OpenGeni API does not support ${feature}`);
+}
+
+function sessionPath(workspaceId: string, sessionId: string): string {
+  return `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
 }
 
 /**
@@ -691,6 +737,12 @@ export type OpenGeniClientOptions = {
   baseUrl: string;
   /** OpenGeni API key, sent as `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
+  /**
+   * Receives a notice (once per route per client) when the API advertises a
+   * `Deprecation`/`Sunset` header on a response. Defaults to a one-time
+   * `console.warn` per route; pass `false` to silence notices.
+   */
+  onDeprecation?: OpenGeniDeprecationHandler | false | undefined;
   /** Extra headers (static or computed per request) merged into every call. */
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
@@ -702,12 +754,35 @@ export type OpenGeniClientOptions = {
   beginSharedRead?: (() => number) | undefined;
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
+  /**
+   * How this client treats an API that advertises a different
+   * `x-opengeni-api-contract` revision.
+   *
+   * - `"strict"`: fail with `OpenGeniApiContractMismatchError` so a browser
+   *   page served alongside the API can reload onto the matching bundle.
+   * - `"compatible"`: keep working. Within a major release train the API is
+   *   additive (see the compatibility policy), and the API admits bearer
+   *   (API key / delegated token) mutations from older SDK revisions, so a
+   *   backend pinned to an older SDK is not broken by every deployment.
+   *
+   * Defaults to `"strict"` in a browser client without an `apiKey`, and to
+   * `"compatible"` everywhere else.
+   */
+  apiContract?: "strict" | "compatible" | undefined;
 };
+
+function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "compatible" {
+  if (options.apiContract) return options.apiContract;
+  const browser = typeof window !== "undefined" && typeof document !== "undefined";
+  return browser && !options.apiKey ? "strict" : "compatible";
+}
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+  /** Opt-in void response handling for focused helpers using the shared transport. */
+  responseType?: "json" | "void";
 };
 
 export type SharedSessionReadOptions = {
@@ -896,10 +971,13 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 
 export class OpenGeniClient {
   protected externalActorHeader?: string;
+  protected serviceInitiatorHeader?: string | undefined;
+  protected serviceContextHeader?: string | undefined;
   private readonly baseUrl: string;
   protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
+  private readonly apiContractStrict: boolean;
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
@@ -912,12 +990,16 @@ export class OpenGeniClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
     // Bind lazily so variable sets that polyfill fetch after module load work.
-    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.fetchImpl = withDeprecationNotices<FetchResponse>(
+      options.fetch ?? ((input, init) => fetch(input, init)),
+      options.onDeprecation,
+    );
     const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
     if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
       throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
+    this.apiContractStrict = defaultApiContractMode(options) === "strict";
     this.interaction = new OpenGeniInteractionClient(this);
     this.tools = createLazyToolsFacade(this);
   }
@@ -962,7 +1044,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "POST",
@@ -1070,7 +1152,7 @@ export class OpenGeniClient {
       if (input.signal?.aborted) throw error;
       throw mutationTransportError(correlationId);
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok)
       throw await apiErrorFromResponse(response, {
         method: "PUT",
@@ -1175,6 +1257,86 @@ export class OpenGeniClient {
     );
   }
 
+  /** The workspace's HTTP credential provider, or null when none is configured. */
+  async getWorkspaceCredentialProvider(
+    workspaceId: string,
+  ): Promise<GetWorkspaceCredentialProviderResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/credential-provider`);
+  }
+
+  /**
+   * Create or update the workspace credential provider. The signing secret is
+   * returned only when the provider is first created; store it then.
+   */
+  async putWorkspaceCredentialProvider(
+    workspaceId: string,
+    request: PutWorkspaceCredentialProviderRequest,
+  ): Promise<PutWorkspaceCredentialProviderResponse> {
+    return this.requestJson("PUT", `/v1/workspaces/${workspaceId}/credential-provider`, request);
+  }
+
+  async deleteWorkspaceCredentialProvider(workspaceId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
+  }
+
+  async listWorkspaceWebhooks(workspaceId: string): Promise<ListWorkspaceWebhooksResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks`);
+  }
+
+  /** Create a webhook. The signing secret is returned only in this response. */
+  async createWorkspaceWebhook(
+    workspaceId: string,
+    request: CreateWorkspaceWebhookRequest,
+  ): Promise<CreateWorkspaceWebhookResponse> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/webhooks`, request);
+  }
+
+  async updateWorkspaceWebhook(
+    workspaceId: string,
+    webhookId: string,
+    request: UpdateWorkspaceWebhookRequest,
+  ): Promise<WorkspaceWebhook> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`,
+      request,
+    );
+  }
+
+  async deleteWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
+  }
+
+  async listWorkspaceWebhookDeliveries(
+    workspaceId: string,
+    webhookId: string,
+    options: { limit?: number } = {},
+  ): Promise<ListWorkspaceWebhookDeliveriesResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}/deliveries`,
+      undefined,
+      options.limit !== undefined ? { limit: String(options.limit) } : {},
+    );
+  }
+
+  /** Queue a delivered or failed delivery again with a fresh attempt budget. */
+  async redeliverWorkspaceWebhookDelivery(
+    workspaceId: string,
+    webhookId: string,
+    deliveryId: string,
+  ): Promise<WorkspaceWebhookDelivery> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/webhooks/${webhookId}/deliveries/${deliveryId}/redeliver`,
+    );
+  }
+
+  /** Images this deployment lets a workspace choose as its default sandbox image. */
+  async listWorkspaceSandboxImages(workspaceId: string): Promise<WorkspaceSandboxImages> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/sandbox-images`);
+  }
+
   /** Submit general feedback or a session/turn rating. Retain the key when retrying. */
   async createFeedback(
     workspaceId: string,
@@ -1186,7 +1348,11 @@ export class OpenGeniClient {
   /** Only this principal's submissions. No session filter means general feedback only. */
   async listOwnFeedback(
     workspaceId: string,
-    options: { sessionId?: string; limit?: number; includeTurns?: boolean } = {},
+    options: {
+      sessionId?: string;
+      limit?: number;
+      includeTurns?: boolean;
+    } = {},
   ): Promise<{ feedback: Feedback[] }> {
     const query = new URLSearchParams();
     if (options.sessionId) query.set("sessionId", options.sessionId);
@@ -1203,7 +1369,7 @@ export class OpenGeniClient {
     sessionId: string,
     options: GetSessionOptions = {},
   ): Promise<Session> {
-    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    const path = sessionPath(workspaceId, sessionId);
     return await this.sharedRead(
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
@@ -1218,7 +1384,7 @@ export class OpenGeniClient {
   ): Promise<SessionModelContextResponse> {
     return await this.requestJson<SessionModelContextResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-context`,
+      `${sessionPath(workspaceId, sessionId)}/model-context`,
     );
   }
 
@@ -1227,11 +1393,7 @@ export class OpenGeniClient {
     sessionId: string,
     request: UpdateSessionRequest,
   ): Promise<Session> {
-    return await this.requestJson<Session>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-      request,
-    );
+    return await this.requestJson<Session>("PATCH", sessionPath(workspaceId, sessionId), request);
   }
 
   /** Replace the complete ordered Variable Set selection at a quiescent turn boundary. */
@@ -1242,7 +1404,7 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/variable-sets`,
+      `${sessionPath(workspaceId, sessionId)}/variable-sets`,
       request,
     );
   }
@@ -1265,7 +1427,7 @@ export class OpenGeniClient {
   ): Promise<UpdateSessionVisibilityResponse> {
     return await this.requestJson<UpdateSessionVisibilityResponse>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/visibility`,
+      `${sessionPath(workspaceId, sessionId)}/visibility`,
       request,
     );
   }
@@ -1278,7 +1440,7 @@ export class OpenGeniClient {
   ): Promise<ForkSessionResponse> {
     return await this.requestJson<ForkSessionResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/forks`,
+      `${sessionPath(workspaceId, sessionId)}/forks`,
       request,
     );
   }
@@ -1291,7 +1453,25 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-policy`,
+      `${sessionPath(workspaceId, sessionId)}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Replace the session's agent configuration (capabilities, identity,
+   * instructions alias, renderer). Omitted fields keep their current values.
+   * Uses the tool-policy version (409 when stale) and applies from the next
+   * turn. A legacy session converts from its current effective state.
+   */
+  async updateSessionAgent(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAgentRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/agent`,
       request,
     );
   }
@@ -1309,7 +1489,7 @@ export class OpenGeniClient {
   ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
     return await this.requestJson<UpdateSessionMcpApprovalPolicyResponse>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/mcp-servers/${encodeURIComponent(serverId)}/approval-policy`,
+      `${sessionPath(workspaceId, sessionId)}/mcp-servers/${encodeURIComponent(serverId)}/approval-policy`,
       request,
     );
   }
@@ -1395,7 +1575,7 @@ export class OpenGeniClient {
   ): Promise<SessionBackgroundCommandListResponse> {
     return await this.requestJson<SessionBackgroundCommandListResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands`,
+      `${sessionPath(workspaceId, sessionId)}/background-commands`,
       undefined,
       {},
       options,
@@ -1409,7 +1589,7 @@ export class OpenGeniClient {
   ): Promise<CancelSessionBackgroundCommandResult> {
     return await this.requestJson<CancelSessionBackgroundCommandResult>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands/${commandId}`,
+      `${sessionPath(workspaceId, sessionId)}/background-commands/${commandId}`,
     );
   }
 
@@ -1418,34 +1598,63 @@ export class OpenGeniClient {
     workspaceId: string,
     options: SessionListPageOptions = {},
   ): Promise<SessionListResponse> {
+    const response = await this.requestSessionPage(
+      `/v1/workspaces/${workspaceId}/sessions`,
+      options,
+    );
+    if ("projection" in response) throw unsupportedSessionPage("full session details");
+    return response;
+  }
+
+  /** Compact rail records; safely projects full pages from older APIs. */
+  async listSessionSummaryPage(
+    workspaceId: string,
+    options: SessionListPageOptions = {},
+  ): Promise<SessionListEntryResponse> {
+    const response = await this.requestSessionPage(
+      `/v1/workspaces/${workspaceId}/sessions`,
+      options,
+      true,
+    );
+    if ("projection" in response) return response;
+    const { sessionListEntry } = await import("./session-list-entries");
+    return {
+      ...response,
+      projection: "summary",
+      pinned: response.pinned.map(sessionListEntry),
+      sessions: response.sessions.map(sessionListEntry),
+    };
+  }
+
+  private async requestSessionPage(
+    path: string,
+    options: SessionListPageOptions,
+    summary = false,
+  ): Promise<SessionListResponse | SessionListEntryResponse> {
     const search = options.search?.trim();
-    let response: SessionListResponse | Session[];
+    let result: SessionListResponse | SessionListEntryResponse | Session[];
     try {
-      response = await this.requestJson<SessionListResponse | Session[]>(
+      const query: Record<string, string> = { view: "page", ...sessionListQuery(options) };
+      if (summary) query.projection = "summary";
+      if (options.cursor !== undefined) query.cursor = options.cursor;
+      if (search) query.search = search;
+      if (options.channelId !== undefined) query.channelId = options.channelId ?? "null";
+      if (options.createdBy) {
+        query.createdByKind = options.createdBy.kind;
+        query.createdBySubjectId = options.createdBy.subjectId;
+      }
+      for (const key of SESSION_PAGE_STRING_QUERY_KEYS) {
+        const value = options[key];
+        if (value) query[key] = value;
+      }
+      if (options.pinsOnly) query.pinsOnly = "true";
+      if (options.includePinned === false) query.includePinned = "false";
+      if (options.archivedOnly) query.archivedOnly = "true";
+      result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
         "GET",
-        `/v1/workspaces/${workspaceId}/sessions`,
+        path,
         undefined,
-        {
-          view: "page",
-          ...sessionListQuery(options),
-          ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
-          ...(search ? { search } : {}),
-          ...(options.channelId !== undefined ? { channelId: options.channelId ?? "null" } : {}),
-          ...(options.createdBy
-            ? {
-                createdByKind: options.createdBy.kind,
-                createdBySubjectId: options.createdBy.subjectId,
-              }
-            : {}),
-          ...(options.updatedFrom ? { updatedFrom: options.updatedFrom } : {}),
-          ...(options.updatedBefore ? { updatedBefore: options.updatedBefore } : {}),
-          ...(options.createdFrom ? { createdFrom: options.createdFrom } : {}),
-          ...(options.createdBefore ? { createdBefore: options.createdBefore } : {}),
-          ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
-          ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
-          ...(options.sortBy ? { sortBy: options.sortBy } : {}),
-          ...(options.archiveStatus ? { archiveStatus: options.archiveStatus } : {}),
-        },
+        query,
         { signal: options.signal },
       );
     } catch (error) {
@@ -1460,50 +1669,47 @@ export class OpenGeniClient {
       }
       throw error;
     }
+    const response = result;
+    const legacy = Array.isArray(response);
+    const filtered = hasSessionPageFilters(options);
     if (
-      (options.sortBy !== undefined &&
-        (Array.isArray(response) || response.sortBy !== options.sortBy)) ||
+      (options.sortBy !== undefined && (legacy || response.sortBy !== options.sortBy)) ||
       (options.archiveStatus !== undefined &&
-        (Array.isArray(response) || response.archiveStatus !== options.archiveStatus))
+        (legacy || response.archiveStatus !== options.archiveStatus))
     ) {
-      throw new Error(
-        "The connected OpenGeni API does not support the requested session sorting/archive filter",
-      );
+      throw unsupportedSessionPage("the requested session sorting/archive filter");
     }
-    if (Array.isArray(response)) {
+    if (legacy) {
       // Rolling/same-major compatibility: an older API ignores `view=page` and
       // returns the historical array. That is an honest one-page projection;
       // never pretend it honored a cursor supplied directly by a caller.
-      if (options.cursor) {
-        throw new Error("The connected OpenGeni API does not support stable session-page cursors");
-      }
       // Older APIs ignore unknown query parameters. Treating their unfiltered
       // array as a successful search would be worse than an explicit rolling-
       // upgrade error (and client-side filtering cannot recover matches beyond
       // the old endpoint's bounded first page).
-      if (search) {
-        throw new Error("The connected OpenGeni API does not support session search");
-      }
-      if (options.pinsOnly) {
-        throw new Error("The connected OpenGeni API does not support pins-only session lists");
-      }
-      if (options.archivedOnly) {
-        throw new Error("The connected OpenGeni API does not support archived session lists");
-      }
-      if (hasSessionPageFilters(options)) {
-        throw new Error("The connected OpenGeni API does not support filtered session lists");
-      }
+      const unsupported = options.cursor
+        ? "stable session-page cursors"
+        : search
+          ? "session search"
+          : options.pinsOnly
+            ? "pins-only session lists"
+            : options.archivedOnly
+              ? "archived session lists"
+              : filtered
+                ? "filtered session lists"
+                : null;
+      if (unsupported) throw unsupportedSessionPage(unsupported);
       return { pinned: [], sessions: response, nextCursor: null };
     }
-    if (hasSessionPageFilters(options) && response.filtersApplied !== true) {
-      throw new Error("The connected OpenGeni API does not support filtered session lists");
+    if (filtered && response.filtersApplied !== true) {
+      throw unsupportedSessionPage("filtered session lists");
     }
     if (
       options.originSiteId &&
       (!response.originSiteId ||
         (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
     ) {
-      throw new Error("The connected OpenGeni API does not support Site-filtered session lists");
+      throw unsupportedSessionPage("Site-filtered session lists");
     }
     return response;
   }
@@ -1534,32 +1740,24 @@ export class OpenGeniClient {
     if (query && options.subject) {
       throw new TypeError("listAgentTopology query cannot be combined with an exact subject");
     }
+    const params = sessionListQuery(options);
+    if (options.rootSessionId) params.rootSessionId = options.rootSessionId;
+    if (options.cursor) params.cursor = options.cursor;
+    if (query) params.query = query;
+    if (options.statuses?.length) params.statuses = options.statuses.join(",");
+    if (options.activeOnly !== undefined) params.activeOnly = options.activeOnly ? "true" : "false";
+    if (options.recentHours !== undefined) params.recentHours = String(options.recentHours);
+    if (options.subject) {
+      params.subjectNamespace = options.subject.namespace;
+      params.subjectType = options.subject.type;
+      params.subjectKey = options.subject.canonicalKey;
+    }
+    if (options.claimLimit !== undefined) params.claimLimit = String(options.claimLimit);
     return await this.requestJson<AgentTopologyPageResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/agent-topology`,
       undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.parentSessionId === undefined
-          ? {}
-          : { parentSessionId: options.parentSessionId ?? "null" }),
-        ...(options.rootSessionId ? { rootSessionId: options.rootSessionId } : {}),
-        ...(options.cursor ? { cursor: options.cursor } : {}),
-        ...(query ? { query } : {}),
-        ...(options.statuses?.length ? { statuses: options.statuses.join(",") } : {}),
-        ...(options.activeOnly !== undefined
-          ? { activeOnly: options.activeOnly ? "true" : "false" }
-          : {}),
-        ...(options.recentHours !== undefined ? { recentHours: String(options.recentHours) } : {}),
-        ...(options.subject
-          ? {
-              subjectNamespace: options.subject.namespace,
-              subjectType: options.subject.type,
-              subjectKey: options.subject.canonicalKey,
-            }
-          : {}),
-        ...(options.claimLimit !== undefined ? { claimLimit: String(options.claimLimit) } : {}),
-      },
+      params,
     );
   }
 
@@ -1571,7 +1769,7 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+      `${sessionPath(workspaceId, sessionId)}/pin`,
       request,
     );
   }
@@ -1584,7 +1782,7 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/attention`,
+      `${sessionPath(workspaceId, sessionId)}/attention`,
       request,
     );
   }
@@ -1597,7 +1795,7 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/archive`,
+      `${sessionPath(workspaceId, sessionId)}/archive`,
       request,
     );
   }
@@ -1609,7 +1807,7 @@ export class OpenGeniClient {
   ): Promise<{ deletedSessionCount: number }> {
     return await this.requestJson<{ deletedSessionCount: number }>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      sessionPath(workspaceId, sessionId),
     );
   }
 
@@ -1618,7 +1816,7 @@ export class OpenGeniClient {
     sessionId: string,
     options: GetSessionLineageOptions = {},
   ): Promise<SessionLineageResponse> {
-    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
+    const path = `${sessionPath(workspaceId, sessionId)}/lineage`;
     return await this.sharedRead(
       path,
       (signal) => this.requestJson<SessionLineageResponse>("GET", path, undefined, {}, { signal }),
@@ -1793,7 +1991,7 @@ export class OpenGeniClient {
   ): Promise<CodexRealtimeWebrtcResponse> {
     return await this.requestJson<CodexRealtimeWebrtcResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/webrtc`,
       request,
       {},
       { signal: options.signal },
@@ -1809,7 +2007,7 @@ export class OpenGeniClient {
   ): Promise<GatewayRealtimeConnectResponse> {
     return await this.requestJson<GatewayRealtimeConnectResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/gateway`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/gateway`,
       request,
       {},
       { signal: options.signal },
@@ -1825,7 +2023,7 @@ export class OpenGeniClient {
   ): Promise<GatewayRealtimeConnectResponse> {
     return await this.requestJson<GatewayRealtimeConnectResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/supergrok`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/supergrok`,
       request,
       {},
       { signal: options.signal },
@@ -1843,7 +2041,7 @@ export class OpenGeniClient {
   ): Promise<SessionRealtimeMutationResponse> {
     return await this.requestJson<SessionRealtimeMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/connections/${connectionId}/activate`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/${realtimeId}/connections/${connectionId}/activate`,
       request,
       {},
       { signal: options.signal },
@@ -1858,7 +2056,7 @@ export class OpenGeniClient {
   ): Promise<SessionRealtimeMutationResponse> {
     return await this.requestJson<SessionRealtimeMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime`,
+      `${sessionPath(workspaceId, sessionId)}/realtime`,
       request,
     );
   }
@@ -1872,7 +2070,7 @@ export class OpenGeniClient {
   ): Promise<SessionRealtimeMutationResponse> {
     return await this.requestJson<SessionRealtimeMutationResponse>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/heartbeat`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/${realtimeId}/heartbeat`,
       request,
     );
   }
@@ -1886,7 +2084,7 @@ export class OpenGeniClient {
   ): Promise<SyncSessionRealtimeLedgerResponse> {
     return await this.requestJson<SyncSessionRealtimeLedgerResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/sync`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/${realtimeId}/sync`,
       request,
     );
   }
@@ -1900,7 +2098,7 @@ export class OpenGeniClient {
   ): Promise<SessionRealtimeMutationResponse> {
     return await this.requestJson<SessionRealtimeMutationResponse>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}`,
+      `${sessionPath(workspaceId, sessionId)}/realtime/${realtimeId}`,
       request,
     );
   }
@@ -1916,7 +2114,7 @@ export class OpenGeniClient {
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns`,
+      `${sessionPath(workspaceId, sessionId)}/turns`,
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
@@ -2109,7 +2307,7 @@ export class OpenGeniClient {
   ): Promise<SwapActiveSandboxResponse> {
     return await this.requestJson<SwapActiveSandboxResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/active-sandbox`,
+      `${sessionPath(workspaceId, sessionId)}/active-sandbox`,
       request,
     );
   }
@@ -2136,6 +2334,23 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
+    );
+  }
+
+  /**
+   * Channels a person may choose as a scheduled task's fixed Slack destination:
+   * active, non-shared channels the selected OpenGeni bot already belongs to.
+   */
+  async listScheduledTaskSlackChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackReactionChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackReactionChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-task-slack-channels?${query}`,
     );
   }
 
@@ -2186,7 +2401,7 @@ export class OpenGeniClient {
       options.resultMode === "compact" ? null : options;
     const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(
-      this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
+      this.url(`${sessionPath(workspaceId, sessionId)}/events`, {
         ...(listOptions?.after !== undefined ? { after: String(listOptions.after) } : {}),
         ...(listOptions?.before !== undefined ? { before: String(listOptions.before) } : {}),
         ...(listOptions?.limit !== undefined ? { limit: String(listOptions.limit) } : {}),
@@ -2214,7 +2429,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2297,7 +2512,7 @@ export class OpenGeniClient {
   ): Promise<SessionEvent> {
     return await this.requestSessionCommand<SessionEvent>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+      `${sessionPath(workspaceId, sessionId)}/events`,
       event,
     );
   }
@@ -2363,7 +2578,7 @@ export class OpenGeniClient {
       requests: SessionHumanInputRequest[];
     }>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
+      `${sessionPath(workspaceId, sessionId)}/human-input-requests`,
       undefined,
       options.status ? { status: options.status } : undefined,
     );
@@ -2377,7 +2592,7 @@ export class OpenGeniClient {
   ): Promise<SessionHumanInputRequest> {
     return await this.requestJson<SessionHumanInputRequest>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests/${requestId}`,
+      `${sessionPath(workspaceId, sessionId)}/human-input-requests/${requestId}`,
     );
   }
 
@@ -2427,7 +2642,7 @@ export class OpenGeniClient {
     sessionId: string,
     options: { after?: number; signal?: AbortSignal } = {},
   ): Promise<ReadableStream<Uint8Array>> {
-    const url = this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events/stream`, {
+    const url = this.url(`${sessionPath(workspaceId, sessionId)}/events/stream`, {
       after: String(options.after ?? 0),
     });
     const correlationId = crypto.randomUUID();
@@ -2436,7 +2651,7 @@ export class OpenGeniClient {
       headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2452,7 +2667,7 @@ export class OpenGeniClient {
   // --- Turn queue ------------------------------------------------------------
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
-    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
+    const path = `${sessionPath(workspaceId, sessionId)}/queue`;
     return await this.sharedRead(path, () =>
       this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
     );
@@ -2466,7 +2681,7 @@ export class OpenGeniClient {
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/move`,
+      `${sessionPath(workspaceId, sessionId)}/queue/${turnId}/move`,
       request,
     );
   }
@@ -2479,7 +2694,7 @@ export class OpenGeniClient {
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/edit`,
+      `${sessionPath(workspaceId, sessionId)}/queue/${turnId}/edit`,
       request,
     );
   }
@@ -2492,7 +2707,7 @@ export class OpenGeniClient {
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/steer`,
+      `${sessionPath(workspaceId, sessionId)}/queue/${turnId}/steer`,
       request,
     );
   }
@@ -2505,7 +2720,7 @@ export class OpenGeniClient {
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/delete`,
+      `${sessionPath(workspaceId, sessionId)}/queue/${turnId}/delete`,
       request,
     );
   }
@@ -2517,7 +2732,7 @@ export class OpenGeniClient {
   ): Promise<ComposerDraft> {
     return await this.requestSessionCommand<ComposerDraft>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+      `${sessionPath(workspaceId, sessionId)}/composer-draft`,
       undefined,
       options,
     );
@@ -2530,7 +2745,7 @@ export class OpenGeniClient {
   ): Promise<ComposerDraft> {
     return await this.requestSessionCommand<ComposerDraft>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+      `${sessionPath(workspaceId, sessionId)}/composer-draft`,
       request,
     );
   }
@@ -2542,7 +2757,7 @@ export class OpenGeniClient {
   ): Promise<SubmitComposerDraftResponse> {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      `${sessionPath(workspaceId, sessionId)}/composer-draft/submit`,
       request,
     );
   }
@@ -2552,10 +2767,7 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
   ): Promise<SandboxRecoveryProjection> {
-    return this.requestJson(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
-    );
+    return this.requestJson("GET", `${sessionPath(workspaceId, sessionId)}/sandbox-recovery`);
   }
 
   /** Restore only the explicitly selected checkpoint; never retry a command. */
@@ -2566,7 +2778,7 @@ export class OpenGeniClient {
   ): Promise<SandboxRecoveryResponse> {
     return this.requestSessionCommand(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+      `${sessionPath(workspaceId, sessionId)}/sandbox-recovery`,
       request,
     );
   }
@@ -2579,7 +2791,7 @@ export class OpenGeniClient {
   ): Promise<SessionRetryResponse> {
     return await this.requestSessionCommand<SessionRetryResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/retry`,
+      `${sessionPath(workspaceId, sessionId)}/retry`,
       request,
     );
   }
@@ -2596,7 +2808,7 @@ export class OpenGeniClient {
   ): Promise<SessionControlResponse> {
     return await this.requestSessionCommand<SessionControlResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`,
+      `${sessionPath(workspaceId, sessionId)}/control`,
       request,
     );
   }
@@ -2686,7 +2898,7 @@ export class OpenGeniClient {
         headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2762,7 +2974,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2803,7 +3015,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -2829,7 +3041,7 @@ export class OpenGeniClient {
     assertNoMessageTools(input);
     return await this.requestSessionCommand<SteerMessageResult>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
+      `${sessionPath(workspaceId, sessionId)}/steer`,
       input,
     );
   }
@@ -2842,7 +3054,7 @@ export class OpenGeniClient {
     sessionId: string,
     options: SharedSessionReadOptions = {},
   ): Promise<SessionGoal> {
-    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
+    const path = `${sessionPath(workspaceId, sessionId)}/goal`;
     return await this.sharedRead(
       path,
       (signal) => this.requestJson<SessionGoal>("GET", path, undefined, {}, { signal }),
@@ -2857,7 +3069,7 @@ export class OpenGeniClient {
   ): Promise<SessionGoal> {
     return await this.requestJson<SessionGoal>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
+      `${sessionPath(workspaceId, sessionId)}/goal`,
       request,
     );
   }
@@ -2865,7 +3077,7 @@ export class OpenGeniClient {
   async listGoalRevisions(workspaceId: string, sessionId: string): Promise<SessionGoalRevision[]> {
     return await this.requestJson<SessionGoalRevision[]>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions`,
+      `${sessionPath(workspaceId, sessionId)}/goal/revisions`,
     );
   }
 
@@ -2880,7 +3092,7 @@ export class OpenGeniClient {
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return await this.requestJson<ListSessionGoalRevisionsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/page${suffix}`,
+      `${sessionPath(workspaceId, sessionId)}/goal/revisions/page${suffix}`,
     );
   }
 
@@ -2892,7 +3104,7 @@ export class OpenGeniClient {
   ): Promise<RejectSessionGoalRevisionResponse> {
     return await this.requestJson<RejectSessionGoalRevisionResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/reject`,
+      `${sessionPath(workspaceId, sessionId)}/goal/revisions/${revisionId}/reject`,
       request,
     );
   }
@@ -2905,7 +3117,7 @@ export class OpenGeniClient {
   ): Promise<SessionGoal> {
     return await this.requestJson<SessionGoal>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/rollback`,
+      `${sessionPath(workspaceId, sessionId)}/goal/revisions/${revisionId}/rollback`,
       request,
     );
   }
@@ -2918,13 +3130,13 @@ export class OpenGeniClient {
   ): Promise<SessionGoal> {
     return await this.requestJson<SessionGoal>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/apply`,
+      `${sessionPath(workspaceId, sessionId)}/goal/revisions/${revisionId}/apply`,
       request,
     );
   }
 
   async deleteGoal(workspaceId: string, sessionId: string): Promise<void> {
-    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`);
+    await this.requestVoid("DELETE", `${sessionPath(workspaceId, sessionId)}/goal`);
   }
 
   /** Pause the goal loop: the session stops self-continuing until resumed. */
@@ -2954,11 +3166,9 @@ export class OpenGeniClient {
    * context — the destructive intent is explicit on the wire.
    */
   async clearSessionContext(workspaceId: string, sessionId: string): Promise<void> {
-    await this.requestVoid(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/clear`,
-      { confirm: true },
-    );
+    await this.requestVoid("POST", `${sessionPath(workspaceId, sessionId)}/context/clear`, {
+      confirm: true,
+    });
   }
 
   /** Request one durable portable compaction at the next safe model boundary. */
@@ -2968,7 +3178,7 @@ export class OpenGeniClient {
   ): Promise<CompactSessionContextResult> {
     return await this.requestJson<CompactSessionContextResult>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/compact`,
+      `${sessionPath(workspaceId, sessionId)}/context/compact`,
       {},
     );
   }
@@ -2987,7 +3197,7 @@ export class OpenGeniClient {
   ): Promise<FsListResponse> {
     return await this.requestJson<FsListResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`,
+      `${sessionPath(workspaceId, sessionId)}/fs/list`,
       request,
       {},
       options,
@@ -3003,7 +3213,7 @@ export class OpenGeniClient {
   ): Promise<FsListBatchResponse> {
     return await this.requestJson<FsListBatchResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list-batch`,
+      `${sessionPath(workspaceId, sessionId)}/fs/list-batch`,
       request,
       {},
       options,
@@ -3019,7 +3229,9 @@ export class OpenGeniClient {
   ): Promise<FsReadResponse> {
     return await this.requestJson<FsReadResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
+      request.workspaceOnly
+        ? `${sessionPath(workspaceId, sessionId)}/fs/read-workspace`
+        : `${sessionPath(workspaceId, sessionId)}/fs/read`,
       request,
       {},
       options,
@@ -3035,7 +3247,7 @@ export class OpenGeniClient {
   ): Promise<SandboxFileArtifactReceipt> {
     return await this.requestJson<SandboxFileArtifactReceipt>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/publish`,
+      `${sessionPath(workspaceId, sessionId)}/artifacts/publish`,
       request,
       {},
       options,
@@ -3050,7 +3262,7 @@ export class OpenGeniClient {
   ): Promise<FsWriteResponse> {
     return await this.requestJson<FsWriteResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/write`,
+      `${sessionPath(workspaceId, sessionId)}/fs/write`,
       request,
     );
   }
@@ -3063,7 +3275,7 @@ export class OpenGeniClient {
   ): Promise<FsDeleteResponse> {
     return await this.requestJson<FsDeleteResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/delete`,
+      `${sessionPath(workspaceId, sessionId)}/fs/delete`,
       request,
     );
   }
@@ -3076,7 +3288,7 @@ export class OpenGeniClient {
   ): Promise<FsMoveResponse> {
     return await this.requestJson<FsMoveResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/move`,
+      `${sessionPath(workspaceId, sessionId)}/fs/move`,
       request,
     );
   }
@@ -3089,7 +3301,7 @@ export class OpenGeniClient {
   ): Promise<FsMkdirResponse> {
     return await this.requestJson<FsMkdirResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/mkdir`,
+      `${sessionPath(workspaceId, sessionId)}/fs/mkdir`,
       request,
     );
   }
@@ -3103,7 +3315,7 @@ export class OpenGeniClient {
   ): Promise<GitStatusResponse> {
     return await this.requestJson<GitStatusResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`,
+      `${sessionPath(workspaceId, sessionId)}/git/status`,
       request,
       {},
       options,
@@ -3119,7 +3331,7 @@ export class OpenGeniClient {
   ): Promise<GitDiffResponse> {
     return await this.requestJson<GitDiffResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
+      `${sessionPath(workspaceId, sessionId)}/git/diff`,
       request,
       {},
       options,
@@ -3135,7 +3347,7 @@ export class OpenGeniClient {
   ): Promise<GitReadBatchResponse> {
     return await this.requestJson<GitReadBatchResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/read-batch`,
+      `${sessionPath(workspaceId, sessionId)}/git/read-batch`,
       request,
       {},
       options,
@@ -3150,7 +3362,7 @@ export class OpenGeniClient {
   ): Promise<GitLogResponse> {
     return await this.requestJson<GitLogResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/log`,
+      `${sessionPath(workspaceId, sessionId)}/git/log`,
       request,
     );
   }
@@ -3163,7 +3375,7 @@ export class OpenGeniClient {
   ): Promise<GitShowResponse> {
     return await this.requestJson<GitShowResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/show`,
+      `${sessionPath(workspaceId, sessionId)}/git/show`,
       request,
     );
   }
@@ -3179,7 +3391,7 @@ export class OpenGeniClient {
   ): Promise<GetWorkspaceCaptureResponse> {
     return await this.requestJson<GetWorkspaceCaptureResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`,
+      `${sessionPath(workspaceId, sessionId)}/workspace/capture`,
       undefined,
       {},
       options,
@@ -3200,7 +3412,7 @@ export class OpenGeniClient {
     if (revision !== undefined) query.revision = String(revision);
     return await this.requestJson<GetWorkspaceCaptureFileResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`,
+      `${sessionPath(workspaceId, sessionId)}/workspace/capture/file`,
       undefined,
       query,
       options,
@@ -3215,7 +3427,7 @@ export class OpenGeniClient {
   ): Promise<TerminalExecResponse> {
     return await this.requestJson<TerminalExecResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/exec`,
+      `${sessionPath(workspaceId, sessionId)}/terminal/exec`,
       request,
     );
   }
@@ -3229,7 +3441,7 @@ export class OpenGeniClient {
   ): Promise<PtyOpenResponse> {
     return await this.requestJson<PtyOpenResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty`,
+      `${sessionPath(workspaceId, sessionId)}/terminal/pty`,
       request,
     );
   }
@@ -3242,7 +3454,7 @@ export class OpenGeniClient {
   ): Promise<void> {
     await this.requestVoid(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/write`,
+      `${sessionPath(workspaceId, sessionId)}/terminal/pty/write`,
       request,
     );
   }
@@ -3255,7 +3467,7 @@ export class OpenGeniClient {
   ): Promise<void> {
     await this.requestVoid(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/resize`,
+      `${sessionPath(workspaceId, sessionId)}/terminal/pty/resize`,
       request,
     );
   }
@@ -3268,7 +3480,7 @@ export class OpenGeniClient {
   ): Promise<void> {
     await this.requestVoid(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/close`,
+      `${sessionPath(workspaceId, sessionId)}/terminal/pty/close`,
       request,
     );
   }
@@ -3292,7 +3504,7 @@ export class OpenGeniClient {
   ): Promise<SessionCapabilities> {
     return await this.requestJson<SessionCapabilities>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`,
+      `${sessionPath(workspaceId, sessionId)}/stream-capabilities`,
       undefined,
       {},
       options,
@@ -3309,7 +3521,7 @@ export class OpenGeniClient {
   ): Promise<AcknowledgeStreamResponse> {
     return await this.requestJson<AcknowledgeStreamResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities/acknowledge`,
+      `${sessionPath(workspaceId, sessionId)}/stream-capabilities/acknowledge`,
       request,
     );
   }
@@ -3327,7 +3539,7 @@ export class OpenGeniClient {
   ): Promise<AttachViewerResponse> {
     return await this.requestJson<AttachViewerResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers`,
+      `${sessionPath(workspaceId, sessionId)}/viewers`,
       request,
     );
   }
@@ -3343,17 +3555,14 @@ export class OpenGeniClient {
   ): Promise<ViewerHeartbeatResponse> {
     return await this.requestJson<ViewerHeartbeatResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}/heartbeat`,
+      `${sessionPath(workspaceId, sessionId)}/viewers/${viewerId}/heartbeat`,
       request,
     );
   }
 
   /** Detach a viewer (delete this holder; idempotent delete-my-row). */
   async detachViewer(workspaceId: string, sessionId: string, viewerId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}`,
-    );
+    await this.requestVoid("DELETE", `${sessionPath(workspaceId, sessionId)}/viewers/${viewerId}`);
   }
 
   // --- Browser / Computer interaction resources --------------------------------
@@ -3398,7 +3607,7 @@ export class OpenGeniClient {
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, {
         method: "GET",
@@ -4445,16 +4654,20 @@ export class OpenGeniClient {
    * reasoning efforts, MCP servers, file-upload limits, and how the client is
    * expected to authenticate. Drives a composer's model picker without prior
    * knowledge of the host setup; safe to call before any auth is established.
+   * Authenticated calls resolve the caller's default workspace, or the exact
+   * `workspaceId` option, using the same selection rules as fresh session create.
    */
-  async getClientConfig(options: OpenGeniRequestOptions = {}): Promise<ClientConfig> {
+  async getClientConfig(
+    options: OpenGeniRequestOptions & { workspaceId?: string } = {},
+  ): Promise<ClientConfig> {
     const config = await this.requestJson<ClientConfig>(
       "GET",
       "/v1/config/client",
       undefined,
-      {},
+      options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId },
       options,
     );
-    if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    if (this.apiContractStrict && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
       throw new OpenGeniApiContractMismatchError(
         OPENGENI_API_CONTRACT_REVISION,
         String(config.apiContractRevision || "(missing)"),
@@ -4562,6 +4775,86 @@ export class OpenGeniClient {
   }
 
   /** Read metadata for one organization-owned model-provider connection. */
+  async getWorkspaceClaudeSubscriptionUsage(workspaceId: string): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  /** Sign in with model and profile access; no inference request is made. */
+  async startWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeWorkspaceClaudeSubscriptionOAuth(
+    workspaceId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
+  async startOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionOAuthStartResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/start`,
+      {},
+    );
+  }
+
+  async completeOrganizationClaudeSubscriptionOAuth(
+    organizationId: string,
+    request: ClaudeSubscriptionOAuthCompleteRequest,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/complete`,
+      request,
+    );
+  }
+
+  async refreshWorkspaceClaudeSubscriptionUsage(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage/refresh`,
+      {},
+    );
+  }
+
+  async getOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  async refreshOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage/refresh`,
+      {},
+    );
+  }
+
+  /** Read metadata for one organization-owned model-provider connection. */
   async getOrganizationModelProviderConnection(
     organizationId: string,
     providerKind: OrganizationModelProviderKind,
@@ -4594,6 +4887,50 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationModelProviderConnection>(
       "DELETE",
       `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** List workspace-owned Claude model slugs. */
+  async listWorkspaceClaudeCustomModels(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add an immutable workspace-owned Claude model generation. */
+  async createWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire a workspace-owned Claude model generation. */
+  async deleteWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    )
+      throw new TypeError("customModelId must be a UUID");
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
       request,
     );
   }
@@ -4677,7 +5014,17 @@ export class OpenGeniClient {
     );
   }
 
-  /** The caller's access context: subject, account + workspace grants, defaults. */
+  /**
+   * The caller's subject, grants, defaults, and optional direct API-key authority.
+   * `credential.effectiveWorkspacePermissions` expands workspace admin without
+   * changing existing grants or including account-only permissions. Full
+   * organization keys can provision shared workspaces, external members, and
+   * `asUser` sessions; user requests additionally need live membership.
+   * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
+   * session visibility or the explicit `secrets:read` permission requirement. Credential
+   * metadata is omitted for `asUser`/external actors, humans, delegated tokens,
+   * other caller contexts, and older servers.
+   */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
   }
@@ -4862,7 +5209,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Delete a shared workspace through organization-administrator authority. */
+  /**
+   * Delete an organization (shared) workspace. Accepts an organization owner
+   * session or an organization API key with `workspace:admin` (for tenant
+   * offboarding); never deletes a Personal workspace. 409 until quiescent.
+   */
   async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
     await this.requestVoid(
       "DELETE",
@@ -5832,6 +6183,33 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+   * with the signed-in caller's current authority. Pass the `executionDigest`
+   * of the task whose `policyDrift` was reviewed; a changed task returns 409.
+   */
+  async refreshScheduledTaskAccess(
+    workspaceId: string,
+    taskId: string,
+    request: RefreshScheduledTaskAccessRequest,
+  ): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/refresh-access`,
+      request,
+    );
+  }
+
+  /** Schedules the caller can act on whose latest run could not use a connector. */
+  async listScheduledTaskAccessAttention(
+    workspaceId: string,
+  ): Promise<ScheduledTaskAccessAttention[]> {
+    const response = await this.requestJson<{
+      tasks: ScheduledTaskAccessAttention[];
+    }>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`);
+    return response.tasks;
+  }
+
   // --- VariableSets --------------------------------------------------------------
   // Generic reads return name/version metadata only. Plaintext uses one
   // dedicated permissioned endpoint.
@@ -5980,7 +6358,7 @@ export class OpenGeniClient {
   ): Promise<Session> {
     return await this.requestJson<Session>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/channel`,
+      `${sessionPath(workspaceId, sessionId)}/channel`,
       request,
     );
   }
@@ -6340,7 +6718,7 @@ export class OpenGeniClient {
   ): Promise<RetainedArtifactMetadata> {
     return await this.requestJson<RetainedArtifactMetadata>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}`,
+      `${sessionPath(workspaceId, sessionId)}/artifacts/${artifactId}`,
     );
   }
 
@@ -6351,7 +6729,7 @@ export class OpenGeniClient {
     options: RetainedArtifactContentOptions = {},
   ): Promise<RetainedArtifactContent> {
     return await this.getRetainedArtifactContentAtPath(
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}/content`,
+      `${sessionPath(workspaceId, sessionId)}/artifacts/${artifactId}/content`,
       options,
     );
   }
@@ -6474,7 +6852,7 @@ export class OpenGeniClient {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     try {
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
     } catch (error) {
       await cancelResponseBody(response, "retained artifact API contract mismatch");
       throw error;
@@ -7082,7 +7460,12 @@ export class OpenGeniClient {
 
   async discoverPlugins(
     workspaceId: string,
-    options: { id?: string; query?: string; provider?: string; offset?: number } = {},
+    options: {
+      id?: string;
+      query?: string;
+      provider?: string;
+      offset?: number;
+    } = {},
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
@@ -7433,6 +7816,19 @@ export class OpenGeniClient {
     request: SaveWorkspaceSkillRequest,
   ): Promise<SkillWriteReceipt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  /** Permanently remove a personal/workspace Skill and all its saved revisions. */
+  async removeWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: RemoveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/remove`,
+      request,
+    );
   }
 
   async approveWorkspaceSkill(
@@ -8128,6 +8524,56 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Embedding transport -----------------------------------------------------
+
+  /** The URL of an API path on this client's base (relative when the base is relative). */
+  apiUrl(path: string): string {
+    if (!path.startsWith("/")) throw new TypeError("API path must start with /");
+    return `${this.baseUrl}${path}`;
+  }
+
+  /**
+   * A client of the same class that adds `headers` to every request, keeping
+   * this client's base URL, fetch, credentials, and actor attribution. Used to
+   * scope a surface (for example an artifact viewer) to one host context.
+   */
+  withHeaders(headers: Readonly<Record<string, string>>): this {
+    const extra = { ...headers };
+    const base = this.options.headers;
+    const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
+    const client = new Client({
+      ...this.options,
+      headers: () => ({ ...(typeof base === "function" ? base() : base), ...extra }),
+    });
+    if (this.externalActorHeader !== undefined) {
+      client.externalActorHeader = this.externalActorHeader;
+    }
+    client.serviceInitiatorHeader = this.serviceInitiatorHeader;
+    client.serviceContextHeader = this.serviceContextHeader;
+    return client;
+  }
+
+  /**
+   * Fetch an absolute URL under this client's base URL through its fetch and
+   * headers. For transports the SDK builds itself (the editable-artifact live
+   * transport), so host authentication stays in one place. A URL outside the
+   * base is refused: credentials never leave the configured API.
+   */
+  async fetchApi(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    const origin =
+      typeof globalThis.location?.href === "string" ? globalThis.location.href : undefined;
+    const base = new URL(this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`, origin);
+    const target = new URL(input, base);
+    if (target.origin !== base.origin || !`${target.pathname}/`.startsWith(base.pathname)) {
+      throw new TypeError("fetchApi only reaches this client's API base URL");
+    }
+    const headers = new Headers(init.headers);
+    for (const [name, value] of Object.entries(this.headers())) {
+      if (!headers.has(name)) headers.set(name, value);
+    }
+    return (await this.fetchImpl(target.href, { ...init, headers })) as Response;
+  }
+
   // --- Internals -------------------------------------------------------------
 
   private headers(correlationId?: string): Record<string, string> {
@@ -8139,11 +8585,30 @@ export class OpenGeniClient {
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
+    const headerNames = Object.keys(headers).map((key) => key.toLowerCase());
+    const hasUser =
+      this.externalActorHeader !== undefined || headerNames.includes("x-opengeni-external-actor");
+    const hasService =
+      this.serviceInitiatorHeader !== undefined ||
+      headerNames.includes("x-opengeni-service-initiator") ||
+      headerNames.includes("x-opengeni-service-context");
+    if (hasUser && hasService)
+      throw new Error("asUser and asService attribution headers are mutually exclusive");
     if (this.externalActorHeader) {
       for (const key of Object.keys(headers)) {
         if (key.toLowerCase() === "x-opengeni-external-actor") delete headers[key];
       }
       headers["x-opengeni-external-actor"] = this.externalActorHeader;
+    }
+    if (this.serviceInitiatorHeader !== undefined) {
+      for (const key of Object.keys(headers)) {
+        const name = key.toLowerCase();
+        if (name === "x-opengeni-service-initiator" || name === "x-opengeni-service-context")
+          delete headers[key];
+      }
+      headers["x-opengeni-service-initiator"] = this.serviceInitiatorHeader;
+      if (this.serviceContextHeader !== undefined)
+        headers["x-opengeni-service-context"] = this.serviceContextHeader;
     }
     return headers;
   }
@@ -8232,7 +8697,7 @@ export class OpenGeniClient {
   ): Promise<SessionCodexAccountsResponse> {
     return await this.requestJson<SessionCodexAccountsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-accounts`,
+      `${sessionPath(workspaceId, sessionId)}/codex-accounts`,
     );
   }
 
@@ -8331,11 +8796,10 @@ export class OpenGeniClient {
     sessionId: string,
     target: string,
   ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
-    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
-      { target },
-    );
+    return await this.requestJson<{
+      pinned: string;
+      appliedTo?: "waiting_turn" | "next_turn";
+    }>("POST", `${sessionPath(workspaceId, sessionId)}/codex-account`, { target });
   }
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------
@@ -8344,7 +8808,13 @@ export class OpenGeniClient {
   async getModelConnectionAccess(target: {
     scope: "organizations" | "workspaces";
     scopeId: string;
-    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    kind:
+      | "codex"
+      | "supergrok"
+      | "vercel_gateway"
+      | "openrouter"
+      | "anthropic"
+      | "claude_subscription";
     connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
@@ -8357,7 +8827,13 @@ export class OpenGeniClient {
     target: {
       scope: "organizations" | "workspaces";
       scopeId: string;
-      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      kind:
+        | "codex"
+        | "supergrok"
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription";
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,
@@ -8566,13 +9042,14 @@ export class OpenGeniClient {
       if (abort.signal?.aborted) {
         throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
       }
+      const headers = this.headers(correlationId);
       let response: FetchResponse;
       try {
         response = await awaitWithAbort(
           this.fetchImpl(this.url(path, query), {
             method,
             headers: {
-              ...this.headers(correlationId),
+              ...headers,
               Accept: "application/json",
               ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             },
@@ -8588,13 +9065,20 @@ export class OpenGeniClient {
         }
         throw error;
       }
-      assertApiContractResponse(response);
+      assertApiContractResponse(response, this.apiContractStrict);
       try {
         if (!response.ok) {
           throw await awaitWithAbort(
             apiErrorFromResponse(response, { method, correlationId }),
             abort.signal,
           );
+        }
+        if (options.responseType === "void") {
+          await awaitWithAbort(
+            cancelResponseBody(response, "discarding void API response"),
+            abort.signal,
+          );
+          return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
         return (await awaitWithAbort(response.json(), abort.signal)) as T;
@@ -8616,16 +9100,17 @@ export class OpenGeniClient {
     method: string,
     path: string,
     query: Record<string, string> = {},
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
         headers: {
-          ...this.headers(correlationId),
-          Accept: "application/octet-stream",
+          ...headers,
+          Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
       });
@@ -8633,7 +9118,7 @@ export class OpenGeniClient {
       if (isMutationMethod(method)) throw mutationTransportError(correlationId);
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
@@ -8643,12 +9128,13 @@ export class OpenGeniClient {
   /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
   async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: "application/json",
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
@@ -8660,14 +9146,15 @@ export class OpenGeniClient {
       }
       throw error;
     }
-    assertApiContractResponse(response);
+    assertApiContractResponse(response, this.apiContractStrict);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
   }
 }
 
-function assertApiContractResponse(response: FetchResponse): void {
+function assertApiContractResponse(response: FetchResponse, strict: boolean): void {
+  if (!strict) return;
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
@@ -8853,10 +9340,19 @@ async function apiErrorFromResponse(
   response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<OpenGeniApiError> {
-  return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
+  const body = await readBoundedJsonErrorBody(response);
+  const ErrorType = allowanceExhaustedFields(body)
+    ? OpenGeniAllowanceExhaustedError
+    : OpenGeniApiError;
+  const error = new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),
   });
+  return error.status >= 400 &&
+    error.status < 500 &&
+    (error.code === "SESSION_TENANCY_NOT_ACTIVATED" || error.code === "OPENGENI_SETUP_REQUIRED")
+    ? new OpenGeniSetupError(error)
+    : error;
 }
 
 async function assertJsonResponse(

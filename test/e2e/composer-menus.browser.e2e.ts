@@ -46,7 +46,7 @@ describe("consistent production composer menus", () => {
     await page.route("**/src/context.tsx", (route) =>
       route.fulfill({
         contentType: "application/javascript",
-        body: `let settings={};const context={accessContext:{subjectId:"fixture-user"},client:{getAgentLearningSettings:async(_w,_s,source)=>({version:1,settings:source?settings:{knowledge:"automatic",instructions:"review_first",skills:"off"}}),saveAgentLearningSettings:async(_w,input)=>{for(const [key,value] of Object.entries(input.settings)){if(value==="inherit")delete settings[key];else settings[key]=value;}return {version:2,settings};}},captureWorkspaceInvocation:()=>({}),ownsWorkspaceInvocation:()=>true};export function useAppContext(){return context;}`,
+        body: `let settings={};const context={accessContext:{subjectId:"fixture-user"},client:{getAgentLearningSettings:async(_w,_s,source)=>({version:1,settings:source?settings:{knowledge:"automatic",instructions:"review_first",skills:"off"}}),saveAgentLearningSettings:async(_w,input)=>{for(const [key,value] of Object.entries(input.settings)){if(value==="inherit")delete settings[key];else settings[key]=value;}return {version:2,settings};}},captureWorkspaceInvocation:()=>({}),ownsWorkspaceInvocation:()=>true};export function useAppContext(){return context;}export function useOptionalAppContext(){return context;}`,
       }),
     );
   }, 60_000);
@@ -99,12 +99,15 @@ describe("consistent production composer menus", () => {
           if (name === "Chat settings") {
             const select = menu.getByLabel("Knowledge", { exact: true });
             await select.waitFor();
+            const shown = () =>
+              select.locator("..").locator('[aria-hidden="true"]').first().innerText();
             expect(await select.inputValue()).toBe("inherit");
-            expect(
-              await select.locator("..").locator('[aria-hidden="true"]').first().innerText(),
-            ).toBe("Allow updates");
+            // An inherited value names the effective default, so it is never
+            // mistaken for an override.
+            expect(await shown()).toBe("Default (Automatic)");
             await select.selectOption("off");
             expect(await select.inputValue()).toBe("off");
+            expect(await shown()).toBe("Off");
             await select.selectOption("inherit");
           }
           await page.keyboard.press("Escape");
@@ -152,7 +155,7 @@ describe("consistent production composer menus", () => {
     await page.setViewportSize({ width: 1000, height: 800 });
     await page.goto(url, { waitUntil: "networkidle" });
     await open("Connectors");
-    await page.getByRole("switch", { name: "Customize connectors", exact: true }).click();
+    await page.getByRole("menuitemcheckbox", { name: "Customize connectors", exact: true }).click();
     await page.getByRole("menuitemcheckbox", { name: "Slack", exact: true }).click();
     expect((await state()).connectors).toContain("files");
     expect((await state()).connectors).not.toContain("connector-1");

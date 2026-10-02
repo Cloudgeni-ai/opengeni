@@ -11,6 +11,7 @@ import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
+const turnId = "44444444-4444-4444-8444-444444444444";
 
 function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
   return {
@@ -41,7 +42,13 @@ describe("access-grant session RLS context", () => {
     const result = await withAccessGrantSessionRlsContext(
       { db: {} } as never,
       grant(),
-      async () => "ok",
+      async () => {
+        expect(db.currentCreditDebitAttribution()).toEqual({
+          kind: "human",
+          initiatingHumanSubjectId: "user:access-grant-rls-test",
+        });
+        return "ok";
+      },
     );
 
     expect(result).toBe("ok");
@@ -62,6 +69,7 @@ describe("access-grant session RLS context", () => {
     } as never);
     const liveAttempt = spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
       subjectId: "worker:first-party-mcp",
+      turnId,
       initiatingHumanSubjectId: "user:owner",
     } as never);
     const access = grant({
@@ -71,7 +79,14 @@ describe("access-grant session RLS context", () => {
     });
 
     await expect(
-      withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => "ok"),
+      withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => {
+        expect(db.currentCreditDebitAttribution()).toEqual({
+          kind: "turn",
+          turnId,
+          initiatingHumanSubjectId: "user:owner",
+        });
+        return "ok";
+      }),
     ).resolves.toBe("ok");
     expect(liveAttempt).toHaveBeenCalledWith({}, access, sessionId);
     expect(actors).toEqual([
@@ -98,6 +113,17 @@ describe("access-grant session RLS context", () => {
     expect(caught).toBeInstanceOf(HTTPException);
     expect((caught as HTTPException).status).toBe(403);
     expect(context).not.toHaveBeenCalled();
+  });
+  test("API-key grants retain pure-service billing attribution, not a human subject", async () => {
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
+    await withAccessGrantSessionRlsContext(
+      { db: {} } as never,
+      grant({ principalKind: "api_key", subjectId: "key:opaque" }),
+      async () => {
+        expect(db.currentCreditDebitAttribution()).toEqual({ kind: "service" });
+      },
+    );
+    expect(db.currentCreditDebitAttribution()).toEqual({ kind: "unknown" });
   });
 });
 

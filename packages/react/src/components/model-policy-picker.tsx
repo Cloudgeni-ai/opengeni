@@ -1,3 +1,5 @@
+import { ClaudeMark } from "./claude-mark";
+import { GrokMark } from "./grok-mark";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -20,6 +22,7 @@ import {
   type SVGProps,
 } from "react";
 import { cn } from "../lib/cn";
+import { MENU_CHEVRON_CLASS } from "../lib/menu-styles";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   effortOptionsForModel,
@@ -96,10 +99,11 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   free: "Free",
 
   billingHints: {
-    opengeni_credits: "Provided by OpenGeni",
+    opengeni_credits: "Provided by Opengeni",
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
+    claude_subscription: "Claude plan",
     byok: "Billed to the workspace provider account",
     organization_byok: "Billed to the organization provider account",
   },
@@ -140,6 +144,15 @@ export type ModelPolicyPickerProps = {
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
   contentStyle?: CSSProperties | undefined;
   className?: string | undefined;
+  /**
+   * "pill" (default) is the composer's quiet rounded trigger with the effort.
+   * "field" is a settings control: a bordered rectangle with the model name
+   * and `triggerMeta` (for example the payer) in muted text. The effort stays
+   * in the menu.
+   */
+  triggerStyle?: "pill" | "field" | undefined;
+  /** Muted text after the model name in the "field" trigger. */
+  triggerMeta?: ReactNode;
   messages?: Partial<ModelPolicyPickerMessages> | undefined;
   onModelChange: (modelId: string) => void;
   onEffortChange: (effort: ReasoningEffort) => void;
@@ -169,17 +182,6 @@ function ChatGptMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function XaiMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 466.04 516.93" fill="currentColor" aria-hidden="true" {...props}>
-      <polygon points="0.12 182.71 234.14 516.92 338.15 516.92 104.13 182.71 0.12 182.71" />
-      <polygon points="0 516.92 104.08 516.92 156.08 442.67 104.04 368.34 0 516.92" />
-      <polygon points="466.04 0 361.96 0 182.1 256.86 234.15 331.18 466.04 0" />
-      <polygon points="380.78 516.92 466.04 516.92 466.04 37.16 380.78 158.92 380.78 516.92" />
-    </svg>
-  );
-}
-
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
   presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
@@ -187,10 +189,11 @@ export function BillingClassMark(props: {
   "aria-label"?: string | undefined;
 }) {
   const labels: Record<PickerBillingClass, string> = {
-    opengeni_credits: "OpenGeni",
+    opengeni_credits: "Opengeni",
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
+    claude_subscription: "Claude",
     byok: "Workspace provider account",
     organization_byok: "Organization provider account",
   };
@@ -219,8 +222,10 @@ export function BillingClassMark(props: {
         <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
+      ) : props.billingClass === "claude_subscription" ? (
+        <ClaudeMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (
-        <XaiMark className={mark} />
+        <GrokMark className={mark} />
       ) : (
         <KeyRoundIcon className={mark} aria-hidden />
       )}
@@ -233,6 +238,10 @@ function isCodexModel(model: ClientModel): boolean {
 }
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("workspace-anthropic/")) return "byok";
+  if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   // A deployment OpenRouter ID does not encode its workspace-facing cost.
@@ -292,25 +301,20 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        // The one menu row (lib/menu-styles.ts), with density tokens for embedders.
+        "flex min-h-8 w-full cursor-pointer items-center gap-2.5 rounded-og-md px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
       {props.icon}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate text-og-menu", props.active && "font-medium")}>
-          {props.label}
-        </span>
+        <span className="block truncate text-og-menu">{props.label}</span>
         {props.hint ? (
-          <span className="mt-0.5 block truncate text-og-control text-og-fg-subtle">
-            {props.hint}
-          </span>
+          <span className="mt-0.5 block truncate text-og-sm text-og-fg-muted">{props.hint}</span>
         ) : null}
       </span>
       {props.trailing ? <span className="ml-auto shrink-0">{props.trailing}</span> : null}
-      {props.showChevron === false ? null : (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
-      )}
+      {props.showChevron === false ? null : <ChevronRightIcon className={MENU_CHEVRON_CLASS} />}
     </button>
   );
 }
@@ -322,14 +326,16 @@ export function PickerBackHeader(props: {
   trailing?: ReactNode;
 }) {
   return (
-    <div className="mb-1 flex items-center gap-0.5 border-b border-og-border/70 px-0.5 pb-1.5">
+    <div className="mb-1.5 flex min-h-9 items-center gap-1 border-b border-og-border pb-1.5">
       <button
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-og-md pr-2.5 text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11"
       >
-        <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
+        <span className="flex size-8 shrink-0 items-center justify-center text-og-fg-muted">
+          <ChevronLeftIcon className="size-4" />
+        </span>
         {props.icon}
         <span className="min-w-0 flex-1 truncate text-og-menu font-medium">{props.label}</span>
       </button>
@@ -386,11 +392,68 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
       <span
         className={cn(
           "og-root inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
+          props.triggerStyle === "field" && "w-[180px] rounded-og-md",
           props.className,
         )}
         aria-label={messages.loading}
         data-testid="model-picker-loading"
       />
+    );
+  }
+  if (props.triggerStyle === "field") {
+    return (
+      <>
+        <button
+          ref={trigger.ref}
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? contentId : undefined}
+          data-state={open ? "open" : "closed"}
+          data-trigger-style="field"
+          onClick={() => setOpen(!open)}
+          disabled={props.disabled}
+          aria-label={messages.label}
+          className={cn(
+            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            props.className,
+          )}
+        >
+          {needsModel ? (
+            <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
+          ) : (
+            <BillingClassMark
+              billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
+              presentation={
+                props.groupPresentation?.[
+                  selected?.billingClass ?? billingClassForMissingSelection(props.model)
+                ]
+              }
+              className="text-og-fg"
+            />
+          )}
+          <span className="min-w-0 truncate font-medium">
+            {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
+          </span>
+          {props.triggerMeta && !needsModel ? (
+            <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">
+              {props.triggerMeta}
+            </span>
+          ) : null}
+          <ChevronDownIcon className="ml-auto size-3.5 shrink-0 text-og-fg-muted" />
+        </button>
+        {open ? (
+          <Suspense fallback={null}>
+            <LazyModelPolicyPickerMenu
+              {...props}
+              anchor={trigger.currentRef}
+              contentId={contentId}
+              portalStyle={portalStyle}
+              onOpenChange={setOpen}
+            />
+          </Suspense>
+        ) : null}
+      </>
     );
   }
   return (
@@ -407,8 +470,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         aria-label={messages.label}
         className={cn(
           "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          // With no usable model the pill is the one thing that unblocks the
+          // composer, so it takes the primary wash.
           needsModel
-            ? "border-og-border bg-og-surface-2 text-og-fg hover:bg-og-surface-3"
+            ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
             : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg",
           props.className,
         )}

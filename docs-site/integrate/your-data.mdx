@@ -1,0 +1,106 @@
+---
+title: "Give the agent your data"
+description: "Expose your product's data and actions to the agent through an MCP server or an OpenAPI description, authorized as the signed-in user."
+icon: "database"
+---
+
+The agent reaches your product through tools you expose. OpenGeni calls them on the agent's behalf; your API authorizes every call. There are two main ways to do it:
+
+| Use                        | When                                                                                                                       |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Per-session MCP server** | The agent should act as the signed-in user, with a short-lived token you mint for each session                             |
+| **OpenAPI Integration**    | You already have an HTTP API. Describe the operations the agent may use; OpenGeni compiles them into tools for a workspace |
+
+Either way, the tool must also be **selected** in the session's `tools`. Nothing reaches the agent unless you select it.
+
+## Per-session MCP server with a per-user token
+
+<Steps>
+  <Step title="Allow users to attach an MCP server">
+    Add `mcp_servers:attach` to the permissions you grant during [onboarding](/embed-manually).
+  </Step>
+  <Step title="Attach and select the server when creating the session">
+    ```ts
+    const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
+
+    await og.asUser(user.id, { source }).createSession(workspaceId, {
+      initialMessage,
+      idempotencyKey,
+      mcpServers: [
+        {
+          ...acme(await mintUserToken(user)),
+          url: "https://api.acme.com/mcp",
+          allowedTools: ["get_ticket", "update_ticket"],
+        },
+      ],
+      tools: [{ kind: "mcp", id: "acme" }], // required: the server must also be selected
+      firstPartyMcpTools: [],
+      sandboxBackend: "none",
+    });
+    ```
+
+    Header values are encrypted at rest and never returned in responses or events.
+
+  </Step>
+  <Step title="Rotate the token on every message">
+    `beforeForwardMessage` runs on your server before each message the browser sends. Return a fresh token and any per-message context:
+
+    ```ts
+    createSessionProxyHandler(og, {
+      resolve,
+      beforeForwardMessage: async (_message, { user }) => ({
+        mcpCredentialUpdates: [acme(await mintUserToken(user))],
+        modelContext: `Today is ${new Date().toISOString().slice(0, 10)}. Current page: tickets.`,
+      }),
+    });
+    ```
+
+    OpenGeni applies the update atomically as the message is accepted. The browser can never send credential updates itself.
+
+  </Step>
+  <Step title="Authorize every call in your MCP server">
+    Validate the token and derive the tenant and user from it. Never trust a tenant or record id the model supplies without checking it belongs to that user.
+  </Step>
+</Steps>
+
+Make the token outlive one turn: agents can work for many minutes. `modelContext` is visible to the model and in the session's audit events, so never put secrets in it.
+
+Provider credentials must be independently scoped, not ordinary host login JWTs with a smaller tool list. A token using the normal login signing secret/user ID can still authorize the host's account/password endpoints. Prefer a separate signing key/token namespace, distinct issuer/audience, short expiry and exact operation/record scope. The bridge must verify them; ordinary host endpoints must reject this token. Merely adding audience claims is not enough if ordinary middleware ignores them. Tool allowlists and approval gates are not credential authorization.
+
+Test the real middleware: the provider token permits only the intended operation on an owned record and is rejected by ordinary account/password/admin APIs, foreign records and extra write fields; a normal login token is rejected by the bridge. Also test expiry, issuer/audience and operation scope. Reuse authorized business logic, not the ordinary login credential.
+
+To require human approval before a tool runs, set `requireApproval: true` on the server, or list specific tool names. See [Approvals & questions](/integrate/approvals-and-questions).
+
+## OpenAPI Integration
+
+If your product already has an HTTP API, publish a focused OpenAPI 3.0 or 3.1 document with only the operations the agent may use. Preview it, choose the operations, and install the exact revision you reviewed:
+
+```ts
+const source = { kind: "openapi" as const, url: "https://api.acme.com/agent-openapi.json" };
+const preview = await og.previewApiIntegration(workspaceId, { source, connectionId });
+const installed = await og.installApiIntegration(workspaceId, {
+  source,
+  connectionId, // from og.createConnection(): the credential the integration calls your API with
+  expectedRevisionId: preview.revisionId,
+  expectedContentSha256: preview.contentSha256,
+  instanceKey: "acme-api",
+  // Tool ids from the preview (not operationIds), for example every non-destructive one:
+  allowedTools: preview.tools
+    .filter((tool) => tool.safety !== "destructive")
+    .map((tool) => tool.id),
+});
+// Persist installed.serverId, then select it per session:
+// tools: [{ kind: "mcp", id: installed.serverId }]
+```
+
+Integrations belong to a workspace, so every session in that workspace can select them. They are the right fit for [background agents](/integrate/background-agents), which cannot carry a per-session MCP server. GraphQL endpoints and workspace-wide MCP connections are also supported.
+
+## Reachability
+
+MCP servers, OpenAPI document URLs, and the API an integration calls must be public HTTPS URLs the OpenGeni deployment can reach. You can also pass the OpenAPI document inline (`kind: "openapi_document"`); the API it describes must still be reachable. For local development, expose your server with a tunnel such as `cloudflared tunnel --url http://localhost:4101` or `ngrok http 4101`.
+
+## Keep the tool surface small
+
+Tool schemas cost prompt tokens on every turn. Use `allowedTools` to expose only what the use case needs, and keep writes approval-gated unless you want the agent to act on its own.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

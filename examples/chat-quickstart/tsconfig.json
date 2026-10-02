@@ -4,5 +4,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["server.ts"]
+  "include": ["server.ts", "onboard.ts", "quickstart.ts"]
 }

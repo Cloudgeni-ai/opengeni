@@ -71,30 +71,52 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
   expect(chunks.length).toBeGreaterThan(32);
   let failProvider = true;
   let embedded = 0;
+  const providerSecret = "private provider response body";
   const embedder: DocumentServices["embedder"] = {
     model: "knowledge-index-test",
     dimensions: 3,
     embedQuery: async () => [1, 0, 0],
     embedMany: async (texts) => {
-      if (failProvider) throw new Error("provider unavailable");
+      if (failProvider)
+        throw Object.assign(new Error(`provider unavailable: ${providerSecret}`), { status: 503 });
       embedded += texts.length;
       return texts.map(() => [1, 0, 0]);
     },
   };
+  const warnings: Array<{ message: string; fields: unknown }> = [];
   const makeWorker = () =>
     createKnowledgeIndexingActivities(
       async () =>
         ({
           db: client.db,
           settings: { billingMode: "none", usageLimitsMode: "none" } as Settings,
-          observability: { warn: () => undefined },
-        }) as ControlActivityServices,
+          observability: {
+            warn: (message: string, fields: unknown) => warnings.push({ message, fields }),
+          },
+        }) as unknown as ControlActivityServices,
       async () => ({ embedder }) as DocumentServices,
     );
   expect((await makeWorker().indexKnowledge()).deferred).toBe(1);
   const [failed] =
-    await shared.admin`SELECT next_index, state FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
-  expect(failed).toMatchObject({ next_index: 0, state: "pending" });
+    await shared.admin`SELECT next_index, state, last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  expect(failed).toMatchObject({
+    next_index: 0,
+    state: "pending",
+    last_failure: "embedding_unavailable",
+  });
+  // The deferral names the actual cause without provider content.
+  expect(warnings).toEqual([
+    {
+      message: "Knowledge indexing batch deferred",
+      fields: {
+        errorClass: "KnowledgeIndexOperationError",
+        errorCode: "knowledge_index_embedding_failed",
+        origin: "worker",
+        status: 503,
+      },
+    },
+  ]);
+  expect(JSON.stringify(warnings)).not.toContain(providerSecret);
   expect(
     (await searchKnowledgeEntries(client.db, context, { query: "supply" }, () => embedder)).entries,
   ).toHaveLength(1);
@@ -386,6 +408,29 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   expect(Number(firstBatch?.rate)).toBe(1_000_000);
   expect(firstBatch?.vectors).toBe(32);
   expect(firstBatch?.debits).toBe(1);
+  const [attribution] = await shared.admin`
+    SELECT j.billing_attribution,
+      (SELECT metadata FROM credit_ledger_entries WHERE source_id=${saved.revisionId}
+        AND type='document_embedding_debit' LIMIT 1) AS debit_metadata
+    FROM knowledge_index_jobs j WHERE j.revision_id=${saved.revisionId}`;
+  expect(attribution?.billing_attribution).toEqual({
+    kind: "human",
+    initiatingHumanSubjectId: "user:rollback-index-owner",
+  });
+  expect(attribution?.debit_metadata).toMatchObject({
+    initiatingHumanSubjectId: "user:rollback-index-owner",
+  });
+  const [memberUsage] = await shared.admin`
+    SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
+    WHERE workspace_id=${workspaceId} AND subject_id='user:rollback-index-owner'`;
+  expect(Number(memberUsage?.used)).toBe(
+    1_000_000 - (await getBillingBalance(client.db, accountId)).balanceMicros,
+  );
+  await expect(
+    shared.admin`UPDATE knowledge_index_jobs SET
+      billing_attribution='{"kind":"service"}'::jsonb
+      WHERE revision_id=${saved.revisionId}`.then((rows) => rows),
+  ).rejects.toMatchObject({ code: "23514" });
   const balanceAfterFirstBatch = (await getBillingBalance(client.db, accountId)).balanceMicros;
 
   settings.documentEmbeddingBillingMode = "usage_only";
@@ -453,6 +498,13 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   expect(settled?.next_index).toBe(chunks.length);
   expect(Number(settled?.rate)).toBe(1_000_000);
   expect(settled?.debits).toBe(2);
+  const secondAttribution = await shared.admin`
+    SELECT metadata->>'initiatingHumanSubjectId' AS human FROM credit_ledger_entries
+    WHERE source_id=${saved.revisionId} AND type='document_embedding_debit'`;
+  expect(secondAttribution.map((row) => row.human)).toEqual([
+    "user:rollback-index-owner",
+    "user:rollback-index-owner",
+  ]);
   expect(Number(settled?.charged)).toBe(Number(settled?.bytes));
   expect((await worker.indexKnowledge()).completed).toBe(0);
   expect(calls).toBe(2);

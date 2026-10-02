@@ -52,6 +52,7 @@ import {
   type ConnectionHealth,
 } from "@/lib/capabilities";
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
+import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
 
@@ -551,6 +552,7 @@ export function DetailBody({
               <CredentialForm
                 compact={inline}
                 onCancel={onCancel}
+                analytics="connect_integration"
                 fields={plan.fields}
                 itemName={item.name}
                 keyPageUrl={keyPageUrl}
@@ -598,6 +600,7 @@ export function DetailBody({
                       ownership: connectionOwnership,
                     })
                   }
+                  {...analyticsAction("connect_integration")}
                 >
                   {busy ? <Loader2Icon className="animate-spin" /> : !inline ? <PlugIcon /> : null}
                   {inline
@@ -626,6 +629,7 @@ export function DetailBody({
                     : undefined
                 }
                 onClick={() => onAction({ type: "enable", item })}
+                {...analyticsAction("connect_integration")}
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
                 Add to workspace
@@ -687,6 +691,7 @@ function SkillControls({
             className="w-full"
             disabled={busy || !canManage || !item.runtime.available}
             onClick={() => onAction({ type: "install_skill", item })}
+            {...analyticsAction(item.enabled ? null : "install_skill")}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : !setupOnly ? <SparklesIcon /> : null}
             {busy && setupOnly
@@ -973,7 +978,7 @@ export function FikenConnectorControls({
       className="mx-auto block text-xs font-medium text-brand hover:underline"
       onClick={() => setUsingToken(true)}
     >
-      Use a personal API token instead
+      Use an API token instead
     </button>
   );
 
@@ -1037,9 +1042,9 @@ export function FikenConnectorControls({
 
   return (
     <div className="space-y-3">
-      {oauthButton("Connect with Fiken", <PlugIcon />)}
+      {oauthButton("Connect Fiken", <PlugIcon />)}
       <p className="text-center text-xs text-fg-subtle">
-        Connect your own Fiken account. Workspace agents and automations can act through it.
+        Uses your Fiken account. Agents and automations in this workspace can use it.
       </p>
       {usingToken ? (
         <div className="space-y-3">
@@ -1132,7 +1137,7 @@ function humanizeSelection(value: string): string {
 // The labeled credential form, shared by first-time connect and reconnect. It
 // owns its own header state so it starts empty each time it mounts (a fresh
 // sheet, or the reveal on reconnect) — credentials are never prefilled.
-function CredentialForm({
+export function CredentialForm({
   fields,
   itemName,
   keyPageUrl,
@@ -1142,6 +1147,7 @@ function CredentialForm({
   onSubmit,
   onCancel,
   compact = false,
+  analytics,
 }: {
   fields: { name: string; label: string }[];
   itemName: string;
@@ -1151,6 +1157,8 @@ function CredentialForm({
   busy: boolean;
   onCancel?: (() => void) | undefined;
   compact?: boolean;
+  /** Closed analytics label for the submit control; omit for reconnects. */
+  analytics?: AnalyticsAction;
   onSubmit: (headers: Record<string, string>) => void;
 }) {
   const inputId = useId();
@@ -1208,7 +1216,12 @@ function CredentialForm({
         </p>
       ) : null}
       <ConnectionActions onCancel={onCancel} busy={busy}>
-        <Button type="submit" className="w-full" disabled={busy || !ready}>
+        <Button
+          type="submit"
+          className="w-full"
+          disabled={busy || !ready}
+          {...analyticsAction(analytics)}
+        >
           {busy ? <Loader2Icon className="animate-spin" /> : compact ? null : submitIcon}
           {busy && compact ? "Connecting…" : submitLabel}
         </Button>

@@ -15,9 +15,21 @@ import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
-import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "./modal-command-router-wire";
+import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
+import {
+  hasModalCommandStartBoundary,
+  hasModalCommandStartOutcomeUnknownBoundary,
+  installModalCommandStartContext,
+  installModalCommandStartRetention,
+  modalCommandStartHasOwnAccessor,
+  modalCommandStartOwnData,
+} from "./modal-command-start-errors";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -90,6 +102,7 @@ export function modalSandboxAttributionTags(
 }
 
 type MutableModalSnapshotSandbox = {
+  terminate?: (options?: { wait?: boolean }) => Promise<unknown>;
   detach?: () => void;
   snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
   snapshotDirectory?: (...args: unknown[]) => Promise<unknown>;
@@ -100,6 +113,7 @@ type ModalWorkspaceCaptureOptions = {
 };
 
 type MutableModalSandboxSession = {
+  close?: () => Promise<void>;
   // Pinned Agents Extensions 0.14.3 uses this synchronous adapter-local map.
   activeProcesses?: unknown;
   modal?: {
@@ -133,6 +147,7 @@ type MutableModalSandboxSession = {
 };
 
 const modalRetentionWrappedSessions = new WeakSet<object>();
+const modalTerminationWrappedSandboxes = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
 const modalSnapshotRequestIds = new WeakMap<object, string>();
@@ -220,15 +235,11 @@ function modalHttpStatus(value: unknown): number | null {
 }
 
 function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boolean {
-  const values = [record.status, record.statusCode, record.httpStatus, record.httpStatusCode];
-  const response = record.response;
+  const keys = ["status", "statusCode", "httpStatus", "httpStatusCode"];
+  const values = keys.map((key) => modalCommandStartOwnData(record, key));
+  const response = modalCommandStartOwnData(record, "response");
   if (response && typeof response === "object") {
-    values.push(
-      Reflect.get(response, "status"),
-      Reflect.get(response, "statusCode"),
-      Reflect.get(response, "httpStatus"),
-      Reflect.get(response, "httpStatusCode"),
-    );
+    values.push(...keys.map((key) => modalCommandStartOwnData(response, key)));
   }
   return values.some((value) => modalHttpStatus(value) !== null);
 }
@@ -258,24 +269,42 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     let nested: unknown[];
     try {
       const record = current.value as Record<string, unknown>;
+      if (
+        [
+          "cause",
+          "error",
+          "errors",
+          "response",
+          "status",
+          "statusCode",
+          "httpStatus",
+          "httpStatusCode",
+        ].some((key) => modalCommandStartHasOwnAccessor(record, key))
+      )
+        return false;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
+      if (hasModalCommandStartBoundary(current.value, "outcome-unknown")) return false;
+      if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
 
       // This instance is created only by the client's readiness gate before
       // Start dispatch; an RPC's own status or details never enters this path.
-      if (current.value instanceof ModalCommandStartPreDispatchUnavailableError) {
+      if (
+        current.value instanceof ModalCommandStartPreDispatchUnavailableError ||
+        hasModalCommandStartBoundary(current.value, "pre-dispatch-unavailable")
+      ) {
         matchingLeaves += 1;
         continue;
       }
 
       nested = [];
       for (const key of ["cause", "error"] as const) {
-        const value = record[key];
+        const value = modalCommandStartOwnData(record, key);
         if (value !== undefined) nested.push(value);
       }
 
-      if (current.value instanceof AggregateError || record.name === "AggregateError") {
-        const errors = record.errors;
+      const errors = modalCommandStartOwnData(record, "errors");
+      if (errors !== undefined) {
         if (
           !Array.isArray(errors) ||
           errors.length === 0 ||
@@ -283,7 +312,8 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
         ) {
           return false;
         }
-        nested.push(...errors);
+        for (let index = 0; index < errors.length; index++)
+          nested.push(modalCommandStartOwnData(errors, String(index)));
       }
 
       if (nested.length === 0) return false;
@@ -298,6 +328,12 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
   }
 
   return matchingLeaves > 0;
+}
+
+/** Any typed ambiguous Start in a bounded wrapper graph vetoes generic provider
+ * retries. Its original IDs are observation authority, never replay authority. */
+export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean {
+  return hasModalCommandStartOutcomeUnknownBoundary(error);
 }
 
 /**
@@ -331,6 +367,37 @@ function assertPinnedModalSdk(session: MutableModalSandboxSession): void {
         `the active session reported ${actualVersion ?? "no version"}`,
     );
   }
+}
+
+async function confirmModalTermination(
+  terminate: (options: { wait: true }) => Promise<unknown>,
+): Promise<number> {
+  // Modal 0.9 resolves terminate() once the stop request is accepted. Only
+  // wait:true observes the provider's terminal result before releasing a lease.
+  const exitCode = await terminate({ wait: true });
+  if (typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
+    throw new Error("Modal termination did not confirm a terminal exit");
+  }
+  return exitCode;
+}
+
+function installModalTerminationConfirmation(session: MutableModalSandboxSession): void {
+  if (typeof session.close !== "function") return;
+  const close = session.close.bind(session);
+  session.close = async () => {
+    // Hydration/cancellation may replace this handle. Install at close time,
+    // retaining the SDK's ownsSandbox check and process/hook cleanup ordering.
+    const sandbox = session.sandbox;
+    if (!sandbox || typeof sandbox.terminate !== "function") {
+      throw new Error("Modal session does not expose provider termination");
+    }
+    if (!modalTerminationWrappedSandboxes.has(sandbox)) {
+      const terminate = sandbox.terminate.bind(sandbox);
+      sandbox.terminate = async () => confirmModalTermination(terminate);
+      modalTerminationWrappedSandboxes.add(sandbox);
+    }
+    await close();
+  };
 }
 
 function installModalNativeSnapshotRetention(session: MutableModalSandboxSession): void {
@@ -533,6 +600,8 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  if (mutable.modal) installModalCommandStartContext(mutable.modal);
+  installModalTerminationConfirmation(mutable);
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
@@ -613,15 +682,18 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     }
   };
   modalRetentionWrappedSessions.add(session);
+  installModalCommandStartRetention(session);
   return session;
 }
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
+  readonly #createOptions: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]>;
 
   constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
     super(...args);
     this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
+    this.#createOptions = { ...args[0] };
   }
 
   override async create(
@@ -630,6 +702,18 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   ): Promise<ModalSandboxSession> {
     const session = await super.create(args, manifestOptions);
     return installOpenGeniModalSnapshotPolicy(session);
+  }
+
+  async createWithLifecycle(
+    args: Parameters<ModalSandboxClient["create"]>[0],
+    lifecycle: ModalCreateLifecycle,
+  ): Promise<ModalSandboxSession> {
+    return await createModalSessionWithLifecycle(
+      this.#createOptions,
+      args,
+      lifecycle,
+      installOpenGeniModalSnapshotPolicy,
+    );
   }
 
   override async resume(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
@@ -1040,6 +1124,78 @@ export async function resolveModalCheckpointProviderBinding(
   }
 }
 
+/** Positive discovery only. A missing/expired provider listing never proves
+ * that a dispatched create did not happen, and never authorizes a retry. */
+export async function findModalProviderCreateReceipt(
+  settings: Settings,
+  attempt: {
+    operationId: string;
+    providerBindingKey: string;
+    appId: string;
+    providerName: string;
+    imageId: string | null;
+  },
+  createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
+): Promise<string | null> {
+  if (
+    !attempt.imageId ||
+    !attempt.appId ||
+    attempt.providerName !== `opengeni-create-${attempt.operationId}`
+  )
+    throw new Error("Modal create recovery requires exact persisted provider identity");
+  const modal = await createClient(settings);
+  try {
+    const binding = canonicalModalCheckpointProviderBinding(
+      await modalCheckpointProviderBindingForClient(settings, modal),
+    );
+    if (binding?.key !== attempt.providerBindingKey)
+      throw new Error("Modal create recovery refused a different authenticated namespace");
+    let beforeTimestamp: number | undefined;
+    const found = new Set<string>();
+    // An operation normally has one result. Bound malformed/ambiguous provider
+    // inventory without treating partial pagination as a unique receipt.
+    for (let page = 0; page < 16; page++) {
+      const response = await modal.cpClient.sandboxList({
+        appId: attempt.appId,
+        environmentName: modal.environmentName(settings.modalEnvironment),
+        includeFinished: true,
+        tags: [{ tagName: "opengeni_provider_create_operation_id", tagValue: attempt.operationId }],
+        ...(beforeTimestamp === undefined ? {} : { beforeTimestamp }),
+      });
+      if (!response.sandboxes.length) return found.size === 1 ? [...found][0]! : null;
+      for (const info of response.sandboxes) {
+        if (
+          !info.id.startsWith("sb-") ||
+          info.appId !== attempt.appId ||
+          info.name !== attempt.providerName ||
+          info.imageId !== attempt.imageId ||
+          info.tags.filter((tag) => tag.tagName === "opengeni_provider_create_operation_id")
+            .length !== 1 ||
+          !info.tags.some(
+            (tag) =>
+              tag.tagName === "opengeni_provider_create_operation_id" &&
+              tag.tagValue === attempt.operationId,
+          )
+        )
+          throw new Error("Modal create discovery returned inconsistent operation identity");
+        found.add(info.id);
+        if (found.size > 1) throw new Error("Modal create discovery is ambiguous; preserve fence");
+      }
+      const oldest = Math.min(...response.sandboxes.map((info) => info.createdAt));
+      if (
+        !Number.isFinite(oldest) ||
+        oldest <= 0 ||
+        (beforeTimestamp !== undefined && oldest >= beforeTimestamp)
+      )
+        throw new Error("Modal create discovery pagination did not advance");
+      beforeTimestamp = oldest;
+    }
+    throw new Error("Modal create discovery exceeded its bounded inventory");
+  } finally {
+    modal.close();
+  }
+}
+
 /** Prove a legacy lease's live sandbox is visible in the same Modal namespace
  * whose identity will own the adopted checkpoint row. */
 export async function resolveModalCheckpointProviderBindingForLiveSandbox(
@@ -1185,14 +1341,23 @@ export async function tagModalSandbox(
 export async function terminateModalSandboxById(
   settings: Settings,
   sandboxId: string,
+  createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
+  expectedProviderBindingKey?: string,
 ): Promise<boolean> {
   if (!sandboxId) {
     return true;
   }
-  const modal = await createModalClient(settings);
+  const modal = await createClient(settings);
   try {
+    if (expectedProviderBindingKey) {
+      const binding = canonicalModalCheckpointProviderBinding(
+        await modalCheckpointProviderBindingForClient(settings, modal),
+      );
+      if (binding?.key !== expectedProviderBindingKey)
+        throw new Error("Modal create cleanup refused a different authenticated namespace");
+    }
     const sandbox = await modal.sandboxes.fromId(sandboxId);
-    await sandbox.terminate();
+    await confirmModalTermination(sandbox.terminate.bind(sandbox));
     return true;
   } finally {
     modal.close();
@@ -1390,7 +1555,7 @@ export async function sweepModalOrphanSandboxes(
           }
         }
         try {
-          await sandbox.terminate();
+          await confirmModalTermination(sandbox.terminate.bind(sandbox));
           terminated.push(candidate);
         } catch {
           skipped += 1;

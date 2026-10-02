@@ -5,10 +5,67 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_OPENROUTER_MODEL_ID,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  configuredModels,
+  applyModelCatalogDocument,
+  withCodexCatalogProvider,
+  withClaudeConnectionCatalog,
+  withClaudeConnectionCredential,
 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { z } from "zod";
-import { buildWorkspaceModelCatalog } from "../src/model-catalog";
+import {
+  buildWorkspaceModelCatalog,
+  projectClientModel,
+  projectWorkspaceModelCatalog,
+} from "../src/model-catalog";
+import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
+import { resolveWorkspaceModelSelection } from "@opengeni/core";
+
+test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
+  let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  });
+  settings = withClaudeConnectionCatalog(
+    settings,
+    {
+      anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+      claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    },
+    "workspace",
+  );
+  settings = withClaudeConnectionCredential(settings, "anthropic", "fixture-secret");
+  settings = withClaudeConnectionCredential(
+    settings,
+    "claude_subscription",
+    JSON.stringify({
+      version: 1,
+      token: "sk-ant-oat01-test-secret",
+      identity: { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },
+    }),
+  );
+  for (const [providerId, label, billingClass] of [
+    ["workspace-anthropic", "Anthropic API", "byok"],
+    ["workspace-claude-subscription", "Claude subscription", "claude_subscription"],
+    ["organization-anthropic", "Anthropic API", "organization_byok"],
+    ["organization-claude-subscription", "Claude subscription", "claude_subscription"],
+  ]) {
+    const model = configuredModels(settings).find(
+      (candidate) => candidate.providerId === providerId,
+    )!;
+    const client = projectClientModel(model);
+    expect(client.provider).toBe(providerId);
+    expect(client.providerLabel).toBe(label);
+    expect(client.capabilities?.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
+    expect(client.source).toBeUndefined();
+    expect(modelPickerBillingClassFor(client)).toBe(billingClass);
+    expect(JSON.stringify(client)).not.toContain("secret");
+    expect(JSON.stringify(client)).not.toContain("10000000-0000-4000-8000-000000000001");
+  }
+});
 
 const previousClientModelSchema = z
   .object({
@@ -41,6 +98,45 @@ const previousClientModelSchema = z
   .passthrough();
 
 describe("workspace model catalog availability", () => {
+  test("live database catalog projects fast/vision for GPT-6 point releases and Luna", () => {
+    const base = testSettings({ codexSubscriptionEnabled: true });
+    const capabilities = {
+      ...configuredModels(base)[0]!.capabilities,
+      inputModalities: ["text"],
+      latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+    };
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-luna"],
+      codexModels: ["gpt-6.1-sol", "gpt-6-luna"].map((slug) => ({
+        id: `codex/${slug}`,
+        upstreamModelId: slug,
+        label: slug,
+        capabilities,
+      })),
+    });
+    const catalog = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: true,
+    });
+    for (const id of ["codex/gpt-6.1-sol", "codex/gpt-6-luna"]) {
+      const model = catalog.models.find((candidate) => candidate.id === id)!;
+      expect(model.capabilities.inputModalities).toEqual(["text", "image"]);
+      expect(model.capabilities.latencyModes).toContainEqual(
+        expect.objectContaining({ id: "fast", upstream: "supported", runnable: true }),
+      );
+      expect(model.billing).toEqual({
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      });
+      expect(model.definitionVersion).toBe(
+        configuredModels(withCodexCatalogProvider(settings)).find(
+          (candidate) => candidate.id === id,
+        )!.definitionVersion,
+      );
+    }
+  });
   test("projects anonymous providers as ready external routes", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
@@ -815,6 +911,42 @@ describe("workspace model catalog availability", () => {
   });
 });
 
+describe("workspace model catalog defaults", () => {
+  test("publishes the resolved new-chat default and the credits default beside the rows", () => {
+    const settings = testSettings({
+      openrouterApiKey: "openrouter-key",
+      openaiModel: DEFAULT_OPENROUTER_MODEL_ID,
+      openaiAllowedModels: "gpt-6-astra,gpt-6-sol,gpt-6-luna",
+    });
+    const selections = resolveWorkspaceModelSelection({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+    });
+    const catalog = projectWorkspaceModelCatalog(selections, {
+      defaultSelection: {
+        model: DEFAULT_OPENROUTER_MODEL_ID,
+        reasoningEffort: "low",
+        source: "deployment",
+      },
+      creditsSelection: { model: "gpt-6-luna", reasoningEffort: "xhigh", source: "credits" },
+    });
+    expect(catalog.defaultSelection).toEqual({
+      model: DEFAULT_OPENROUTER_MODEL_ID,
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+    expect(catalog.creditsSelection).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+    expect(catalog.models.map((model) => model.id)).toContain("gpt-6-luna");
+    // A caller without resolved defaults keeps the historical response shape.
+    expect(projectWorkspaceModelCatalog(selections)).not.toHaveProperty("defaultSelection");
+  });
+});
+
 describe("workspace model catalog route discipline", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(resolve(here, "..", "src", "routes", "workspaces.ts"), "utf8");
@@ -832,5 +964,9 @@ describe("workspace model catalog route discipline", () => {
     expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
+    // The published default uses the same selection and the caller's own
+    // subscription authority, resolved only after the grant check.
+    expect(handler.indexOf("resolveDefaultSessionModelForSelections")).toBeGreaterThan(grant);
+    expect(handler).toContain("creditsDefaultSessionModel");
   });
 });

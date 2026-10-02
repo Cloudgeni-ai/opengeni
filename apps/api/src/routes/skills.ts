@@ -38,6 +38,7 @@ import type { Hono } from "hono";
 import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
 import { registerSkillContentRoutes } from "./skill-content";
 import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
+import { parseRequestJson } from "../http/request-body";
 
 export type SkillRouteOverrides = Readonly<{
   github?: GitHubSkillSourceClient;
@@ -88,7 +89,7 @@ export function registerSkillRoutes(
     const { grant } = access;
     const skillActor = skillInstallerActor(access);
     const libraryId = decodeURIComponent(c.req.param("libraryId"));
-    const payload = InstallLibrarySkillRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, InstallLibrarySkillRequest);
     let loaded: ReturnType<typeof loadSkillLibrarySkill>;
     try {
       loaded = loadSkillLibrarySkill(libraryId, payload.expectedVersion);
@@ -150,7 +151,7 @@ export function registerSkillRoutes(
   app.post("/v1/workspaces/:workspaceId/skills/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const payload = PreviewSkillImportRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, PreviewSkillImportRequest);
     const resolved = await resolveForRoute(payload.url, github);
     const installed = await getPortableSkillUninstallPreview(
       deps.db,
@@ -176,7 +177,7 @@ export function registerSkillRoutes(
     );
     const { grant } = access;
     const skillActor = skillInstallerActor(access);
-    const payload = InstallSkillRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, InstallSkillRequest);
     const resolved = await resolveForRoute(payload.url, github);
     if (
       resolved.preview.sourceCommit !== payload.expectedSourceCommit ||
@@ -252,7 +253,7 @@ export function registerSkillRoutes(
     const { grant } = access;
     const skillActor = skillRemovalActor(access);
     const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
-    const payload = UninstallSkillRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UninstallSkillRequest);
     try {
       return c.json(
         UninstallSkillResult.parse(

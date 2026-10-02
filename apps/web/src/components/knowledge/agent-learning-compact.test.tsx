@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   AgentLearningContext,
   AgentLearningOverrides,
@@ -37,6 +38,7 @@ const context = {
 mock.module("@/context", () => ({ useAppContext: () => context }));
 const { AgentLearningSettingsEditor, AgentLearningDraftEditor } =
   await import("./agent-learning-settings");
+const { apiErrorAdvice } = await import("@/lib/api-error");
 let container: HTMLDivElement;
 let root: Root;
 beforeAll(() => {
@@ -87,28 +89,47 @@ async function change(select: HTMLSelectElement, value: string) {
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }
-test("compact settings show effective permission without a default badge or resource descriptions", async () => {
+test("compact settings use the one vocabulary and say when a value is the default", async () => {
   await render();
   const select = field("Knowledge");
   expect(select.value).toBe("inherit");
-  expect(select.parentElement?.querySelector("[aria-hidden]")?.textContent).toBe("Allow updates");
+  expect(select.parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+    "Default (Automatic)",
+  );
   expect([...select.options].map((option) => option.textContent?.trim())).toEqual([
-    "Use default (Allow updates)",
-    "Allow updates",
+    "Default (Automatic)",
+    "Automatic",
     "Review first",
-    "Don’t allow updates",
+    "Off",
   ]);
-  expect(
-    field("Workspace instructions").parentElement?.querySelector("[aria-hidden]")?.textContent,
-  ).toBe("Review first");
+  expect(field("Instructions").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+    "Default (Review first)",
+  );
   expect(field("Skills").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
-    "Don’t allow updates",
+    "Default (Off)",
   );
   expect(container.textContent).not.toContain("Retained sources");
   expect(container.textContent).not.toContain("Automatic saves become");
   expect(container.textContent).toContain(
-    "Agents can still use these resources when updates are off.",
+    "Off stops agent changes. Agents still use what's already there.",
   );
+});
+test("missing category defaults use automatic without persisting a choice", async () => {
+  const empty = async () => ({
+    ownerKey: "workspace",
+    contextKey: "defaults",
+    version: 0,
+    settings: {},
+  });
+  getSettings.mockImplementationOnce(empty).mockImplementationOnce(empty);
+  await render();
+  for (const label of ["Knowledge", "Instructions", "Skills"]) {
+    expect(field(label).value).toBe("inherit");
+    expect(field(label).parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
+      "Default (Automatic)",
+    );
+  }
+  expect(saveSettings).not.toHaveBeenCalled();
 });
 test("compact override and reset keep the sparse API semantics", async () => {
   await render();
@@ -125,7 +146,7 @@ test("compact override and reset keep the sparse API semantics", async () => {
   });
   expect(field("Knowledge").value).toBe("inherit");
   expect(field("Knowledge").parentElement?.querySelector("[aria-hidden]")?.textContent).toBe(
-    "Allow updates",
+    "Default (Automatic)",
   );
 });
 test("read-only compact settings cannot save even if a change event is dispatched", async () => {
@@ -157,4 +178,57 @@ test("new-chat compact draft does not write settings and removes only the reset 
   await change(field("Knowledge"), "inherit");
   expect(current).toEqual({ skills: "automatic" });
   expect(saveSettings).not.toHaveBeenCalled();
+});
+
+/** Opens the editor again on a fresh root, so it starts from the cached rows. */
+async function reopen() {
+  await render();
+  await act(async () => root.unmount());
+  root = createRoot(container);
+}
+test("a failed refresh over cached rows says it couldn't refresh, with Try again", async () => {
+  await reopen();
+  const failure = new OpenGeniApiError(503, "");
+  getSettings.mockImplementationOnce(async () => {
+    throw failure;
+  });
+  await render();
+  // The cached rows stay.
+  expect(field("Knowledge").value).toBe("inherit");
+  expect(container.textContent).toContain("Couldn't refresh Agent learning.");
+  expect(container.textContent).toContain(apiErrorAdvice(failure));
+  expect(container.textContent).not.toContain("Couldn't save that.");
+  const retry = [...container.querySelectorAll("button")].find(
+    (each) => each.textContent === "Try again",
+  );
+  const reads = getSettings.mock.calls.length;
+  await act(async () => retry!.click());
+  expect(getSettings.mock.calls.length).toBeGreaterThan(reads);
+  expect(container.textContent).not.toContain("Couldn't refresh Agent learning.");
+});
+test("cached rows can't be saved until the refresh has read the current version", async () => {
+  await reopen();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = async (_workspace: string, scope: string, source?: AgentLearningContext) => {
+    await gate;
+    return {
+      ownerKey: scope,
+      contextKey: source ? `${source.kind}:${source.id}` : "default",
+      version: 5,
+      settings: source ? {} : defaults,
+    };
+  };
+  getSettings.mockImplementationOnce(slow).mockImplementationOnce(slow);
+  await render();
+  expect(container.querySelector("fieldset")?.disabled).toBe(true);
+  await change(field("Knowledge"), "off");
+  expect(saveSettings).not.toHaveBeenCalled();
+
+  await act(async () => release());
+  expect(container.querySelector("fieldset")?.disabled).toBe(false);
+  await change(field("Knowledge"), "off");
+  expect(saveSettings.mock.calls[0]?.[1]).toMatchObject({ expectedVersion: 5 });
 });

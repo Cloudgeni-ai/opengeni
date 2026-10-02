@@ -1,27 +1,24 @@
-import { ConnectionAccessSettings } from "@/components/connection-access-settings";
-import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { trackModelConnection } from "@/lib/analytics-observer";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
 import type {
   SuperGrokAccount,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
 } from "@opengeni/sdk";
-import { SparklesIcon, Loader2Icon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
-import { ModelConnectionSection } from "@/components/model-connection-section";
-import { Button } from "@/components/ui/button";
-import { SubscriptionAccountRow } from "@/components/subscription-account-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Select } from "@/components/ui/select";
-import { useAppContext } from "@/context";
-
+import { ApiError } from "@/api";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
+
+// SuperGrok (xAI) subscriptions for Settings > Models at workspace and
+// organization scope: the data and every mutation. Rows, the account page and
+// the Connect page live in components/models/supergrok-models.tsx.
 
 type PendingDeviceCode = {
   userCode: string;
@@ -32,7 +29,7 @@ export function SuperGrokDeviceCodePanel(props: PendingDeviceCode) {
   return <SubscriptionDeviceCodePanel {...props} provider="supergrok" />;
 }
 
-function accountLabel(account: SuperGrokAccount): string {
+export function superGrokAccountName(account: SuperGrokAccount): string {
   return account.label ?? account.email ?? account.subject;
 }
 
@@ -40,35 +37,40 @@ type SubscriptionScope =
   | { workspaceId: string; organizationId?: never; canManage: boolean }
   | { organizationId: string; workspaceId?: never; canManage: boolean };
 
-export function SuperGrokSubscriptionsCard(props: SubscriptionScope) {
-  const client = useAppContext().client;
+/** The deployment has SuperGrok turned off: the API answers 404 for the whole family. */
+function deploymentDisabled(error: unknown): boolean {
   return (
-    <SuperGrokSubscriptionsCardWithClient
-      key={props.organizationId ?? props.workspaceId}
-      {...props}
-      client={client}
-    />
+    (error instanceof OpenGeniApiError || error instanceof ApiError) &&
+    (error as { status: number }).status === 404
   );
 }
 
-/** Isolated product fixture seam; production callers use SuperGrokSubscriptionsCard. */
-export function SuperGrokSubscriptionsCardWithClient({
+export type SuperGrokSubscriptions = ReturnType<typeof useSuperGrokSubscriptions>;
+
+export function useSuperGrokSubscriptions({
   workspaceId,
   organizationId,
   canManage,
   client,
-}: SubscriptionScope & { client: OpenGeniBrowserClient }) {
+  enabled: readEnabled = true,
+}: SubscriptionScope & {
+  client: OpenGeniBrowserClient;
+  /** False for people who can't read these accounts: nothing is read. */
+  enabled?: boolean;
+}) {
   const [data, setData] = useState<SuperGrokAccountsResponse | null>(null);
-  const [scope, setScope] = useState<Exclude<SuperGrokAccountScope, "organization">>("workspace");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(readEnabled);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** SuperGrok is off for this deployment: the page doesn't show it at all. */
+  const [unavailable, setUnavailable] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [working, setWorking] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingDeviceCode | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    if (!readEnabled) return;
     try {
       setData(
         organizationId
@@ -76,367 +78,243 @@ export function SuperGrokSubscriptionsCardWithClient({
           : await client.listSuperGrokAccounts(workspaceId!),
       );
       setLoadError(null);
+      setUnavailable(false);
     } catch (error) {
       setData(null);
-      setLoadError(error instanceof Error ? error.message : "Could not load subscriptions");
+      if (deploymentDisabled(error)) {
+        setUnavailable(true);
+        setLoadError(null);
+      } else {
+        // Shown under "Couldn't load ..." as what to do; never the raw API message.
+        setLoadError(apiErrorAdvice(error));
+      }
     } finally {
       setLoading(false);
     }
-  }, [client, workspaceId, organizationId]);
+  }, [client, workspaceId, organizationId, readEnabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
+    setLoading(readEnabled);
     void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
       pollAbort.current = null;
     };
-  }, [refresh]);
+  }, [refresh, readEnabled]);
 
-  const connect = useCallback(async () => {
-    const recordOutcome = workspaceId ? trackModelConnection("supergrok", workspaceId) : () => {};
-    setBusy(true);
-    try {
-      const start = organizationId
-        ? await client.organizationSupergrokConnectStart(organizationId)
-        : await client.supergrokConnectStart(workspaceId!, scope);
-      setPending({
-        userCode: start.userCode,
-        verificationUri: start.verificationUri,
-      });
-      window.open(
-        start.verificationUriComplete ?? start.verificationUri,
-        "_blank",
-        "noopener,noreferrer",
-      );
-      pollAbort.current?.abort();
-      const controller = new AbortController();
-      pollAbort.current = controller;
-      void pollSuperGrokDeviceLogin({
-        poll: () =>
-          organizationId
-            ? client.organizationSupergrokConnectPoll(organizationId, start.state)
-            : client.supergrokConnectPoll(workspaceId!, start.state),
-        initialIntervalSeconds: start.intervalSeconds,
-        expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
-        signal: controller.signal,
-      })
-        .then(async (result) => {
-          if (!result || controller.signal.aborted || cancelled.current) return;
-          setPending(null);
-          if (result.status === "connected") {
-            recordOutcome("connected");
-            toast.success(
-              result.scope === "organization"
-                ? "SuperGrok connected for the organization"
-                : result.scope === "workspace"
-                  ? "SuperGrok connected for the workspace"
-                  : "Private SuperGrok account connected",
-            );
-            await refresh();
-            return;
-          }
-          recordOutcome(result.status === "expired" ? "expired" : "denied");
-          toast.error(result.status === "expired" ? "The xAI code expired" : "xAI login denied");
-        })
-        .catch((error) => {
-          recordOutcome("outcome_unknown");
-          if (!controller.signal.aborted && !cancelled.current) {
-            setPending(null);
-            toast.error(error instanceof Error ? error.message : "Failed to verify xAI login");
-          }
-        })
-        .finally(() => {
-          if (pollAbort.current === controller) pollAbort.current = null;
+  /** `scope` is "workspace" (shared) or "user" (only the person connecting). */
+  const connect = useCallback(
+    async (
+      scope: Exclude<SuperGrokAccountScope, "organization">,
+      options?: { onConnected?: (accountId: string | null) => void },
+    ) => {
+      const recordOutcome = workspaceId
+        ? trackModelConnection("supergrok", workspaceId)
+        : beginModelConnectJourney("supergrok", "device_code");
+      setBusy(true);
+      try {
+        const start = organizationId
+          ? await client.organizationSupergrokConnectStart(organizationId)
+          : await client.supergrokConnectStart(workspaceId!, scope);
+        setPending({
+          userCode: start.userCode,
+          verificationUri: start.verificationUri,
         });
-    } catch (error) {
-      recordOutcome("outcome_unknown");
-      setPending(null);
-      toast.error(error instanceof Error ? error.message : "Failed to start xAI login");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, refresh, scope, workspaceId, organizationId]);
+        window.open(
+          start.verificationUriComplete ?? start.verificationUri,
+          "_blank",
+          "noopener,noreferrer",
+        );
+        pollAbort.current?.abort();
+        const controller = new AbortController();
+        pollAbort.current = controller;
+        void pollSuperGrokDeviceLogin({
+          poll: () =>
+            organizationId
+              ? client.organizationSupergrokConnectPoll(organizationId, start.state)
+              : client.supergrokConnectPoll(workspaceId!, start.state),
+          initialIntervalSeconds: start.intervalSeconds,
+          expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
+          signal: controller.signal,
+        })
+          .then(async (result) => {
+            if (!result || controller.signal.aborted || cancelled.current) return;
+            setPending(null);
+            if (result.status === "connected") {
+              recordOutcome("connected");
+              toast.success(
+                result.scope === "organization"
+                  ? "SuperGrok connected for the organization"
+                  : result.scope === "workspace"
+                    ? "SuperGrok connected for the workspace"
+                    : "Your private SuperGrok account is connected",
+              );
+              await refresh();
+              options?.onConnected?.(result.accountId ?? null);
+              return;
+            }
+            recordOutcome(result.status === "expired" ? "expired" : "denied");
+            toast.error(
+              result.status === "expired"
+                ? "The xAI code expired before it was used. Try again."
+                : "The xAI sign-in was declined",
+            );
+          })
+          .catch((error) => {
+            recordOutcome("outcome_unknown");
+            if (!controller.signal.aborted && !cancelled.current) {
+              setPending(null);
+              toast.error("Couldn't confirm the xAI sign-in", {
+                description: userErrorText(error),
+              });
+            }
+          })
+          .finally(() => {
+            if (pollAbort.current === controller) pollAbort.current = null;
+          });
+      } catch (error) {
+        recordOutcome("outcome_unknown");
+        setPending(null);
+        toast.error("Couldn't start the xAI sign-in", { description: userErrorText(error) });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, refresh, workspaceId, organizationId],
+  );
 
   const mutate = useCallback(
-    async (operation: () => Promise<unknown>, success: string) => {
+    async (key: string, operation: () => Promise<unknown>, success: string) => {
       setBusy(true);
+      setWorking(key);
       try {
         await operation();
         await refresh();
         toast.success(success);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "SuperGrok update failed");
+        toast.error("Couldn't update SuperGrok", { description: userErrorText(error) });
       } finally {
         setBusy(false);
+        setWorking(null);
       }
     },
     [refresh],
   );
 
+  const setRotation = (rotationEnabled: boolean) =>
+    mutate(
+      "rotation",
+      () =>
+        organizationId
+          ? client.setOrganizationSuperGrokRotationSettings(organizationId, { rotationEnabled })
+          : client.setSuperGrokRotationSettings(workspaceId!, { rotationEnabled }),
+      rotationEnabled
+        ? "New work is spread across SuperGrok accounts"
+        : "New work uses the primary SuperGrok account only",
+    );
+
+  const activate = (account: SuperGrokAccount) =>
+    mutate(
+      `activate:${account.id}`,
+      () =>
+        organizationId
+          ? client.activateOrganizationSuperGrokAccount(organizationId, account.id)
+          : client.activateSuperGrokAccount(workspaceId!, account.id),
+      `${superGrokAccountName(account)} is now the primary account`,
+    );
+
+  const setAllocator = (account: SuperGrokAccount, enabled: boolean) =>
+    mutate(
+      `allocator:${account.id}`,
+      () =>
+        organizationId
+          ? client.setOrganizationSuperGrokAccountAllocator(organizationId, account.id, {
+              enabled,
+              expectedVersion: account.allocatorVersion,
+            })
+          : client.setSuperGrokAccountAllocator(workspaceId!, account.id, {
+              enabled,
+              expectedVersion: account.allocatorVersion,
+            }),
+      enabled
+        ? `${superGrokAccountName(account)} is used for new work again`
+        : `${superGrokAccountName(account)} won't be used for new work`,
+    );
+
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
+  const rename = async (account: SuperGrokAccount, label: string): Promise<void> => {
+    setBusy(true);
+    setWorking(`rename:${account.id}`);
+    try {
+      await (organizationId
+        ? client.renameOrganizationSuperGrokAccount(
+            organizationId,
+            account.id,
+            label.trim() || null,
+          )
+        : client.renameSuperGrokAccount(workspaceId!, account.id, label.trim() || null));
+      await refresh();
+      toast.success("Name saved");
+    } catch (error) {
+      throw error instanceof Error && error.message
+        ? error
+        : new Error("Couldn't save the name.", { cause: error });
+    } finally {
+      setBusy(false);
+      setWorking(null);
+    }
+  };
+
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
+  const disconnect = async (account: SuperGrokAccount): Promise<void> => {
+    setBusy(true);
+    setWorking(`disconnect:${account.id}`);
+    try {
+      await (organizationId
+        ? client.disconnectOrganizationSuperGrokAccount(organizationId, account.id)
+        : client.disconnectSuperGrokAccount(workspaceId!, account.id));
+      await refresh();
+      toast.success(`Disconnected ${superGrokAccountName(account)}`);
+    } catch (error) {
+      throw error instanceof Error && error.message
+        ? error
+        : new Error(`Couldn't disconnect ${superGrokAccountName(account)}. Try again.`, {
+            cause: error,
+          });
+    } finally {
+      setBusy(false);
+      setWorking(null);
+    }
+  };
+
   const accounts = data?.accounts ?? [];
   const inherited = !organizationId && data?.source === "organization";
-  const canManageAccounts = canManage && !inherited;
-  return (
-    <ModelConnectionSection
-      title="SuperGrok"
-      description={`SuperGrok subscription · ${organizationId ? "Shared with your workspaces" : inherited ? "From your organization" : "Workspace account"}`}
-      mark={<SparklesIcon className="size-4" />}
-      status={
-        loading
-          ? "Loading…"
-          : loadError
-            ? "Unavailable"
-            : pending
-              ? "Awaiting sign-in"
-              : accounts.length === 0
-                ? "Not connected"
-                : accounts.some((account) => account.status === "active")
-                  ? "Connected"
-                  : "Needs attention"
-      }
-    >
-      <p className="text-xs leading-5 text-fg-subtle">
-        Use Grok models with a SuperGrok subscription. Usage is included in the connected plan.
-      </p>
-      {inherited && data?.organizationId ? (
-        <div className="grid gap-2 border-y border-border py-3 text-xs">
-          <p className="font-medium">Using organization subscriptions</p>
-          <Link
-            className="text-brand hover:underline"
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId: workspaceId! }}
-            search={{ section: "models" }}
-          >
-            Manage in organization settings
-          </Link>
-          <p className="text-fg-subtle">
-            Connect a workspace account to use its subscriptions instead.
-          </p>
-        </div>
-      ) : null}
-      {accounts.length > 1 && canManageAccounts ? (
-        <label
-          className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2"
-          title="Spread new sessions across eligible SuperGrok accounts."
-        >
-          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
-          <input
-            type="checkbox"
-            className="size-4 accent-brand"
-            checked={data?.settings.rotationEnabled ?? false}
-            disabled={busy}
-            onChange={(event) =>
-              void mutate(
-                () =>
-                  organizationId
-                    ? client.setOrganizationSuperGrokRotationSettings(organizationId, {
-                        rotationEnabled: event.target.checked,
-                      })
-                    : client.setSuperGrokRotationSettings(workspaceId!, {
-                        rotationEnabled: event.target.checked,
-                      }),
-                "SuperGrok rotation updated",
-              )
-            }
-          />
-        </label>
-      ) : null}
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-xs text-fg-subtle">
-          <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
-        </div>
-      ) : loadError ? (
-        <div role="alert" className="flex items-center justify-between gap-3">
-          <p className="text-xs text-destructive">{loadError}</p>
-          <Button size="sm" variant="secondary" onClick={() => void refresh()}>
-            Retry
-          </Button>
-        </div>
-      ) : pending ? (
-        <SuperGrokDeviceCodePanel {...pending} />
-      ) : accounts.length === 0 ? (
-        !canManage ? (
-          <p className="text-xs text-fg-subtle">No SuperGrok subscriptions connected.</p>
-        ) : null
-      ) : (
-        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
-          {accounts.map((account) => {
-            const expanded = expandedId === account.id;
-            const isActive = account.id === data?.activeAccountId;
-            return (
-              <SubscriptionAccountRow
-                key={account.id}
-                provider="SuperGrok"
-                name={accountLabel(account)}
-                label={account.label}
-                email={account.email}
-                plan={account.plan ?? account.quota?.subscriptionTier}
-                group={`supergrok-active-${workspaceId}`}
-                selected={isActive}
-                disabled={!canManageAccounts || busy}
-                unavailable={account.status !== "active"}
-                selectionLabel={`Use ${accountLabel(account)} as active SuperGrok account`}
-                expanded={expanded}
-                onExpandedChange={(open) => setExpandedId(open ? account.id : null)}
-                onSelect={() =>
-                  void mutate(
-                    () =>
-                      organizationId
-                        ? client.activateOrganizationSuperGrokAccount(organizationId, account.id)
-                        : client.activateSuperGrokAccount(workspaceId!, account.id),
-                    "Active SuperGrok account updated",
-                  )
-                }
-                onRename={
-                  canManageAccounts
-                    ? (label) =>
-                        void mutate(
-                          () =>
-                            organizationId
-                              ? client.renameOrganizationSuperGrokAccount(
-                                  organizationId,
-                                  account.id,
-                                  label || null,
-                                )
-                              : client.renameSuperGrokAccount(
-                                  workspaceId!,
-                                  account.id,
-                                  label || null,
-                                ),
-                          "SuperGrok account renamed",
-                        )
-                    : undefined
-                }
-                meta={
-                  <>
-                    {account.scope === "user" ? <MetaChip rounded="full">Only me</MetaChip> : null}
-                    {account.status !== "active" ? (
-                      <MetaChip dot="waiting" rounded="full">
-                        {account.status.replaceAll("_", " ")}
-                      </MetaChip>
-                    ) : null}
-                    {account.quota?.usedPercent != null ? (
-                      <span className="shrink-0 text-2xs text-fg-subtle">
-                        {Math.round(account.quota.usedPercent)}%
-                      </span>
-                    ) : null}
-                  </>
-                }
-              >
-                <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5">
-                  <span className="text-xs font-medium">Use for new automatic turns</span>
-                  <span className="flex items-center gap-2 text-xs text-fg-muted">
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-brand"
-                      checked={account.allocatorEnabled}
-                      disabled={!canManageAccounts || busy}
-                      onChange={(event) =>
-                        void mutate(
-                          () =>
-                            organizationId
-                              ? client.setOrganizationSuperGrokAccountAllocator(
-                                  organizationId,
-                                  account.id,
-                                  {
-                                    enabled: event.target.checked,
-                                    expectedVersion: account.allocatorVersion,
-                                  },
-                                )
-                              : client.setSuperGrokAccountAllocator(workspaceId!, account.id, {
-                                  enabled: event.target.checked,
-                                  expectedVersion: account.allocatorVersion,
-                                }),
-                          "Automatic-turn eligibility updated",
-                        )
-                      }
-                    />
-                    <span aria-hidden="true">
-                      {account.allocatorEnabled ? "Enabled" : "Paused"}
-                    </span>
-                  </span>
-                </label>
-                {account.lastError ? (
-                  <p className="rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
-                    {account.lastError}
-                  </p>
-                ) : null}
-                {canManageAccounts ? (
-                  <div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() =>
-                        void mutate(
-                          () =>
-                            organizationId
-                              ? client.disconnectOrganizationSuperGrokAccount(
-                                  organizationId,
-                                  account.id,
-                                )
-                              : client.disconnectSuperGrokAccount(workspaceId!, account.id),
-                          "SuperGrok account disconnected",
-                        )
-                      }
-                    >
-                      <Trash2Icon className="size-3.5" /> Disconnect
-                    </Button>
-                  </div>
-                ) : null}
-                {canManageAccounts ? (
-                  <ConnectionAccessSettings
-                    client={client}
-                    organizationId={organizationId}
-                    workspaceId={workspaceId}
-                    kind="supergrok"
-                    connectionId={account.id}
-                    canManage={canManageAccounts}
-                  />
-                ) : null}
-              </SubscriptionAccountRow>
-            );
-          })}
-        </div>
-      )}
-
-      {canManage && !pending && !loading && !loadError ? (
-        <SubscriptionConnectAction
-          analyticsAction="connect_supergrok"
-          provider="SuperGrok"
-          count={accounts.length}
-          busy={busy}
-          onConnect={() => void connect()}
-          scopeControl={
-            !organizationId ? (
-              <Select
-                aria-label="SuperGrok connection scope"
-                className="w-auto"
-                value={scope}
-                disabled={busy}
-                onChange={(event) =>
-                  setScope(event.target.value as Exclude<SuperGrokAccountScope, "organization">)
-                }
-              >
-                <option value="workspace">This workspace</option>
-                <option value="user">Only me</option>
-              </Select>
-            ) : undefined
-          }
-        />
-      ) : null}
-      {accounts.length > 0 && !pending && !loading ? (
-        <p className="text-2xs text-fg-subtle">
-          {data?.settings.rotationEnabled && accounts.length > 1
-            ? `New sessions rotate across ${accounts.length} eligible subscriptions.`
-            : "The active subscription runs sessions that aren't pinned to a specific account."}
-        </p>
-      ) : null}
-    </ModelConnectionSection>
-  );
+  return {
+    client,
+    organizationId,
+    workspaceId,
+    canManage,
+    data,
+    accounts,
+    /** Workspace page showing the organization's accounts: read-only here. */
+    inherited,
+    canManageAccounts: canManage && !inherited,
+    activeAccountId: data?.activeAccountId ?? null,
+    rotationEnabled: data?.settings.rotationEnabled ?? false,
+    loading,
+    loadError,
+    unavailable,
+    busy,
+    working,
+    pending,
+    refresh,
+    connect,
+    setRotation,
+    activate,
+    setAllocator,
+    rename,
+    disconnect,
+  };
 }

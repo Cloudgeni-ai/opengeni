@@ -1,8 +1,8 @@
 import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
 import { projectClientModelRows } from "../src/model-policy";
 import { afterEach, describe, expect, test } from "bun:test";
-import type { ClientModel } from "@opengeni/sdk";
-import { act } from "react";
+import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   BillingClassMark,
@@ -167,7 +167,7 @@ describe("ModelPolicyPicker", () => {
       />,
     );
     expect(container.querySelector('section[aria-label="Acme Assist"]')).not.toBeNull();
-    expect(container.textContent).not.toContain("OpenGeni");
+    expect(container.textContent).not.toContain("Opengeni");
     expect(container.textContent).toContain("Workspace-provided models");
     expect(container.querySelector('[data-testid="acme-mark"]')).not.toBeNull();
     expect(JSON.stringify(catalogRows)).toBe(before);
@@ -305,7 +305,7 @@ describe("ModelPolicyPicker", () => {
         [...container.querySelectorAll("section")].map((section) =>
           section.getAttribute("aria-label"),
         ),
-      ).toEqual(["Codex", "OpenGeni"]);
+      ).toEqual(["Codex", "Opengeni"]);
       expect(
         container.querySelector('[data-testid="model-picker-choice-free"] [aria-label="Selected"]'),
       ).toBeTruthy();
@@ -363,7 +363,7 @@ describe("ModelPolicyPicker", () => {
       [...container.querySelectorAll("section")].map((section) =>
         section.getAttribute("aria-label"),
       ),
-    ).toEqual(["OpenGeni", "Codex"]);
+    ).toEqual(["Opengeni", "Codex"]);
     expect(calls).toEqual([]);
   });
 
@@ -413,6 +413,60 @@ describe("ModelPolicyPicker", () => {
       container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
     );
     expect(calls).toEqual([["effort", "high"]]);
+  });
+
+  test("Claude Extra high and Max reuse the inline picker without changing model or closing it", async () => {
+    const model: ClientModel = {
+      ...MODELS[0]!,
+      id: "workspace-claude-subscription/claude-opus-5-5",
+      provider: "workspace-claude-subscription",
+      providerLabel: "Claude subscription",
+      source: undefined,
+      api: "anthropic-messages",
+      label: "Claude Opus 5.5",
+      capabilities: {
+        ...MODELS[0]!.capabilities!,
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
+          required: false,
+        },
+        latencyModes: [],
+      },
+    };
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(["model", id])}
+        onEffortChange={(effort) => calls.push(["effort", effort])}
+        onLatencyModeChange={() => {}}
+        onOpenChange={(open) => calls.push(["open", open])}
+      />,
+    );
+    expect(
+      [...container.querySelectorAll('[role="radio"]')].map((element) =>
+        element.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Low", "Medium", "High", "Extra high", "Max"]);
+    expect(
+      container.querySelector('[role="radio"][aria-label="Medium"]')?.getAttribute("aria-checked"),
+    ).toBe("true");
+    for (const label of ["Extra high", "Max"])
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`[role="radio"][aria-label="${label}"]`)!
+          .click(),
+      );
+    expect(calls).toEqual([
+      ["effort", "xhigh"],
+      ["effort", "max"],
+    ]);
   });
 
   test("hides thinking for models with no runnable reasoning controls", async () => {
@@ -484,7 +538,7 @@ describe("ModelPolicyPicker", () => {
         onLatencyModeChange={() => {}}
       />,
     );
-    const group = container.querySelector('section[aria-label="OpenGeni"]')!;
+    const group = container.querySelector('section[aria-label="Opengeni"]')!;
     expect(group.querySelectorAll("button").length).toBe(5);
     expect(container.querySelector('section[aria-label="External"]')).toBeNull();
     for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
@@ -551,7 +605,30 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
   });
 
-  test("selects immediately, coerces unsupported effort and speed, and closes", async () => {
+  test("the field trigger shows the model and the payer, and leaves the effort to the menu", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={MODELS}
+        model="codex/gpt-5.6-sol"
+        effort="medium"
+        latencyMode="standard"
+        triggerStyle="field"
+        triggerMeta="Codex"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Model and effort"]',
+    );
+    expect(trigger?.dataset.triggerStyle).toBe("field");
+    expect(trigger?.textContent).toBe("GPT-5.6 SolCodex");
+    expect(trigger?.textContent).not.toContain("Medium");
+    expect(trigger?.className).not.toContain("rounded-full");
+  });
+
+  test("selects immediately and coerces unsupported effort and speed without closing", async () => {
     const calls: unknown[] = [];
     const container = await mount(
       <ModelPolicyPickerMenu
@@ -577,9 +654,53 @@ describe("ModelPolicyPicker", () => {
       ["model", "codex/gpt-5.6-terra"],
       ["effort", "low"],
       ["latency", "standard"],
-      ["open", false],
     ]);
   });
+
+  test.each(["codex/gpt-5.6-sol", "codex/gpt-5.6-terra"])(
+    "keeps the picker open to adjust effort after selecting %s",
+    async (modelId) => {
+      function Harness() {
+        const [open, setOpen] = useState(true);
+        const [model, setModel] = useState(MODELS[0]!.id);
+        const [effort, setEffort] = useState<ReasoningEffort>("medium");
+        return open ? (
+          <ModelPolicyPickerMenu
+            models={MODELS}
+            model={model}
+            effort={effort}
+            latencyMode="standard"
+            onModelChange={setModel}
+            onEffortChange={setEffort}
+            onLatencyModeChange={() => {}}
+            onOpenChange={setOpen}
+          />
+        ) : null;
+      }
+      const container = await mount(<Harness />);
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid="model-picker-choice-${modelId}"]`)!
+          .click(),
+      );
+      expect(container.querySelector('[data-testid="model-picker-menu"]')).not.toBeNull();
+      expect(
+        container.querySelector(
+          `[data-testid="model-picker-choice-${modelId}"] [aria-label="Selected"]`,
+        ),
+      ).not.toBeNull();
+      expect(container.querySelectorAll('[role="radio"]').length).toBe(
+        modelId === MODELS[0]!.id ? 4 : 2,
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
+      );
+      expect(container.querySelector('[data-testid="model-picker-menu"]')).not.toBeNull();
+      expect(
+        container.querySelector('[role="radio"][aria-label="High"]')?.getAttribute("aria-checked"),
+      ).toBe("true");
+    },
+  );
 
   test("commits supported effort after model selection and hides a model with only one level", async () => {
     const calls: string[] = [];
@@ -1018,6 +1139,6 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
         ?.textContent,
-    ).not.toContain("OpenGeni credits");
+    ).not.toContain("Opengeni credits");
   });
 });

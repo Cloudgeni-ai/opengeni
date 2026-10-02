@@ -20,6 +20,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { createManagedAuth } from "../src/auth/managed-auth";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -152,6 +153,87 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       error: { details: { managedAuthCode: "operation_reused" } },
     });
   });
+
+  test("forwards optional first-touch attribution into the server-side OAuth state", async () => {
+    const settings = testSettings({
+      databaseUrl: shared.adminUrl,
+      productAccessMode: "managed",
+      managedAuthSessionSetMode: "broker",
+      betterAuthSecret: "managed-session-set-integration-secret-32-bytes",
+      publicBaseUrl: "http://opengeni.test",
+      managedAuthGoogleClientId: "google-client-id",
+      managedAuthGoogleClientSecret: "google-client-secret",
+    });
+    const managedAuth = createManagedAuth(settings, client.db, {
+      send: async () => undefined,
+    } as never)!;
+    const app = createApp({
+      settings,
+      db: client.db,
+      managedAuth,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    // Each start uses its own browser set: a set holds one pending transaction.
+    const oauthState = async (attribution: unknown): Promise<Record<string, unknown>> => {
+      const initialResponse = await app.request("/v1/auth/session-set");
+      const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
+      const authorityCookie = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
+      const begin = await app.request("/v1/auth/session-set/transactions", {
+        method: "POST",
+        headers: mutationHeaders(initial, authorityCookie),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedGeneration: initial.generation,
+          kind: "add",
+        }),
+      });
+      expect(begin.status).toBe(200);
+      const transaction = (await begin.json()) as { id: string };
+      const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+      const start = await app.request("/v1/auth/session-set/transactions/social", {
+        method: "POST",
+        headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedGeneration: initial.generation,
+          transactionId: transaction.id,
+          provider: "google",
+          attribution,
+        }),
+      });
+      expect(start.status).toBe(200);
+      const state = new URL(((await start.json()) as { url: string }).url).searchParams.get(
+        "state",
+      )!;
+      const stored = await (
+        await managedAuth.$context
+      ).internalAdapter.findVerificationValue(state);
+      return JSON.parse(stored!.value) as Record<string, unknown>;
+    };
+
+    const attributed = await oauthState({
+      ref: "producthunt",
+      utmCampaign: "hero-cta",
+    });
+    expect(attributed.opengeniAttribution).toEqual({
+      ref: "producthunt",
+      utmCampaign: "hero-cta",
+    });
+    expect(attributed.opengeniManagedAuth).toMatchObject({
+      version: 1,
+      provider: "google",
+    });
+    // Invalid attribution never blocks the sign-in and is not stored.
+    const invalid = await oauthState({
+      utmSource: "https://intranet.example/path",
+    });
+    expect(invalid).not.toHaveProperty("opengeniAttribution");
+    expect(invalid.opengeniManagedAuth).toMatchObject({
+      version: 1,
+      provider: "google",
+    });
+  }, 60_000);
 
   test("starts the first isolated Add from a read-only empty broker projection", async () => {
     const app = createApp({

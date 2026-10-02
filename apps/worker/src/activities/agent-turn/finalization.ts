@@ -2,6 +2,7 @@ import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
   recordCodexAccountUsageForFinalization,
+  recordClaudeSubscriptionUsage,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
@@ -73,6 +74,8 @@ export type TurnFinalizationDeps = {
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   signalSessionAttemptQuiesced: ActivityServices["signalSessionAttemptQuiesced"];
   signalCodexCapacityWorkflow: ActivityServices["signalCodexCapacityWorkflow"];
+  requestWorkerDrain: ActivityServices["requestWorkerDrain"];
+  turnFinalizationTimeoutMs: ActivityServices["turnFinalizationTimeoutMs"];
   cancellationSignal: AbortSignal | undefined;
   sandboxResumeController: AbortController;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -112,6 +115,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   deps.eventing.heartbeatTimer = startActivityHeartbeat(deps.activityContext, details);
   const monitor = startTurnFinalizationMonitor({
     observability: deps.observability,
+    ...(deps.turnFinalizationTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: deps.turnFinalizationTimeoutMs }),
     details,
     heartbeat: (value) => {
       try {
@@ -120,7 +126,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         // A closed Temporal transport is not proof of physical quiescence.
       }
     },
-    terminateWorker: () => process.exit(1),
+    requestWorkerDrain: deps.requestWorkerDrain,
   });
   try {
     monitor.enter("tool_writers");
@@ -213,6 +219,8 @@ async function finalizeTurnAttemptSteps(
       renewals.codemodeTokenRenewal as CodemodeTokenRenewalController | null;
     renewals.codemodeTokenRenewal = null;
     renewals.runCredentialRenewalClosed = true;
+    renewals.runMcpCredentials?.close();
+    delete renewals.runMcpCredentials;
     const runRenewalToStop = renewals.runCredentialRenewal as RunCredentialRenewalController | null;
     renewals.runCredentialRenewal = null;
 
@@ -408,10 +416,21 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
+    for (const [scope, snapshot] of providerTurn.latestClaudeUsage) {
+      await waitForTurnFinalizerStep(
+        recordClaudeSubscriptionUsage(
+          db,
+          settings,
+          { accountId: input.accountId, workspaceId: input.workspaceId, scope },
+          snapshot,
+        ).catch(() => null),
+        finalizerSignal,
+      );
+    }
     if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
-      // is byte-identical to the /wham/usage write — no partial-window clobber.
+      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
+      // so untyped response headers cannot mislabel weekly-only quota.
       if (
         providerTurn.latestCodexUsage &&
         attempt.turnId &&

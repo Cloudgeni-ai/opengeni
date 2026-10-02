@@ -52,7 +52,7 @@ describe("model-policy", () => {
       codex: true,
       free: true,
       codexOnly: false,
-      first: "OpenGeni",
+      first: "Opengeni",
     },
     {
       name: "no usable Codex",
@@ -60,7 +60,7 @@ describe("model-policy", () => {
       codex: false,
       free: true,
       codexOnly: false,
-      first: "OpenGeni",
+      first: "Opengeni",
     },
     {
       name: "no selectable OpenGeni",
@@ -68,7 +68,7 @@ describe("model-policy", () => {
       codex: true,
       free: false,
       codexOnly: false,
-      first: "OpenGeni",
+      first: "Opengeni",
     },
     {
       name: "Codex-only session",
@@ -84,7 +84,7 @@ describe("model-policy", () => {
       codex: false,
       free: false,
       codexOnly: true,
-      first: "OpenGeni",
+      first: "Opengeni",
     },
   ])("conditionally promotes the UI group: $name", ({ paid, codex, free, codexOnly, first }) => {
     const rows = projectPickerRows([
@@ -102,7 +102,7 @@ describe("model-policy", () => {
     expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
     expect(groups.flatMap((group) => group.rows).find((row) => row.id === "paid")).toEqual(rows[1]);
     expect(rows).toEqual(snapshot);
-    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("OpenGeni");
+    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("Opengeni");
   });
 
   test("unknown legacy cost is not treated as free", () => {
@@ -111,7 +111,7 @@ describe("model-policy", () => {
       catalogModel({ id: "codex/test", label: "Codex", source: "codex" }),
     ]);
     expect(groupPickerRowsByBillingClass(rows).map((group) => group.label)).toEqual([
-      "OpenGeni",
+      "Opengeni",
       "Codex",
     ]);
   });
@@ -269,10 +269,10 @@ describe("model-policy", () => {
     expect(billingClassForModel(model)).toBe("opengeni_credits");
     expect(projectPickerRows([model])[0]).toMatchObject({
       billingClass: "opengeni_credits",
-      billingClassLabel: "OpenGeni",
+      billingClassLabel: "Opengeni",
     });
     expect(advancedSourceSummary(model)).toBe("Deployment-provided connection");
-    expect(payerSummaryForModel(model)).toBe("OpenGeni · no model credits");
+    expect(payerSummaryForModel(model)).toBe("Opengeni · no model credits");
   });
 
   test("uses deployment cost before upstream settlement in the payer summary", () => {
@@ -300,7 +300,7 @@ describe("model-policy", () => {
           cost: "credits",
         }),
       ),
-    ).toBe("OpenGeni credits");
+    ).toBe("Opengeni credits");
   });
 
   test("uses explicit ownership cost labels independently of legacy billing metadata", () => {

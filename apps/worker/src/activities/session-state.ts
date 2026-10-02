@@ -14,10 +14,12 @@ import {
   getSessionEvent,
   getSessionTurnForAttempt,
   expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
+  expireScheduledRunHumanWait as expireScheduledRunHumanWaitDb,
   expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { CancelledFailure } from "@temporalio/activity";
@@ -33,6 +35,8 @@ import type {
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   ExpireSessionInteractionInterventionInput,
+  ExpireScheduledRunHumanWaitInput,
+  ExpireScheduledRunHumanWaitResult,
   ExpireSessionInteractionInterventionResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
@@ -67,6 +71,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
+  expireScheduledRunHumanWait: typeof expireScheduledRunHumanWaitDb;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
@@ -113,6 +118,8 @@ export function createSessionStateActivities(
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const expireSessionInteractionInterventionFn =
     overrides.expireSessionInteractionIntervention ?? expireSessionInteractionInterventionDb;
+  const expireScheduledRunHumanWaitFn =
+    overrides.expireScheduledRunHumanWait ?? expireScheduledRunHumanWaitDb;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
@@ -233,6 +240,9 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
+    if (postClaimRecovery?.sandboxSetupRecoveryExhausted && !postClaimIdentityMatches) {
+      return { action: "stale" };
+    }
     const providerRecoveryCount = postClaimIdentityMatches
       ? postClaimRecovery?.providerRecoveryCount
       : undefined;
@@ -241,6 +251,19 @@ export function createSessionStateActivities(
       : undefined;
     const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
     const hasProviderFailureCode = providerFailureCode !== undefined;
+    const setupOutcomeUnknown =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
+    const setupRecoveryExhausted =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupRecoveryExhausted === true;
+    if (
+      (setupOutcomeUnknown && setupRecoveryExhausted) ||
+      ((setupOutcomeUnknown || setupRecoveryExhausted) &&
+        (hasProviderRecoveryCount || hasProviderFailureCode)) ||
+      (setupRecoveryExhausted &&
+        turn.metadata?.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT)
+    ) {
+      return { action: "stale" };
+    }
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
       return { action: "stale" };
     }
@@ -269,11 +292,30 @@ export function createSessionStateActivities(
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: input.attemptId,
-        reason: providerFailureCode ?? "claimed_attempt_database_failure",
+        reason: setupOutcomeUnknown
+          ? "sandbox_command_start_outcome_unknown"
+          : setupRecoveryExhausted
+            ? "sandbox_command_start_recovery_exhausted"
+            : (providerFailureCode ?? "claimed_attempt_database_failure"),
+        ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+        ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
         ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
         detail: {
-          code: providerFailureCode ?? recoveredClaimCode,
-          retryable: true,
+          code: setupOutcomeUnknown
+            ? "sandbox_command_start_outcome_unknown"
+            : setupRecoveryExhausted
+              ? "sandbox_command_start_recovery_exhausted"
+              : (providerFailureCode ?? recoveredClaimCode),
+          retryable: !setupOutcomeUnknown && !setupRecoveryExhausted,
+          ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
+          ...(setupRecoveryExhausted
+            ? {
+                setupOutcome: "not_started",
+                replay: "blocked",
+                recoveryExhausted: true,
+                providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+              }
+            : {}),
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,
@@ -610,6 +652,18 @@ export function createSessionStateActivities(
     return { action: result.action };
   }
 
+  /** A scheduled run's approval timeout answers for its unanswered human wait. */
+  async function expireScheduledRunHumanWait(
+    input: ExpireScheduledRunHumanWaitInput,
+  ): Promise<ExpireScheduledRunHumanWaitResult> {
+    const { db, bus } = await services();
+    const result = await expireScheduledRunHumanWaitFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
+  }
+
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const settled = await settleSessionIdleWithParentOutboxFn(
@@ -646,6 +700,7 @@ export function createSessionStateActivities(
     settleSessionInputWait,
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
+    expireScheduledRunHumanWait,
     markSessionIdle,
   };
 }

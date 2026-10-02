@@ -1,5 +1,102 @@
 # @opengeni/tool-gateway
 
+## 0.1.18
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/observability@0.8.37
+
+## 0.1.17
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/observability@0.8.36
+
+## 0.1.16
+
+### Patch Changes
+
+- 32598eb: Expose content-free MCP phase timings and host-owned outbound trace correlation across gateway, credential, transport and persistence boundaries. Preserve W3C sampling flags, credential header semantics, exact execution authority and existing retry behavior.
+- b5a77df: Make rejected tool arguments actionable. When a call does not match the tool's advertised input schema, the gateway error now names each missing, mistyped, or unexpected property (for example `missing required property "context"`), reports up to eight problems plus a count of the rest, and never quotes argument values. `ToolGatewayInputValidationError` gains `issues`, `omittedIssueCount`, and `summary`. The accept/reject decision still stops at the first error; the all-errors pass runs only after a rejection, only for arguments up to 64 KiB serialized, and never runs a `pattern` on a string longer than that subschema's `maxLength`.
+
+  A model MCP call rejected this way now reads "The tool was not called because its arguments do not match the tool's input schema: ... Correct the named properties and call the tool again." instead of "Please try again", so the model fixes the arguments rather than resending the same call. Other thrown MCP failures keep the existing wording. The workspace tool HTTP call and approval routes return the same summary on their `422` (`code: "validation_failed"`, `details.code: "invalid_tool_arguments"` with `issues` and `omittedIssueCount`); the previous body carried only the bare code as its message.
+
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [32598eb]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/observability@0.8.35
+
+## 0.1.15
+
+### Patch Changes
+
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
+## 0.1.14
+
+### Patch Changes
+
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+
 ## 0.1.13
 
 ### Patch Changes

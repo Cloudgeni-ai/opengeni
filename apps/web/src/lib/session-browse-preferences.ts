@@ -1,6 +1,7 @@
 import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "./sessions-group";
 
-export type SessionBrowseStatus = "active" | "archived" | "all";
+/** "needs-you" is the Active list narrowed to workstreams waiting on the person. */
+export type SessionBrowseStatus = "active" | "needs-you" | "archived" | "all";
 export type SessionBrowsePreferences = {
   groupBy: SessionBrowseGroupBy;
   sortBy: SessionBrowseSortBy;
@@ -13,6 +14,20 @@ export const DEFAULT_SESSION_BROWSE_PREFERENCES: SessionBrowsePreferences = {
   status: "active",
   showEmptyGroups: false,
 };
+
+/**
+ * True only when the view differs from the default. The default view must not
+ * look filtered: a new person with no sessions sees the real empty state, not
+ * "No sessions match this view".
+ */
+export function sessionBrowsePreferencesCustomized(value: SessionBrowsePreferences): boolean {
+  return (
+    value.groupBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy ||
+    value.sortBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.sortBy ||
+    value.status !== DEFAULT_SESSION_BROWSE_PREFERENCES.status ||
+    value.showEmptyGroups !== DEFAULT_SESSION_BROWSE_PREFERENCES.showEmptyGroups
+  );
+}
 
 const SESSION_BROWSE_PREFERENCE_VERSION = 1;
 const DEFAULT_SESSION_BROWSE_GROUP_BY = DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy;
@@ -82,7 +97,9 @@ export function readSessionBrowsePreferences(
       sortBy: ["updatedAt", "createdAt", "name"].includes(parsed.sortBy)
         ? parsed.sortBy
         : "updatedAt",
-      status: ["active", "archived", "all"].includes(parsed.status) ? parsed.status : "active",
+      status: ["active", "needs-you", "archived", "all"].includes(parsed.status)
+        ? parsed.status
+        : "active",
       showEmptyGroups: parsed.showEmptyGroups === true,
     };
   } catch {

@@ -54,6 +54,14 @@ prepares source content with provider ACLs and durable checkpoints;
 passages. The agent selects findings and saves them with `knowledge_save`.
 No separate ingestion workflow decides what the company should remember.
 
+A failed vector-index batch keeps its last completed projection and the durable
+queue retries it with backoff. The stored job reason stays the SQL lifecycle's
+fixed `embedding_unavailable` code; the worker warning carries only the
+content-free cause: `knowledge_index_embedding_failed` with the provider HTTP
+status, `knowledge_index_persistence_failed` with the SQLSTATE when a
+PostgreSQL error caused it, `knowledge_index_usage_limit_reached`, or
+`knowledge_index_failed` for any other worker-side failure.
+
 Review-first source content and findings belong to the same run's review batch.
 The source tool may read that run's pending content so the agent can finish its
 work; ordinary retrieval still excludes pending revisions. Source-job settlement
@@ -124,6 +132,54 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
+A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+id from `operationId` (`knowledgeEntryIdForOperation` in
+`packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
+receipt. A correction passes an existing `entryId` and its current version. The
+all-zero UUID is rejected. A supplied id that already belongs to another entry
+fails as `knowledge_entry_id_taken` (HTTP 409), even when row-level security hides
+that entry, instead of reading as operation-ID reuse.
+
+### Model-visible discovery results
+
+`knowledge_search` (first-party and Docs MCP) and `knowledge_prepare_save`
+return the complete contract to every caller: HTTP, the SDK, Codemode scripts
+and other programmatic callers receive the exact bytes. Only a model tool call
+receives a compact copy, projected in the worker at the per-caller seam
+(`projectAttemptToolResultForCaller` with
+`packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
+It is the same JSON without bookkeeping or repeated text:
+
+- kept: entry and collection IDs, `version` (the `expectedVersion` for an
+  update), `revision.id` (for evidence pins), scope, `revision.outcome` and
+  collection `view`, titles, kinds, group and parent IDs, descriptions, excerpts
+  with their offsets, index status, `complete`, and every pagination cursor;
+- removed: timestamps, rank score, revision number and lineage, creating
+  session and review batch, and a collection descriptor's `revisionId`;
+- removed only when equal to the default or to another shown field:
+  `archived: false`, `change: "upsert"`, `sourceKind: null`,
+  `descriptionTruncated: false`, `revision.entryId` equal to `id`, and
+  `publishedRevisionId`/`latestRevisionId` equal to `revision.id` (so a pending
+  revision above the published one, or a missing published revision, stays
+  visible);
+- `revision.preview`, the first 512 characters of the content, is omitted only
+  when it is empty or a content excerpt starting at offset 0 already begins with
+  it. The title never counts, because a short content such as a decision's
+  answer can appear inside its title and still be the only place it is stated.
+  A preview with unique text, such as when the best excerpt is a later chunk or
+  there is no excerpt, is kept in full. Every excerpt, including title
+  excerpts, is kept. Nothing is truncated.
+
+An error, structured content, or a result that does not strictly match the
+contract passes through unchanged. The model call's history item and timeline
+event record the compact copy the model received; past tool outputs are never
+re-rendered. MCP transport bounds the exact result to 1 MiB before this
+projection, so compaction only shrinks results that already fit; a result that
+is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
+(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
+search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
+from 21.7 KB to 14.1 KB (35%).
+
 ## Personal and shared Knowledge
 
 Personal and workspace Knowledge use the same schema, tools, versioning and
@@ -147,27 +203,39 @@ retain their prior workspace ownership instead of guessing an owner.
 
 ## Browsing Knowledge
 
-Agent Knowledge is one page with persistent **Knowledge**, **Files**,
-**Instructions** and **Skills** tabs. Each tab has a URL under `/state`; historical
-Memory and Documents links keep the same navigation. Files is a library of
-original copies with one Upload action. Opening a file shows its preview, extracted
-text and a link to related Knowledge. Readable source text stays attached to its
-original and in canonical Knowledge; there is no competing Add text form.
+The **Knowledge** page (`/state`) has **Library**, **Instructions** and
+**Review** tabs; Review shows only while proposals wait. Entries, collections,
+the Learning settings and add/edit flows open as pages with a back link, each
+addressed by URL. Files are a **Files** Type filter in the Library, and
+**Add → Upload files** saves originals that become File entries. Opening a file
+shows its preview, extracted text and a link to related Knowledge. Old
+`view=files` links open the Library filtered to files, and `view=skills` links
+open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge.
 
-The workspace navigation marks Agent Knowledge with an amber indicator while
-accessible Knowledge proposals await review. That link opens Needs review directly.
+The workspace rail marks Knowledge with an indicator while accessible Knowledge
+proposals await review. That link opens the Review tab directly.
 The indicator refreshes after local decisions, on window focus, and every 30 seconds
 while visible; a transient refresh failure preserves the last known pending state.
 
-The Knowledge page uses a compact expandable tree. Collections appear as folders
-with one-line descriptions; entries open their content and evidence on click.
-Collections can nest and an entry can appear in several collections without
-copying it. Collection menus provide details and creation within that collection.
-Arrow keys navigate, expand and collapse folders. Search and review use compact
-flat results so matching entries remain discoverable regardless of their parents.
+The Library shows a flat list or a **By collection** layout: one section per
+top-level collection (no visible parent in the selected scope) listing its
+sub-collections first, as rows that open their own page, then its direct
+entries, and finally the entries not in a collection. A nested collection
+therefore appears once, inside its parent. Rows open the entry's or collection's
+own page with its content and evidence. A collection page lists its
+sub-collections as their own group before its entries, and every entry or
+collection page shows the path of parent collections (first parent at each
+level, for example "in Runbooks › Payments"), each part linking to that
+collection. Collections can nest and an entry can appear in several collections
+without copying it. Search and filters use flat results so matching entries
+remain discoverable regardless of their parents. Only collections and files carry
+an icon; other kinds are named in the row's meta line ("Decision · updated 3
+days ago").
 
-The root list uses `rootOnly` before server pagination; each expanded collection
-pages its direct members using `groupId`. A parent outside the selected scope,
+The section list uses `kind: "group"` with `rootOnly`, and the loose list
+`rootOnly`, both before server pagination; each collection pages its direct
+sub-collections (`groupId` with `kind: "group"`) and its direct members using
+`groupId`. A parent outside the selected scope,
 archived parent, or inaccessible parent does not hide an accessible child from
 the root. Published and outstanding pending membership edges are checked for
 cycles under the publication lock, including at approval and restoration.
@@ -185,13 +253,18 @@ All finding types share retrieval, review, permissions and revision history.
 
 ## Agent learning settings
 
-**Settings → Agent learning** groups three destinations together:
+**Knowledge → Learning** groups three destinations together (the old
+Settings → Agent learning URL redirects there):
 
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
 | Knowledge | Automatic | Knowledge entries and revisions |
-| Workspace instructions | Review first | Native instruction revisions and active heads |
-| Skills | Review first | Native Skill folders, revisions and lifecycle receipts |
+| Workspace instructions | Automatic | Native instruction revisions and active heads |
+| Skills | Automatic | Native Skill folders, revisions and lifecycle receipts |
+
+These defaults apply when no saved workspace or personal policy exists. Saved
+choices (including Review first and Off), context overrides, and accepted-turn
+snapshots are unchanged; no existing policy is migrated.
 
 Each destination supports **Automatic**, **Review first** and **Off**. These
 control agent authoring and publication. Off does not remove existing Knowledge,
@@ -202,8 +275,8 @@ separate from learning policy.
 
 Workspace or personal defaults can be overridden per chat or scheduled task.
 Overrides are sparse: selecting Inherit removes that category's override.
-Settings list the active overrides in one place; chat options and a schedule's
-collapsed advanced settings provide context shortcuts. Existing schedule
+Chat options and the Advanced section of a schedule's form set these
+overrides. Existing schedule
 overrides are drafts until Save; Cancel discards them. Schedule and learning
 changes commit together and restore together if scheduler synchronization fails. New-chat choices are retained
 in the composer draft and committed with the session before its first accepted

@@ -4,6 +4,7 @@ import {
   type MaterializationVerificationDiagnostic,
 } from "../materialization-verification-error";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
+import { ProviderCommandObservationUnavailableError } from "../provider-command-session";
 
 const MARKER = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
 const OUTPUT_LIMIT = 16 * 1024;
@@ -104,7 +105,11 @@ export async function verifyModalMaterializedPath(
           ...diagnostic("command_pending"),
           causeMessage: "Observation deadline exceeded; provider process completion is unconfirmed",
         },
-        { cause: error },
+        {
+          cause: providerCommand
+            ? new ProviderCommandObservationUnavailableError(providerCommand, error)
+            : error,
+        },
       );
     }
     if (!(error instanceof SandboxMaterializationVerificationError)) {

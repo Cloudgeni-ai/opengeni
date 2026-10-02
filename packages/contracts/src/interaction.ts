@@ -45,6 +45,13 @@ const opaqueGeneration = z
   .min(1)
   .max(256)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+// Native bridge generations use unpadded base64url; both - and _ can lead.
+// Keep the bytes unchanged: generation equality fences old connections.
+const attachedBridgeGeneration = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-][A-Za-z0-9._:-]*$/u);
 const boundedOpaqueId = z
   .string()
   .min(1)
@@ -202,6 +209,11 @@ export const BrowserSessionCapabilities = z
   .strict();
 export type BrowserSessionCapabilities = z.infer<typeof BrowserSessionCapabilities>;
 
+/** Versioned persistent discriminator for experimental disposable contexts. */
+export { EPHEMERAL_CHROMIUM_DRIVER_ID, browserSessionStorageMode } from "./browser-storage";
+export const BrowserStorageMode = z.enum(["private_profile", "ephemeral_context"]);
+export type BrowserStorageMode = z.infer<typeof BrowserStorageMode>;
+
 export const BrowserSession = z
   .object({
     id: z.string().uuid(),
@@ -309,7 +321,7 @@ export type AttachedBrowserDeviceAnnouncement = z.infer<typeof AttachedBrowserDe
 
 export const AttachedBrowserInventorySnapshot = z
   .object({
-    bridgeGeneration: opaqueGeneration,
+    bridgeGeneration: attachedBridgeGeneration,
     revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     devices: z.array(AttachedBrowserDeviceAnnouncement).max(10_000),
   })
@@ -371,7 +383,7 @@ export const AttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
     state: z.enum(["online", "offline"]),
-    bridgeGeneration: opaqueGeneration,
+    bridgeGeneration: attachedBridgeGeneration,
     inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     connectedProfileCount: z.number().int().nonnegative().max(10_000),
     lastSeenAt: z.string().datetime({ offset: true }),
@@ -2269,6 +2281,8 @@ export const BrowserActionBatch = z
   .object({
     type: z.literal("batch"),
     actions: z.array(BrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    /** Revalidate the original document before each action; never follow navigation. */
+    fenceEachAction: z.literal(true).optional(),
   })
   .strict()
   .superRefine((batch, context) => {
@@ -2363,8 +2377,10 @@ export const BrowserActionCommand = z
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
     /** Human live-control surfaces already receive the resulting pixels. They
-     * may omit the expensive semantic snapshot; agent actions keep it. */
-    observationMode: z.enum(["full", "none"]).optional(),
+     * may omit the expensive semantic snapshot; agent actions keep it. The
+     * negotiated input mode only observes a focused native dropdown after a
+     * pointer click, and otherwise returns no observation. */
+    observationMode: z.enum(["full", "none", "input"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -2492,6 +2508,7 @@ export const CreateBrowserSessionRequest = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: boundedUrl.optional(),
     headless: z.boolean().default(true),
+    storageMode: BrowserStorageMode.default("private_profile"),
     /** Managed engine choice. Attached Chrome continues to derive its engine
      * from the selected device rather than accepting an impersonated value. */
     engine: z.enum(["chromium", "lightpanda"]).default("chromium"),
@@ -2503,6 +2520,23 @@ export const CreateBrowserSessionRequest = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      value.storageMode === "ephemeral_context" &&
+      (!value.headless ||
+        value.engine !== "chromium" ||
+        value.identityId ||
+        value.baseRevisionId ||
+        value.networkRouteId ||
+        value.linkedComputerSessionId ||
+        (value.placement && value.placement.kind !== "sandbox_group"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["storageMode"],
+        message:
+          "ephemeral contexts require headless managed sandbox Chromium without identity, revision, route or Computer",
+      });
+    }
     if (value.baseRevisionId && !value.identityId) {
       context.addIssue({
         code: "custom",
@@ -2715,6 +2749,8 @@ export const BrowserSessionAttachment = z
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
     stream: BrowserFrameStreamAttachment,
+    fencedInputBatches: z.literal(true).optional(),
+    focusedInputObservations: z.literal(true).optional(),
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
@@ -2739,7 +2775,7 @@ export const BrowserActionRequest = z
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
-    observationMode: z.enum(["full", "none"]).default("full"),
+    observationMode: z.enum(["full", "none", "input"]).default("full"),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -2903,6 +2939,8 @@ export const ComputerSessionCapabilities = z
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
+    /** Raw window input stays in the background. Absent means foreground-only. */
+    backgroundInput: z.boolean().optional(),
     parallelApps: z.boolean(),
   })
   .strict();

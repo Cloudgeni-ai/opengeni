@@ -18,6 +18,7 @@ import {
   createConnection,
   createDb,
   createOrganizationApiKey,
+  createScheduledTask,
   ensureExternalIdentity,
   createMemorySlackPublicationConfiguration,
   createSession,
@@ -50,9 +51,12 @@ import {
   createOpenGeniSlackBotClient,
   exchangeOpenGeniSlackAuthorizationCode,
   nextSlackFilesListPage,
+  prepareScheduledSlackBotPost,
   resolveSlackFilesListPage,
   resolveSlackBotConnectionForTool,
+  sendScheduledSlackBotPost,
   verifyOpenGeniSlackBotCredential,
+  verifyScheduledTaskSlackChannel,
 } from "../src/integrations/slack-bot";
 import { drainMemorySlackPublicationsOnce } from "../src/memory-slack-delivery";
 
@@ -202,9 +206,16 @@ function fakeSlack(
     deleteErrorCode?: string;
     transcriptRequiresUserSession?: boolean;
     transcriptInFileInfo?: boolean;
+    image?: { bytes: Uint8Array; declaredMime?: string; responseMime?: string; size?: number };
+    imageSharedViaParent?: boolean;
     fileListResponse?: (input: { count: number; page: number }) => Record<string, unknown>;
+    /** Extra channels, with realistic IDs, that the bot is a member of. */
+    extraMemberChannels?: string[];
+    dmUserId?: string;
   } = {},
 ) {
+  const isMemberChannel = (channel: string) =>
+    channel === "C_MEMBER" || (options.extraMemberChannels ?? []).includes(channel);
   const calls: SlackCall[] = [];
   const committedPosts: CommittedSlackPost[] = [];
   const committedDeletes = new Set<string>();
@@ -305,6 +316,11 @@ function fakeSlack(
           }
         : undefined;
     if (url.hostname === "files.slack.com") {
+      if (url.pathname.includes("F_IMAGE")) {
+        return new Response(options.image?.bytes ?? fixturePng(), {
+          headers: { "content-type": options.image?.responseMime ?? "image/png" },
+        });
+      }
       if (url.pathname.includes("huddle-transcript") && options.transcriptRequiresUserSession) {
         return new Response(null, {
           status: 302,
@@ -421,6 +437,12 @@ function fakeSlack(
             is_private: true,
             is_member: false,
           },
+          ...(options.extraMemberChannels ?? []).map((id) => ({
+            id,
+            name: `channel-${id.toLowerCase()}`,
+            is_private: id.startsWith("G"),
+            is_member: true,
+          })),
         ],
         response_metadata: { next_cursor: "" },
       });
@@ -435,13 +457,16 @@ function fakeSlack(
         ok: true,
         channel: {
           id: channel,
-          name: channel === "C_MEMBER" ? "general" : "private",
+          name: isMemberChannel(channel) ? "general" : "private",
           is_private: channel.startsWith("G"),
-          is_member: channel === "C_MEMBER",
-          is_archived: channel === "C_MEMBER" && memberChannelState.isArchived,
-          is_shared: channel === "C_MEMBER" && memberChannelState.isShared,
-          is_ext_shared: channel === "C_MEMBER" && memberChannelState.isExternallyShared,
-          is_org_shared: channel === "C_MEMBER" && memberChannelState.isOrgShared,
+          is_member: isMemberChannel(channel),
+          is_im: channel.startsWith("D"),
+          is_mpim: channel === "G_GROUP",
+          ...(channel.startsWith("D") ? { user: options.dmUserId ?? "U_OWNER" } : {}),
+          is_archived: isMemberChannel(channel) && memberChannelState.isArchived,
+          is_shared: isMemberChannel(channel) && memberChannelState.isShared,
+          is_ext_shared: isMemberChannel(channel) && memberChannelState.isExternallyShared,
+          is_org_shared: isMemberChannel(channel) && memberChannelState.isOrgShared,
         },
       });
     }
@@ -552,6 +577,23 @@ function fakeSlack(
     if (method === "files.info") {
       const fileId = params.get("file") ?? "F_CANVAS";
       const transcript = fileId === "FTRANSCRIPT";
+      if (fileId === "F_IMAGE") {
+        return Response.json({
+          ok: true,
+          file: {
+            id: fileId,
+            name: "thread-image.png",
+            title: "Thread image",
+            mode: "hosted",
+            filetype: "png",
+            mimetype: options.image?.declaredMime ?? "image/png",
+            size: options.image?.size ?? (options.image?.bytes ?? fixturePng()).byteLength,
+            channels: [options.imageSharedViaParent ? "G_PRIVATE" : "C_MEMBER"],
+            url_private_download:
+              "https://files.slack.com/files-pri/T_OPEN_GENI-F_IMAGE/download/thread-image.png",
+          },
+        });
+      }
       return Response.json({
         ok: true,
         file: {
@@ -566,6 +608,7 @@ function fakeSlack(
           size: transcript ? 4567 : 1234,
           channels: transcript ? [] : [fileId === "F_OTHER" ? "G_PRIVATE" : "C_MEMBER"],
           groups: transcript ? ["C_CANVAS"] : [],
+          embedded_file_ids: options.imageSharedViaParent ? ["F_IMAGE"] : undefined,
           canvas_metadata: transcript ? undefined : { originating_huddle_id: "H_FIXTURE" },
           huddle_transcript_file_id: transcript ? undefined : "FTRANSCRIPT",
           huddle_transcription:
@@ -700,6 +743,13 @@ function fakeSlack(
       return { entered, release };
     },
   };
+}
+
+function fixturePng(): Uint8Array {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+    "base64",
+  );
 }
 
 describe("Slack files.list pagination adapter", () => {
@@ -942,7 +992,6 @@ describe("OpenGeni Slack bot credential verification", () => {
       ),
     ).rejects.toThrow("do not satisfy");
     for (const unsafe of [
-      "files:write",
       "reactions:write",
       "chat:write.customize",
       "users:read.email",
@@ -2345,6 +2394,127 @@ describe("OpenGeni Slack bot connection", () => {
     ).rejects.toThrow("OpenGeni Slack bot connection");
   });
 
+  test("uploads bytes without bot headers and completes in the exact task thread", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const uploadUrl = "https://files.slack.com/upload/v1/fixture-upload";
+    const providerCalls: { method: string; params?: URLSearchParams }[] = [];
+    const fetchUpload = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(request instanceof Request ? request.url : request.toString());
+      if (url.toString() === uploadUrl) {
+        providerCalls.push({ method: "bytes" });
+        expect(init?.method).toBe("POST");
+        expect(new Headers(init?.headers).has("authorization")).toBe(false);
+        expect(init?.redirect).toBe("error");
+        expect([...new Uint8Array(init?.body as Buffer)]).toEqual([...fixturePng()]);
+        return new Response("OK", { status: 200 });
+      }
+      if (url.pathname === "/api/files.getUploadURLExternal") {
+        const params = new URLSearchParams(init?.body as string);
+        providerCalls.push({ method: "allocate", params });
+        return Response.json({ ok: true, file_id: "FUPLOAD1", upload_url: uploadUrl });
+      }
+      if (url.pathname === "/api/files.completeUploadExternal") {
+        const params = new URLSearchParams(init?.body as string);
+        providerCalls.push({ method: "complete", params });
+        return Response.json({ ok: true, files: [{ id: "FUPLOAD1" }] });
+      }
+      return slack.fetch(request, init);
+    }) as typeof globalThis.fetch;
+    let authorizations = 0;
+    const { bot } = await connectedTestBot(workspace, fetchUpload, async () => {
+      authorizations += 1;
+      return true;
+    });
+    const before = slack.calls.length;
+    const allocated = await bot.allocateFileUpload({
+      channelId: "C_MEMBER",
+      filename: "preview.png",
+      sizeBytes: fixturePng().byteLength,
+    });
+    await bot.transferFileUpload({
+      channelId: "C_MEMBER",
+      uploadUrl: allocated.uploadUrl,
+      bytes: fixturePng(),
+    });
+    await bot.completeFileUpload({
+      channelId: "C_MEMBER",
+      threadTimestamp: "1700000000.123456",
+      fileId: allocated.fileId,
+      title: "preview.png",
+    });
+    expect(providerCalls.map((call) => call.method)).toEqual(["allocate", "bytes", "complete"]);
+    expect(providerCalls[0]!.params?.get("filename")).toBe("preview.png");
+    expect(providerCalls[0]!.params?.get("length")).toBe(String(fixturePng().byteLength));
+    expect(providerCalls[2]!.params?.get("channel_id")).toBe("C_MEMBER");
+    expect(providerCalls[2]!.params?.get("thread_ts")).toBe("1700000000.123456");
+    expect(JSON.parse(providerCalls[2]!.params!.get("files")!)).toEqual([
+      { id: "FUPLOAD1", title: "preview.png" },
+    ]);
+    expect(authorizations).toBe(slack.calls.length - before + providerCalls.length);
+  });
+
+  test("refuses uploads from legacy bot grants before provider I/O", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const before = slack.calls.length;
+    await expect(
+      bot.allocateFileUpload({ channelId: "C_MEMBER", filename: "preview.png", sizeBytes: 1 }),
+    ).rejects.toThrow("slack_bot_file_upload_scope_missing");
+    expect(slack.calls).toHaveLength(before);
+  });
+
+  test("private file upload validates the exact live requester IM before allocation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ dmUserId: "U_OWNER", extraMemberChannels: ["G_GROUP"] });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    const input = { filename: "private.png", sizeBytes: 1, privateRecipientSlackUserId: "U_OWNER" };
+    await expect(bot.allocateFileUpload({ ...input, channelId: "G_GROUP" })).rejects.toThrow(
+      "private_task_recipient_changed",
+    );
+    await expect(
+      bot.allocateFileUpload({
+        ...input,
+        channelId: "D_OWNER",
+        privateRecipientSlackUserId: "U_OTHER",
+      }),
+    ).rejects.toThrow("private_task_recipient_changed");
+    expect(slack.calls.some((call) => call.method === "files.getUploadURLExternal")).toBe(false);
+  });
+
+  test("denies a revoked byte-transfer continuation before sending any bytes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    let byteTransfers = 0;
+    const fetchUpload = (async (request: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(request instanceof Request ? request.url : request.toString());
+      if (url.hostname === "files.slack.com") {
+        byteTransfers += 1;
+        return new Response("OK", { status: 200 });
+      }
+      return slack.fetch(request, init);
+    }) as typeof globalThis.fetch;
+    let authorizations = 0;
+    const { bot } = await connectedTestBot(workspace, fetchUpload, async () => {
+      authorizations += 1;
+      return authorizations < 2;
+    });
+    await expect(
+      bot.transferFileUpload({
+        channelId: "C_MEMBER",
+        uploadUrl: new URL("https://files.slack.com/upload/v1/fixture-upload"),
+        bytes: fixturePng(),
+      }),
+    ).rejects.toThrow("provider request is no longer authorized");
+    expect(authorizations).toBe(2);
+    expect(byteTransfers).toBe(0);
+  });
+
   test("adapts files.list to bounded count/page pagination with opaque continuation", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -2470,6 +2640,91 @@ describe("OpenGeni Slack bot connection", () => {
       bot.listFiles({ channelId: "C_MEMBER", cursor: first.nextCursor! }),
     ).rejects.toThrow(/reinstalled|authority changed/);
     expect(slack.calls).toHaveLength(callCount);
+  });
+
+  test("reads a channel-shared thread image as validated bytes with bounded authority", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot, connection } = await connectedTestBot(workspace, slack.fetch);
+    const image = await bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" });
+    expect("image" in image && image.image).toMatchObject({
+      fileId: "F_IMAGE",
+      filename: "thread-image.png",
+      contentType: "image/png",
+    });
+    expect("image" in image && [...image.image.bytes]).toEqual([...fixturePng()]);
+    expect(JSON.stringify(image)).not.toContain("files.slack.com");
+    await expect(bot.fileContent({ channelId: "G_PRIVATE", fileId: "F_IMAGE" })).rejects.toThrow(
+      "not_in_channel",
+    );
+    await expect(
+      bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE", offset: 1 }),
+    ).rejects.toThrow("invalid_file_offset");
+    slack.setMemberChannelState({ isShared: true });
+    await expect(bot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" })).rejects.toThrow(
+      "slack_connect_unsupported",
+    );
+
+    const parentSlack = fakeSlack({ imageSharedViaParent: true });
+    const parentBot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: parentSlack.fetch },
+      await resolveSlackBotConnectionForTool({
+        db: client.db,
+        grant: {
+          ...workspace,
+          subjectId: "subject-a",
+          permissions: ["connections:read"],
+          metadata: {},
+        },
+        sessionId: null,
+        requestedConnectionId: connection.id,
+      }),
+    );
+    await expect(
+      parentBot.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE", parentFileId: "F_CANVAS" }),
+    ).rejects.toThrow("file_not_shared_to_channel");
+    expect(parentSlack.calls.some((call) => call.method.includes("F_IMAGE"))).toBe(false);
+
+    for (const option of [
+      { image: { bytes: fixturePng(), responseMime: "text/html" }, code: "unsupported_file_type" },
+      { image: { bytes: new TextEncoder().encode("<svg></svg>") }, code: "invalid_file_content" },
+      { image: { bytes: fixturePng(), size: 4 * 1024 * 1024 + 1 }, code: "invalid_file_size" },
+      { image: { bytes: fixturePng(), size: 640 * 1024 + 1 }, code: "image_result_too_large" },
+      {
+        image: {
+          bytes: new Uint8Array([
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+            6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 73, 69, 78, 68, 0, 0, 0, 0,
+          ]),
+        },
+        code: "invalid_file_content",
+      },
+    ]) {
+      const fake = fakeSlack(option);
+      const candidate = createOpenGeniSlackBotClient(
+        { db: client.db, settings, slackFetch: fake.fetch },
+        await resolveSlackBotConnectionForTool({
+          db: client.db,
+          grant: {
+            ...workspace,
+            subjectId: "subject-a",
+            permissions: ["connections:read"],
+            metadata: {},
+          },
+          sessionId: null,
+        }),
+      );
+      await expect(
+        candidate.fileContent({ channelId: "C_MEMBER", fileId: "F_IMAGE" }),
+      ).rejects.toThrow(option.code);
+      if (option.code === "image_result_too_large") {
+        expect(
+          fake.calls.some((call) => call.method === "files.info" && call.fileId === "F_IMAGE"),
+        ).toBe(true);
+        expect(fake.calls.some((call) => call.method.includes("F_IMAGE"))).toBe(false);
+      }
+    }
   });
 
   test("rechecks authority before a private-file redirect leg", async () => {
@@ -4413,5 +4668,316 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slackAdapterSource).toContain("slackBotPersistableDestinationAuthority");
     expect(slackAdapterSource).toContain("collectionId: null");
     expect(slackAdapterSource).toContain("saveDestination");
+  });
+});
+
+describe("scheduled task posting to a fixed Slack channel", () => {
+  const TASK_CHANNEL = "C0SCHED01";
+
+  async function scheduledPostingFixture(slack: ReturnType<typeof fakeSlack>) {
+    const workspace = await freshWorkspace();
+    const connected = await connectBot(workspace, slack.fetch);
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.body.connection.id,
+      null,
+    );
+    if (!connection) throw new Error("expected connected Slack bot fixture");
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Daily Slack summary",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3_600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "Post the daily summary",
+        resources: [],
+        tools: [],
+        metadata: {},
+        slackBotConnectionId: connection.id,
+        slackBotChannelId: TASK_CHANNEL,
+      },
+      metadata: {},
+    });
+    const runId = crypto.randomUUID();
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Post the daily summary",
+      resources: [],
+      metadata: {
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: runId,
+        [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: connection.id,
+      },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      createdByContext: {
+        label: "OpenGeni scheduler",
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: runId,
+      },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const grant = {
+      ...workspace,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["connections:read"],
+      principalKind: "agent_attempt",
+      metadata: { sessionId: session.id },
+    } as AccessGrant;
+    return { workspace, connection, task, session, grant };
+  }
+
+  test("a run posts to the task's channel once, even when a send is retried", async () => {
+    if (!available) return;
+    const slack = fakeSlack({ extraMemberChannels: [TASK_CHANNEL], loseFirstPostResponse: true });
+    const { session, grant } = await scheduledPostingFixture(slack);
+
+    const prepared = await prepareScheduledSlackBotPost({
+      db: client.db,
+      grant,
+      sessionId: session.id,
+      text: "Daily summary: all green",
+    });
+    expect(prepared).toMatchObject({
+      identity: "workspace_bot",
+      channelId: TASK_CHANNEL,
+      text: "Daily summary: all green",
+      sent: false,
+    });
+    expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(0);
+
+    const send = () =>
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant,
+        sessionId: session.id,
+        messageId: prepared.messageId,
+        slackFetch: slack.fetch,
+      });
+    // Slack commits the post but the response is lost; the retry with the same
+    // prepared id reconciles the original message instead of posting again.
+    await expect(send()).rejects.toThrow();
+    const posted = await send();
+    expect(posted).toMatchObject({ channelId: TASK_CHANNEL });
+    expect(await send()).toMatchObject({ channelId: TASK_CHANNEL, timestamp: posted.timestamp });
+    expect(slack.committedPosts).toEqual([
+      expect.objectContaining({
+        channel: TASK_CHANNEL,
+        clientMessageId: prepared.messageId,
+        text: "Daily summary: all green",
+      }),
+    ]);
+
+    const reply = await prepareScheduledSlackBotPost({
+      db: client.db,
+      grant,
+      sessionId: session.id,
+      text: "Details in thread",
+      threadTimestamp: posted.timestamp,
+    });
+    await sendScheduledSlackBotPost({
+      db: client.db,
+      settings,
+      grant,
+      sessionId: session.id,
+      messageId: reply.messageId,
+      slackFetch: slack.fetch,
+    });
+    expect(slack.committedPosts.at(-1)).toMatchObject({
+      channel: TASK_CHANNEL,
+      threadTimestamp: posted.timestamp,
+    });
+  });
+
+  test("refuses other chats, other channels, and a channel changed after preparing", async () => {
+    if (!available) return;
+    const slack = fakeSlack({ extraMemberChannels: [TASK_CHANNEL, "C0OTHER01"] });
+    const { workspace, connection, task, session, grant } = await scheduledPostingFixture(slack);
+
+    // An ordinary chat cannot borrow the scheduler's bot routing.
+    const ordinary = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Post somewhere",
+      resources: [],
+      metadata: {
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: crypto.randomUUID(),
+        [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: connection.id,
+      },
+      createdBy: { kind: "subject", subjectId: "subject-a" },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await expect(
+      prepareScheduledSlackBotPost({
+        db: client.db,
+        grant: { ...grant, metadata: { sessionId: ordinary.id } },
+        sessionId: ordinary.id,
+        text: "not allowed",
+      }),
+    ).rejects.toThrow("not a scheduled task run");
+    await expect(
+      prepareScheduledSlackBotPost({ db: client.db, grant, sessionId: null, text: "no run" }),
+    ).rejects.toThrow("not a scheduled task run");
+
+    const prepared = await prepareScheduledSlackBotPost({
+      db: client.db,
+      grant,
+      sessionId: session.id,
+      text: "Prepared before the channel moved",
+    });
+    // A person moves the task to another channel. The saved message is not
+    // redirected, and new messages follow the person's new choice.
+    await shared!.admin`UPDATE scheduled_tasks
+      SET agent_config = agent_config || '{"slackBotChannelId":"C0OTHER01"}'::jsonb
+      WHERE id = ${task.id}`;
+    await expect(
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant,
+        sessionId: session.id,
+        messageId: prepared.messageId,
+        slackFetch: slack.fetch,
+      }),
+    ).rejects.toThrow("channel changed");
+    const moved = await prepareScheduledSlackBotPost({
+      db: client.db,
+      grant,
+      sessionId: session.id,
+      text: "After the move",
+    });
+    expect(moved.channelId).toBe("C0OTHER01");
+
+    // Clearing the channel stops posting at once.
+    await shared!.admin`UPDATE scheduled_tasks
+      SET agent_config = agent_config - 'slackBotChannelId' WHERE id = ${task.id}`;
+    await expect(
+      prepareScheduledSlackBotPost({ db: client.db, grant, sessionId: session.id, text: "x" }),
+    ).rejects.toThrow("no one has chosen a Slack channel");
+    await expect(
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant,
+        sessionId: session.id,
+        messageId: moved.messageId,
+        slackFetch: slack.fetch,
+      }),
+    ).rejects.toThrow("no one has chosen a Slack channel");
+    // A message id from another chat is never readable here.
+    await expect(
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant: { ...grant, metadata: { sessionId: ordinary.id } },
+        sessionId: ordinary.id,
+        messageId: moved.messageId,
+        slackFetch: slack.fetch,
+      }),
+    ).rejects.toThrow("not a scheduled task run");
+    expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(0);
+  });
+
+  test("a channel change never hides that a prepared message was already posted", async () => {
+    if (!available) return;
+    const slack = fakeSlack({
+      extraMemberChannels: [TASK_CHANNEL, "C0OTHER01"],
+      loseFirstPostResponse: true,
+    });
+    const { task, session, grant } = await scheduledPostingFixture(slack);
+    const prepare = async (text: string) =>
+      await prepareScheduledSlackBotPost({ db: client.db, grant, sessionId: session.id, text });
+    const send = (messageId: string) =>
+      sendScheduledSlackBotPost({
+        db: client.db,
+        settings,
+        grant,
+        sessionId: session.id,
+        messageId,
+        slackFetch: slack.fetch,
+      });
+
+    // Slack commits the first send but its response is lost; the second one
+    // completes normally.
+    const interrupted = await prepare("Posted, but the response was lost");
+    await expect(send(interrupted.messageId)).rejects.toThrow();
+    const completed = await prepare("Posted and confirmed");
+    const posted = await send(completed.messageId);
+    expect(slack.committedPosts).toHaveLength(2);
+
+    await shared!.admin`UPDATE scheduled_tasks
+      SET agent_config = agent_config || '{"slackBotChannelId":"C0OTHER01"}'::jsonb
+      WHERE id = ${task.id}`;
+    // Replaying a confirmed send returns its original result without posting.
+    expect(await send(completed.messageId)).toMatchObject({
+      channelId: TASK_CHANNEL,
+      timestamp: posted.timestamp,
+    });
+    // An interrupted send is neither retried in the old channel nor reported
+    // as unsent, so the agent does not assume nothing reached Slack.
+    await expect(send(interrupted.messageId)).rejects.toThrow("may already have been posted");
+    expect(slack.committedPosts).toHaveLength(2);
+  });
+
+  test("setup accepts only an active, unshared channel the bot belongs to", async () => {
+    if (!available) return;
+    const slack = fakeSlack({ extraMemberChannels: [TASK_CHANNEL] });
+    const workspace = await freshWorkspace();
+    const connected = await connectBot(workspace, slack.fetch);
+    const verify = (channelId: string) =>
+      verifyScheduledTaskSlackChannel(
+        { db: client.db, settings, slackFetch: slack.fetch },
+        {
+          ...workspace,
+          subjectId: "subject-a",
+          connectionId: connected.body.connection.id,
+          channelId,
+        },
+      );
+    await verify(TASK_CHANNEL);
+    await expect(verify("C0NOTIN01")).rejects.toThrow("Invite it to the channel first");
+    slack.setMemberChannelState({ isExternallyShared: true });
+    await expect(verify(TASK_CHANNEL)).rejects.toThrow("not shared with another organization");
+    slack.setMemberChannelState({ isExternallyShared: false });
+
+    const response = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-task-slack-channels?connectionId=${connected.body.connection.id}`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "scheduled_tasks:manage",
+            "connections:read",
+            "connections:write",
+          ]),
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    const listed = (await response.json()) as { channels: { id: string }[] };
+    // Fixture IDs with underscores are not real Slack channel IDs.
+    expect(listed.channels.map((channel) => channel.id)).toEqual([TASK_CHANNEL]);
+
+    const readOnly = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-task-slack-channels?connectionId=${connected.body.connection.id}`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "scheduled_tasks:manage",
+            "connections:read",
+          ]),
+        },
+      },
+    );
+    expect(readOnly.status).toBe(403);
   });
 });

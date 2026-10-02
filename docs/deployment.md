@@ -1,6 +1,132 @@
 # Deployment
 
+Workspace/member allowances use rolling migrations and a default-off producer
+gate. Upgrade every API, control worker, and turn worker before enabling
+`OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
+of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+
+Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
+EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
+inventory during a rolling upgrade; no maintenance drain is required for these
+additions. The final `knowledge_index_claim` replacement pins
+`pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
+accounting sources. Upgrade consumers before enabling producer writes.
+
+## Scheduled Slack channel posts (0530)
+
+`0530_scheduled_slack_bot_messages.sql` is rolling. It adds the private
+`opengeni_private.scheduled_slack_bot_messages` table and its two runtime
+capabilities; the public-schema table inventory of older processes is
+unchanged. Run `db:provision-roles` after it as usual. Older API and worker
+processes ignore the new `slackBotChannelId` task field, so a task keeps
+running without the posting tools until the matching worker creates its next
+run. See [`slack-bot.md`](slack-bot.md#scheduled-tasks).
+
+## Assistant message phases (0527)
+
+`0527_session_attention_excludes_commentary.sql` is rolling: it builds the
+commentary-free attention index concurrently, and the 0503 index keeps serving
+older API processes. The same predicate admits a `turn.completed` whose
+`reply` records the answer a human's message received before its turn waited
+for input. Workers from this release stream one
+`agent.message.completed` per assistant message, including progress notes
+(`phase: "commentary"`). Only API processes from the same release treat those as
+activity. While an older API process still runs next to a newer worker, it can
+post up to three progress notes per Slack interaction, wake `session_wait`
+change mode on each note, and mark a session unread for a note. Roll the API
+before the workers to avoid that window; nothing is stored wrongly either way.
+Once no API image older than 0527 can run, a later rolling migration drops
+`session_events_meaningful_attention_idx` (the 0503 index) and its schema entry.
+
+## Verified signup trial runtime switch (0521)
+
+`0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
+no drain and no `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then
+run the normal `db:provision-roles`. Its seed revision allows grants, so this
+migration changes no behavior on its own.
+
+A new verified self-service setup gets the one-time $10 trial credit only when
+**both** switches allow it:
+
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` is the deployment master
+  opt-in. The API reads it at startup, so changing it needs a config rollout
+  and an API restart. Leave it `false` until the campaign is approved.
+- The runtime switch is the newest row of the append-only
+  `opengeni_private.verified_signup_trial_switch_revisions` table. Use it as
+  the fast kill switch for abuse response. A change applies to the next setup
+  transaction on every API replica, with no deploy or restart.
+
+To pause or resume grants, connect as the migration owner (the role in
+`OPENGENI_MIGRATIONS_DATABASE_URL`) and call the audited setter:
+
+```sql
+select set_verified_signup_trial_credits_enabled(
+  false,                                                        -- true resumes grants
+  'github:<owner>/<repo>:actor:<actor>:run:<run id>:attempt:<n>', -- operator identity, 1-200 characters
+  'abuse response: pause signup trial'                          -- reason, 6-1000 characters
+);
+```
+
+Use the same `github:<owner>/<repo>:actor:<actor>:run:<run id>:attempt:<n>`
+identity that an audited CI operator job records, so manual and automated
+revisions read the same in the audit table.
+
+It returns the new revision as JSON (`revision`, `grantsEnabled`,
+`previousGrantsEnabled`, `changed`, `operator`, `reason`, `databaseRole`,
+`changedAt`). Every call appends one revision, even when the value does not
+change, and records the calling database login. Revisions cannot be updated,
+deleted, or truncated. Run it from an audited, access-controlled operator job
+(for example, a protected CI environment that already holds the migration
+credentials), never from an application pod. Read the current state with:
+
+```sql
+select revision, grants_enabled, previous_grants_enabled, operator, reason,
+       database_role, changed_at
+from opengeni_private.verified_signup_trial_switch_revisions
+order by revision desc
+limit 1;
+```
+
+What the switch guarantees:
+
+- The setter holds an exclusive advisory lock until commit. Each grant takes
+  the shared form of that lock before it reads the switch. After a disable
+  commits, no setup that commits later can still receive a grant.
+- A setup that runs while grants are off still succeeds, but gets no credit.
+  Turning grants back on never backfills it: its one-shot receipt already
+  exists.
+- The setter is `SECURITY DEFINER` and callable only by its owner. PUBLIC and
+  every runtime role lack `EXECUTE`. The migration strips every non-owner
+  grant on the table and the setter at creation, including grants from default
+  privileges. `db:provision-roles` revokes any later stray grant, and runtime
+  posture fails readiness if a runtime role can call the setter or write the
+  table. Runtime roles get `SELECT` only, from `db:provision-roles`.
+- If the table has no revision, grants fail closed.
+
+The control worker's sandbox-lease reaper pass (`OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS`,
+default 30 seconds) publishes two 0/1 gauges:
+
+- `opengeni_verified_signup_trial_credits_runtime_enabled`: the runtime switch
+  (1 allows grants, 0 blocks them).
+- `opengeni_verified_signup_trial_credits_deployment_enabled`: the
+  `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` master opt-in as the worker's
+  configuration sees it. The chart and deployment tooling give the API and the
+  workers the same shared setting.
+
+New grants happen only while both gauges are 1. The runtime gauge alone reads 1
+on every deployment that never opted in, so never read it as "the trial is live".
+
 ## Meaningful child attention (0503)
+
+`0585_session_attention_cursor.sql` persists the newest meaningful attention
+sequence in the narrow event cursor. Stop the declared application login roles
+for this maintenance migration: it backfills one indexed history probe per
+existing cursor and restores FORCE RLS in the same transaction. Cursor-backed
+readers must start after the migration commits. Older writers remain compatible
+because the existing event-insert trigger advances the raw and meaningful
+frontiers together; the change does not alter personal acknowledgements or
+rewrite event history. The current partial attention index remains available
+for exact content and lifecycle evidence reads.
 
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
@@ -62,8 +188,69 @@ Rollback after use is limited to warning-compatible builds. Session deletion
 alone removes its warning receipt through the legitimate parent cascade.
 
 This adds canonical-human consent for singleton managed-home Modal recovery only.
-It does not enable automatic rollback, shared-group recovery, command replay,
-empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
+Consent itself never recovers shared groups, replays commands, resets to an empty
+workspace or changes the cancellation/reaper protocol. System continuity after
+definitive loss is separate (0526 and 0548 below). See [run lifecycle](run-lifecycle.md).
+
+## Automatic checkpoint continuity (0526)
+
+`0526_automatic_checkpoint_discontinuity.sql` is maintenance-only. Stop old
+API/control/turn workers, migrate and provision roles, then start only the
+matching binaries. A pre-0520 worker does not reconstruct a system-selected
+filesystem warning. The replacement claim guard requires the worker's
+transaction-local warning protocol v2 for sessions with an automatic receipt;
+human-consented sessions still require v1. Never put either declaration in a
+role default, pool configuration or deployment environment.
+
+The worker may automatically select the registered CURRENT native Modal
+checkpoint of a managed home when definitive provider loss made its archive
+generation older than the workspace generation (shared groups since 0548).
+Selection is a separate system-attributed durable receipt, not human consent or
+proof of restore. The ordinary provider snapshot and artifact verification must
+finish before the box is usable. Live writers in any group member still block.
+Every affected agent attempt
+reconstructs a deterministic warning after the static instruction prefix;
+unknown command outcomes are never replayed. Operator metrics and alerts
+record the fallback even when the next turn succeeds. A read-only, aggregate
+`opengeni_private.sandbox_recovery_observations()` inventory reconstructs
+the last 30 minutes of provider-loss and fallback decisions from a small
+indexed private ledger, committed with their RLS-verified source audit events.
+The ledger stores only event IDs and fixed kinds, not tenant or provider data;
+normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
+
+## Lost sandbox group continuity (0548)
+
+`0548_lost_sandbox_group_continuity.sql` is rolling. It only extends guards for a
+new receipt kind and adds one fixed operator-ledger kind; rows and receipts that
+older images write keep their exact 0526 behavior, and older images never create
+the new receipt. Apply it before rolling API/control/turn images, then provision
+roles as usual. During the overlap an older worker fails closed (SQLSTATE
+`55000` at attempt claim, retried by the ordinary wake) only for a session that
+holds an empty-workspace receipt, and older API/worker images keep refusing the
+new lanes, so affected sessions stay blocked until the new images serve them.
+Rollback of images after a fresh-workspace decision is limited to v3-warning
+builds for those sessions; do not roll the migration back.
+
+After definitive Modal loss (the reaper's missing-before-capture commit or an
+exact warm-instance `NOT_FOUND`, never a failed replacement box) the worker
+decides, for the complete quiescent sandbox group, either the latest verified
+checkpoint (outcomes `selected` and `selected_shared`) or, when none can be
+restored automatically, continuation on a new EMPTY workspace
+(`fresh_workspace`). Both write one permanent warning receipt per group member;
+the empty-workspace receipt requires warning protocol v3 at claim. The empty
+workspace additionally waits until the lost box is past its hard provider
+lifetime (its stamped deadline plus one hour, else loss plus 24 hours). Only a
+definitive, non-retryable content-integrity failure abandons a checkpoint; a
+missing archive object or unconfigured archive storage never does, so fix
+storage and Retry. Other restore failures retry with backoff and then wait for
+an operator. A complete archive is never
+bypassed. The lost archive fields and checkpoint references stay on the lease
+for review. Sessions stuck before this release qualify on their next turn or
+Retry when their loss is provable from the row or its loss audit; a capture
+that was in flight when the box vanished may publish only within one hour, and
+decisions wait for that window. `OpenGeniModalFreshWorkspaceContinuity` warns
+on each empty-workspace decision; see [run lifecycle](run-lifecycle.md) and the
+Sandbox Health dashboard notes.
 
 ## Selective Knowledge source discovery (0469)
 
@@ -114,7 +301,7 @@ The new control worker registers the Knowledge indexing schedule. Search caches
 are rebuildable; original files, canonical revisions, evidence and review
 receipts are retained authorities. Old learning source exceptions remain
 historical evidence: set future exceptions on the relevant chat or scheduled
-task in Settings → Agent learning. Existing category opt-outs are preserved.
+task. Existing category opt-outs are preserved.
 See [Knowledge](knowledge.md) for scope, review and compatibility behavior.
 
 ### Native instance resolver registration (0463)
@@ -249,8 +436,8 @@ The public MCP authorization server is disabled by default. Enable it only in
 managed or local product-access mode with
 `OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
 `OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
-Generated runtime env and Helm artifacts carry the explicit enable switch and
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
+Generated runtime env and Helm artifacts carry the explicit enable switch and,
+when set, `OPENGENI_API_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
 URL a required artifact input and rejects configured product-access profiles
 before deployment.
 
@@ -264,6 +451,17 @@ runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
 because it is the issuer and part of every exact resource identifier. See
 [`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
 
+The metadata and protocol endpoints live at the issuer origin root, outside
+`/v1`: `/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource/...`, `/oauth/register`,
+`/oauth/authorize`, and `/oauth/token`. While the switch is on, the Helm chart
+renders a dedicated `<release>-mcp-oauth` Ingress that routes exactly those
+paths to the API for every ingress host that already routes to the API
+(`ingress.mcpOAuthIngress`); repeat any edge-auth annotations of the primary
+Ingress there. An edge outside this chart must route the same paths to the API.
+If they reach the web application instead, discovery returns HTML and MCP
+clients cannot sign in.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention
@@ -271,15 +469,10 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
-The source quota uses the transport peer address reported by Bun and ignores
-caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behind
-a fixed trusted proxy chain may set
-`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
-`X-Forwarded-For` from the server side by exactly that many hops, so a caller
-cannot evade the quota by prepending values. Enable this only when firewall or
-network-policy rules prevent direct API access and every declared hop overwrites
-or appends the forwarding chain. A missing or shorter chain fails back to the
-server-owned transport peer.
+The source quota keys on the API request source address described in
+[API request source and auth rate limits](#api-request-source-and-auth-rate-limits):
+the transport peer by default, or the forwarded client when
+`OPENGENI_API_TRUSTED_PROXY_HOPS` declares a trusted proxy chain.
 
 Current-human HTTP/SDK calls classified for human approval use the ordinary API
 database and require migration `0405_tool_gateway_approval_capabilities.sql`.
@@ -454,7 +647,7 @@ The NATS client/monitor ports and Garage RPC/admin/web ports are not exposed. On
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
 `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
@@ -523,9 +716,9 @@ kubectl -n opengeni create secret generic opengeni-migrations \
   --from-env-file=.agent/generated/single-node/secrets/migrations.env
 ```
 
-This bootstrap does not require a model-provider API key. A workspace admin can
-connect a ChatGPT/Codex subscription from workspace settings, or connect it once
-from Organization settings → Models for inheritance by shared workspaces, after the
+This bootstrap does not require a model-provider API key. An organization owner or
+admin can connect a ChatGPT/Codex subscription once from Organization settings →
+Models and choose which workspaces use it (all by default, or only some), after the
 application starts. If the deployment instead uses API-billed models, add the
 selected provider's credential to `opengeni-runtime` separately. Keep the
 generated directory as a private recovery artifact or move the values into a
@@ -897,7 +1090,9 @@ Two operator-visible consequences follow the commit. `POST /v1/organizations`
 becomes the one-time setup entry point rather than an organization factory: a
 human who already holds an organization membership can no longer create a
 second organization through it. And `OPENGENI_API_CONTRACT_REVISION` advances,
-so every mutating client must be on the new bundle before admission reopens.
+so every cookie-authenticated browser tab must reload onto the new bundle before
+its next mutation; bearer-authenticated integrations stay admitted (see
+`docs/architecture.md` §3.10).
 
 No backfill is required. A human left holding a legacy `better-auth:user`
 fallback organization whose organization membership was never anchored is
@@ -1147,6 +1342,24 @@ remove, drain, or disable those durable refs. Upgraded readers, child
 inheritance, and workers consume them regardless of their local switch value;
 the switch gates only new external admission and static configuration.
 
+Agent configuration (`sessions.agent_config`, rolling migration
+`0559_session_agent_config.sql`) has two switches, both `false` in config and
+Helm. Deploy the 0559-aware API, control worker, and turn worker everywhere
+with both off: every session keeps a NULL configuration and byte-identical
+legacy behavior, and an old worker reading a new row ignores the column. Then
+set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
+create, `PUT .../sessions/:id/agent`, MCP `session_create`, scheduled-task
+`agentConfig.agent`, automation templates, and workspace
+`settings.sessionAgentDefaults`; with it off each of those is a 422 whose
+`details.code` is `agent_config_not_enabled`, and stored workspace defaults are
+ignored. `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true` additionally
+resolves omitted-`agent` top-level sessions to `{ capabilities: "all" }`; an old
+worker ignoring an `"all"` configuration still runs today's full tool set.
+Turning either switch off later changes only new admissions: stored
+configurations stay authoritative for their sessions, and a scheduled task
+whose stored `agent` is no longer admissible is refused (skipped) rather than
+run without it. See `packages/contracts/src/agent-config.ts`.
+
 Migration 0303 is intentionally rolling and applies while the switch remains
 `false`; applying the ordinary migration chain does not activate an
 organization. The switch is enforced by the separately invoked session-tenancy
@@ -1186,7 +1399,41 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For each subsequent activation:
+For the **fleet activation** cutover, rolling migration
+`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
+adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
+it neither activates organizations nor changes sessions. The CLI additionally
+requires the separately reviewed maintenance marker
+`0586_private_sessions_fleet_activation.sql` before accepting:
+
+```bash
+bun run db:activate-session-tenancy -- \
+  --all-organizations \
+  --activated-by '<bounded-operator-identity>'
+```
+
+Run this only inside the existing protected, drained maintenance release after
+fresh all-organization evidence and release admission clearance. Persist and
+prove canonical activation `true` in durable Helm values **while the runtime is
+parked and before the first committed witness**; a Job-only override is not
+sufficient. Recovery and every later release must retain that value after any
+activation witness. Before a witness, an unwind additionally requires verified
+zero activation receipts; after one, recovery is forward-only.
+
+The fleet command freezes `managed_accounts`, preflights pending activations,
+then writes receipts for pending accounts in one transaction. It checks final
+receipt coverage before committing. Both activation scopes preserve all
+existing organization preferences byte-identically, including missing settings
+and explicit OFF or ON choices. The fleet command rejects the retired
+`--enable-organization-private-sessions` override and never invokes the 0583
+preference-enable helper. After activation, an organization owner or admin opts
+in separately through organization settings; shared-workspace Only me remains
+unavailable while that setting is OFF. No existing session visibility, chat
+default, credential owner, or authority is changed. Marker ordinal references
+must follow the project renumber command
+if newer main migrations claim these ordinals.
+
+For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -1197,11 +1444,11 @@ For each subsequent activation:
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
-3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only. Never flip it on a running pre-activation
-   generation as a way to "test" activation;
+3. prepare canonical activation `true` for the new image generation. Never
+   flip it on a running pre-activation generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity;
+   migration-only secret and Job identity, then persist and verify canonical
+   activation `true` in durable Helm values while they remain parked;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
 6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
@@ -1268,7 +1515,7 @@ cannot restore the legacy authority. Remain in maintenance and fix forward.
 
 ### Production all-organization Only me availability cutover
 
-Migration `0515_private_sessions_fleet_activation.sql` is a maintenance-classified
+Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
 release marker, not an activation shortcut. The protected production release
 parks application database clients, applies the candidate migrations, then runs
 `db:activate-session-tenancy -- --all-organizations --activated-by
@@ -1388,6 +1635,15 @@ CORS responses and therefore cannot use a managed-login session cookie.
 Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
+
+The unauthenticated local development API (`OPENGENI_PRODUCT_ACCESS_MODE=local`
+with the default `OPENGENI_ENVIRONMENT=local`) uses a stricter browser boundary
+instead: no wildcard CORS, browser `Origin`s limited to its web origin, its own
+address, and `OPENGENI_LOCAL_ALLOWED_ORIGINS`, and `Host` limited to this
+computer's names and configured addresses. See
+[local-development.md](local-development.md#start-the-full-stack). Managed and
+configured access modes, and local access mode under any other
+`OPENGENI_ENVIRONMENT` (such as the Helm examples), keep the policy above.
 
 For Azure Blob, the blob-service CORS rule must allow origin `*`, method `PUT`
 (plus `GET`, `HEAD`, and `OPTIONS` for the complete file flow), and all request
@@ -1606,8 +1862,35 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. The API compresses JSON responses and leaves
-SSE and other streaming transports uncompressed.
+while the HTML shell revalidates. Every shell response carries
+`X-Content-Type-Options: nosniff` and `Referrer-Policy:
+strict-origin-when-cross-origin` (the setup-account page keeps its stricter
+`no-referrer`). The server deliberately sets no `X-Frame-Options`,
+`frame-ancestors`, or other CSP, because the console supports embedding. The
+API compresses JSON responses and leaves SSE and other streaming transports
+uncompressed.
+
+The shell carries a meta description plus Open Graph and Twitter card tags so
+shared console links unfurl with the bundled 1200x630 `/og-image.png`. Link
+preview crawlers need an absolute image URL, and the static shell cannot know
+its own origin, so the web server rewrites root-relative `og:image` and
+`twitter:image` URLs against `OPENGENI_WEB_BASE_URL`, or
+`OPENGENI_PUBLIC_BASE_URL` when the console and API share an origin. The Helm
+chart already hands the web pod the shared config map, so no extra setting is
+needed. A split-origin deployment must set `OPENGENI_WEB_BASE_URL` to the
+console origin: the `OPENGENI_PUBLIC_BASE_URL` fallback would point the image at
+the API host, which does not serve it. Without either value the URL stays
+relative: browsers accept it, but
+some crawlers then show a preview without an image. The origin is never taken
+from request headers. Top-level icon files (`/favicon.ico`, `/favicon.svg`,
+`/apple-touch-icon.png`) ship with the shell, and any other missing top-level
+file such as `/robots.txt` answers 404 instead of the SPA HTML.
+
+The console's account menu links to product documentation under Help. The API
+advertises the link in `/v1/config/client` as `documentationUrl`, defaulting to
+the public OpenGeni docs at `https://docs.opengeni.ai`. Set
+`OPENGENI_DOCUMENTATION_URL` on the API to an absolute http(s) URL for your own
+documentation, or to `none` to hide the entry; any other value fails startup.
 
 Web assets, the React demo, and the server bundle compile once on BuildKit's
 native build platform. The amd64 and arm64 web images copy those portable
@@ -1646,7 +1929,11 @@ Site authoring installs exact registry versions. Stable builds use their source
 SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
-`site-package-versions-<sha>` artifact. The runtime includes these pins beside
+`site-package-versions-<sha>` artifact. The publisher runs from protected `main`
+and admits an exact ancestor commit, so branch movement does not invalidate a
+frozen candidate. Standard npm provenance identifies the trusted workflow
+controller; the verified checkout and source-named receipt identify the package
+source, which can be older. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
@@ -2461,7 +2748,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged.
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -2471,9 +2758,55 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+  Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
+  origins; Checkout and billing-portal return URLs may use that configured web
+  origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
+  origin. Unconfigured external origins remain rejected.
+  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  manage Stripe products, coupons, promotion codes, customer eligibility,
+  redemption limits, and expiry in their own operations workflow; campaign
+  creation and account-specific offers are not part of the source package.
+  A discount changes the checkout price while OpenGeni credits the selected
+  package's full face value after the signed completion webhook, including a
+  zero-dollar checkout. For coupons restricted to the credits product, configure
+  `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
+  dispute holds on new checkouts remove the corresponding fraction of package
+  credits. Existing customer balances are account-wide.
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+When `OPENGENI_BILLING_MODE=stripe`, point the Stripe webhook endpoint at
+`/v1/webhooks/stripe` and subscribe it to exactly these events (or `*`):
+
+```text
+checkout.session.completed
+checkout.session.async_payment_succeeded
+checkout.session.async_payment_failed
+checkout.session.expired
+payment_intent.succeeded
+payment_intent.payment_failed
+payment_intent.canceled
+charge.refunded
+refund.created
+refund.updated
+refund.failed
+charge.dispute.created
+charge.dispute.funds_withdrawn
+charge.dispute.closed
+charge.dispute.funds_reinstated
+charge.dispute.updated
+customer.created
+customer.updated
+```
+
+Credits are granted only once Stripe reports the Checkout payment `paid`: at
+`checkout.session.completed` for immediate payment methods, or at
+`checkout.session.async_payment_succeeded` for delayed ones. Checkout Sessions
+without OpenGeni metadata (another product sharing the Stripe account) and
+OpenGeni sessions for an account this deployment does not hold (another
+OpenGeni deployment sharing the account) are acknowledged and ignored.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
@@ -2900,10 +3233,13 @@ ingress and secret wiring:
 - **Stream relay** (`opengeni-relay` image): a stateless wss byte-pump that
   splices the agent's producer stream and the viewer's consumer stream for a
   channel (pty/desktop). Enable with `relay.enabled=true`; the chart then renders
-  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and —
-  when observability is on — a ServiceMonitor. The relay holds no cluster state
-  and makes no cluster egress; both the agent and the viewer dial IN through the
-  ingress.
+  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and,
+  when observability is on, a ServiceMonitor. With the default
+  `relay.metricsPort` it also renders an internal ClusterIP
+  `<release>-relay-metrics` Service for Prometheus. The relay holds no cluster
+  state and makes no cluster egress; both the agent and the viewer dial IN
+  through the ingress. Route only `/stream` and `/healthz` of the relay host to
+  it.
 - **NATS with auth-callout**: the machine's agent dials a NATS websocket to reach
   the request/reply control plane, authenticated per workspace by a NATS
   auth-callout responder. Use chart-managed NATS with
@@ -2948,7 +3284,9 @@ Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
 ingress hosts; both are returned to the agent as connect info at enrollment)
 plus the callout account/user names. The relay process itself listens on
-`OPENGENI_RELAY_BIND`. The relay's non-secret tuning
+`OPENGENI_RELAY_BIND`, and serves `GET /metrics` only on
+`OPENGENI_RELAY_METRICS_BIND` when that is set (see Service endpoints below).
+The relay's non-secret tuning
 knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
 `OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
 `OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject
@@ -2974,6 +3312,8 @@ back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
 or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
+Explicit `/agent/v<version>/<asset>` binary and signature requests always use
+that immutable archive release; a baked canary cannot override a version pin.
 The same deployment serves signed `/agent/stable/manifest.json` and
 `manifest.json.minisig` routes so an enrolled agent updates through a control
 plane it already trusts instead of depending on public DNS. Beta is independent
@@ -3025,7 +3365,7 @@ Long-lived public deployments should still sit behind a gateway or ingress stack
 - Access logs that include request id, user or tenant id from the gateway, route, status, and duration.
 - Explicit deny rules for internal-only surfaces if you expose only the public client API.
 
-When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
+When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed, content-free report from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `POST /v1/analytics-consent` remains public on the same terms so the analytics banner's answer is counted before sign-in (list it as an `Exact` `publicIngress` path too behind edge basic auth), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
 
 For AKS smoke deployments using `ingress-nginx` behind an Azure LoadBalancer service, configure the ingress controller service health probes explicitly. HTTP/HTTPS probes to `/` can mark ingress-nginx unhealthy when the default backend returns a non-200 response, leaving the public VIP allocated but unrouted. TCP probes are sufficient for the temporary ingress-controller smoke path:
 
@@ -3037,6 +3377,77 @@ controller:
       service.beta.kubernetes.io/port_80_health-probe_protocol: Tcp
       service.beta.kubernetes.io/port_443_health-probe_protocol: Tcp
 ```
+
+### API request source and auth rate limits
+
+Every API rate limit and abuse quota keys on one request source address:
+managed sign-in, sign-up, verification, and password-reset limits (Better
+Auth), the address recorded on each auth session, MCP OAuth client
+registration, Connected Machine enrollment, invited-user account setup, and
+browser login transactions. By default it is the transport peer address
+reported by Bun, and caller-supplied `X-Forwarded-For` and `X-Real-IP` are
+ignored, so a caller cannot choose its own bucket.
+
+Behind a fixed proxy chain, set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>`
+(0-16, default 0). OpenGeni then takes the client address from
+`X-Forwarded-For`, walking that many entries from the server side, so values a
+caller prepends never replace the address the trusted edge observed. Each
+trusted proxy must append the address of the peer that connected to it, or
+overwrite the header with the original client address. A missing, short, or
+malformed chain falls back to the transport peer. Enable it only when firewall
+or network-policy rules prevent direct API access; with `networkPolicy.enabled`
+the chart's API NetworkPolicy admits only the ingress controller, web, and
+collector pods. `OPENGENI_API_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs or
+addresses, optional, requires a hop count) additionally honors the forwarded
+chain only when the transport peer is inside one of those ranges, for example
+the node/pod subnet the ingress controller runs in. Boot fails on a malformed
+entry. Without an enforcing NetworkPolicy plugin, any in-cluster pod in a
+trusted range can still reach the API directly and set the header, so keep
+untrusted workloads out of that range.
+
+For `ingress-nginx` on a cloud LoadBalancer, the default
+`externalTrafficPolicy: Cluster` source-NATs every request to a node address,
+so all users share a handful of rate-limit buckets. Set
+`controller.service.externalTrafficPolicy=Local` so the controller sees the
+real client, then set `OPENGENI_API_TRUSTED_PROXY_HOPS=1`: with its default
+`use-forwarded-headers: false`, ingress-nginx overwrites `X-Forwarded-For` with
+the address it observed. Add one hop for each further trusted proxy (for
+example a CDN) in front of the controller. Leaving it at 0 behind
+ingress-nginx keys every client on the controller pod address instead.
+
+Setting the hop count before the traffic policy change is safe, but until
+`externalTrafficPolicy: Local` is live every limiter keys on the few node
+addresses, so each per-address limit acts as a deployment-wide limit. Email
+sign-in and sign-up allow at least Better Auth's previous default (3 per 10 s)
+per address for this reason, but OAuth callbacks, email verification, and
+password-reset completion are tighter than Better Auth's old defaults. Put the
+traffic policy change in place before expecting a burst of real users, such as
+a launch.
+
+Managed auth applies per-client-address limits to sign-in, sign-up, social
+sign-in and callbacks, verification email, email verification, and password
+reset, plus per-email limits (shared by every API replica) on email sign-in,
+sign-up, password-reset requests, and verification-email requests. The exact
+values live in `apps/api/src/auth/managed-auth-rate-limits.ts`. Each per-email
+limit has two fixed windows: a tight one per email and client address, and a
+looser one per email that only attempts admitted by the first reach. A single
+client address therefore exhausts an email's budget only for itself; locking a
+person out of email/password sign-in, sign-up, password reset, or verification
+mail needs at least five client addresses inside the window, and social
+sign-in is never limited per email. The accepted cost is that a distributed
+attacker may still spend the looser budget. IPv6 clients key on their /64 in
+every limiter. A refused Better Auth request receives HTTP 429 with an
+`X-Retry-After` header; the browser session-set sign-in returns 429
+`login_transaction_rate_limited` with `Retry-After` and
+`details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
+never as email or client addresses.
+
+Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
+read a single-value `X-Forwarded-For` by default. It now ignores forwarding
+headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
+user shares the proxy's address and its sign-in and sign-up limits. The
+MCP-only `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` is retired; API startup and
+runtime-artifact generation fail when it is still set to anything but `0`.
 
 Secret delivery should use one of these patterns:
 
@@ -3145,9 +3556,9 @@ and storage objects, so it proves deeper behavior but is not a liveness probe.
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts. `GET /metrics` is served on `OPENGENI_API_METRICS_PORT` when it is set, and then never on `OPENGENI_API_PORT`, so an ingress that forwards every path to the API cannot publish it. Without it, `/metrics` stays on `OPENGENI_API_PORT` (the local and Docker Compose default). The Helm chart sets it from `api.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-api-metrics` Service that the ServiceMonitor, scrape annotations, and bundled collector use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public API Service's `service`/`job` identity, so alerts keyed on `service="<release>-api"` keep matching; annotation-based scrapers see the new Service name. `api.metricsPort: null` restores the legacy single-port layout.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
-- Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
+- Relay: `GET /healthz` on `OPENGENI_RELAY_BIND` (the wss port, default `8443`) when the relay is enabled. `GET /metrics` is served on `OPENGENI_RELAY_METRICS_BIND` (a `host:port`) when it is set, and then never on the wss port, so an ingress that forwards every path of the relay host cannot publish it. Without it, `/metrics` stays on the wss port (the local development default, where the relay binds loopback). The relay refuses to start when both binds share a port. The Helm chart sets it from `relay.metricsPort` (default `9464`) behind a separate always-ClusterIP `<release>-relay-metrics` Service that the relay ServiceMonitor and scrape annotations use; do not route it through an Ingress. The ServiceMonitor relabels those series back to the public relay Service's `service`/`job` identity; annotation-based scrapers see the new `<release>-relay-metrics` Service name. The default needs a relay image from the same release or later; `relay.metricsPort: null` restores the legacy single-port layout, including for an older pinned relay image.
 
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
@@ -3164,6 +3575,8 @@ Useful settings:
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
+- `OPENGENI_API_METRICS_PORT=9464` moves API `/metrics` to a dedicated internal listener. That listener serves nothing else and applies the same deployment-key rules.
+- `OPENGENI_RELAY_METRICS_BIND=0.0.0.0:9464` moves relay `/metrics` to a dedicated internal listener that serves nothing else.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
@@ -3178,11 +3591,49 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
+Upgrade note for clusters that enforce NetworkPolicy: with
+`networkPolicy.enabled=true`, the API NetworkPolicy admits only the bundled
+collector and `networkPolicy.monitoring` to `api.metricsPort`, never the
+`networkPolicy.ingressController` peers. Before the dedicated listener, a
+Prometheus outside the release could scrape the API on its public port through
+the ingress-controller rule, whose default empty selectors admit every pod. If
+such a Prometheus (ServiceMonitor or scrape annotations) scrapes the API, set
+`networkPolicy.monitoring` to its namespace and pod selectors before upgrading;
+otherwise the API target goes down and the `up == 0` availability alert fires.
+The relay follows the same rule: with `relay.metricsPort` set, the relay
+NetworkPolicy admits only `networkPolicy.monitoring` to that port, and the wss
+port admits only the ingress controller. A Prometheus that reached the relay's
+wss port through the ingress-controller rule needs `networkPolicy.monitoring`
+too. The default `relay.metricsPort` needs a relay image from the same release
+or later: an older relay binary ignores `OPENGENI_RELAY_METRICS_BIND` and keeps
+`/metrics` on the wss port, so its scrape target goes down. When you pin an older
+relay image, set `relay.metricsPort: null` to keep the legacy layout. The managed
+example values files carry a commented `monitoring` block.
+
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+
+When one Prometheus evaluates several OpenGeni releases, node recording-rule
+consumers select their exact namespace, Helm release and environment. Rule-group
+labels identify the output; they do not restrict an expression's input series.
+Keep the deployment selectors on both node-map joins and workload-node filters:
+removing them causes duplicate joins or borrows another release's node alert.
+The chart regression test renders co-located releases and verifies firing,
+recovery and missing-workload isolation using real Prometheus rule evaluation:
+
+```bash
+OPENGENI_TEST_PROMTOOL=/path/to/promtool bun test ./deploy/helm/opengeni/test/node-recording-isolation.test.ts
+```
+
+The render assertions always run. The evaluation check runs when `promtool` is
+on `PATH` or the explicit path is supplied; a skipped evaluation is not proof
+that the rules are healthy in a live deployment.
 
 Minimum production dashboards should cover:
 
-- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
+- Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
+- Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so use `max` across control workers and then `increase()`. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
+- Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
@@ -3190,7 +3641,7 @@ Minimum production dashboards should cover:
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
 - Turn startup: the canonical `OpenGeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
 - Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome}`, `opengeni_mcp_tool_call_duration_seconds{outcome}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
-- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
+- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.
@@ -3219,6 +3670,32 @@ sum by (activity, status) (rate(opengeni_worker_activity_runs_total{variable set
 ```
 
 ```promql
+sum by (event, method) (increase(opengeni_auth_events_total{environment="production"}[1d]))
+```
+
+```promql
+sum by (source) (increase(opengeni_signup_acquisition_total{environment="production"}[1d]))
+```
+
+```promql
+max by (window) (opengeni_active_users{environment="production"})
+```
+
+```promql
+max by (grant_class) (increase(opengeni_credit_grants_total{environment="production"}[7d]))
+```
+
+```promql
+sum by (surface) (increase(opengeni_user_messages_total{environment="production"}[1d]))
+```
+
+```promql
+sum(increase(opengeni_analytics_consent_total{environment="production",decision="denied"}[7d]))
+/
+sum(increase(opengeni_analytics_consent_total{environment="production"}[7d]))
+```
+
+```promql
 histogram_quantile(
   0.95,
   sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{variable set="production"}[5m]))
@@ -3240,7 +3717,7 @@ Minimum production alerts:
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
-- Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`.
+- Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`. The matching "Codex eligible credential pool is low" log line is throttled to the first observation per workspace pool depth and then one line per 10 minutes carrying `suppressedCount` and `reason` (`eligible_pool_zero` or `eligible_pool_one`); alert on the counter, not the log. Connected Machine auth-callout denial warnings use the same per-source throttle (one line per minute per rejected bearer or enrollment, with `reason` `invalid_bearer`, `inactive_enrollment`, or `duplicate_runner`); the denial itself is never throttled.
 - Worker failures: `runAgentTurn` failure ratio is above 5% for 10 minutes.
 - Worker duration: p95 `runAgentTurn` duration is above the expected model/tool budget for 15 minutes.
 - Scheduler health: manual scheduled-task conformance does not dispatch a session through Temporal within the configured timeout.
@@ -3258,7 +3735,13 @@ It supports:
 - AKS for OpenGeni workloads.
 - ACR for images.
 - Key Vault for runtime secret storage.
-- Managed Azure PostgreSQL when `postgres.mode = "managed"`.
+- Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional
+  non-secret policies for capacity and `max_connections`
+  (`managed_postgres_capacity`), a high-availability standby, custom
+  maintenance window, and server update timeout for standby seeding
+  (`managed_postgres_availability`), and CPU/connection
+  saturation alerts on the observability action group
+  (`managed_postgres_alerts`). See `deploy/terraform/azure/README.md`.
 - Existing customer Postgres when `postgres.mode = "external"`.
 - Existing Temporal endpoint when `temporal.mode = "external"`.
 - Managed Azure Blob storage when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
@@ -3266,6 +3749,21 @@ It supports:
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed Blob URLs without per-application registration.
+
+Pod stdout/stderr lives only as long as each pod. To retain it, enable the
+optional `aks_container_insights` object together with `observability.enabled`.
+It installs the AKS monitoring addon with managed-identity ingestion, one data
+collection rule scoped to the listed namespaces (`ContainerLogV2`, Kubernetes
+events, and pod inventory by default), and a mandatory daily ingestion cap on
+the observability Log Analytics workspace, whose retention stays 30 days.
+The cap is shared with Application Insights data in that workspace, so size it
+well above normal ingestion; reaching it pauses ingestion until the daily reset.
+Two log search alerts notify the observability action group when the cap is
+reached or when collection stops. An optional `container_log_transform_kql`
+redacts container log content, such as ingress query strings, before it is
+retained.
+The addon adds a DaemonSet with CPU and memory requests on every node, so check
+node headroom first. See `deploy/terraform/azure/README.md`.
 
 Before applying anything in Azure:
 
@@ -3489,3 +3987,17 @@ binary afterward. Do not use an older binary as the rollback image after this
 routine contract changes. Whole-session forks retain their existing signature.
 See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
 boundary validation and compacted-history limitations.
+
+### Restricting native human accounts
+
+Set `OPENGENI_ALLOWED_USER_EMAILS` to a comma-separated list of exact email
+addresses to restrict native human signup, sign-in and existing browser sessions.
+Addresses are case-insensitive; email verification remains required. Unset keeps
+open registration; an explicitly empty or invalid list fails startup. Apply the
+same value to all API replicas and restart them when changing the list.
+
+This is deployment admission, not an organization membership grant. It does not
+change organization API keys, external-user authentication, sandbox credentials,
+webhook signatures or signed storage URLs. Review existing issued credentials
+separately when restricting an already-running deployment: removing an email does
+not revoke its previously issued API keys or cancel already accepted work.

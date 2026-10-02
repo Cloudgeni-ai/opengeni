@@ -1,5 +1,125 @@
 # @opengeni/github
 
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/config@3.2.1
+
+## 0.8.1
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/config@3.2.0
+
+## 0.8.0
+
+### Minor Changes
+
+- a1b6b8e: An automatically attached (optional) repository that loses access after a task started no longer fails the task's later turns. Before the strict per-turn GitHub App allowlist recheck and installation-token mint, the worker drops, for that turn only, each optional repository the workspace allowlist no longer admits or the GitHub App installation can no longer reach, and reports it as `skippedOptionalRepositories` on a `sandbox.operation.completed` event named `optional-repository-access`. It only ever removes repositories; explicitly attached repositories keep the strict behavior.
+
+  Optional repository clones are also bounded (60 seconds each, 90 seconds together) when the sandbox has a `timeout` binary, so a hung fetch is skipped with the usual warning instead of failing sandbox setup. Explicit clones are unchanged.
+
+  `@opengeni/github` adds `findInaccessibleGitHubAppInstallationRepositories`. `@opengeni/runtime` exports `OPTIONAL_REPOSITORY_CLONE_TIMEOUT_SECONDS`, and `repositoryCloneCommand` and `runRepositoryCloneHook` accept an optional per-repository timeout.
+
+  `@opengeni/react` keeps the `optional-repository-access` report out of the transcript, like the routine repository-clone event.
+
+- 14990d0: A task started from Slack now starts from what the workspace offers every new session instead of the person's last website composer selection. Connectors follow the workspace default connector policy (including the person's own personal connections when that policy includes connected servers, still executable only through the frozen delegation snapshot), OpenGeni tools follow the workspace default selection, and the Sandbox Environment and its Variable Sets follow the workspace default. Only an explicitly chosen model carries over. Mentions, commands, DMs and shortcuts now always add the read-only Slack context tools, including when the workspace has its own default OpenGeni tool selection; reactions still do not.
+
+  Repositories are the person's own recently used repositories in that workspace: those on the top-level sessions they started there in the last 30 days, most recent first, at most five, and only through their current entry in the workspace GitHub App catalog (same catalog and `github:use` permission as the website picker), on the default branch. Archived and empty repositories are skipped. A person with no recent repositories gets none; GitHub is asked only when there is something to look up, and an outage starts the task without repositories. These repositories are attached best effort.
+
+  Repository resources gain an optional `optional: true` flag (contracts and SDK). A failed clone of such a repository logs a warning, is reported as `skippedOptionalRepositories` on the `repository-clone` operation event, and no longer fails sandbox setup; a repository without the flag keeps the strict behavior. `GitHubRepository` gains optional `archived` and `sizeKb`, filled from GitHub when reported.
+
+  The Slack acknowledgement adds one line naming what the task started with, for example `Using connectors: Gmail, Linear; repos: opengeni.` It names only connectors the first accepted turn can reach, so a personal-only connector the person never connected is not claimed. The line is frozen on the interaction when its session binds (rolling migration 0529 adds the nullable `slack_interactions.session_defaults_line`), so a repaired acknowledgement re-renders identical bytes. A Slack message or a reacted-to message that links a workspace or session on a different deployment under the same parent domain (for example staging versus production) now carries a model-context note, so the agent says the link is for the other deployment instead of reporting the session as not found.
+
+  Breaking: `@opengeni/core` removes `getActorNewSessionDefaults`. Use `getActorNewSessionModelChoice`, which returns only an explicitly chosen model policy. `@opengeni/db` adds `SlackInteraction.sessionDefaultsLine`, an optional `sessionDefaultsLine` input to `bindSlackInteractionSession` (written only by the bind that wins), `listRecentSessionRepositoryResources`, and `getSessionFirstTurnConnectionAuthority`.
+
+### Patch Changes
+
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [126a395]
+- Updated dependencies [2088678]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/config@3.1.1
+
+## 0.7.18
+
+### Patch Changes
+
+- Updated dependencies [74e0dfb]
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/config@3.1.0
+  - @opengeni/contracts@5.3.0
+
+## 0.7.17
+
+### Patch Changes
+
+- 9cd1d23: Integration OAuth callbacks now land on a real page when they fail. A callback whose correctly signed state is only too old returns to that workspace's Plugins page with `reason=state_expired`; a tampered or foreign state returns to `/integrations` with `reason=state_invalid`, which the web app forwards to the current workspace. Atlassian, Google Drive, and Fiken now report those reasons (and `state_replayed` for a reused link) instead of `http_400`, `invalid_state`, `state_reused`, or `callback_failed`. Clicking Cancel at the provider reports `reason=access_denied` instead of an expired attempt. MCP, Integration Definition, social, Fiken, and personal GitHub OAuth starts default their return path to `/workspaces/:id/plugins`; Atlassian, Google Drive, and the Slack bot install keep their validated `/workspaces/:id/capabilities` path, which the web app's legacy redirect now forwards with the callback outcome. GitHub App browser routes (connect, setup, install and OAuth callbacks, installation select and configure, manifest callback) render a readable page with a way back instead of a JSON error body, including an organization policy denial and unexpected failures, keeping the status the API error handler gives. `@opengeni/github` adds `inspectSignedState`, which verifies a signed state without its age limit for explaining failures only.
+- Updated dependencies [084616e]
+- Updated dependencies [b6d65a1]
+- Updated dependencies [1a427e0]
+- Updated dependencies [d582db0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [f48191e]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@3.0.0
+
 ## 0.7.16
 
 ### Patch Changes

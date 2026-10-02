@@ -48,6 +48,7 @@ export type TurnSettleFn = (input: {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   suppressGoalContinuation?: boolean;
+  allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;
@@ -113,10 +114,14 @@ export type SandboxRuntimeState = {
 };
 
 export type RenewalState = {
+  /** Secret-only local state; closed on every attempt finalization path. */
+  runMcpCredentials?: { close(): void };
   gitCredentialRenewals: GitCredentialRenewalController[];
   gitCredentialRenewalClosed: boolean;
   runCredentialRenewal: RunCredentialRenewalController | null;
   runCredentialRenewalClosed: boolean;
+  /** Outcome of the most recent renewal attempt, for on-demand refresh reporting. */
+  runCredentialRenewalOutcome: "completed" | "auth_needed" | "error" | null;
   runCredentialSession: RunCredentialCommandSession | null;
   codemodeTokenRenewal: CodemodeTokenRenewalController | null;
   codemodeTokenRenewalClosed: boolean;
@@ -141,6 +146,8 @@ export type EventingState = {
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
+  /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
+  modelVisibleSkillIds: ReadonlySet<string> | null;
 };
 
 /** Rig telemetry (M3): set once the session loads; empty string for a rig-less
@@ -159,6 +166,11 @@ export type ProviderTurnState = {
   effectiveCodexCredentialVersion: number | null;
   /** Frozen alternate-account ceiling observed by the fenced allocator. */
   codexCredentialFailoverLimit: number;
+  /**
+   * Accepted product model id (`codex/<slug>`) the Codex allocator filtered
+   * for. Failure settlement scopes plan entitlement and failover to it.
+   */
+  codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
@@ -179,6 +191,10 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
+  latestClaudeUsage: Map<
+    "workspace" | "organization",
+    import("./claude-usage-observer").CapturedClaudeUsage
+  >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -249,6 +265,7 @@ export function createTurnContext(input: {
       gitCredentialRenewals: [],
       gitCredentialRenewalClosed: false,
       runCredentialRenewal: null,
+      runCredentialRenewalOutcome: null,
       runCredentialRenewalClosed: false,
       runCredentialSession: null,
       codemodeTokenRenewal: null,
@@ -273,6 +290,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       companyBrainContextContributions: null,
+      modelVisibleSkillIds: null,
     },
     workspaceRefs: {
       variableSetId: "",
@@ -291,6 +309,7 @@ export function createTurnContext(input: {
       xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
+      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };

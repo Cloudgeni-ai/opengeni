@@ -5,7 +5,7 @@ import {
   MemoryEventBus,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { Hello } from "@opengeni/agent-proto";
+import { AgentEvent, Hello } from "@opengeni/agent-proto";
 import {
   claimEnrollmentConnection,
   advanceEnrollmentAgentUpdate,
@@ -20,6 +20,7 @@ import {
 } from "@opengeni/db";
 import {
   handleHelloPayload,
+  handleAgentEventPayload,
   helloDesktopUnavailableReason,
   helloReportsOpStream,
   helloReportsDisplay,
@@ -267,6 +268,71 @@ afterAll(async () => {
 }, 180_000);
 
 describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => {
+  test("heartbeat restores desktop after wake without changing connection or release identity", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, {
+        desktop: false,
+        desktopUnavailableReason: "This Mac is locked.",
+        agentVersion: "0.1.26",
+        binarySha256: "1".repeat(64),
+        updateChannel: "stable",
+        transactionalFsWrite: true,
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    const before = (await getEnrollment(db, workspaceId, enrollment.id))!;
+    const send = async (
+      desktopStatus?: { available: boolean; unavailableReason: string },
+      instance = connectionInstanceId,
+    ) => {
+      await handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: {
+              $case: "heartbeat",
+              heartbeat: { seq: "1", desktopStatus },
+            },
+          }),
+        ).finish(),
+        `agent.${workspaceId}.${enrollment.id}.connection.${instance}.events`,
+      );
+    };
+    await send({ available: true, unavailableReason: "" });
+    const awake = (await getEnrollment(db, workspaceId, enrollment.id))!;
+    expect(awake.hasDisplay).toBe(true);
+    expect(awake.desktopUnavailableReason).toBeNull();
+    expect(awake.agentCapabilities).toEqual({ ...before.agentCapabilities, desktop: true });
+    expect(awake.connectionGeneration).toBe(before.connectionGeneration);
+    expect(awake.connectionInstanceId).toBe(before.connectionInstanceId);
+    expect(awake.agentVersion).toBe(before.agentVersion);
+    expect(awake.agentBinarySha256).toBe(before.agentBinarySha256);
+    expect(awake.agentUpdateStatus).toBe(before.agentUpdateStatus);
+    const unchanged = await refreshEnrollmentDisplay(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      connectionInstanceId,
+      hasDisplay: true,
+      runtimeDesktop: true,
+    });
+    expect(unchanged.updated).toBe(false);
+    await send(); // Old runners do not fabricate a new false snapshot.
+    await send({ available: false, unavailableReason: "stale runner" }, crypto.randomUUID());
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.hasDisplay).toBe(true);
+    // A blocked grant wins even if a malformed sender claims availability.
+    await send({ available: true, unavailableReason: "Screen Recording permission not granted" });
+    const blocked = (await getEnrollment(db, workspaceId, enrollment.id))!;
+    expect(blocked.hasDisplay).toBe(false);
+    expect(blocked.agentCapabilities?.desktop).toBe(false);
+    expect(blocked.desktopUnavailableReason).toContain("permission not granted");
+  });
+
   test("desktop=true flips a HEADLESS enrollment's has_display false → true", async () => {
     if (!available) return;
     const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);

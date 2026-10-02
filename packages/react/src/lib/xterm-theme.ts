@@ -24,11 +24,13 @@ export type TokenReader = (name: string) => string | undefined;
  * The 16 ANSI colors + selection/cursor treatment, designed against the og
  * OKLCH palette. Hues are borrowed from the og status ramp so terminal color
  * reads as part of the same system: red≈status-failed(22), green≈status-idle
- * (155), yellow≈status-running(80), blue≈accent(255), magenta≈status-waiting
- * (305), cyan≈200. Dark uses lifted lightness on the dark slate ground; light
- * uses deeper, more saturated inks on the near-white ground. Bright variants
- * add lightness + a touch of chroma. `black`/`white` are neutral slate ramp
- * stops (never pure #000/#fff — that clashes with the calm neutral ground).
+ * (155), yellow≈status-running(80), magenta(305), cyan≈200. The ANSI blue and
+ * magenta slots stay chromatic because program output means them; the app
+ * chrome around the terminal is neutral. Dark uses lifted lightness on the
+ * dark neutral ground; light uses deeper, more saturated inks on the
+ * near-white ground. Bright variants add lightness + a touch of chroma.
+ * `black`/`white` and the selection are neutral grey ramp stops (never pure
+ * #000/#fff — that clashes with the calm neutral ground).
  */
 export type AnsiPalette = {
   black: string;
@@ -54,47 +56,47 @@ export type AnsiPalette = {
 };
 
 const DARK_ANSI: AnsiPalette = {
-  black: "oklch(0.3 0.014 260)",
+  black: "oklch(0.3 0 0)",
   red: "oklch(0.68 0.17 22)",
   green: "oklch(0.75 0.13 155)",
   yellow: "oklch(0.8 0.11 80)",
   blue: "oklch(0.7 0.14 255)",
   magenta: "oklch(0.72 0.13 305)",
   cyan: "oklch(0.75 0.1 210)",
-  white: "oklch(0.8 0.01 260)",
-  brightBlack: "oklch(0.45 0.014 260)",
+  white: "oklch(0.8 0 0)",
+  brightBlack: "oklch(0.45 0 0)",
   brightRed: "oklch(0.76 0.17 22)",
   brightGreen: "oklch(0.82 0.14 155)",
   brightYellow: "oklch(0.86 0.12 85)",
   brightBlue: "oklch(0.78 0.13 255)",
   brightMagenta: "oklch(0.8 0.13 305)",
   brightCyan: "oklch(0.83 0.1 200)",
-  brightWhite: "oklch(0.97 0.005 260)",
-  selectionBackground: "oklch(0.72 0.15 255 / 0.34)",
-  selectionForeground: "oklch(0.985 0.005 260)",
-  selectionInactiveBackground: "oklch(0.72 0.02 260 / 0.22)",
+  brightWhite: "oklch(0.97 0 0)",
+  selectionBackground: "oklch(0.8 0 0 / 0.3)",
+  selectionForeground: "oklch(0.985 0 0)",
+  selectionInactiveBackground: "oklch(0.72 0 0 / 0.2)",
 };
 
 const LIGHT_ANSI: AnsiPalette = {
-  black: "oklch(0.35 0.015 260)",
+  black: "oklch(0.35 0 0)",
   red: "oklch(0.52 0.19 22)",
   green: "oklch(0.5 0.13 155)",
   yellow: "oklch(0.56 0.13 80)",
   blue: "oklch(0.52 0.18 255)",
   magenta: "oklch(0.52 0.16 305)",
   cyan: "oklch(0.52 0.1 210)",
-  white: "oklch(0.7 0.01 260)",
-  brightBlack: "oklch(0.5 0.014 260)",
+  white: "oklch(0.7 0 0)",
+  brightBlack: "oklch(0.5 0 0)",
   brightRed: "oklch(0.55 0.2 22)",
   brightGreen: "oklch(0.54 0.14 155)",
   brightYellow: "oklch(0.6 0.14 80)",
   brightBlue: "oklch(0.48 0.19 255)",
   brightMagenta: "oklch(0.54 0.17 305)",
   brightCyan: "oklch(0.54 0.11 210)",
-  brightWhite: "oklch(0.3 0.015 260)",
-  selectionBackground: "oklch(0.55 0.18 255 / 0.24)",
-  selectionForeground: "oklch(0.21 0.015 260)",
-  selectionInactiveBackground: "oklch(0.6 0.02 260 / 0.16)",
+  brightWhite: "oklch(0.3 0 0)",
+  selectionBackground: "oklch(0.45 0 0 / 0.2)",
+  selectionForeground: "oklch(0.21 0 0)",
+  selectionInactiveBackground: "oklch(0.6 0 0 / 0.14)",
 };
 
 /** The designed ANSI-16 palette for a theme mode. Pure. */
@@ -110,8 +112,8 @@ export function ogAnsiPalette(mode: ThemeMode): AnsiPalette {
  */
 export function buildXtermTheme(read: TokenReader, mode: ThemeMode): XtermTheme {
   const ansi = ogAnsiPalette(mode);
-  const bgFallback = mode === "light" ? "oklch(0.978 0.003 260)" : "oklch(0.155 0.012 260)";
-  const fgFallback = mode === "light" ? "oklch(0.21 0.015 260)" : "oklch(0.955 0.005 260)";
+  const bgFallback = mode === "light" ? "#ffffff" : "#202020";
+  const fgFallback = mode === "light" ? "#242424" : "#e6e6e6";
   const bg = read("--og-color-bg") ?? bgFallback;
   const fg = read("--og-color-fg") ?? fgFallback;
   const accent = read("--og-color-accent") ?? ansi.brightBlue;

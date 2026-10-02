@@ -7,6 +7,7 @@ import type {
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import { registerEditableArtifactRoutes } from "../src/routes/editable-artifacts";
 
 const SECRET = "editable-artifact-export-route-test-secret";
@@ -147,6 +148,9 @@ describe("editable artifact durable export routes", () => {
     expect(downloaded.headers.get("content-disposition")).toBe(
       `attachment; filename="artifact-${ARTIFACT_ID}.xlsx"`,
     );
+    expect(downloaded.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(downloaded.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(downloaded.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(Uint8Array.of(1, 2, 3));
     expect(downloadClosed).toBe(1);
     expect(calls).toEqual([

@@ -33,9 +33,7 @@ import {
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
-  getScheduledScopedRigVersionMetadata,
   touchLeaseHolder,
-  loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   readLease,
@@ -58,6 +56,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -159,6 +158,10 @@ export type ChannelAContext = {
    * provider handle and replay the request. Tab/lifecycle mutations that lack
    * a controller operation id must never opt into this recovery. */
   retryControllerTransport?: boolean | undefined;
+  /** Ephemeral browser callbacks must never replay after an ambiguous result. */
+  allowOperationReplay?: boolean | undefined;
+  /** Exact existing interaction provider; may not spawn/rotate on image drift. */
+  retainedInstanceId?: string | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -406,6 +409,8 @@ type ChannelAReadRecoveryOptions = {
   /** Modal may expose one more stale command-router route after the first
    * successful handle rebuild. Keep this closed and statically bounded. */
   maxFreshHandleRetries?: 1 | 2;
+  /** Explicit opt-out overrides every transport/provider retry classification. */
+  allowOperationReplay?: boolean | undefined;
   /** Never start another provider attempt after the originating request ends. */
   waitSignal?: AbortSignal | undefined;
   /** Additional callback-specific failure that is safe to replay. */
@@ -432,7 +437,11 @@ export async function runChannelAReadWithFreshHandleRetry<T>(
     } catch (error) {
       const retryable =
         error instanceof ChannelAUnavailableError || options.retryableError?.(error) === true;
-      if (!retryable || retries >= maxFreshHandleRetries) {
+      if (
+        options.allowOperationReplay === false ||
+        !retryable ||
+        retries >= maxFreshHandleRetries
+      ) {
         throw error;
       }
       options.waitSignal?.throwIfAborted();
@@ -552,38 +561,12 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironmentValues: Record<string, string> = {};
-  const rigVersion =
-    session.rigId && session.rigVersionId
-      ? await getScheduledScopedRigVersionMetadata(
-          db,
-          {
-            accountId,
-            workspaceId,
-            subjectId: ctx.subjectId ?? "session-attach",
-          },
-          session.rigId,
-          session.rigVersionId,
-        )
-      : null;
-  for (const variableSetId of rigVersion?.version.defaultVariableSetIds ?? []) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
-      accountId,
-      workspaceId,
-      variableSetId,
-      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
-    });
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
-  for (const variableSetId of session.variableSetIds) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
-      accountId,
-      workspaceId,
-      variableSetId,
-      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
-    });
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
+  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(db, settings, {
+    accountId,
+    workspaceId,
+    session,
+    subjectId: ctx.subjectId,
+  });
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
@@ -831,6 +814,8 @@ async function withChannelAOperation<T>(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
+      ...(ctx.retainedInstanceId ? { retainedInstanceId: ctx.retainedInstanceId } : {}),
       rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
@@ -1180,6 +1165,7 @@ async function withChannelAOperation<T>(
           },
           {
             maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
+            allowOperationReplay: ctx.allowOperationReplay,
             ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
             ...(ctx.retryControllerTransport
               ? { retryableError: isRetryableControllerTransport }
@@ -1249,6 +1235,23 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     });
   if (error instanceof SelfhostedControlError && error.agentOffline)
     return new HTTPException(409, { message: error.message, cause: error });
+  if (error instanceof SelfhostedControlError && error.payloadTooLarge) {
+    const outbound = error.detail.direction === "request";
+    // Project only the bounded direction. Native free-form diagnostics can
+    // contain file contents or private paths. A large reply is not evidence
+    // that the operation failed before execution, and must not invite replay.
+    return new ApiHttpError(outbound ? 413 : 502, {
+      code: "limit_exceeded",
+      message: outbound
+        ? "The request exceeds the connected machine's per-message size limit. Large file content requires a machine that supports bounded file transfers."
+        : "The connected machine's reply exceeds its per-message size limit. The operation may have completed; inspect its result before repeating it. Read large files in bounded ranges.",
+      retryable: false,
+      details: {
+        code: "machine_transport_payload_too_large",
+        direction: outbound ? "request" : "response",
+      },
+    });
+  }
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)
@@ -1311,6 +1314,13 @@ export function channelAOperationFailureDiagnostic(
       reason: "provider_read_busy",
       status: 503,
       errorCode: "sandbox_channel_a_provider_busy",
+    };
+  }
+  if (error instanceof SelfhostedControlError && error.payloadTooLarge) {
+    return {
+      reason: error.detail.direction === "request" ? "request_rejected" : "provider_unavailable",
+      status: error.detail.direction === "request" ? 413 : 502,
+      errorCode: "sandbox_channel_a_operation_failed",
     };
   }
   if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError) {

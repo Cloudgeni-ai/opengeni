@@ -67,6 +67,14 @@ export type ObjectStorage = {
     expiresInSeconds?: number;
     /** Select the network endpoint embedded in the signed URL. */
     audience?: "public" | "sandbox";
+    /**
+     * Signed `Content-Disposition` override for the response (S3
+     * `response-content-disposition`, Azure `rscd`, GCS
+     * `response-content-disposition`). An `attachment` value makes a browser
+     * that opens the URL download the object instead of rendering it with its
+     * stored content type. Omitted, the object's stored headers apply.
+     */
+    responseContentDisposition?: string;
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   /** Check provider existence without downloading object bytes. */
@@ -234,6 +242,9 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: args.key,
+            ...(args.responseContentDisposition
+              ? { ResponseContentDisposition: args.responseContentDisposition }
+              : {}),
           }),
           { expiresIn },
         ),
@@ -558,6 +569,9 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
         version: "v4",
         action: "read",
         expires: expiresAt,
+        ...(args.responseContentDisposition
+          ? { responseDisposition: args.responseContentDisposition }
+          : {}),
       });
       return { url, expiresAt };
     },
@@ -759,6 +773,9 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
           blobName: args.key,
           permissions: BlobSASPermissions.parse("r"),
           expiresOn: expiresAt,
+          ...(args.responseContentDisposition
+            ? { contentDisposition: args.responseContentDisposition }
+            : {}),
         },
         sharedKey,
       ).toString();

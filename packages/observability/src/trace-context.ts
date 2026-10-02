@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 
 /** W3C-compatible identity only: never propagate baggage or user attributes. */
-export type TraceContext = { traceId: string; spanId: string };
+export type TraceContext = { traceId: string; spanId: string; traceFlags?: string };
 type ActiveContext = TraceContext & { addLink?: ((link: TraceContext) => void) | undefined };
 const storage = new AsyncLocalStorage<ActiveContext | undefined>();
 
@@ -20,10 +20,16 @@ export function validTraceContext(value: unknown): TraceContext | undefined {
   // Snapshot primitive own data once. Never invoke getters, coercion or toJSON.
   const traceId = ownData(value, "traceId");
   const spanId = ownData(value, "spanId");
+  const traceFlags = ownData(value, "traceFlags");
   if (typeof traceId !== "string" || typeof spanId !== "string") return undefined;
   if (!/^[0-9a-f]{32}$/.test(traceId) || /^0+$/.test(traceId)) return undefined;
   if (!/^[0-9a-f]{16}$/.test(spanId) || /^0+$/.test(spanId)) return undefined;
-  return { traceId, spanId };
+  if (
+    traceFlags !== undefined &&
+    (typeof traceFlags !== "string" || !/^[0-9a-f]{2}$/.test(traceFlags))
+  )
+    return undefined;
+  return { traceId, spanId, ...(traceFlags === undefined ? {} : { traceFlags }) };
 }
 
 export function currentTraceContext(): TraceContext | undefined {
@@ -68,11 +74,13 @@ export function linkCurrentSpanToAdmission(eventId: string): void {
 /** Remote context must be admitted by the caller's trust boundary before use. */
 export function parseTraceparent(value: string | undefined): TraceContext | undefined {
   if (typeof value !== "string") return undefined;
-  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/.exec(value ?? "");
-  return match ? validTraceContext({ traceId: match[1]!, spanId: match[2]! }) : undefined;
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(value ?? "");
+  return match
+    ? validTraceContext({ traceId: match[1]!, spanId: match[2]!, traceFlags: match[3]! })
+    : undefined;
 }
 
 export function traceparent(context: TraceContext): string | undefined {
   const valid = validTraceContext(context);
-  return valid ? `00-${valid.traceId}-${valid.spanId}-01` : undefined;
+  return valid ? `00-${valid.traceId}-${valid.spanId}-${valid.traceFlags ?? "01"}` : undefined;
 }

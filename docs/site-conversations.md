@@ -20,7 +20,7 @@
   The origin link remains on individual rows and in the session header regardless
   of placement. The group is presentation only: no fake session is persisted and
   no parent-control authority is introduced.
-- The host Site detail page has a Conversations sheet: search, active/archived,
+- The host Site detail page has a Conversations tab: search, active/archived,
   refresh, and pagination. It works independently of generated Site navigation.
 
 ## API and implementation
@@ -62,4 +62,4 @@ workspace-wide interface. These are defaults, not product restrictions.
 Cover origin stamping/concurrent isolation, actual MCP transport propagation,
 host/preview binding, SQL filtering before pagination and cursor binding,
 project/pin precedence, search, aggregate counts and keyboard projection.
-Inspect the host sheet and origin links in the local browser before handoff.
+Inspect the Conversations tab and origin links in the local browser before handoff.

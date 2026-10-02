@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
-import { SessionTenancyNotActivatedError } from "@opengeni/db";
+import {
+  SessionTenancyNotActivatedError,
+  SessionCreateConnectionSelectionUnavailableError,
+} from "@opengeni/db";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -46,6 +50,38 @@ function routeDeps(): ApiRouteDeps {
 }
 
 describe("session create error envelope", () => {
+  test("unsupported latency is an actionable non-500 create rejection", async () => {
+    const app = new Hono();
+    app.post("/rejected", (c) =>
+      sessionCreateErrorResponse(
+        c,
+        new UnsupportedLatencyModeError("scripted-model", "fast", ["standard"]),
+      ),
+    );
+    const response = await app.request("http://x/rejected", { method: "POST" });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      code: "SESSION_CREATE_REJECTED",
+      message: "latency mode fast is not runnable for model scripted-model (allowed: standard)",
+      details: { code: "UNSUPPORTED_LATENCY_MODE", allowedLatencyModes: ["standard"] },
+    });
+  });
+  test("connection selection refusal is actionable without returning its private driver cause", async () => {
+    const app = new Hono();
+    const failure = new SessionCreateConnectionSelectionUnavailableError(
+      new Error("private-query-and-credential"),
+    );
+    app.get("/rejected", (c) => sessionCreateErrorResponse(c, failure));
+    const response = await app.request("http://x/rejected");
+    expect(response.status).toBe(409);
+    const raw = await response.text();
+    expect(JSON.parse(raw)).toEqual({
+      code: "SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE",
+      message: failure.message,
+      retryable: false,
+    });
+    expect(raw).not.toContain("private-");
+  });
   test("returns value-free actionable 422 JSON for malformed create schema", async () => {
     const app = new Hono();
     registerSessionRoutes(app, routeDeps());

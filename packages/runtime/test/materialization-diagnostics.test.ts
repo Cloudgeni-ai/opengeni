@@ -7,6 +7,7 @@ import {
   materializationVerificationDiagnostic,
   type RoutableBackendSession,
 } from "../src/sandbox";
+import { isolatedGitEnvironment } from "./isolated-git-home-fixture";
 
 test("a real provider-shell visibility failure retains the result and checked root", async () => {
   const root = await mkdtemp(join(tmpdir(), "opengeni-visibility-"));
@@ -26,6 +27,7 @@ test("a real provider-shell visibility failure retains the result and checked ro
         const args = value as { shell: string; cmd: string; workdir: string };
         const child = Bun.spawn([args.shell, "-c", args.cmd], {
           cwd: args.workdir,
+          env: isolatedGitEnvironment({ HOME: join(root, "home") }),
           stdout: "pipe",
           stderr: "pipe",
         });

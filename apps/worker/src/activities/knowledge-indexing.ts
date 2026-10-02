@@ -4,8 +4,10 @@ import {
   applyCreditDebitAfterUse,
   appendKnowledgeIndexChunks,
   claimKnowledgeIndexJobs,
+  checkWorkspaceAllowance,
   completeKnowledgeIndexJob,
   continueKnowledgeIndexJob,
+  creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
   getBillingBalance,
@@ -19,6 +21,95 @@ import {
 } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { ControlActivityServices } from "./types";
+
+/** The configured monthly indexed-chunk limit, not a provider failure. */
+export class KnowledgeIndexUsageLimitError extends Error {
+  constructor() {
+    super("monthly document indexing limit reached");
+    this.name = "KnowledgeIndexUsageLimitError";
+  }
+}
+
+export type KnowledgeIndexFailureStage = "embedding" | "processing";
+
+/**
+ * Content-free classification for a deferred Knowledge index batch. Only
+ * protocol constants, an HTTP status, and a PostgreSQL SQLSTATE are retained;
+ * provider messages, bodies, SQL, and identifiers never leave the process.
+ * Outside the embedding call, only a PostgreSQL error in the cause chain is
+ * attributed to the database; any other failure stays a worker failure.
+ */
+export function knowledgeIndexFailureDiagnostic(
+  stage: KnowledgeIndexFailureStage,
+  error: unknown,
+): {
+  errorClass: "KnowledgeIndexOperationError";
+  errorCode:
+    | "knowledge_index_usage_limit_reached"
+    | "knowledge_index_embedding_failed"
+    | "knowledge_index_persistence_failed"
+    | "knowledge_index_failed";
+  origin: "worker" | "db";
+  status?: number;
+  sqlState?: string;
+} {
+  if (error instanceof KnowledgeIndexUsageLimitError) {
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_usage_limit_reached",
+      origin: "worker",
+    };
+  }
+  if (stage === "embedding") {
+    const status = ownValue(error, "status");
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_embedding_failed",
+      origin: "worker",
+      ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+        ? { status }
+        : {}),
+    };
+  }
+  const postgres = postgresErrorState(error);
+  if (!postgres) {
+    return {
+      errorClass: "KnowledgeIndexOperationError",
+      errorCode: "knowledge_index_failed",
+      origin: "worker",
+    };
+  }
+  return {
+    errorClass: "KnowledgeIndexOperationError",
+    errorCode: "knowledge_index_persistence_failed",
+    origin: "db",
+    ...(postgres.sqlState ? { sqlState: postgres.sqlState } : {}),
+  };
+}
+
+function ownValue(value: unknown, key: string): unknown {
+  try {
+    if (!value || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The nearest PostgreSQL error in a short cause chain, with its SQLSTATE
+ * when that is a well-formed five-character code. */
+function postgresErrorState(error: unknown): { sqlState?: string } | undefined {
+  let current = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    if (ownValue(current, "name") === "PostgresError") {
+      const code = ownValue(current, "code");
+      return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { sqlState: code } : {};
+    }
+    current = ownValue(current, "cause");
+  }
+  return undefined;
+}
 
 export function createKnowledgeIndexingActivities(
   services: () => Promise<ControlActivityServices>,
@@ -52,6 +143,7 @@ export function createKnowledgeIndexingActivities(
         limit: 2,
       });
       for (const claim of claims) {
+        let stage: KnowledgeIndexFailureStage = "processing";
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
@@ -108,10 +200,36 @@ export function createKnowledgeIndexingActivities(
                 return;
               }
               const paid = frozenPolicy.mode === "credits";
+              if (paid && claim.billingAttribution.kind === "unknown") {
+                // Unknown legacy/source-preparation causality is not service.
+                // Keep the checkpoint without making an uncountable paid call.
+                observability.warn("Paid Knowledge indexing awaits initiating attribution", {
+                  errorCode: "knowledge_index_attribution_unavailable",
+                });
+                await deferKnowledgeIndexJob(lockedDb, claim);
+                result.deferred++;
+                return;
+              }
               if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
+                  result.deferred++;
+                  return;
+                }
+              }
+              if (paid) {
+                const refusal = await checkWorkspaceAllowance(lockedDb, {
+                  accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId,
+                  subjectId:
+                    claim.billingAttribution.kind === "turn" ||
+                    claim.billingAttribution.kind === "human"
+                      ? claim.billingAttribution.initiatingHumanSubjectId
+                      : null,
+                });
+                if (refusal) {
+                  await deferKnowledgeIndexJob(lockedDb, claim);
                   result.deferred++;
                   return;
                 }
@@ -126,8 +244,7 @@ export function createKnowledgeIndexingActivities(
                     eventType: "document.indexed",
                     since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
                   });
-                  if (used + chunks.length > limit)
-                    throw new Error("monthly document indexing limit reached");
+                  if (used + chunks.length > limit) throw new KnowledgeIndexUsageLimitError();
                 }
               }
               const inputs = chunks.map((chunk) => chunk.embeddingInput);
@@ -135,9 +252,11 @@ export function createKnowledgeIndexingActivities(
                 (sum, input) => sum + Buffer.byteLength(input, "utf8"),
                 0,
               );
+              stage = "embedding";
               const vectors = await embedder.embedMany(inputs);
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
+              stage = "processing";
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
               if (paid) {
@@ -218,6 +337,7 @@ export function createKnowledgeIndexingActivities(
                     sourceId: claim.revisionId,
                     idempotencyKey: `knowledge.embedding:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
                     metadata: {
+                      ...creditDebitAttributionMetadata(claim.billingAttribution),
                       model: claim.model,
                       bytes,
                       chunks: chunks.length,
@@ -239,16 +359,23 @@ export function createKnowledgeIndexingActivities(
               else result.unavailable++;
             }
           });
-        } catch {
+        } catch (error) {
           // Provider failures retain the last completed projection. The durable
           // queue owns retry/backoff; do not retry an entire activity implicitly.
-          await deferKnowledgeIndexJob(db, claim).catch(() => undefined);
-          result.deferred++;
-          observability.warn("Knowledge indexing batch deferred", {
-            accountId: claim.accountId,
-            entryId: claim.entryId,
-            revisionId: claim.revisionId,
+          // The stored reason stays the SQL lifecycle's fixed code; the log
+          // carries the content-free class/code of the actual cause.
+          observability.warn(
+            "Knowledge indexing batch deferred",
+            knowledgeIndexFailureDiagnostic(stage, error),
+          );
+          await deferKnowledgeIndexJob(db, claim).catch((deferError: unknown) => {
+            const deferDiagnostic = knowledgeIndexFailureDiagnostic("processing", deferError);
+            observability.warn("Knowledge indexing batch deferral failed", {
+              ...deferDiagnostic,
+              errorCode: "knowledge_index_defer_failed",
+            });
           });
+          result.deferred++;
         }
       }
       return result;

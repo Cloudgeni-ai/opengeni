@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   OrganizationUsageQuery,
   OrganizationUsageSummary,
@@ -18,6 +19,7 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 describe("organization usage windows and wire quantities", () => {
   const now = new Date("2024-03-01T12:34:56.789Z");
@@ -223,4 +225,141 @@ test("real RLS query totals all events, separates units, excludes other accounts
       [...pageOne.workspaces, ...pageTwo.workspaces].map((workspace) => workspace.workspaceId),
     ).size,
   ).toBe(52);
+}, 180_000);
+
+test("Personal workspaces appear as usage-only rows keyed by owner membership", async () => {
+  if (!shared || !client) {
+    console.warn("SKIPPED organization usage Personal rows: PostgreSQL fixture unavailable");
+    return;
+  }
+  const userId = `org-usage-personal-${crypto.randomUUID()}`;
+  const ownerSubjectId = `user:${userId}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Personal usage owner",
+  });
+  const grant = access.workspaceGrants[0]!;
+  const accountId = grant.accountId;
+  const [pointer] = await shared.admin<Array<{ id: string; personal_workspace_id: string }>>`
+    select id, personal_workspace_id from organization_memberships
+    where account_id = ${accountId} and subject_id = ${ownerSubjectId}`;
+  expect(pointer?.personal_workspace_id).toBeTruthy();
+  const personalId = pointer!.personal_workspace_id;
+  const membershipId = pointer!.id;
+  await shared.admin`update workspaces set name = 'SECRET PERSONAL WORKSPACE' where id = ${personalId}`;
+  const now = new Date("2026-09-14T12:00:00Z");
+  const input = { accountId, period: "month" as const };
+  const reader = "user:other-billing-reader";
+
+  // A Personal workspace with no usage in the period is not listed at all.
+  const idle = await withSessionRlsActorContext({ subjectId: reader }, () =>
+    getOrganizationUsageSummary(client!.db, input, now),
+  );
+  expect(idle.personalWorkspaces).toEqual([]);
+  expect(idle.personalWorkspaceCount).toBe(0);
+
+  // The owner's Only me chat in their Personal workspace stays theirs.
+  await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+    values (${accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test') on conflict (account_id) do nothing`;
+  const privateSession = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+    createSession(client!.db, {
+      accountId,
+      workspaceId: personalId,
+      initialMessage: "Personal private usage fixture",
+      resources: [],
+      metadata: {},
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: ownerSubjectId },
+      createdByContext: {},
+    }),
+  );
+  await transitionSessionVisibility(client.db, {
+    workspaceId: personalId,
+    sessionId: privateSession.id,
+    actorSubjectId: ownerSubjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: crypto.randomUUID(),
+  });
+  for (const [workspaceId, sessionId, quantity] of [
+    [grant.workspaceId!, null, 20],
+    [personalId, null, 7],
+    [personalId, privateSession.id, 100],
+  ] as const) {
+    await shared.admin`insert into usage_events (account_id, workspace_id, session_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${accountId}, ${workspaceId}, ${sessionId}, 'model.cost', ${quantity}, 'usd_micros', ${crypto.randomUUID()}, '2026-09-10T00:00:00Z')`;
+  }
+  const cost = (totals: Array<{ eventType: string; quantity: string }> | undefined) =>
+    totals?.find((total) => total.eventType === "model.cost")?.quantity;
+
+  const other = await withSessionRlsActorContext({ subjectId: reader }, () =>
+    getOrganizationUsageSummary(client!.db, input, now),
+  );
+  expect(cost(other.totals)).toBe("27");
+  expect(other.workspaces.map((row) => row.workspaceId)).toEqual([grant.workspaceId!]);
+  expect(other.personalWorkspaces).toEqual([
+    {
+      membershipId,
+      totals: [{ eventType: "model.cost", unit: "usd_micros", quantity: "7", eventCount: "1" }],
+    },
+  ]);
+  expect(other.personalWorkspaceCount).toBe(1);
+  // Shared rows plus Personal rows add up to the organization total.
+  expect(
+    [...other.workspaces, ...other.personalWorkspaces]
+      .map((row) => BigInt(cost(row.totals) ?? "0"))
+      .reduce((sum, value) => sum + value, 0n),
+  ).toBe(27n);
+  // Amounts only: no Personal workspace id, name or session reaches the wire.
+  const wire = JSON.stringify(other);
+  expect(wire).not.toContain(personalId);
+  expect(wire).not.toContain("SECRET PERSONAL WORKSPACE");
+  expect(wire).not.toContain(privateSession.id);
+
+  const owner = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+    getOrganizationUsageSummary(client!.db, input, now),
+  );
+  expect(cost(owner.totals)).toBe("127");
+  expect(cost(owner.personalWorkspaces[0]?.totals)).toBe("107");
+
+  // Pages continue shared workspaces only and never recompute Personal rows.
+  const page = await withSessionRlsActorContext({ subjectId: reader }, () =>
+    getOrganizationUsageWorkspacePage(client!.db, { ...input, until: other.until }),
+  );
+  expect("personalWorkspaces" in page).toBe(false);
+  expect(JSON.stringify(page)).not.toContain(personalId);
+}, 180_000);
+
+test("the Personal inventory restores the membership read scope before returning", async () => {
+  if (!shared) return;
+  const userId = `org-usage-scope-${crypto.randomUUID()}`;
+  const access = await ensureManagedAccessForUser(client!.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Scope restore",
+  });
+  const accountId = access.workspaceGrants[0]!.accountId;
+  const app = postgres(shared.appUrl, {
+    max: 1,
+    prepare: false,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true), set_config('opengeni.workspace_id', '', true), set_config('opengeni.subject_id', 'user:scope-reader', true), set_config('opengeni.organization_tenancy_lifecycle', 'caller-scope', true)`;
+      const [row] = await tx`select opengeni_private.organization_usage_summary(${accountId}::uuid,
+        '2026-09-01'::timestamptz, '2026-09-14'::timestamptz, 'day', null, true) as summary`;
+      expect(row!.summary.personalWorkspaceCount).toBe(0);
+      // The membership-lifecycle read scope never outlives the pointer read.
+      const [scope] =
+        await tx`select current_setting('opengeni.organization_tenancy_lifecycle', true) as lifecycle`;
+      expect(scope!.lifecycle).toBe("caller-scope");
+    });
+  } finally {
+    await app.end();
+  }
 }, 180_000);

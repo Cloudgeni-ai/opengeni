@@ -8,11 +8,14 @@ import type {
   BrowserProtectedAuthFillCommand,
   BrowserTarget,
 } from "@opengeni/contracts";
+import { InteractionControllerError } from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
   BrowserControlServer,
+  CdpCommandTimeoutError,
+  CdpTransportError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -34,6 +37,197 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    await withServer(async ({ server, reference }) => {
+      for (const token of [undefined, viewToken, controlToken]) {
+        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
+      }
+      expect(
+        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
+      ).toBe(405);
+      const idle = async () =>
+        await json(await request(server, "/v1/runtime", { token: adminToken }));
+      expect((await idle()).data).toEqual({ idle: true });
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      expect((await idle()).data).toEqual({ idle: false });
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await idle()).data).toEqual({ idle: true });
+    });
+  });
+
+  test.each([
+    {
+      operation: "listTargets" as const,
+      label: "target inventory",
+      suffix: "",
+      code: "timeout",
+      status: 504,
+      error: new CdpCommandTimeoutError("Target.getTargets"),
+    },
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "timeout",
+      status: 504,
+      error: new CdpCommandTimeoutError("Accessibility.getFullAXTree"),
+    },
+    {
+      operation: "listTargets" as const,
+      label: "target inventory",
+      suffix: "",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpTransportError("private transport endpoint"),
+    },
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpTransportError("private transport endpoint"),
+    },
+  ])(
+    "classifies read-only browser $label $code without replay",
+    async ({ operation, label, suffix, code, status, error }) => {
+      let failing = false;
+      let attempts = 0;
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/targets${suffix ? `/target-${reference.browserSessionId}${suffix}` : ""}`;
+          failing = true;
+          const failed = await request(server, path, { token: viewToken });
+          expect(failed.status).toBe(status);
+          expect(((await failed.json()) as { error: unknown }).error).toEqual({
+            code,
+            message: `browser ${label} ${code === "timeout" ? "timed out" : "unavailable"}`,
+            retryable: true,
+          });
+          expect(attempts).toBe(1);
+          failing = false;
+          expect((await request(server, path, { token: viewToken })).status).toBe(200);
+        },
+        {
+          beforeDriverOperation(name) {
+            if (failing && name === operation) {
+              attempts++;
+              throw error;
+            }
+          },
+        },
+      );
+    },
+  );
+
+  test("does not classify a CDP mutation timeout as retryable or redispatch it", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          {
+            method: "POST",
+            token: controlToken,
+            body: { url: "https://example.test" },
+          },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+        const action = command(observation);
+        const receipt = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          {
+            method: "POST",
+            token: controlToken,
+            body: action,
+          },
+        );
+        expect(receipt.status).toBe(200);
+        expect((await json(receipt)).data).toMatchObject({ state: "outcome_unknown" });
+        const replay = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          {
+            method: "POST",
+            token: controlToken,
+            body: action,
+          },
+        );
+        expect((await json(replay)).data).toMatchObject({ state: "outcome_unknown" });
+        expect(attempts).toBe(2);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (name === "openTarget" || name === "dispatch") {
+            attempts++;
+            throw new CdpCommandTimeoutError("Page.navigate");
+          }
+        },
+      },
+    );
+  });
+
+  test.each([
+    { code: "timeout" as const, status: 504 },
+    { code: "resource_unavailable" as const, status: 503 },
+  ])("preserves retryable screenshot $code with its failed stage", async ({ code, status }) => {
+    const message = `browser screenshot ${code} during Page.captureScreenshot`;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const screenshot = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/screenshot`,
+          { token: viewToken },
+        );
+        expect(screenshot.status).toBe(status);
+        const failure = (await screenshot.json()) as { error: unknown };
+        expect(failure.error).toEqual({ code, message, retryable: true });
+      },
+      { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
   test("delivers the exact private network route only to the browser supervisor", async () => {
     let browserContext: BrowserSupervisorDriverContext | null = null;
     await withServer(
@@ -674,6 +868,39 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  for (const supported of [false, true]) {
+    test(`negotiates fenced typing from the active driver (${supported})`, async () => {
+      await withServer(
+        async ({ server, reference }) => {
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          const grantId = randomUUID();
+          const body = {
+            grantId,
+            controllerGeneration: reference.controllerGeneration,
+            token: grantedViewToken,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          };
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const result = await json(
+              await request(
+                server,
+                `/v1/browser-sessions/${reference.browserSessionId}/view-grants`,
+                { method: "POST", token: adminToken, body },
+              ),
+            );
+            expect(result.data.fencedInputBatches).toBe(supported ? true : undefined);
+            expect(result.data.focusedInputObservations).toBe(supported ? true : undefined);
+          }
+        },
+        { fencedInputBatches: supported, focusedInputObservations: supported },
+      );
+    });
+  }
+
   test("uses bounded expiring grants for browser frame viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -938,7 +1165,13 @@ async function withServer(
     reference: { browserSessionId: string; controllerGeneration: string };
   }) => Promise<void>,
   options: {
+    fencedInputBatches?: boolean;
+    focusedInputObservations?: boolean;
     failStart?: boolean;
+    screenshotError?: Error;
+    beforeDriverOperation?: (
+      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+    ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
     uploadDownload?: BrowserSupervisorOptions["uploadDownload"];
@@ -1000,7 +1233,15 @@ async function withServer(
 
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
-  options: { failStart?: boolean },
+  options: {
+    fencedInputBatches?: boolean;
+    focusedInputObservations?: boolean;
+    failStart?: boolean;
+    screenshotError?: Error;
+    beforeDriverOperation?: (
+      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+    ) => void;
+  },
 ): BrowserSupervisorDriver {
   const target: BrowserTarget = {
     id: `target-${context.browserSessionId}`,
@@ -1035,6 +1276,8 @@ function fakeDriver(
     observedAt: "2026-08-09T12:00:00.000Z",
   });
   return {
+    fencedInputBatches: options.fencedInputBatches === true,
+    focusedInputObservations: options.focusedInputObservations === true,
     async start(url) {
       if (options.failStart) throw new Error("private-driver-detail");
       target.url = url ?? "about:blank";
@@ -1044,9 +1287,11 @@ function fakeDriver(
       return targetId === target.id ? { ...target } : null;
     },
     async listTargets() {
+      options.beforeDriverOperation?.("listTargets");
       return [{ ...target }];
     },
     async openTarget(url) {
+      options.beforeDriverOperation?.("openTarget");
       target.url = url ?? "about:blank";
       return observation();
     },
@@ -1057,6 +1302,7 @@ function fakeDriver(
       return [];
     },
     async observe() {
+      options.beforeDriverOperation?.("observe");
       return observation();
     },
     async targetState() {
@@ -1083,6 +1329,7 @@ function fakeDriver(
       };
     },
     async dispatch() {
+      options.beforeDriverOperation?.("dispatch");
       return observation();
     },
     async protectedFill() {
@@ -1102,6 +1349,7 @@ function fakeDriver(
       };
     },
     async captureScreenshot() {
+      if (options.screenshotError) throw options.screenshotError;
       return frame(context, target);
     },
     async subscribeFrames() {

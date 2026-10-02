@@ -67,16 +67,16 @@ use Only-me visibility as a substitute for the mapping above.
 
 | Need | Recommended surface | Product renders | OpenGeni package |
 | --- | --- | --- | --- |
-| Send users to the complete stock experience | Link/deep-link | Product entry point only | None |
-| Custom UI in any framework, mobile, CLI, or automation | Headless SDK | Everything user-facing | `@opengeni/sdk` |
-| Custom React UI using canonical session behavior | Headless React session hooks | Product timeline/composer/layout | `@opengeni/react/session` |
-| Packaged OpenGeni chat/session controls | Styled React surfaces | Product shell and domain UI | `@opengeni/react/session-ui`, `/composer`, `/realtime` |
+| Agent conversation in a React product (default) | `OpenGeniChat` / `SessionConversation` behind the packaged proxy | Product shell and domain UI | `@opengeni/react`, `createSessionProxyHandler` from `@opengeni/sdk` |
+| Materially different interaction model in React | Headless React session hooks | Product timeline/composer/layout | `@opengeni/react/session` |
+| Non-React frontend, mobile, CLI, or automation | Headless SDK | Everything user-facing | `@opengeni/sdk` |
 | Agent workspace with files, changes, terminal, or desktop | Workbench | Product shell plus chosen tabs | `@opengeni/react` |
+| Existing Vercel/OpenAI-shaped chat UI to keep, or a server-side bot | Chat facade fallback (text-only) | Its existing chat UI | `@opengeni/sdk/chat` |
 | OpenGeni runtime inside the host process | Advanced in-process embedding | Host owns infrastructure seams | Repo-level packages; see `docs/embedding.md` |
 
-Start with the headless SDK. Add React surfaces rather than designing a larger
-boundary up front. The packages are composable; using one hook does not require
-mounting the stock OpenGeni application.
+Start from the full conversation and deviate only for a materially different
+interaction model, a non-React frontend, or compute surfaces. The packages are
+composable; a deviation can still reuse individual hooks or components.
 
 ## Server And Browser Responsibilities
 
@@ -91,12 +91,12 @@ mounting the stock OpenGeni application.
   idempotent replay.
 - Loads product-owned Skills and passes the selected definitions inline in
   `CreateSessionRequest.skills` for each product-created session.
-- Sends explicit minimal `tools` and `firstPartyMcpTools` selections. Omission
-  inherits workspace/deployment defaults; an explicit empty array suppresses
-  that category.
+- Sends an explicit `agent` (capabilities and identity) and `tools` selection.
+  Omitted `agent` inherits the workspace defaults; an explicit empty `tools`
+  array suppresses workspace connectors.
 - Calls `OpenGeniClient` and returns product-shaped responses.
-- Re-streams session SSE with `proxySessionEventStream` when the browser needs a
-  live timeline.
+- Mounts `createSessionProxyHandler` for the React conversation (a custom route
+  uses `proxySessionEventStream`); never forwards arbitrary paths under the key.
 - Rejects caller-supplied workspace/session IDs that are not already authorized
   by the product relationship.
 
@@ -104,8 +104,9 @@ mounting the stock OpenGeni application.
 
 - Talks to the product's same-origin routes or the deployment's normal browser
   auth boundary.
-- May use the SDK with a custom `fetch`/same-origin base URL.
-- May mount React hooks/components against a structural proxy client.
+- Uses the unmodified SDK client with a same-origin base URL, for example
+  `new OpenGeniClient({ baseUrl: "/api/opengeni" })`, and mounts
+  `SessionConversation` or hooks against it.
 - Never receives an organization API key just because it renders an agent.
 
 The browser may PUT file bytes directly to a short-lived signed object-storage
@@ -116,30 +117,25 @@ origins when browser uploads are enabled.
 
 ## UI Composition
 
-### Headless session semantics
+### Packaged conversation (default)
+
+Mount `SessionConversation` (root package or `@opengeni/react/session-ui`) and
+import `@opengeni/react/compiled.css` once. The CSS is package-compiled, scoped
+under `.og-root`, and needs no host Tailwind or source scan; theme and density
+are `--og-*` runtime tokens. Tailwind v4 hosts may deliberately compile the
+additive `styles.css` source bridge instead, but must use one styling path, not
+both. Add other styled subpaths only for features the product wants:
+`@opengeni/react/composer` (composer controller and primitives),
+`@opengeni/react/realtime`, `@opengeni/react/machines`, and the root package's
+workspace/workbench graph.
+
+### Headless session semantics (deviation)
 
 Use `@opengeni/react/session` when the product owns every visual decision but
 wants canonical event, queue, composer, goal, approval, human-input, and timeline
 behavior. The exported client contracts are structural and intentionally
-narrow. Implement the exact client refinement required by each mounted hook;
-do not stub billing, workspace administration, machines, or workbench methods.
-
-### Packaged visuals
-
-Use the styled subpaths for only the features the product wants:
-
-- `@opengeni/react/session-ui` for timeline/session chrome surfaces.
-- `@opengeni/react/composer` for the standard composer or its controller and
-  compound primitives.
-- `@opengeni/react/realtime` for realtime session controls.
-- `@opengeni/react/machines` for Connected Machine management.
-- the root package for the optional workspace/workbench graph.
-
-Import `@opengeni/react/compiled.css` once for the default styled experience.
-It is package-compiled, scoped under `.og-root`, and does not require the host to
-run Tailwind or scan package source. Theme and density are `--og-*` runtime
-tokens. Tailwind v4 hosts may deliberately compile the additive `styles.css`
-source bridge instead, but must use one styling path, not both.
+narrow; the packaged proxy serves the conversation subset. Do not stub billing,
+workspace administration, machines, or workbench methods.
 
 Responsive behavior should be container-based inside sidebars, drawers, and
 split panes. Prefer package density/responsive props over host CSS selectors
@@ -152,8 +148,9 @@ matching contracts:
 
 | Information | Contract | Lifetime | Visible in timeline |
 | --- | --- | --- | --- |
-| Stable workspace persona | workspace `agentInstructions` | every session in workspace | No |
-| Agent role/persona refinement | session `instructions` | one session | No, but session metadata is org-visible |
+| Who the agent is | `agent.identity`, or the workspace's `sessionAgentDefaults.identity` | one session, or new sessions in the workspace | No |
+| Stable workspace rules | workspace instructions | every session in workspace | No |
+| Agent role refinement | session `instructions` (= `agent.instructions`) | one session | No, but session metadata is org-visible |
 | Current route/selection/viewport snapshot | `modelContext` | one accepted message | No in the standard timeline; yes in full audit data |
 | What the user said | message text / `initialMessage` | durable conversation | Yes |
 

@@ -83,12 +83,70 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-Use `SessionConversation` for an existing session, or compose `MessageTimeline`
-and `ChatComposer` with the session hooks. These use the normal SDK through
-your authenticated host routes. For custom or compatible frontends, the backend
-`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
+`SessionConversation` is the default product integration for an existing
+session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
+on your server, and point an unmodified browser
+`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+
+```tsx
+import "@opengeni/react/compiled.css";
+
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} />
+</OpenGeniProvider>;
+```
+
+Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
+the product needs a materially different interaction model. These components do
+not consume the text-only `@opengeni/sdk/chat` fallback protocol.
+
+`OpenGeniChat` adds the user's chat list to the conversation: a sidebar when
+the component is wide and a drawer behind a menu button when narrow (measured on
+its own container, so it works inside panels), a new-chat composer that creates
+the session from its first message, and inline rename and archive. It is
+composed from `SessionList` and `SessionConversation`, which you can also mount
+separately. Pass `conversationProps` for message rendering and tool renderers,
+`createSession` to create chats through your own endpoint, or `sessionId` /
+`onSessionChange` to control the selection (for example from the URL).
+
+`SessionConversation` hides its model picker when the client config reports
+`modelSelection: false` (a proxy that fixes the model policy); pass
+`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
+deployment enables uploads (`attachments={false}` opts out), pending tool
+approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+
+The root keeps all existing exports, including workbench components, but never
+imports their optional peers. Conversation-only Next.js/Vite hosts do not need
+terminal, desktop, editor, or diff packages. Hosts mounting those surfaces opt
+in through the [per-surface setup entries](#optional-peer-dependencies).
+
+Highlighted diffs use the optional `@pierre/diffs` peer only after an explicit
+opt-in, so a host without it still builds with any bundler (Turbopack resolves
+every reachable `import()`). Hosts that install it call `enablePierreDiffs()`
+once; call it from the lazily loaded route that renders diffs to keep the peer
+out of your initial bundle. Views already on screen upgrade when it registers:
+
+```ts
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+enablePierreDiffs();
+```
+
+Without it, diffs and file views render as plain text.
+
+`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
+a new API contract revision. The stock OpenGeni console opts into that
+stale-tab protection with `reloadOnApiContractChange`; embedded products
+should leave it off.
 
 ### Exact conversation search navigation
+
+`useSessionEvents().initialHistoryReady` becomes true when a history window has
+loaded successfully, including an empty tail. It stays true through later stream
+errors, history navigation, and tip reloads, and resets for a new session/replay
+identity. Use it rather than inferring initial success from `initialLoading` or
+the combined `error`. A failed first load stays unready until recovery;
+`jumpToLatest()` clears its stale error and retries. Full replay has no history
+snapshot-completion watermark, so SSE alone does not set this flag.
 
 `useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
 window with at most two bounded cursor reads around an exact durable event.
@@ -541,6 +599,38 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+Managed browser actions keep the foreground tab in place. Target-local Chromium
+focus emulation keeps animation callbacks running without an open preview;
+explicit activation brings a tab forward. The override ends when its controller
+detaches. Native **App controls** also work in the background where supported.
+Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
+makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
+
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
+
+A managed browser's attachment authority error keeps a same-browser **Reconnect**
+action available. It obtains a fresh server-authorized attachment without creating
+a replacement browser or replaying input. The fresh Connected Chrome instruction
+is reserved for the selected extension-attached browser's generation loss; a
+different lost browser in the workspace cannot change that recovery path.
+
+The browser viewer negotiates bounded typing batches from the active controller's
+short-lived attachment. Supporting helpers recheck the original controller,
+target, document and frame fence before every action; old helpers retain one
+request per action. Only queued text actions share a request (at most 16), with
+each text/input event preserved. Keys, pointer input and clipboard operations
+remain ordering barriers. A failed or uncertain action discards the queued suffix
+without replay.
+IME candidate-selection keys stay local to the viewer; only committed text is
+sent to the remote page. A later ordinary Enter remains a remote key action.
+Live image props use opaque byte buffers so React development timing diagnostics
+cannot expand and retain every screenshot byte. Normal timing diagnostics remain enabled.
+Queued inputs retain only immutable frame fences, not screenshot bytes or prior
+render callbacks. Replacing the selected viewer invalidates its queued suffix.
+
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";
 import { BrowserViewer, ComputerViewer } from "@opengeni/react/interaction";
@@ -565,6 +655,33 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
+
+If the chat's latest browser was lost or failed, the viewer names it and explains
+why it is unavailable instead of showing the ordinary empty state. It offers the
+existing new-browser controls without reopening the lost controller or selecting
+another chat's browser. Explicitly closed browsers still use the empty state;
+older failures do not replace a newer closed browser. This loss notice also takes
+precedence over `renderEmpty`. Preview the deadline-loss case with
+`browser.html?mode=mock&lost=1` (add `width=360&theme=light` for a narrow light dock).
+
+Native dropdown popups may not appear in page frames. With a controller that
+advertises focused input observations, clicking one opens its choices beside
+the click. Ordinary clicks use a bounded focus probe instead of a full page
+snapshot; only a focused native dropdown (or a child-frame focus hint) requests
+semantic options. Current controllers show no permanent **Choose option** button
+over the page; older controllers retain that explicit fallback. **Alt+Down** opens
+the focused dropdown and reads its options on either controller generation.
+Selection uses the normal browser action API. The viewer retains that
+observation's target/document/frame fence. Private, oversized, or ambiguous
+choices remain unavailable; the page's keyboard controls still work. This
+fallback requires a controller with focused native-select metadata support and
+does not rewrite the page or capture the desktop.
 
 The provider opens one shared workspace interaction-revision stream and every
 catalog refreshes only when its revision advances; hidden or disconnected pages
@@ -668,7 +785,8 @@ state remains application-owned; durable draft and session state remain in
 
 - `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
   default, then live-streams on the SDK's exactly-once/ordered event delivery.
-  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  Initial replay reads one 1000-row raw page, with at most one extra page to
+  recover a dense turn's boundary; `loadOlder` is capped at two such pages;
   timeline group density is only an early stop. It returns the raw windowed
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
@@ -683,6 +801,8 @@ state remains application-owned; durable draft and session state remain in
   window.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  The live working set is at most 16 MiB or 20,000 events. One event larger than
+  the byte target stays complete in a window of its own.
   Live appends reuse the retained window's byte total, measuring only incoming
   and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
@@ -739,7 +859,10 @@ state remains application-owned; durable draft and session state remain in
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
-  fleet/manager views (optional polling).
+  fleet/manager views (optional polling). `useWorkspaceSessions({ projection:
+  "summary" })` returns compact list entries; omit the option for full sessions.
+  Scripted clients can omit the summary method and the hook projects full pages
+  locally while retaining cancellation and causal read revisions.
 - `useVariableSets()` — workspace variable sets with metadata-only generic
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
@@ -821,6 +944,8 @@ intentional changes should regenerate those snapshots and review the diff.
   paragraphs, user bubbles, and nested or standalone Markdown keep their normal
   width; oversized tables retain table-only horizontal scrolling. No host prop
   or viewport-wide layout override is required.
+  Remeasurement during host rerenders or tail streaming does not temporarily
+  resize the live table or displace an unpinned history reader.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render
@@ -870,6 +995,97 @@ ordered tool arguments, outputs, status, and timing. Added facets follow the
 remaining built-ins in supplied order. Duplicate IDs keep their first
 definition; remove a built-in before adding a custom facet with the same ID.
 `replace` is type-exclusive with `add` and `remove`.
+
+`turnSummary={{ rolling: true }}` selects the readable per-turn presentation:
+startup shows the preparation orb outside any disclosure, then hands over to
+Working without resetting the startup-inclusive elapsed clock. While work is
+live, assistant progress messages stay fully formatted and visible,
+followed by one Working or Waiting disclosure with the rolling latest step.
+When the turn finishes, earlier assistant messages and tools share the Worked
+disclosure; the final response remains visible. Expanding reveals that turn's
+earlier prose and activity in chronological order, not a fold of multiple turns.
+An already expanded or actively read view is preserved through settlement.
+Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
+continues through long answers, and manual scrolling never auto-repins on new work.
+Expanded outer work headers stay reachable at the top of the timeline until
+their own details end; nested headers never stick. The contextual navigation
+pill stays below the sticky-header strip and avoids interactive controls. If
+no horizontal slot fits beside a toolbar, only the pill moves below it; the
+timeline's size and scroll position do not change.
+
+The single **Back to your message** button returns to the loaded user prompt
+associated with the response or work being read: the latest prompt preceding
+the viewport midpoint. It appears only when that prompt's start is more than
+24 px above the viewport and its entire body and attachments are out of view.
+Clicking synchronously scrolls and focuses that exact
+mounted prompt near the top and leaves tip-follow. Later messages and queued
+prompts do not change the destination while the reader remains in older work.
+An older bounded window uses its own loaded context; a window with no associated
+prompt shows no action. Navigation never replaces the history window or looks up
+the globally newest message. There are no previous/next arrows.
+
+`SessionConversation` includes this behavior automatically. Custom timelines
+need no prompt-navigation callback:
+
+```tsx
+const events = useSessionEvents(sessionId);
+<MessageTimeline
+  events={events.events}
+  items={events.timeline}
+  turnSummary={{ rolling: true }}
+  hasNewer={events.hasNewer}
+  onJumpToLatest={events.jumpToLatest}
+/>;
+```
+
+`onJumpToLatest` retains its separate live-bottom behavior. The deprecated
+`MessageTimeline.onJumpToLatestQuestion` prop remains source-compatible but is
+not invoked by contextual navigation.
+
+### Optional global newest-message lookup
+
+The public `useSessionEvents().jumpToLatestQuestion()` hook remains available for
+hosts that deliberately build a **separate** global lookup action. It is not wired
+to `MessageTimeline` or the first-party conversation's contextual button.
+The hook checks the authoritative queue and normally uses one filtered forensic
+lookup plus, if needed, two bounded context reads. It pages past legacy worker
+completions and withdrawn/cancelled-before-start prompts, never substituting an
+arbitrary question from a loaded old page. Queued/legacy admission uses filtered
+lifecycle evidence to locate its real turn start. A distant prompt is retained as
+one projection-only witness in `events.timeline`; `events.events` remains the
+bounded contiguous raw window, so pass `items` as above.
+The optional resolver loads on its first invocation, not when opening a session.
+Identity and navigation guards also cover that module-loading delay.
+
+Custom hosts can provide their own queue destination when invoking this hook:
+
+```tsx
+const navigateToNewest = () => events.jumpToLatestQuestion({
+  onQueuedQuestion: async (turn, navigation) => {
+    await queue.refresh();
+    if (!navigation.isCurrent()) return;
+    // Check the host's latest queue/error state before applying its focus request.
+    setQueueFocusTarget((previous) => ({
+      turnId: turn.id,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+  },
+});
+// Pass queueFocusTarget to SessionChrome; each new request opens/focuses once.
+```
+
+A queue destination returns `null`, not an invisible transcript sequence. Without
+`onQueuedQuestion`, a pending prompt rejects with `LatestQuestionQueuedError`;
+the custom host can show guidance. Transitional queue state can be retried.
+Check `navigation.isCurrent()` after awaits and immediately before queue UI effects:
+an explicit history jump can supersede a queued lookup without changing the session.
+The shared projection predicate supplies execution evidence for older queued turns
+without `turn.started`, including tools, agent/sandbox activity, startup, recovery,
+and capacity events. Compact cursor coverage skips coalesced delta runs.
+`groupTimeline(items)` retains classic
+grouping; `{ readableTurns: true }` selects the new projection. The deprecated
+`foldExchanges` option aliases readable turns, not the removed cross-turn fold. See
+[`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).
 
 ## Sandbox surfacing
 
@@ -953,11 +1169,46 @@ function Fleet({ sessionId }: { sessionId: string }) {
 See the [Connected Machines guide](../../docs/connected-machines.md) for the
 end-to-end embedder story (create-on-machine, discover, swap, enroll, revoke).
 
+## Usage allowances (`@opengeni/react/usage`)
+
+Show people where they stand against a workspace or member usage allowance.
+A separate subpath, so hosts that don't meter usage never load it.
+
+- `useUsage({ workspaceId? })` — the signed-in person's own `/usage/me`
+  (through `getMyUsage` or any client with `requestJson`) plus a summary of
+  which limit binds first. `refreshKey` re-reads when work settles.
+- `UsageMeter` — "38% left · Resets Nov 1". Shares only; pass `formatAmount`
+  for money, credits or plan multiples. `density="compact"` for menus,
+  `"hero"` to lead a page.
+- `UsageLimitNotice` — the calm composer line: nothing while comfortable, a
+  dismissible heads-up near the limit, then who can raise it and when it
+  resets. `labels` rewords it; `action` adds your own "Upgrade" button.
+- `UsageMemberList` — the admin roster with a share-of-budget slider,
+  optional fixed amounts, and a visible note when shares add up to more than
+  the pool. Save rules through your backend in `onChangeRule`.
+
+```tsx
+import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
+
+<UsageMeter workspaceId={workspaceId} />
+<SessionConversation
+  sessionId={sessionId}
+  composerProps={{ header: <UsageLimitNotice workspaceId={workspaceId} /> }}
+  allowanceExhaustedLabels={{ memberRemedy: "Ask your team admin for more." }}
+/>
+```
+
+The conversation's "usage limit reached" row is customized on
+`MessageTimeline`/`SessionConversation` with `allowanceExhaustedLabels` or
+replaced with `renderAllowanceExhausted`. See
+[usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
+
 ## Optional peer dependencies
 
-The chat/timeline surface has none. The sandbox workspace and diff surfaces pull
-their heavy libraries from **optional** `peerDependencies`, so you install only
-what the surfaces you mount need:
+The chat/timeline surface needs only the required React/React DOM peers. All
+existing root exports remain available without optional workbench peers, even
+when a bundler resolves every reachable dynamic import. Install and enable
+only the surfaces you mount, once in their client route or bootstrap:
 
 - Terminal (`SandboxTerminal`): `@xterm/xterm`, `@xterm/addon-fit`,
   `@xterm/addon-web-links`.
@@ -966,6 +1217,37 @@ what the surfaces you mount need:
 - Code editor (`CodeEditor`): `@uiw/react-codemirror` + the `@codemirror/lang-*`
   language packs you need (`css`, `html`, `javascript`, `json`, `markdown`,
   `python`).
+
+```ts
+import { enableSandboxTerminal } from "@opengeni/react/terminal";
+import { enableDesktopViewer } from "@opengeni/react/desktop";
+import { enableCodeEditor } from "@opengeni/react/editor";
+
+enableSandboxTerminal();
+enableDesktopViewer();
+enableCodeEditor({
+  javascript: async () =>
+    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
+});
+```
+
+Omit imports and calls for surfaces you do not use. These entries also re-export
+their components; root component imports continue to work after setup. The
+libraries load on mount, not during setup or SSR. Import the setup from a lazy
+route to keep its peer chunks outside the initial conversation graph.
+
+For optional terminal WebGL acceleration, install `@xterm/addon-webgl` and call
+`enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") })`. Without
+it, or if it fails, the terminal uses its DOM renderer. Only supply editor
+grammar loaders for packages you installed; absent/failed grammars use plain
+CodeMirror. Without editor setup, the existing textarea fallback remains usable.
+Without terminal/VNC setup, those surfaces show a setup error; relay-frame
+desktops and a custom `rfbFactory` need no noVNC setup.
+
+Custom hosts may supply `registerSandboxTerminal`, `registerCodeEditor`, or
+`registerDesktopViewer` loaders from the root instead. Mounted fallbacks retry
+when registration changes. Do not hide peer imports behind runtime bare strings
+or `@vite-ignore`: browsers cannot resolve those without an import map.
 
 ## Demo harness
 

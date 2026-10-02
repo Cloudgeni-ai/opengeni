@@ -19,6 +19,21 @@ import {
 import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import { usePageLiveActivity } from "./internal";
 
+/** Immutable input fence; queued actions never need the encoded screenshot. */
+export type BrowserFrameInputFence = Pick<
+  BrowserFrame,
+  | "browserSessionId"
+  | "controllerGeneration"
+  | "targetId"
+  | "targetGeneration"
+  | "documentGeneration"
+  | "frameId"
+>;
+
+export type BrowserInputFailure = Pick<BrowserActionReceipt, "operationId" | "error"> & {
+  state: Exclude<BrowserActionReceipt["state"], "completed">;
+};
+
 export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
@@ -36,7 +51,13 @@ export type UseBrowserSessionResult = {
   loading: boolean;
   mutating: boolean;
   error: Error | null;
+  inputFailure: BrowserInputFailure | null;
   refresh: () => Promise<void>;
+  observeForInput: () => Promise<BrowserObservation>;
+  actFromObservation: (
+    action: BrowserAction,
+    observation: BrowserObservation,
+  ) => Promise<BrowserActionReceipt>;
   selectTarget: (targetId: string) => Promise<BrowserTarget>;
   openTarget: (url?: string) => Promise<BrowserTarget>;
   closeTarget: (targetId: string) => Promise<void>;
@@ -48,8 +69,9 @@ export type UseBrowserSessionResult = {
    *  the controller fence instead of targeting a newer page. */
   actFromFrame: (
     action: BrowserAction | BrowserActionBatch,
-    frame: BrowserFrame,
+    frame: BrowserFrameInputFence,
     operationId?: string,
+    observationMode?: "none" | "input",
   ) => Promise<BrowserActionReceipt>;
   readClipboard: () => Promise<BrowserClipboard>;
   diagnostics: (options?: BrowserDiagnosticsOptions) => Promise<BrowserDiagnosticBatch>;
@@ -79,10 +101,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     loading: boolean;
     mutating: boolean;
     error: Error | null;
+    inputFailure: BrowserInputFailure | null;
   }>(() => emptyState(browserSessionId, enabled));
   const visible =
     state.browserSessionId === browserSessionId ? state : emptyState(browserSessionId, enabled);
   const refreshBlocked = isNonRetryableInteractionError(visible.error);
+  const inputFailureRef = useRef(visible.inputFailure);
+  inputFailureRef.current = visible.inputFailure;
   const selectedTargetIdRef = useRef<string | null>(visible.selectedTargetId);
   selectedTargetIdRef.current = visible.selectedTargetId;
   const selectedTargetRef = useRef<BrowserTarget | null>(
@@ -122,88 +147,104 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     requestRef.current = { id, controller: null };
   }, []);
 
-  const refresh = useCallback(async (): Promise<void> => {
-    if (!enabled || !browserSessionId) return;
-    const id = requestRef.current.id + 1;
-    requestRef.current.controller?.abort();
-    const controller = new AbortController();
-    requestRef.current = { id, controller };
-    try {
-      const [session, targetResponse] = await Promise.all([
-        client.getBrowserSession(workspaceId, browserSessionId, {
-          signal: controller.signal,
-        }),
-        client.listBrowserTargets(workspaceId, browserSessionId, {
-          signal: controller.signal,
-        }),
-      ]);
-      if (!mountedRef.current || requestRef.current.id !== id) return;
-      const selected = chooseTarget(targetResponse.targets, selectedTargetIdRef.current);
-      selectedTargetIdRef.current = selected?.id ?? null;
-      const previousObservation =
-        observationRef.current.browserSessionId === browserSessionId
-          ? observationRef.current.observation
-          : null;
-      const retainedObservation =
-        selected && previousObservation && sameObservationTarget(previousObservation, selected)
-          ? previousObservation
-          : null;
-      observationRef.current = { browserSessionId, observation: retainedObservation };
-      setState((current) =>
-        current.browserSessionId === browserSessionId
-          ? {
-              ...current,
-              session,
-              targets: targetResponse.targets,
-              selectedTargetId: selected?.id ?? null,
-              observation: retainedObservation,
-              loading: false,
-              error: null,
-            }
-          : current,
-      );
-      if (!selected || !semanticObservationEnabledRef.current) return;
+  const refreshInventory = useCallback(
+    async (checkInput = false) => {
+      if (!enabled || !browserSessionId) return;
+      const checkedInputFailure = inputFailureRef.current;
+      const id = requestRef.current.id + 1;
+      requestRef.current.controller?.abort();
+      const controller = new AbortController();
+      requestRef.current = { id, controller };
       try {
-        const observation = await client.observeBrowserTarget(
-          workspaceId,
-          browserSessionId,
-          selected.id,
-          { signal: controller.signal },
-        );
+        const [session, targetResponse] = await Promise.all([
+          client.getBrowserSession(workspaceId, browserSessionId, {
+            signal: controller.signal,
+          }),
+          client.listBrowserTargets(workspaceId, browserSessionId, {
+            signal: controller.signal,
+          }),
+        ]);
         if (!mountedRef.current || requestRef.current.id !== id) return;
-        observationRef.current = { browserSessionId, observation };
-        lastObservationAtRef.current = Date.now();
+        const selected = chooseTarget(targetResponse.targets, selectedTargetIdRef.current);
+        selectedTargetIdRef.current = selected?.id ?? null;
+        const previousObservation =
+          observationRef.current.browserSessionId === browserSessionId
+            ? observationRef.current.observation
+            : null;
+        const retainedObservation =
+          selected && previousObservation && sameObservationTarget(previousObservation, selected)
+            ? previousObservation
+            : null;
+        observationRef.current = { browserSessionId, observation: retainedObservation };
         setState((current) =>
-          current.browserSessionId === browserSessionId &&
-          current.selectedTargetId === observation.target.id
-            ? { ...current, observation }
+          current.browserSessionId === browserSessionId
+            ? {
+                ...current,
+                session,
+                targets: targetResponse.targets,
+                selectedTargetId: selected?.id ?? null,
+                observation: retainedObservation,
+                loading: false,
+                error: null,
+                // Media and background polling cannot confirm an input outcome.
+                // Only an explicit fresh check clears the notice it began with.
+                inputFailure:
+                  checkInput &&
+                  session.id === browserSessionId &&
+                  targetResponse.browserSessionId === browserSessionId &&
+                  current.inputFailure === checkedInputFailure
+                    ? null
+                    : current.inputFailure,
+              }
             : current,
         );
+        if (!selected || !semanticObservationEnabledRef.current) return;
+        try {
+          const observation = await client.observeBrowserTarget(
+            workspaceId,
+            browserSessionId,
+            selected.id,
+            { signal: controller.signal },
+          );
+          if (!mountedRef.current || requestRef.current.id !== id) return;
+          observationRef.current = { browserSessionId, observation };
+          lastObservationAtRef.current = Date.now();
+          setState((current) =>
+            current.browserSessionId === browserSessionId &&
+            current.selectedTargetId === observation.target.id
+              ? { ...current, observation }
+              : current,
+          );
+        } catch (cause) {
+          if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id)
+            return;
+          // Target inventory and the media plane remain authoritative for the
+          // human-facing browser. A failed semantic snapshot must not blank or
+          // disable an otherwise live visual browser.
+          void cause;
+        }
       } catch (cause) {
         if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id)
           return;
-        // Target inventory and the media plane remain authoritative for the
-        // human-facing browser. A failed semantic snapshot must not blank or
-        // disable an otherwise live visual browser.
-        void cause;
+        setState((current) =>
+          current.browserSessionId === browserSessionId
+            ? {
+                ...current,
+                loading: false,
+                error: cause instanceof Error ? cause : new Error(String(cause)),
+              }
+            : current,
+        );
+      } finally {
+        if (requestRef.current.id === id) {
+          requestRef.current = { id, controller: null };
+        }
       }
-    } catch (cause) {
-      if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id) return;
-      setState((current) =>
-        current.browserSessionId === browserSessionId
-          ? {
-              ...current,
-              loading: false,
-              error: cause instanceof Error ? cause : new Error(String(cause)),
-            }
-          : current,
-      );
-    } finally {
-      if (requestRef.current.id === id) {
-        requestRef.current = { id, controller: null };
-      }
-    }
-  }, [browserSessionId, client, enabled, workspaceId]);
+    },
+    [browserSessionId, client, enabled, workspaceId],
+  );
+
+  const refresh = useCallback(async () => await refreshInventory(true), [refreshInventory]);
 
   const refreshSemantic = useCallback(async (): Promise<void> => {
     if (!enabled || !browserSessionId) return;
@@ -248,12 +289,12 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         ? { ...current, loading: true }
         : emptyState(browserSessionId, true),
     );
-    void refresh();
+    void refreshInventory();
     return () => {
       mountedRef.current = false;
       invalidateRefresh();
     };
-  }, [browserSessionId, enabled, invalidateRefresh, refresh]);
+  }, [browserSessionId, enabled, invalidateRefresh, refreshInventory]);
 
   useEffect(() => {
     const previous = previousSemanticObservationRef.current;
@@ -289,17 +330,17 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   useEffect(() => {
     if (!enabled || !pageLive || visible.mutating || refreshBlocked) return;
     const timer = setInterval(() => {
-      if (!requestRef.current.controller) void refresh();
+      if (!requestRef.current.controller) void refreshInventory();
     }, pollIntervalMs);
     return () => clearInterval(timer);
-  }, [enabled, pageLive, pollIntervalMs, refresh, refreshBlocked, visible.mutating]);
+  }, [enabled, pageLive, pollIntervalMs, refreshInventory, refreshBlocked, visible.mutating]);
 
   useEffect(() => {
     if (!enabled || !browserSessionId || !pageLive || refreshBlocked) return;
     let disposed = false;
     const heartbeat = () => {
       void client.heartbeatBrowserSession(workspaceId, browserSessionId).catch(() => {
-        if (!disposed) void refresh();
+        if (!disposed) void refreshInventory();
       });
     };
     const timer = setInterval(heartbeat, 30_000);
@@ -307,7 +348,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       disposed = true;
       clearInterval(timer);
     };
-  }, [browserSessionId, client, enabled, pageLive, refresh, refreshBlocked, workspaceId]);
+  }, [browserSessionId, client, enabled, pageLive, refreshInventory, refreshBlocked, workspaceId]);
 
   const runMutation = useCallback(
     async <T>(scopeBrowserSessionId: string, operation: () => Promise<T>): Promise<T> => {
@@ -474,7 +515,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     async (
       action: BrowserAction | BrowserActionBatch,
       operationId: string,
-      frame: BrowserFrame | null,
+      frame:
+        | (Pick<BrowserFrame, "browserSessionId" | "targetId" | "targetGeneration"> & {
+            frameId: string | null;
+            documentGeneration: string | null;
+          })
+        | null,
+      observationMode: "none" | "input" = "none",
     ): Promise<BrowserActionReceipt> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       if (frame && frame.browserSessionId !== browserSessionId) {
@@ -506,9 +553,19 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
           operationId,
           ...fence,
-          observationMode: "none",
+          observationMode,
           action,
         });
+        if (receipt.state !== "completed") {
+          const inputFailure: BrowserInputFailure = {
+            operationId: receipt.operationId,
+            state: receipt.state,
+            error: receipt.error,
+          };
+          setState((current) =>
+            current.browserSessionId === browserSessionId ? { ...current, inputFailure } : current,
+          );
+        }
         if (receipt.observation) {
           observationRef.current = {
             browserSessionId,
@@ -548,9 +605,41 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const actFromFrame = useCallback(
     async (
       action: BrowserAction | BrowserActionBatch,
-      frame: BrowserFrame,
+      frame: BrowserFrameInputFence,
       operationId: string = crypto.randomUUID(),
-    ): Promise<BrowserActionReceipt> => await dispatchAction(action, operationId, frame),
+      observationMode: "none" | "input" = "none",
+    ): Promise<BrowserActionReceipt> =>
+      await dispatchAction(action, operationId, frame, observationMode),
+    [dispatchAction],
+  );
+
+  const observeForInput = useCallback(async (): Promise<BrowserObservation> => {
+    const target = selectedTargetRef.current;
+    if (!browserSessionId || !target) throw new Error("No browser tab is selected.");
+    const observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+    if (
+      !mountedRef.current ||
+      observation.browserSessionId !== browserSessionId ||
+      !sameObservationTarget(observation, selectedTargetRef.current)
+    ) {
+      throw new Error("The browser page changed. Open the options again.");
+    }
+    return observation;
+  }, [browserSessionId, client, workspaceId]);
+
+  const actFromObservation = useCallback(
+    async (action: BrowserAction, observation: BrowserObservation) => {
+      if (!sameObservationTarget(observation, selectedTargetRef.current)) {
+        throw new Error("The browser page changed. Open the options again.");
+      }
+      return await dispatchAction(action, crypto.randomUUID(), {
+        browserSessionId: observation.browserSessionId,
+        targetId: observation.target.id,
+        targetGeneration: observation.target.targetGeneration,
+        documentGeneration: observation.target.documentGeneration,
+        frameId: observation.frameId,
+      });
+    },
     [dispatchAction],
   );
 
@@ -588,7 +677,10 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     loading: visible.loading,
     mutating: visible.mutating,
     error: visible.error,
+    inputFailure: visible.inputFailure,
     refresh,
+    observeForInput,
+    actFromObservation,
     selectTarget,
     openTarget,
     closeTarget,
@@ -609,6 +701,7 @@ function emptyState(browserSessionId: string | null, loading: boolean) {
     loading,
     mutating: false,
     error: null as Error | null,
+    inputFailure: null as BrowserInputFailure | null,
   };
 }
 
@@ -637,6 +730,7 @@ function sameObservationTarget(
 ): boolean {
   return (
     target !== null &&
+    observation.browserSessionId === target.browserSessionId &&
     observation.target.id === target.id &&
     observation.target.controllerGeneration === target.controllerGeneration &&
     observation.target.targetGeneration === target.targetGeneration &&

@@ -70,14 +70,14 @@ test("a structured denial reveals neither policy state nor failure details and c
     if (++calls === 1) throw unavailable();
     return ownerOverview;
   });
-  expect(container.textContent).toContain("Recovery is unavailable for this account.");
+  expect(container.textContent).toContain("Recovery isn't available for this account.");
   expect(container.textContent).not.toContain("not found");
-  expect(container.textContent).not.toContain("Policy:");
+  expect(container.textContent).not.toContain("Not set up.");
   expect(container.textContent).not.toContain("Couldn't load");
   await act(async () => container.querySelector("button")!.click());
   expect(calls).toBe(2);
-  expect(container.textContent).toContain("Policy: not configured");
-  expect(container.textContent).toContain("Save custody policy");
+  expect(container.textContent).toContain("Not set up.");
+  expect(container.textContent).toContain("Save recovery contacts");
 });
 for (const error of [
   new OpenGeniApiError(
@@ -94,10 +94,10 @@ for (const error of [
       return ownerOverview;
     });
     expect(container.textContent).toContain("Couldn't load organization recovery");
-    expect(container.textContent).not.toContain("Recovery is unavailable for this account.");
+    expect(container.textContent).not.toContain("Recovery isn't available for this account.");
     await act(async () => container.querySelector("button")!.click());
     expect(calls).toBe(2);
-    expect(container.textContent).toContain("Policy: not configured");
+    expect(container.textContent).toContain("Not set up.");
   });
 }
 test("a late denial from the previous browser account cannot hide the current owner's recovery", async () => {
@@ -120,6 +120,6 @@ test("a late denial from the previous browser account cannot hide the current ow
     ),
   );
   await act(async () => rejectOld(unavailable()));
-  expect(container.textContent).toContain("Save custody policy");
-  expect(container.textContent).not.toContain("Recovery is unavailable for this account.");
+  expect(container.textContent).toContain("Save recovery contacts");
+  expect(container.textContent).not.toContain("Recovery isn't available for this account.");
 });

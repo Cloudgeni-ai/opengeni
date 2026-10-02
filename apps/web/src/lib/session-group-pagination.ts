@@ -8,7 +8,7 @@ import {
   type SessionBrowseDateRange,
   type SessionRecencyGroup,
 } from "@/lib/sessions-group";
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 type CreatorIdentity = Pick<Session["createdBy"], "kind" | "subjectId">;
 
@@ -53,6 +53,19 @@ export type SessionPaginationGroup =
       label: string;
       kind: "archived";
     };
+
+/** Each project (including Default) owns a cursor independent of workspace recency. */
+export function sessionPaginationProjectGroup(
+  channelId: string | null,
+  label: string,
+): Extract<SessionPaginationGroup, { kind: "channel" }> {
+  return {
+    key: `channel:${channelId ?? "default"}`,
+    label,
+    kind: "channel",
+    channelId,
+  };
+}
 
 export type SessionPaginationBrowseFilter = {
   creator: CreatorIdentity | null;

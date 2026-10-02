@@ -15,6 +15,23 @@ export const MCP_LIFECYCLE_PHASES = ["connect", "close"] as const;
 export const MCP_LIFECYCLE_POLICIES = ["strict", "best_effort"] as const;
 export const MCP_LIFECYCLE_OUTCOMES = ["completed", "failed"] as const;
 
+/**
+ * Closed outcomes of one fresh-box command-readiness replacement decision:
+ * the replacement became ready, it also missed readiness, it failed for another
+ * typed reason, cancellation won the pause or the replacement, or the turn
+ * attempt had already spent its single replacement.
+ */
+export const SANDBOX_READINESS_REPLACEMENT_OUTCOMES = [
+  "replaced",
+  "failed_again",
+  "replacement_failed",
+  "cancelled",
+  "budget_spent",
+] as const;
+
+export type SandboxReadinessReplacementOutcome =
+  (typeof SANDBOX_READINESS_REPLACEMENT_OUTCOMES)[number];
+
 export type McpLifecyclePhase = (typeof MCP_LIFECYCLE_PHASES)[number];
 export type McpLifecyclePolicy = (typeof MCP_LIFECYCLE_POLICIES)[number];
 export type McpLifecycleOutcome = (typeof MCP_LIFECYCLE_OUTCOMES)[number];
@@ -34,6 +51,15 @@ export type RuntimeMetricsHooks = {
   onSandboxWarmingTimeout?: (input: {
     backend: string;
     stage: "exec_readiness" | "sibling_warming";
+  }) => void;
+  /**
+   * One fresh-box readiness replacement decision. The first readiness miss is
+   * still counted by `onSandboxWarmingTimeout`; this hook says whether the
+   * single per-turn-attempt replacement happened and whether it worked.
+   */
+  onSandboxReadinessReplacement?: (input: {
+    backend: string;
+    outcome: SandboxReadinessReplacementOutcome;
   }) => void;
   onSandboxProviderApiThrottle?: (input: {
     backend: string;

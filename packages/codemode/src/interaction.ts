@@ -1,5 +1,6 @@
 import type {
   AttemptToolResult,
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -9,6 +10,9 @@ import type {
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveResponse,
   BrowserDomReadLocator,
   BrowserDomReadResponse,
   BrowserDomSafeAttribute,
@@ -66,6 +70,8 @@ const PATH = {
   browserAct: ["interaction", "browser", "act"],
   browserClipboard: ["interaction", "browser", "clipboard"],
   browserDebug: ["interaction", "browser", "debug"],
+  browserDownloads: ["interaction", "browser", "downloads"],
+  browserDownloadSave: ["interaction", "browser", "downloadSave"],
   browserAuth: ["interaction", "browser", "auth"],
   requestHuman: ["interaction", "requestHuman"],
   browserIdentity: ["interaction", "browser", "identity"],
@@ -87,6 +93,7 @@ export type InteractionDiscovery = {
   browsers: BrowserSession[];
   computers: ComputerSession[];
   identities: BrowserIdentity[];
+  attachedBrowserBridges: AttachedBrowserBridge[];
   attachedBrowsers: AttachedBrowserDevice[];
 };
 
@@ -256,6 +263,7 @@ export class OpenGeniCodemode {
 
   async discover(
     options: {
+      scope?: "current_session" | "workspace" | "attached_browsers" | undefined;
       includeTerminal?: boolean | undefined;
       includeArchivedIdentities?: boolean | undefined;
       includeDisconnectedDevices?: boolean | undefined;
@@ -375,6 +383,7 @@ export class CodemodeBrowser {
   readonly tabs: CodemodeBrowserTabCollection;
   readonly auth: CodemodeBrowserAuth;
   readonly clipboard: CodemodeBrowserClipboard;
+  readonly downloads: CodemodeBrowserDownloadCollection;
 
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -383,6 +392,7 @@ export class CodemodeBrowser {
     this.tabs = new CodemodeBrowserTabCollection(client, id);
     this.auth = new CodemodeBrowserAuth(client, id);
     this.clipboard = new CodemodeBrowserClipboard(client, id, this.tabs);
+    this.downloads = new CodemodeBrowserDownloadCollection(client, id);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<BrowserSession> {
@@ -498,6 +508,61 @@ export class CodemodeBrowser {
       this.client,
       PATH.browserLifecycle,
       { browserSessionId: this.id, action },
+      callOptions,
+    );
+  }
+}
+
+export class CodemodeBrowserDownloadCollection {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+  ) {}
+
+  async list(callOptions: CodemodeCallOptions = {}): Promise<BrowserDownloadListResponse> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloads,
+      { browserSessionId: this.browserSessionId, operation: "list" },
+      callOptions,
+    );
+  }
+
+  download(downloadId: string): CodemodeBrowserDownload {
+    return new CodemodeBrowserDownload(this.client, this.browserSessionId, downloadId);
+  }
+}
+
+export class CodemodeBrowserDownload {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+    readonly id: string,
+  ) {}
+
+  async get(callOptions: CodemodeCallOptions = {}): Promise<BrowserDownload> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloads,
+      { browserSessionId: this.browserSessionId, operation: "get", downloadId: this.id },
+      callOptions,
+    );
+  }
+
+  async saveToWorkspace(
+    destinationPath: string,
+    options: { overwrite?: boolean | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserDownloadSaveResponse> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloadSave,
+      {
+        browserSessionId: this.browserSessionId,
+        downloadId: this.id,
+        destinationPath,
+        ...(options.overwrite === undefined ? {} : { overwrite: options.overwrite }),
+      },
       callOptions,
     );
   }

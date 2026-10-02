@@ -1,5 +1,11 @@
 # @opengeni/agent-proto
 
+## 0.6.1
+
+### Patch Changes
+
+- 6a97313: Publish the runner heartbeat `desktopStatus` field so `@opengeni/api-router` can decode live desktop availability.
+
 ## 0.6.0
 
 ### Minor Changes

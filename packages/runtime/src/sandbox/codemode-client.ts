@@ -159,10 +159,9 @@ for (const name of ['package.json', 'ogtool', 'client.mjs']) {
   } catch (error) {
     installationFailure = { error };
   }
-  let cleanupFailure: Error | undefined;
   try {
     await editor.deleteFile({ type: "delete_file", path: stage });
-  } catch (editorFailure) {
+  } catch {
     // A provider can support ingress but lose its delete reply. Remove only
     // this exact attempt's staging file, through the same command fence.
     try {
@@ -170,22 +169,25 @@ for (const name of ['package.json', 'ogtool', 'client.mjs']) {
         `node -e ${quote(`require('node:fs').rmSync(${JSON.stringify(stage)}, {force: true})`)}`,
       );
       if (sandboxCommandExitCode(cleanup) !== 0) {
-        throw new Error("Staging file removal failed", { cause: editorFailure });
+        throw new Error("Staging file removal failed");
       }
-    } catch (commandFailure) {
-      cleanupFailure = new AggregateError(
-        [editorFailure, commandFailure],
-        "Both cleanup paths failed",
-        { cause: commandFailure },
-      );
+    } catch {
+      // This file contains only immutable, non-secret release bytes. Failed
+      // housekeeping cannot invalidate a verified install or wrap its original
+      // delivery error (especially pre-dispatch/outcome-unknown provenance).
+      // Log one bounded identity, never provider errors, output, or client bytes.
+      try {
+        console.warn(
+          "Managed Codemode client staging cleanup failed; installation result preserved",
+          {
+            stageFile: posix.basename(stage),
+            installation: installationFailure ? "failed" : "verified",
+          },
+        );
+      } catch {
+        // Diagnostics must not change the installation result either.
+      }
     }
-  }
-  if (cleanupFailure) {
-    throw new AggregateError(
-      installationFailure ? [installationFailure.error, cleanupFailure] : [cleanupFailure],
-      "Managed Codemode client staging cleanup failed; restore sandbox file ingress/command execution before retrying",
-      { cause: installationFailure?.error ?? cleanupFailure },
-    );
   }
   if (installationFailure) throw installationFailure.error;
 }

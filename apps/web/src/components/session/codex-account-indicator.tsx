@@ -3,15 +3,19 @@
 // active subscription, status/usage, and pin switching. Host-credit: null.
 import { useCodexAccounts } from "@opengeni/react";
 import type { CodexAccount, CodexUsageWindow, SessionEvent } from "@opengeni/sdk";
-import { CheckIcon, ChevronDownIcon, Loader2Icon } from "lucide-react";
+import { ChevronDownIcon, Loader2Icon } from "lucide-react";
+import { useState } from "react";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuMeta,
+  DropdownMenuNote,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -115,6 +119,9 @@ export function CodexAccountIndicator({
     enabled: modelReady && isCodexSession,
     ...(events !== undefined ? { events } : {}),
   });
+  const [checkingUsage, setCheckingUsage] = useState(false);
+  const [usageChecked, setUsageChecked] = useState(false);
+  const [usageCheckFailed, setUsageCheckFailed] = useState(false);
 
   if (!modelReady) {
     return (
@@ -155,9 +162,33 @@ export function CodexAccountIndicator({
   const tone = statusTone(effective);
   const hasAccounts = codex.accounts.length > 0;
   const ariaLabel = `Switch Codex account · ${selectionLabel} · ${displayName}`;
+  const liveStatus = effective ? codex.liveUsage[effective.id]?.status : null;
+  const usageUnavailable =
+    usageCheckFailed ||
+    (usageChecked && !liveStatus) ||
+    liveStatus === "error" ||
+    liveStatus === "no-data";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (!open) return;
+        setCheckingUsage(true);
+        setUsageChecked(false);
+        setUsageCheckFailed(false);
+        void codex.refreshUsage().then(
+          (ok) => {
+            setUsageChecked(ok);
+            setUsageCheckFailed(!ok);
+            setCheckingUsage(false);
+          },
+          () => {
+            setUsageCheckFailed(true);
+            setCheckingUsage(false);
+          },
+        );
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <button
           type="button"
@@ -197,9 +228,9 @@ export function CodexAccountIndicator({
         side="bottom"
         sideOffset={8}
         collisionPadding={12}
-        className="flex max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-72 flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+        className="flex max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-72 flex-col overflow-hidden"
       >
-        <div className="shrink-0 space-y-2 px-2 pt-1.5 pb-2">
+        <div className="shrink-0 space-y-2 px-2.5 pt-1.5 pb-2">
           <div className="flex items-start gap-2">
             <span className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2 text-fg">
               <ChatGptMark className="size-4" />
@@ -214,7 +245,11 @@ export function CodexAccountIndicator({
               </p>
             </div>
           </div>
-          {effective ? (
+          {checkingUsage ? (
+            <p className="text-2xs text-fg-subtle">Checking usage…</p>
+          ) : usageUnavailable ? (
+            <p className="text-2xs text-fg-subtle">Usage unavailable</p>
+          ) : effective ? (
             <div className="space-y-1.5">
               <UsageRow label="5h" window={effective.fiveHour} />
               <UsageRow label="Week" window={effective.weekly} />
@@ -224,7 +259,7 @@ export function CodexAccountIndicator({
 
         <DropdownMenuSeparator className="shrink-0" />
 
-        <DropdownMenuLabel className="shrink-0 px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
+        <DropdownMenuLabel className="shrink-0">
           {current?.waiting ? "Retry with" : "Use for next turn"}
         </DropdownMenuLabel>
 
@@ -236,16 +271,16 @@ export function CodexAccountIndicator({
               if (codex.pinnedAccountId === null && !current?.waiting) return;
               void codex.pin(AUTO);
             }}
-            className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
+            className="cursor-pointer"
           >
             <span className="min-w-0 flex-1 truncate">
               {current?.waiting ? "Auto" : "Auto (workspace default)"}
             </span>
             {codex.pinningTarget === AUTO ? (
-              <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
-            ) : codex.pinnedAccountId === null ? (
-              <CheckIcon className="ml-1 size-4 shrink-0" />
-            ) : null}
+              <Loader2Icon className="size-4 shrink-0 animate-spin" />
+            ) : (
+              <DropdownMenuCheck checked={codex.pinnedAccountId === null} className="ml-0" />
+            )}
           </DropdownMenuItem>
 
           {codex.accounts.map((account) => {
@@ -260,38 +295,42 @@ export function CodexAccountIndicator({
                   if (codex.pinnedAccountId === account.id && !current?.waiting) return;
                   void codex.pin(account.id);
                 }}
-                className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
+                className="cursor-pointer"
               >
                 <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
-                {account.plan ? (
-                  <span className="shrink-0 text-2xs text-fg-subtle">{account.plan}</span>
+                {account.plan ? <DropdownMenuMeta>{account.plan}</DropdownMenuMeta> : null}
+                {!checkingUsage &&
+                !usageCheckFailed &&
+                (!usageChecked || codex.liveUsage[account.id]) &&
+                codex.liveUsage[account.id]?.status !== "error" &&
+                codex.liveUsage[account.id]?.status !== "no-data" ? (
+                  <MiniBar account={account} />
                 ) : null}
-                <MiniBar account={account} />
                 {account.status !== "active" ? (
-                  <span className="shrink-0 text-2xs text-status-waiting">
+                  <span className="shrink-0 text-xs text-status-waiting">
                     {account.status === "needs_relogin" ? "relogin" : account.status}
                   </span>
                 ) : null}
                 {isPinning ? (
-                  <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
-                ) : isSelected ? (
-                  <CheckIcon className="ml-1 size-4 shrink-0" />
-                ) : null}
+                  <Loader2Icon className="size-4 shrink-0 animate-spin" />
+                ) : (
+                  <DropdownMenuCheck checked={isSelected} className="ml-0" />
+                )}
               </DropdownMenuItem>
             );
           })}
 
           {!hasAccounts ? (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+            <DropdownMenuNote>
               {codex.error ? "Accounts unavailable." : "No Codex subscriptions connected."}
-            </p>
+            </DropdownMenuNote>
           ) : null}
           {codex.mutationError ? (
-            <p className="px-2 pt-1 text-2xs text-danger">
+            <DropdownMenuNote role="alert" className="text-xs text-danger">
               Switch failed: {codex.mutationError.message}
-            </p>
+            </DropdownMenuNote>
           ) : (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+            <p className="px-2.5 pt-1.5 pb-1 text-xs text-fg-muted">
               {codex.switchAppliedTo === "waiting_turn"
                 ? "Selection saved. Capacity is being rechecked."
                 : codex.switchAppliedTo === "next_turn"

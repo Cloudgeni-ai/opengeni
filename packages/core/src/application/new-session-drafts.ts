@@ -13,13 +13,13 @@ import {
   getSandbox,
   getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftModelProvided,
   newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   newSessionSelectionHistory,
   publicNewSessionDraftOptions,
   requireFileForSubject,
   saveNewSessionDraftInTransaction,
-  reusableNewSessionRepositoryResource,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -38,6 +38,8 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
+import { resolveDefaultSessionModel } from "../default-session-model";
+import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
 
@@ -59,6 +61,9 @@ function mapNewSessionDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
+    ...(newSessionDraftModelProvided(row) !== undefined
+      ? { modelProvided: newSessionDraftModelProvided(row) }
+      : {}),
     ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
     options: publicNewSessionDraftOptions(row),
     selectionHistory: newSessionSelectionHistory(row),
@@ -66,15 +71,71 @@ function mapNewSessionDraft(
   });
 }
 
+/**
+ * Whether a stored draft's model policy was the person's choice. A row written
+ * before the marker existed (or by an older client) counts as a choice unless
+ * it is exactly the deployment default policy (model, reasoning, standard
+ * speed), which is what an untouched composer used to save.
+ */
+export function draftModelProvided(
+  settings: Settings,
+  draft: Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode" | "modelProvided">,
+): boolean {
+  if (draft.modelProvided !== undefined) return draft.modelProvided;
+  return !(
+    canonicalizeConfiguredModelId(settings, draft.model) ===
+      canonicalizeConfiguredModelId(settings, settings.openaiModel) &&
+    draft.reasoningEffort === settings.openaiReasoningEffort &&
+    draft.latencyMode === "standard"
+  );
+}
+
+/** The resolved new-chat default for this actor and workspace. */
+async function actorDefaultModel(
+  deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+) {
+  return await resolveDefaultSessionModel(deps.db, deps.settings, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+  });
+}
+
+type NewSessionDraftReadOptions = {
+  /**
+   * Project a draft that follows the default onto today's resolved default.
+   * Callers that only reuse a chosen model (Slack defaults) skip the
+   * resolution; session creation resolves the default itself.
+   */
+  projectDefaultModel?: boolean;
+};
+
 async function hydrateNewSessionDraft(
   deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
   grant: AccessGrant,
   workspaceId: string,
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue | null> {
   if (!row) return null;
-  const mapped = mapNewSessionDraft(row);
-  if (!mapped) return null;
+  const stored = mapNewSessionDraft(row);
+  if (!stored) return null;
+  // A draft that follows the default is projected onto today's default, so a
+  // later subscription connect or credit purchase replaces an untouched free
+  // model. The stored row is unchanged until the person saves again.
+  const modelProvided = draftModelProvided(deps.settings, stored);
+  let mapped: NewSessionDraftValue = { ...stored, modelProvided };
+  if (!modelProvided && readOptions.projectDefaultModel !== false) {
+    const resolved = await actorDefaultModel(deps, grant, workspaceId);
+    mapped = {
+      ...mapped,
+      model: resolved.model,
+      reasoningEffort: resolved.reasoningEffort,
+      latencyMode: resolved.model === stored.model ? stored.latencyMode : "standard",
+    };
+  }
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     deps.db,
     workspaceId,
@@ -191,6 +252,7 @@ async function getActorNewSessionDraftInFileScope(
   deps: Pick<NewSessionDraftDependencies, "settings" | "db">,
   grant: AccessGrant,
   workspaceId: string,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue> {
   const row = await withWorkspaceSubjectRls(deps.db, workspaceId, grant.subjectId, (scoped) =>
     getNewSessionDraftInTransaction(scoped, {
@@ -198,21 +260,26 @@ async function getActorNewSessionDraftInFileScope(
       subjectId: grant.subjectId,
     }),
   );
-  return (
-    (await hydrateNewSessionDraft(deps, grant, workspaceId, row)) ?? {
-      revision: 0,
-      text: "",
-      resources: [],
-      tools: [],
-      toolsProvided: false,
-      model: deps.settings.openaiModel,
-      reasoningEffort: deps.settings.openaiReasoningEffort,
-      latencyMode: "standard",
-      options: {},
-      selectionHistory: { projects: [] },
-      updatedAt: null,
-    }
-  );
+  const hydrated = await hydrateNewSessionDraft(deps, grant, workspaceId, row, readOptions);
+  if (hydrated) return hydrated;
+  const resolved =
+    readOptions.projectDefaultModel === false
+      ? { model: deps.settings.openaiModel, reasoningEffort: deps.settings.openaiReasoningEffort }
+      : await actorDefaultModel(deps, grant, workspaceId);
+  return {
+    revision: 0,
+    text: "",
+    resources: [],
+    tools: [],
+    toolsProvided: false,
+    model: resolved.model,
+    reasoningEffort: resolved.reasoningEffort,
+    latencyMode: "standard",
+    modelProvided: false,
+    options: {},
+    selectionHistory: { projects: [] },
+    updatedAt: null,
+  };
 }
 
 /**
@@ -284,6 +351,7 @@ async function saveActorNewSessionDraftInFileScope(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode,
+          ...(input.modelProvided !== undefined ? { modelProvided: input.modelProvided } : {}),
           ...(input.selectedProjectChannelId !== undefined
             ? { selectedProjectChannelId: input.selectedProjectChannelId }
             : {}),
@@ -303,7 +371,10 @@ async function saveActorNewSessionDraftInFileScope(
         }),
       ),
     );
-    return mapNewSessionDraft(saved)!;
+    // Report the same model-policy marker a read of this row reports, so the
+    // save response and the next GET agree for old and new clients alike.
+    const mapped = mapNewSessionDraft(saved)!;
+    return { ...mapped, modelProvided: draftModelProvided(deps.settings, mapped) };
   } catch (error) {
     if (error instanceof NewSessionDraftAccessError) {
       throw new HTTPException(403, { message: error.message });
@@ -317,12 +388,13 @@ export async function getActorNewSessionDraft(
   grant: AccessGrant,
   workspaceId: string,
   authorization?: AccessGrantAuthorization,
+  readOptions: NewSessionDraftReadOptions = {},
 ): Promise<NewSessionDraftValue> {
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:read")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
   return withSessionRlsActorContext(actor, () =>
-    getActorNewSessionDraftInFileScope(deps, grant, workspaceId),
+    getActorNewSessionDraftInFileScope(deps, grant, workspaceId, readOptions),
   );
 }
 export async function saveActorNewSessionDraft(
@@ -335,43 +407,33 @@ export async function saveActorNewSessionDraft(
   return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
 }
 
-/** Reuse the website's actor/workspace selections without consuming its draft. */
-export async function getActorNewSessionDefaults(
+/**
+ * The model policy the person explicitly chose in the website composer, or an
+ * empty object when their draft follows the default.
+ *
+ * Only the model policy is reused. Connectors, repositories, Variable Sets,
+ * Sandbox Environment and compute target in the draft are the person's last
+ * explicit narrowing of one website chat, so surfaces that start work without
+ * the composer (Slack) resolve those from workspace defaults instead of
+ * silently inheriting that narrowing.
+ */
+export async function getActorNewSessionModelChoice(
   deps: Parameters<typeof getActorNewSessionDraft>[0],
   grant: AccessGrant,
   workspaceId: string,
-) {
-  const draft = await getActorNewSessionDraft(deps, grant, workspaceId);
-  const options = draft.options;
-  return {
-    // Revision zero is a synthetic empty form, not a user's model preference.
-    ...(draft.revision > 0
-      ? {
-          model: draft.model,
-          reasoningEffort: draft.reasoningEffort,
-          latencyMode: draft.latencyMode,
-        }
-      : {}),
-    resources: draft.resources.flatMap((resource) =>
-      resource.kind === "repository" ? [reusableNewSessionRepositoryResource(resource)] : [],
-    ),
-    ...(draft.toolsProvided
-      ? { tools: draft.tools }
-      : options.excludedMcpServerIds
-        ? { excludedMcpServerIds: options.excludedMcpServerIds }
-        : {}),
-    ...(options.firstPartyMcpTools ? { firstPartyMcpTools: options.firstPartyMcpTools } : {}),
-    ...(options.firstPartyMcpPermissions
-      ? { firstPartyMcpPermissions: options.firstPartyMcpPermissions }
-      : {}),
-    ...(options.variableSetIds ? { variableSetIds: options.variableSetIds } : {}),
-    ...(options.rigId ? { rigId: options.rigId } : {}),
-    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
-    ...(options.targetSandboxId
-      ? {
-          targetSandboxId: options.targetSandboxId,
-          ...(options.workingDir ? { workingDir: options.workingDir } : {}),
-        }
-      : {}),
-  };
+): Promise<
+  Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode"> | Record<string, never>
+> {
+  // A draft that follows the default is not projected here; session creation
+  // resolves the default itself, once.
+  const draft = await getActorNewSessionDraft(deps, grant, workspaceId, undefined, {
+    projectDefaultModel: false,
+  });
+  return draft.revision > 0 && draft.modelProvided === true
+    ? {
+        model: draft.model,
+        reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
+      }
+    : {};
 }

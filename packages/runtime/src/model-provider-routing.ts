@@ -1,3 +1,4 @@
+import { isDirectModelId } from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { configuredProviders, resolveModelProvider } from "@opengeni/config";
 import {
@@ -8,12 +9,18 @@ import {
   type ModelRequest,
   type ResponseStreamEvent,
 } from "@openai/agents";
-import OpenAI from "openai";
+import OpenAI, { APIError } from "openai";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import {
+  ResponsesStreamingTerminalError,
+  responsesStreamingTerminalError,
+} from "./responses-terminal-error";
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
@@ -79,6 +86,96 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     super(client, model);
   }
 
+  protected override _fetchResponse(
+    request: ModelRequest,
+    stream: false,
+  ): Promise<OpenAI.Responses.Response>;
+  protected _fetchResponse(
+    request: ModelRequest,
+    stream: true,
+  ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>>;
+  protected async _fetchResponse(
+    request: ModelRequest,
+    stream: boolean,
+  ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
+    if (!stream || !this.ownsResponsesTerminalClassification()) {
+      // Subscription transports retain the SDK's request-id and error handling.
+      return await super._fetchResponse(request, stream as false);
+    }
+    // Reuse the SDK's full request conversion, but retain its HTTP receipt
+    // before the SDK's stream wrapper discards the response headers.
+    const built = this._buildResponsesCreateRequest(request, true);
+    const internal = (request as ModelRequest & { _internal?: { runnerManagedRetry?: boolean } })
+      ._internal;
+    const pending = this._client.responses.create(
+      built.requestData as OpenAI.Responses.ResponseCreateParamsStreaming,
+      {
+        headers: built.sdkRequestHeaders,
+        signal: built.signal,
+        ...(built.transportExtraQuery ? { query: built.transportExtraQuery } : {}),
+        ...(internal?.runnerManagedRetry === true ? { maxRetries: 0 } : {}),
+      },
+    );
+    if (typeof pending.withResponse !== "function") {
+      // The SDK also permits custom clients returning only the stream promise.
+      // Such clients cannot supply HTTP evidence, but must remain usable.
+      return this.classifiedResponseStream(await pending, new Headers(), null);
+    }
+    const receipt = await pending.withResponse();
+    return this.classifiedResponseStream(
+      receipt.data,
+      receipt.response.headers,
+      receipt.request_id,
+    );
+  }
+
+  private async *classifiedResponseStream(
+    stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    headers: Headers,
+    requestId: string | null,
+  ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
+    try {
+      for await (const event of stream) {
+        const failure = responsesStreamingTerminalError(event, headers);
+        if (failure) throw failure;
+        // response.done is supported by the pinned terminal reducer but absent
+        // from the OpenAI wire declaration.
+        const eventType: string = event.type;
+        if (
+          requestId &&
+          (eventType === "response.completed" || eventType === "response.done") &&
+          "response" in event &&
+          event.response &&
+          !("_request_id" in event.response)
+        ) {
+          // Match the SDK's successful-terminal request-id attachment without
+          // making transport metadata enumerable in provider/model data.
+          try {
+            Object.defineProperty(event.response, "_request_id", {
+              value: requestId,
+              enumerable: false,
+            });
+          } catch {
+            // Frozen custom response objects remain usable, as in the SDK.
+          }
+        }
+        yield event;
+      }
+    } catch (error) {
+      // The OpenAI parser can throw a top-level `error` before yielding it.
+      // Convert inside the stream, before the Agents SDK's span error handler,
+      // so even enabled model tracing receives only the structural message.
+      if (error instanceof APIError && error.status === undefined && error.error) {
+        throw new ResponsesStreamingTerminalError("response.error", error.error, headers);
+      }
+      throw error;
+    }
+  }
+
+  private ownsResponsesTerminalClassification(): boolean {
+    return this.provider.kind !== "codex-subscription" && this.provider.kind !== "xai-subscription";
+  }
+
   protected override _buildResponsesCreateRequest(request: ModelRequest, stream: boolean) {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
@@ -104,6 +201,12 @@ export function buildModelInstance(
   client: OpenAI,
   modelId: string,
 ): Model {
+  if (provider.api === "anthropic-messages")
+    return new AnthropicMessagesModel(
+      provider,
+      modelId,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
     : new OpenGeniResponsesModel(client, modelId, provider);
@@ -160,9 +263,27 @@ export function resolveTurnModel(
  * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
+  // Per-run only: preserve Claude prompt/request lineage across tool iterations.
+  private readonly anthropicModels = new Map<string, Model>();
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
+    const binding = this.resolveBinding(modelName);
+    if (binding.provider.api !== "anthropic-messages") return binding.model;
+    const key = `${binding.provider.id}/${binding.modelId}`;
+    const cached = this.anthropicModels.get(key);
+    if (cached) return cached;
+    this.anthropicModels.set(key, binding.model);
+    return binding.model;
+  }
+
+  /**
+   * The provider, owned client, and upstream model id that `getModel` binds.
+   * Standalone requests outside an agent run (the session-title sidecar) use
+   * this to call the provider directly instead of the runner-facing
+   * `Model.getResponse()`, which requires an active trace.
+   */
+  resolveBinding(modelName?: string): ModelProviderBinding {
     if (modelName) {
       const resolved = resolveTurnModel(
         settingsForRunScopedModelResolution(this.settings, modelName),
@@ -189,7 +310,12 @@ export class MultiProviderModelProvider implements ModelProvider {
         ) {
           throw new XaiSubscriptionUnavailableError(modelName);
         }
-        return resolved.model;
+        return {
+          provider: resolved.provider,
+          client: resolved.client,
+          model: resolved.model,
+          modelId: resolved.configured.upstreamModelId,
+        };
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
       // (settingsWithCodexCredential) has injected the synthetic codex-subscription
@@ -209,19 +335,33 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
+    if (modelName && isDirectModelId(modelName)) {
+      throw new Error("The selected OpenAI or Azure OpenAI connection is unavailable");
+    }
     // Preserve the legacy unlisted-model fallback, but bind it through the same
     // typed request-policy model as every configured Responses call. This keeps
     // Azure wire normalization at the object stage instead of reintroducing a
     // JSON parse/stringify transport wrapper on the fallback path.
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
-    return new OpenGeniResponsesModel(
-      buildProviderClient(builtin, this.settings),
-      modelName ?? this.settings.openaiModel,
-      builtin,
-    );
+    const client = buildProviderClient(builtin, this.settings);
+    const modelId = modelName ?? this.settings.openaiModel;
+    return {
+      provider: builtin,
+      client,
+      model: new OpenGeniResponsesModel(client, modelId, builtin),
+      modelId,
+    };
   }
 }
+
+export type ModelProviderBinding = {
+  provider: ResolvedModelProvider;
+  client: OpenAI;
+  model: Model;
+  /** The id sent on the provider wire (the upstream id for a registry model). */
+  modelId: string;
+};
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
   if (modelName !== settings.openaiModel) {

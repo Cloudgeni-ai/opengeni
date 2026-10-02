@@ -11,6 +11,7 @@ import {
   getWorkspaceGrant,
   grantWorkspaceAccess,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
   listSessionDiscoverySummaries,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
@@ -185,6 +186,59 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("compact pages retain authority and display state while excluding large configuration", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:compact-list";
+    await grantWorkspaceAccess(db, {
+      ...workspace,
+      subjectId,
+      role: "owner",
+      permissions: ["workspace:read", "sessions:read", "sessions:create", "sessions:control"],
+    });
+    const siteId = crypto.randomUUID();
+    const root = await session({
+      ...workspace,
+      message: "Plan a generated example\0" + "x".repeat(32_768),
+      metadata: {
+        scheduledTaskId: "generated-task",
+        _opengeniSiteOrigin: { siteId, title: "Example Site" },
+        large: "x".repeat(65_536),
+      },
+      createdBy: { kind: "subject", subjectId, label: "Example member" },
+    });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      pinned: true,
+    });
+    const options = { subjectId, pinsOnly: true };
+    const full = await listSessionsForSubject(db, workspace.workspaceId, options);
+    const compact = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    const row = compact.pinned[0]!;
+    const { sessionListEntry } = await import("@opengeni/contracts/session-list-entries");
+    expect(row).toEqual(sessionListEntry(full.pinned[0]!));
+    expect(row.siteOrigin).toEqual({ siteId, title: "Example Site" });
+    expect(row.scheduledTaskId).toBe("generated-task");
+    expect(row.createdBy.label).toBe("Example member");
+    expect(row).not.toHaveProperty("metadata");
+    expect(row).not.toHaveProperty("initialMessage");
+    expect(row).not.toHaveProperty("tools");
+    expect(full.pinned[0]!.initialMessage).toBe("Plan a generated example\0" + "x".repeat(32_768));
+    expect(full.pinned[0]!.metadata.large).toHaveLength(65_536);
+    const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      pinsOnly: true,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(target.pinned[0]?.treeStats?.totalDescendants).toBe(0);
+    expect(target.pinned[0]?.parentSessionId).toBeNull();
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, { subjectId: "user:unrelated" }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  });
+
   test("keeps filtered row content from the same statement as page selection", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1142,6 +1196,47 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       where workspace_id = ${workspace.workspaceId}
         and subject_id = ${subjectId}`;
     expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("ordinary-only pages skip pin hydration without changing pin exclusion or cursors", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:ordinary-page";
+    await grantMember(workspace, subjectId);
+    const first = await session({ ...workspace, message: "ordinary first" });
+    const second = await session({ ...workspace, message: "ordinary second" });
+    const pinned = await session({ ...workspace, message: "pinned shortcut" });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: pinned.id,
+      pinned: true,
+    });
+    const baseline = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      includePinned: false,
+    });
+    expect(baseline.pinned.map((row) => row.id)).toEqual([pinned.id]);
+    expect(page.pinned).toEqual([]);
+    expect(page.pinnedTruncated).toBe(false);
+    expect(page.sessions.map((row) => row.id)).toEqual(baseline.sessions.map((row) => row.id));
+    expect(page.sessions[0]!.id).toBe(second.id);
+    const cursor = decodeSessionListCursor(page.nextCursor!);
+    expect(cursor).not.toBeNull();
+    const next = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      includePinned: false,
+      cursor: cursor!,
+    });
+    expect(next.pinned).toEqual([]);
+    expect(next.sessions.map((row) => row.id)).toEqual([first.id]);
+    expect(next.nextCursor).toBeNull();
   }, 60_000);
 
   test("Site origin filters before pagination, survives project moves and binds cursors", async () => {
@@ -2186,6 +2281,99 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         expectedVersion: 1,
       }),
     ).rejects.toBeInstanceOf(SessionAttentionVersionConflictError);
+  });
+
+  test("completed commentary never marks a read session unread; the next answer does", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({ ...workspace, message: "commentary target" });
+    const subject = "user:commentary-reader";
+    await grantMember(workspace, subject);
+    const message = (text: string, messageId: string, phase: "commentary" | "final_answer") => ({
+      type: "agent.message.completed" as const,
+      payload: { text, messageId, phase },
+    });
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("First answer.", "msg_first", "final_answer"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true },
+    );
+    const read = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: subject,
+      sessionId: target.id,
+      unread: false,
+      expectedVersion: 0,
+    });
+    expect(read).toMatchObject({ unread: false });
+
+    // The next turn narrates its progress: activity, not something to read.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("Checking the deploy logs.", "msg_progress_1", "commentary"),
+      message("Still checking the last region.", "msg_progress_2", "commentary"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: false },
+    );
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      message("Second answer.", "msg_second", "final_answer"),
+    ]);
+    expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
+      { unread: true },
+    );
+  });
+
+  test("a reply to a human message that ends waiting for input marks the session unread", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({ ...workspace, message: "status reply target" });
+    const subject = "user:status-reader";
+    await grantMember(workspace, subject);
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    let expectedVersion = 0;
+    const markRead = async () => {
+      const read = await setSessionAttention(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId: subject,
+        sessionId: target.id,
+        unread: false,
+        expectedVersion,
+      });
+      expect(read).toMatchObject({ unread: false });
+      expectedVersion = read!.attentionVersion;
+    };
+    const unread = async () =>
+      (await getSessionForSubject(db, workspace.workspaceId, target.id, subject))?.unread;
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "agent.message.completed", payload: { text: "Started ten reviewers." } },
+    ]);
+    await markRead();
+
+    // A turn that machine input started narrates and waits again: activity.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "Three reviews came back.", messageId: "msg_note", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "" } },
+    ]);
+    expect(await unread()).toBe(false);
+
+    // The human asks for status. The answer shares its response with the
+    // wait_for_input call, so it streams as commentary and the turn output
+    // stays empty; the settlement records the reply for attention.
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: status, messageId: "msg_status", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "", reply: status } },
+    ]);
+    expect(await unread()).toBe(true);
   });
 
   test("archives a root chat personally, hides its tree, and restores it", async () => {

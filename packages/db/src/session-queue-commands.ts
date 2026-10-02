@@ -1,5 +1,6 @@
 import { acceptSessionFileAttachments } from "./session-file-attachments";
-import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { ArchivedSessionImportError } from "./archived-session-imports";
+import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -14,7 +15,9 @@ import {
   ResourceRef,
   resourceMountPath,
   stableJson,
+  sessionTurnSurfaceOrNull,
   turnExecutionPolicyAuditMetadata,
+  type SessionTurnSurface,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
   type DraftTimelineAnnotation,
@@ -1754,6 +1757,8 @@ export async function submitHumanPromptInTransaction(
     /** False when the human input originated inside the active realtime provider session. */
     mirrorToRealtime?: boolean;
     source: "user" | "api";
+    /** Content-free product surface the request entered through. */
+    surface?: SessionTurnSurface | null;
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -1792,7 +1797,7 @@ export async function submitHumanPromptInTransaction(
       subjectId: input.actor.subjectId,
     });
   }
-  await lockSessionEventWriteRows(db, {
+  const promptLocks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
@@ -1802,6 +1807,11 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  if (
+    promptLocks.sessions.find((session) => session.id === input.sessionId)?.importedArchiveImportId
+  ) {
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  }
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -1881,7 +1891,7 @@ export async function submitHumanPromptInTransaction(
   }
 
   const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
-  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
@@ -2160,6 +2170,8 @@ export async function submitHumanPromptInTransaction(
           temporalWorkflowId: workflowId,
           status: "queued",
           source: input.source,
+          // An edit resubmits the same logical message: keep where it entered.
+          surface: sessionTurnSurfaceOrNull(editedSourceTurn?.surface) ?? input.surface ?? null,
           promptRouting: routing,
           position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
@@ -2600,6 +2612,8 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /** Fresh admission only, after receipt replay and exact caller authority. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -2660,6 +2674,7 @@ export async function sendAgentMessageInTransaction(
     targetSessionId: input.targetSessionId,
     action: "message",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
@@ -2667,7 +2682,14 @@ export async function sendAgentMessageInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2708,6 +2730,9 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
@@ -2833,7 +2858,7 @@ export async function sendAgentMessageInTransaction(
     updateId: update.id,
     eventIds,
     wakeRevision: wake?.wakeRevision ?? null,
-    shouldSignal: wake?.shouldSignal ?? false,
+    shouldSignal: wake !== null,
     workflowId,
     effectiveState: effective.state,
     interruptionCount: 0,
@@ -2851,6 +2876,8 @@ export async function steerAgentSessionInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     instruction: string;
+    /** Runs before resume, supersession or interruption; never on receipt replay. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -2914,6 +2941,7 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     action: "steer",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
@@ -2921,6 +2949,11 @@ export async function steerAgentSessionInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -2929,6 +2962,8 @@ export async function steerAgentSessionInTransaction(
     admission,
   });
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2997,6 +3032,9 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:

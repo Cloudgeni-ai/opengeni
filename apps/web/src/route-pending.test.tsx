@@ -61,7 +61,10 @@ describe("route pending boundaries", () => {
       });
 
       expect(container.textContent).toContain("Persistent rail");
-      expect(container.textContent).toContain("Loading page");
+      expect(document.body.textContent).toContain("Loading…");
+      expect(document.body.querySelector('[role="status"]')?.getAttribute("aria-label")).toBe(
+        "Loading",
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();

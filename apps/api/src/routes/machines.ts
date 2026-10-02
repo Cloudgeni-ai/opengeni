@@ -44,10 +44,11 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
-import { listMachines, metricRowToSample } from "../sandbox/machines";
+import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../sandbox/machines";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import { NatsControlRpc, subjectFor } from "@opengeni/runtime/sandbox";
+import { parseRequestJson } from "../http/request-body";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -215,6 +216,10 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(409, {
         message: "machine has no authoritative live agent build",
       });
+    }
+    const blockedReason = machineUpdateBlockedReason(live.os, live.agentVersion);
+    if (blockedReason) {
+      throw new HTTPException(422, { message: blockedReason });
     }
     const channel = live.agentUpdateChannel ?? "stable";
     const targetVersion =
@@ -388,7 +393,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw error;
       }
     }
-    const body = SwapActiveSandboxRequest.parse(await c.req.json());
+    const body = await parseRequestJson(c, SwapActiveSandboxRequest);
     const ctx = await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId,

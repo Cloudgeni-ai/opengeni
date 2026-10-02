@@ -177,8 +177,9 @@ export default function SessionSearchDialog(props: {
               find: committedQuery,
               matchSequence: match.sequence,
               matchOffset: match.messageMatchOffset,
+              searchOrigin: "session-search",
             }
-          : { find: committedQuery },
+          : { find: committedQuery, searchOrigin: "session-search" },
       });
     },
     [navigate, props.workspaceId, onOpenChange, previewSelection, committedQuery, accessDenied],

@@ -1,3 +1,5 @@
+import { codexPlanKey } from "@opengeni/codex";
+
 /** Refusal-specific, ordered recovery evidence; never erase the failure ledger. */
 export function unresolvedCodexCredentialFailures(
   metadata: Record<string, unknown> | null | undefined,
@@ -8,6 +10,7 @@ export function unresolvedCodexCredentialFailures(
     exhaustedKind: string | null;
     exhaustedRevision?: number;
     credentialVersion?: number;
+    planType?: string | null;
   }[],
   now = new Date(),
 ): string[] {
@@ -37,9 +40,20 @@ export function unresolvedCodexCredentialFailures(
         : null;
     if (
       rawReceipt !== undefined &&
-      (!receipt || !["quota", "rate_limit", "status"].includes(String(receipt.kind)))
+      (!receipt || !["quota", "rate_limit", "status", "plan"].includes(String(receipt.kind)))
     )
       return true;
+    // A plan entitlement refusal is bound to the plan it was observed under.
+    // Only a later provider observation of a DIFFERENT plan (for example an
+    // upgrade back to Pro) makes that account eligible for this turn again.
+    if (receipt?.kind === "plan") {
+      return !(
+        account?.status === "active" &&
+        typeof receipt.planType === "string" &&
+        account.planType !== undefined &&
+        codexPlanKey(account.planType) !== receipt.planType
+      );
+    }
     // The earlier atomic quarantine writer used explicit null only for status
     // refusals (it wrote needs_relogin/error in the same transaction). Seeing
     // active again therefore proves a later repair. Missing ID-only evidence

@@ -120,6 +120,24 @@ function tokenRegistration(property: string) {
 }
 
 describe("compiled CSS contract", () => {
+  test("browser and computer surfaces only use shipped color utilities", async () => {
+    const shipped = new Set<string>();
+    parsed.walkRules((rule) => {
+      selectorParser((selectors) => {
+        selectors.walkClasses((node) => {
+          shipped.add(node.value);
+        });
+      }).processSync(rule.selector);
+    });
+    for (const name of ["browser-viewer", "computer-viewer"]) {
+      const source = await readFile(join(packageRoot, "src/components", name + ".tsx"), "utf8");
+      const colors =
+        source.match(
+          /(?:bg-og-(?:surface|bg)[\w-]*|text-og-(?:fg|muted|subtle|danger|status)[\w-]*)/g,
+        ) ?? [];
+      for (const utility of new Set(colors)) expect(shipped.has(utility), utility).toBe(true);
+    }
+  });
   test("keeps hidden SDK controls hidden despite display utilities", () => {
     let hidden = false;
     parsed.walkRules((rule) => {
@@ -216,7 +234,7 @@ describe("compiled CSS contract", () => {
   test("registers independent defaults and keeps derived defaults live", () => {
     expect(tokenRegistration("--og-color-bg")).toEqual({
       inherits: "true",
-      initialValue: "oklch(0.155 0.012 260)",
+      initialValue: "#303030",
     });
     expect(tokenRegistration("--og-color-accent-soft")).toBeNull();
     expect(effectiveTokens).toContain("--_og-color-accent-soft: var(--og-color-accent-soft);");

@@ -185,6 +185,41 @@ export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool
   return hits.slice(0, limit).map((s) => s.tool); // no hits ⇒ [] (codex-rs parity; see doc)
 }
 
+/**
+ * Tools a free-text query names exactly, in query order. A query token that
+ * contains "_" names a tool when it equals the tool's full model name or the
+ * part after its last "__" server separator (`goal_complete` and
+ * `opengeni__goal_complete` both name `opengeni__goal_complete`). Single words
+ * such as "read" are never treated as names. Agents often search by exact name,
+ * and BM25 alone ranked a neighbouring tool first for about a fifth of those
+ * queries (`goal_complete` returned `goal_set` first).
+ */
+export function toolsNamedInQuery<T extends Tool & { name: string }>(
+  tools: T[],
+  query: string,
+): T[] {
+  const byName = new Map<string, T[]>();
+  for (const tool of tools) {
+    const full = tool.name.toLowerCase();
+    const separator = full.lastIndexOf(MCP_TOOL_NAME_SEPARATOR);
+    const short = separator >= 0 ? full.slice(separator + MCP_TOOL_NAME_SEPARATOR.length) : full;
+    for (const key of new Set([full, short])) {
+      const named = byName.get(key) ?? [];
+      named.push(tool);
+      byName.set(key, named);
+    }
+  }
+  const named: T[] = [];
+  for (const raw of query.toLowerCase().split(/[^a-z0-9_]+/)) {
+    const token = raw.replace(/^_+|_+$/g, "");
+    if (!token.includes("_")) continue;
+    for (const tool of byName.get(token) ?? []) {
+      if (!named.includes(tool)) named.push(tool);
+    }
+  }
+  return named;
+}
+
 /** Parse ranked or exact-name discovery arguments (string or object). */
 function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
   let obj: Record<string, unknown> = {};
@@ -231,12 +266,25 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
       tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
   );
   if (searchable.length === 0) return [];
-  const { query, limit, names } = parseSearchArgs(rawArguments);
-  // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
-  // search or another executor registry. Keep the SDK's original references.
-  const ranked = names
-    ? searchable.filter((tool) => names.includes(tool.name))
-    : bm25RankTools(searchable, query, searchable.length);
+  const { query, limit: requestedLimit, names } = parseSearchArgs(rawArguments);
+  let ranked: Tool[];
+  let limit = requestedLimit;
+  if (names) {
+    // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
+    // search or another executor registry. Keep the SDK's original references.
+    ranked = searchable.filter((tool) => names.includes(tool.name));
+  } else {
+    // Every tool the query names comes first, even beyond the requested limit;
+    // BM25 fills any remaining places.
+    const named = toolsNamedInQuery(searchable, query);
+    ranked = [
+      ...named,
+      ...bm25RankTools(searchable, query, searchable.length).filter(
+        (tool) => !named.includes(tool as Tool & { name: string }),
+      ),
+    ];
+    limit = Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
+  }
   const bounded: Tool[] = [];
   let disclosedBytes = 0;
   for (const tool of ranked) {

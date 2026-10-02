@@ -39,6 +39,7 @@ import {
 import {
   claimKnowledgeDocumentPreparation,
   completeKnowledgeDocumentPreparation,
+  currentCreditDebitAttribution,
   createPersonalDocumentAuthority,
   getFilesForSubject,
   resolveDocumentOriginalFileForSubject,
@@ -1599,6 +1600,7 @@ export async function addDocumentToBase(
             visibility: authority.kind === "personal" ? "private" : "workspace",
             agentAccess: input.agentAccess ?? true,
             createdBy: fileAuthoritySubjectId,
+            billingAttribution: currentCreditDebitAttribution(),
             curationStatus: input.curationStatus ?? "none",
             updatedAt: now,
           })

@@ -171,6 +171,106 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("replays a legacy Lightpanda create with corrected screenshot capabilities", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = {
+      ...createInput(scope),
+      driverId: "opengeni.lightpanda.cdp.v1",
+      engine: "lightpanda" as const,
+      capabilities: { ...LIGHTPANDA_BROWSER_SESSION_CAPABILITIES, screenshots: true },
+    };
+    const original = await prepareBrowserSessionCreate(client.db, input);
+    const replay = await prepareBrowserSessionCreate(client.db, {
+      ...input,
+      capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
+    });
+    expect(replay.session.id).toBe(original.session.id);
+    expect(replay.operation.replayed).toBe(true);
+    expect(replay.session.capabilities.screenshots).toBe(false);
+    await expect(
+      prepareBrowserSessionCreate(client.db, { ...input, name: "Changed request" }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+  });
+
+  test("settles an undispatched browser create failure and replays its durable receipt", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareBrowserSessionCreate(client.db, input);
+    const failed = await failBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "failed", controller: null, failureCode: "driver_failed" },
+      operation: { state: "failed", dispatchedAt: null },
+    });
+    expect(
+      await getBrowserSessionControlRecord(client.db, {
+        ...scope,
+        browserSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({ operation: { state: "failed", controllerGeneration: null } });
+    const replay = await prepareBrowserSessionCreate(client.db, input);
+    expect(replay.session.id).toBe(prepared.session.id);
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+  });
+
+  test("a late browser placement failure cannot erase a dispatched or accepted binding", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareBrowserSessionCreate(client.db, input);
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "placement:test",
+    };
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      controllerGeneration: controller.controllerGeneration,
+      controller,
+    });
+    const failure = {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed" as const, message: "Placement unavailable", retryable: true },
+    };
+    expect(await failBrowserSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "starting", controller, failureCode: null },
+      operation: { state: "dispatched", settledAt: null, error: null, replayed: true },
+    });
+    expect(
+      await getBrowserSessionControlRecord(client.db, {
+        ...scope,
+        browserSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({
+      operation: { state: "dispatched", controllerGeneration: controller.controllerGeneration },
+    });
+    await activateBrowserSession(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      controller,
+      engineVersion: null,
+    });
+    expect(await failBrowserSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "active", controller, failureCode: null },
+      operation: { state: "completed", error: null, replayed: true },
+    });
+  });
+
   test("restores a browser when end placement fails before dispatch", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -411,7 +511,7 @@ describe("durable BrowserSession lifecycle", () => {
     });
     expect(LIGHTPANDA_BROWSER_SESSION_CAPABILITIES).toMatchObject({
       semanticObservation: true,
-      screenshots: true,
+      screenshots: false,
       liveFrames: false,
       downloads: false,
       privateCheckpoint: false,
@@ -1170,6 +1270,51 @@ describe("durable BrowserSession lifecycle", () => {
       lifecycle: "active",
       controller: { controllerGeneration: active.controllerGeneration },
     });
+  });
+
+  test("retires a browser whose controller confirms its session is missing", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const operationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+    });
+    const failed = await failBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId: active.session.id,
+      controllerGeneration: active.controllerGeneration,
+      missingControllerSession: true,
+      error: {
+        code: "resource_not_found",
+        message: "browser session is not active",
+        retryable: false,
+      },
+    });
+    expect(failed.session).toMatchObject({
+      lifecycle: "lost",
+      controller: null,
+      failureCode: "controller_resource_missing",
+    });
+    expect(failed.operation.state).toBe("failed");
+    const replay = await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId,
+      actorSubjectId: scope.subjectId,
+    });
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+    expect(replay.session.lifecycle).toBe("lost");
   });
 
   test("enforces workspace RLS for reads", async () => {

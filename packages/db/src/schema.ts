@@ -1,5 +1,8 @@
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
-import { meaningfulSessionEventSql } from "./session-meaningful-events";
+import {
+  commentaryInclusiveMeaningfulSessionEventSql,
+  meaningfulSessionEventSql,
+} from "./session-meaningful-events";
 import type {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -31,7 +34,7 @@ import type {
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
-import type { SessionToolPolicy } from "@opengeni/contracts";
+import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -1474,6 +1477,18 @@ export const codexSubscriptionCredentials = pgTable(
     chatgptAccountId: text("chatgpt_account_id"), // plaintext ChatGPT-Account-ID header value (non-secret)
     scopes: text("scopes"), // space-delimited, as granted
     planType: text("plan_type"),
+    // When a provider plan observation (connect, token refresh id_token, or
+    // /wham/usage plan_type) last confirmed plan_type. Null for legacy rows.
+    planCheckedAt: timestamp("plan_checked_at", { withTimezone: true }),
+    // The most recent plan change a provider observation recorded: the plan
+    // before it and when it was seen. An observation of the same plan never
+    // overwrites it, so it stays evidence for a later ambiguous refusal.
+    planPreviousType: text("plan_previous_type"),
+    planChangedAt: timestamp("plan_changed_at", { withTimezone: true }),
+    // {planType, models: [{modelId, excludedAt}]}: models the CURRENT plan was
+    // proven not to include. Retired once plan_type no longer matches
+    // planType; each entry expires for allocation after a TTL. Never user policy.
+    planEntitlementExclusion: jsonb("plan_entitlement_exclusion"),
     isFedramp: boolean("is_fedramp").notNull().default(false),
     expiresAt: timestamp("expires_at", { withTimezone: true }), // derived from access-token JWT exp
     lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
@@ -1756,6 +1771,8 @@ export const connections = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     createOperationId: text("create_operation_id"),
     createRequestDigest: text("create_request_digest"),
     grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
@@ -2971,6 +2988,21 @@ export const slackInteractions = pgTable(
     // byte-compare raise `post_reconciliation_mismatch`. NULL means no
     // per-message workspace line.
     routedWorkspaceLabel: text("routed_workspace_label"),
+    // What the bound session started with (connectors, repositories, Sandbox
+    // Environment), rendered once when the session binds and shown in the
+    // acknowledgement. Frozen for the same byte-compare reason as the label
+    // above: the session's tools and resources can change after creation.
+    // NULL means no line. No longer written: new tasks do not list what they
+    // started with, and older rows keep their line so a repair of an already
+    // posted acknowledgement still renders the same bytes.
+    sessionDefaultsLine: text("session_defaults_line"),
+    // The first message's opening sentence (session link, routed workspace,
+    // privacy note), rendered once when the session binds. Frozen for the same
+    // byte-compare reason as the label above: the first message is re-rendered
+    // on repair, on every Stop/Resume click, and when the task settles. NULL
+    // means the interaction keeps the previous message format (bound before
+    // this column existed, or by an older image).
+    startMessageLine: text("start_message_line"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
@@ -3724,7 +3756,7 @@ export const integrationOauthPendingStates = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull(),
+    workspaceId: uuid("workspace_id"),
     stateEncrypted: text("state_encrypted").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3738,6 +3770,199 @@ export const integrationOauthPendingStates = pgTable(
     expiry: index("integration_oauth_pending_states_expiry_idx").on(
       table.workspaceId,
       table.expiresAt,
+    ),
+  }),
+);
+
+export const workspaceCredentialProviders = pgTable(
+  "workspace_credential_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    timeoutMs: integer("timeout_ms").notNull().default(10000),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_credential_providers_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceUnique: uniqueIndex("workspace_credential_providers_workspace_uq").on(
+      table.workspaceId,
+    ),
+  }),
+);
+
+export const workspaceWebhooks = pgTable(
+  "workspace_webhooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    eventTypes: text("event_types").array().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    description: text("description"),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_webhooks_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceIdUnique: unique("workspace_webhooks_workspace_id_uq").on(table.workspaceId, table.id),
+    workspaceIndex: index("workspace_webhooks_workspace_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const workspaceWebhookDeliveries = pgTable(
+  "workspace_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    webhookId: uuid("webhook_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    lastStatus: integer("last_status"),
+    lastError: text("last_error"),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_webhook_deliveries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    webhook: foreignKey({
+      name: "workspace_webhook_deliveries_webhook_fk",
+      columns: [table.workspaceId, table.webhookId],
+      foreignColumns: [workspaceWebhooks.workspaceId, workspaceWebhooks.id],
+    }).onDelete("cascade"),
+    eventUnique: uniqueIndex("workspace_webhook_deliveries_event_uq").on(
+      table.webhookId,
+      table.eventId,
+    ),
+    recent: index("workspace_webhook_deliveries_webhook_recent_idx").on(
+      table.webhookId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type IntegrationWorkspaceFilter = { externalSource: string };
+
+export const organizationCredentialProviders = pgTable(
+  "organization_credential_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    timeoutMs: integer("timeout_ms").notNull().default(10000),
+    workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountUnique: uniqueIndex("organization_credential_providers_account_uq").on(table.accountId),
+  }),
+);
+
+export const organizationWebhooks = pgTable(
+  "organization_webhooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    eventTypes: text("event_types").array().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    description: text("description"),
+    workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdUnique: unique("organization_webhooks_account_id_uq").on(table.accountId, table.id),
+    accountIndex: index("organization_webhooks_account_idx").on(table.accountId, table.createdAt),
+  }),
+);
+
+export const organizationWebhookDeliveries = pgTable(
+  "organization_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    webhookId: uuid("webhook_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    lastStatus: integer("last_status"),
+    lastError: text("last_error"),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "organization_webhook_deliveries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    webhook: foreignKey({
+      name: "organization_webhook_deliveries_webhook_fk",
+      columns: [table.accountId, table.webhookId],
+      foreignColumns: [organizationWebhooks.accountId, organizationWebhooks.id],
+    }).onDelete("cascade"),
+    eventUnique: uniqueIndex("organization_webhook_deliveries_event_uq").on(
+      table.webhookId,
+      table.eventId,
+    ),
+    recent: index("organization_webhook_deliveries_webhook_recent_idx").on(
+      table.webhookId,
+      table.createdAt,
     ),
   }),
 );
@@ -4455,6 +4680,13 @@ export const sessions = pgTable(
     // attempt-snapshot boundary.
     policyRole: text("policy_role"),
     admissionBlock: jsonb("admission_block").$type<StoredSessionAdmissionBlock>(),
+    // Immutable timeline-only import identity, never inferred from metadata or
+    // a user's mutable session archive preference.
+    importedArchiveImportId: text("imported_archive_import_id"),
+    importedArchiveImportedAt: timestamp("imported_archive_imported_at", { withTimezone: true }),
+    importedArchiveRequestHash: text("imported_archive_request_hash"),
+    importedArchiveSubjectId: text("imported_archive_subject_id"),
+    importedArchiveNextOffset: integer("imported_archive_next_offset"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4684,6 +4916,12 @@ export const sessions = pgTable(
     // or portable (plaintext compaction + free provider switching). Existing
     // rows backfill to portable. CHECK lives in the migration.
     codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
+    // Frozen at create (migration 0520): whether the optional Jev-backed
+    // code_search tool is offered. NULL, as on every older row, means off.
+    codeSearchEnabled: boolean("code_search_enabled"),
+    // Frozen agent configuration (migration 0559); NULL means a legacy
+    // session. Mid-session updates share the tool_policy_version CAS.
+    agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Assigned once by the explicit transaction commit gate whenever canonical
@@ -4707,6 +4945,26 @@ export const sessions = pgTable(
     ),
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
+    workspaceImportedArchive: uniqueIndex("sessions_workspace_imported_archive_idx")
+      .on(table.workspaceId, table.importedArchiveImportId)
+      .where(sql`${table.importedArchiveImportId} is not null`),
+    importedArchiveIdentity: check(
+      "sessions_imported_archive_identity_check",
+      sql`
+      (${table.importedArchiveImportId} is null and ${table.importedArchiveImportedAt} is null
+        and ${table.importedArchiveRequestHash} is null and ${table.importedArchiveSubjectId} is null
+        and ${table.importedArchiveNextOffset} is null)
+      or (${table.importedArchiveImportId} is not null and octet_length(${table.importedArchiveImportId}) between 1 and 800
+        and ${table.importedArchiveImportedAt} is not null and ${table.importedArchiveRequestHash} is not null
+        and ${table.importedArchiveRequestHash} ~ '^[0-9a-f]{64}$' and ${table.importedArchiveSubjectId} is not null
+        and ${table.importedArchiveNextOffset} is not null and ${table.importedArchiveNextOffset} >= 0)`,
+    ),
+    importedArchiveInert: check(
+      "sessions_imported_archive_inert_check",
+      sql`
+      ${table.importedArchiveImportId} is null or
+      (${table.status} = 'idle' and ${table.activeTurnId} is null and ${table.temporalWorkflowId} is null and ${table.parentSessionId} is null)`,
+    ),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
       table.createdAt,
@@ -5011,6 +5269,11 @@ export const sessionRealtimeModes = pgTable(
     ownerSubjectId: text("owner_subject_id").notNull(),
     browserInstanceId: text("browser_instance_id").notNull(),
     ownerKeyHash: text("owner_key_hash").notNull(),
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
@@ -5635,6 +5898,83 @@ export const sandboxFilePublications = opengeniPrivateSchema.table(
       table.sourceSessionId,
       table.publishedAt,
       table.fileId,
+    ),
+  }),
+);
+
+/** Source-session upload fence; never stores file bytes or expiring upload URLs. */
+export const slackFileUploadOperations = opengeniPrivateSchema.table(
+  "slack_file_upload_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    interactionId: uuid("interaction_id").notNull(),
+    // Routed interactions may use an installation whose HOME is another workspace.
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    fileId: uuid("file_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    phase: text("phase")
+      .$type<
+        "pending" | "uploading" | "uploaded" | "completing" | "outcome_unknown" | "completed"
+      >()
+      .notNull()
+      .default("pending"),
+    slackFileId: text("slack_file_id"),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operation: uniqueIndex("slack_file_upload_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    session: foreignKey({
+      name: "slack_file_upload_operations_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    interaction: foreignKey({
+      name: "slack_file_upload_operations_interaction_fk",
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+    }).onDelete("cascade"),
+    file: foreignKey({
+      name: "slack_file_upload_operations_file_fk",
+      columns: [table.accountId, table.workspaceId, table.fileId],
+      foreignColumns: [files.accountId, files.workspaceId, files.id],
+    }).onDelete("cascade"),
+    sessionLookup: index("slack_file_upload_operations_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    bounds: check(
+      "slack_file_upload_operations_bounds_check",
+      sql`octet_length(${table.subjectId}) between 1 and 1024
+        and length(btrim(${table.subjectId})) > 0
+        and ${table.requestDigest} ~ '^[a-f0-9]{64}$'
+        and (${table.slackFileId} is null or (
+          octet_length(${table.slackFileId}) between 1 and 128
+          and length(btrim(${table.slackFileId})) > 0
+        ))`,
+    ),
+    state: check(
+      "slack_file_upload_operations_state_check",
+      sql`${table.phase} in ('pending', 'uploading', 'uploaded', 'completing', 'outcome_unknown', 'completed')
+        and ((${table.phase} = 'pending') = (${table.slackFileId} is null))
+        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))
+        and (${table.phase} <> 'completed' or ${table.claimHolderId} is null)`,
     ),
   }),
 );
@@ -6445,6 +6785,12 @@ export const documents = pgTable(
     // document from agent retrieval surfaces (docs MCP) while humans keep REST.
     visibility: text("visibility").notNull().default("workspace"),
     createdBy: text("created_by"),
+    // Trusted ingestion causality, frozen before async source preparation.
+    // createdBy/authority ownership is not verified initiating-human evidence.
+    billingAttribution: jsonb("billing_attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull()
+      .default({ kind: "unknown" }),
     agentAccess: boolean("agent_access").notNull().default(true),
     // Auto-curation output (knowledge drops).
     summary: text("summary"),
@@ -6741,6 +7087,10 @@ export const sessionTurns = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
+    // Immutable, content-free product surface the request entered through
+    // (`SessionTurnSurface`). Analytics only, never an authorization input.
+    // Null is reserved for rolling/legacy writers (migration 0533).
+    surface: text("surface"),
     // Immutable user-facing admission intent. Physical execution still uses
     // status=queued until a worker claims the row; this field keeps that
     // implementation queue distinct from prompts genuinely waiting behind
@@ -6858,6 +7208,13 @@ export const sessionTurns = pgTable(
       "session_turns_model_context_check",
       sql`${table.modelContext} is null
         or opengeni_private.model_context_value_valid(${table.modelContext})`,
+    ),
+    surfaceValid: check(
+      "session_turns_surface_check",
+      sql`${table.surface} is null or ${table.surface} in (
+        'web', 'slack', 'api_key', 'embedded', 'scheduled', 'agent',
+        'voice', 'site', 'automation', 'mcp', 'system'
+      )`,
     ),
   }),
 );
@@ -8771,6 +9128,7 @@ export const sessionEventCursors = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     lastSequence: integer("last_sequence").notNull().default(0),
+    lastMeaningfulSequence: integer("last_meaningful_sequence").notNull().default(0),
     revision: bigint("revision", { mode: "number" }).notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8791,7 +9149,64 @@ export const sessionEventCursors = pgTable(
       table.sessionId,
     ),
     sequenceValid: check("session_event_cursors_sequence_check", sql`${table.lastSequence} >= 0`),
+    meaningfulSequenceValid: check(
+      "session_event_cursors_meaningful_sequence_check",
+      sql`${table.lastMeaningfulSequence} >= 0 and ${table.lastMeaningfulSequence} <= ${table.lastSequence}`,
+    ),
     revisionValid: check("session_event_cursors_revision_check", sql`${table.revision} >= 0`),
+  }),
+);
+
+export const sessionImportBatches = opengeniPrivateSchema.table(
+  "session_import_batches",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    batchId: text("batch_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    eventOffset: integer("event_offset").notNull(),
+    eventCount: integer("event_count").notNull(),
+    nextOffset: integer("next_offset").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.sessionId, table.batchId] }),
+    workspaceAccountFk: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSessionFk: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    batchIdValid: check(
+      "session_import_batches_batch_id_check",
+      sql`octet_length(${table.batchId}) between 1 and 800`,
+    ),
+    requestHashValid: check(
+      "session_import_batches_request_hash_check",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    eventOffsetValid: check(
+      "session_import_batches_event_offset_check",
+      sql`${table.eventOffset} >= 0`,
+    ),
+    eventCountValid: check(
+      "session_import_batches_event_count_check",
+      sql`${table.eventCount} between 1 and 100`,
+    ),
+    nextOffsetValid: check(
+      "session_import_batches_next_offset_check",
+      sql`${table.nextOffset} = ${table.eventOffset} + ${table.eventCount}`,
+    ),
   }),
 );
 
@@ -8852,7 +9267,12 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    // Pre-0527 attention probes (which still counted commentary) during a rolling
+    // deploy. Drop it in a later rolling migration once no pre-0527 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),
+    meaningfulAttentionWithoutCommentary: index("session_events_meaningful_attention_v2_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(meaningfulSessionEventSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
@@ -9359,10 +9779,25 @@ export const sandboxLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
+    providerCreateAttempt: jsonb("provider_create_attempt").$type<Record<string, unknown>>(),
+    providerCreateRecoveryAfter: timestamp("provider_create_recovery_after", {
+      withTimezone: true,
+    }),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {
       withTimezone: true,
+    }),
+    // Stamped by a database trigger (0547) whenever the holder counters change,
+    // for every writer generation. Idle command containment measures holder
+    // release from this durable fact.
+    holdersChangedAt: timestamp("holders_changed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Why an enrolled drain contains its commands (0547); cleared with the
+    // enrollment. Null for a pre-0547 enrollment: settle with neutral wording.
+    commandContainmentReason: text("command_containment_reason", {
+      enum: ["idle_containment", "provider_deadline_containment"],
     }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
@@ -9953,9 +10388,9 @@ export const sandboxRetainedProcesses = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
     providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
-    supervisionRetentionXid: customType<{ data: string }>({ dataType: () => "xid8" })(
-      "supervision_retention_xid",
-    ).default(sql`pg_current_xact_id()`),
+    supervisionRetentionXid: customType<{ data: string }>({
+      dataType: () => "xid8",
+    })("supervision_retention_xid").default(sql`pg_current_xact_id()`),
     supervisionReceipt: jsonb("supervision_receipt").$type<CommandSupervisionReceipt>(),
     supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
     cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
@@ -11406,6 +11841,8 @@ export const scheduledTaskRuns = pgTable(
     // authority and never appears in public scheduled-run projections.
     acceptedExecutionSnapshot: jsonb("accepted_execution_snapshot").$type<unknown>(),
     acceptedExecutionDigest: text("accepted_execution_digest"),
+    admissionDiagnostic: jsonb("admission_diagnostic").$type<unknown>(),
+    admissionRefusal: jsonb("admission_refusal").$type<unknown>(),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12014,13 +12451,14 @@ export const modelCallFacts = pgTable(
   }),
 );
 
-/** Singleton, migration-installed gate. Standalone defaults keep both off. */
+/** Singleton, migration-installed gate. Standalone defaults keep every kind off. */
 export const hostExportConfig = pgTable(
   "host_export_config",
   {
     id: integer("id").primaryKey().default(1),
     sessionEventsEnabled: boolean("session_events_enabled").notNull().default(false),
     usageEventsEnabled: boolean("usage_events_enabled").notNull().default(false),
+    lifecycleFactsEnabled: boolean("lifecycle_facts_enabled").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -12042,8 +12480,9 @@ export const hostExportOutbox = pgTable(
     exportKind: text("export_kind").notNull(),
     exportCursor: bigint("export_cursor", { mode: "bigint" }),
     sourceId: uuid("source_id").notNull(),
-    accountId: uuid("account_id").notNull(),
-    workspaceId: uuid("workspace_id").notNull(),
+    // Null only for `lifecycle_fact` rows (see host_export_outbox_scope_check).
+    accountId: uuid("account_id"),
+    workspaceId: uuid("workspace_id"),
     sessionId: uuid("session_id"),
     rootSessionId: uuid("root_session_id"),
     turnId: uuid("turn_id"),
@@ -12062,6 +12501,10 @@ export const hostExportOutbox = pgTable(
       .notNull()
       .default({}),
     origin: text("origin"),
+    // Content-free analytics dimensions captured with the row (migration 0533).
+    surface: text("surface"),
+    modelProvider: text("model_provider"),
+    toolFamily: text("tool_family"),
     payload: jsonb("payload").$type<unknown>().notNull(),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
@@ -12074,7 +12517,15 @@ export const hostExportOutbox = pgTable(
   (table) => ({
     kindValid: check(
       "host_export_outbox_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
+    ),
+    scopeValid: check(
+      "host_export_outbox_scope_check",
+      sql`(${table.exportKind} <> 'lifecycle_fact'
+        and ${table.accountId} is not null and ${table.workspaceId} is not null)
+        or (${table.exportKind} = 'lifecycle_fact'
+          and (${table.workspaceId} is null or ${table.accountId} is not null)
+          and ${table.sessionId} is null)`,
     ),
     rootSessionCaptured: check(
       "host_export_outbox_root_session_check",
@@ -12100,6 +12551,20 @@ export const hostExportOutbox = pgTable(
         'user', 'scheduled_task', 'api', 'goal', 'system', 'compaction'
       )`,
     ),
+    analyticsValid: check(
+      "host_export_outbox_analytics_check",
+      sql`(${table.surface} is null or ${table.surface} in (
+        'web', 'slack', 'api_key', 'embedded', 'scheduled', 'agent',
+        'voice', 'site', 'automation', 'mcp', 'system'
+      ))
+      and (${table.modelProvider} is null or ${table.modelProvider} in (
+        'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
+        'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
+        'openrouter', 'workspace-openrouter', 'organization-openrouter', 'registry'
+      ))
+      and (${table.toolFamily} is null or ${table.toolFamily} ~
+        '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
+    ),
   }),
 );
 
@@ -12114,7 +12579,7 @@ export const hostExportCursorState = pgTable(
   (table) => ({
     kindValid: check(
       "host_export_cursor_state_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     cursorValid: check(
       "host_export_cursor_state_next_check",
@@ -12154,7 +12619,7 @@ export const hostExportConsumers = pgTable(
     ),
     kindValid: check(
       "host_export_consumers_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     checkpointValid: check("host_export_consumers_checkpoint_check", sql`${table.checkpoint} >= 0`),
     due: index("host_export_consumers_due_idx").on(
@@ -12188,7 +12653,7 @@ export const hostExportDeadLetters = pgTable(
     ),
     kindValid: check(
       "host_export_dead_letters_kind_check",
-      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+      sql`${table.exportKind} in ('session_event', 'usage_event', 'lifecycle_fact')`,
     ),
     reasonValid: check(
       "host_export_dead_letters_reason_check",
@@ -12227,6 +12692,228 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+/** Content-free immutable accepted billing facts; no runtime table privileges. */
+export const usageAllowanceAttributionReceipts = opengeniPrivateSchema.table(
+  "usage_allowance_attribution_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceKind: text("source_kind").$type<"turn" | "schedule" | "knowledge_query">().notNull(),
+    sourceId: text("source_id").notNull(),
+    sessionId: uuid("session_id"),
+    attribution: jsonb("attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull(),
+    quantity: bigint("quantity", { mode: "number" }),
+    idempotencyKey: text("idempotency_key"),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.accountId, table.workspaceId, table.sourceKind, table.sourceId],
+    }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+/** EXECUTE-only lifecycle/counter storage; migration 0547 owns FORCE-RLS policy. */
+export const workspaceAllowanceClearReceipts = opengeniPrivateSchema.table(
+  "workspace_allowance_clear_receipts",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<{ version: number }>().notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceUsageAllowances = opengeniPrivateSchema.table(
+  "workspace_usage_allowances",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    activePeriodKey: text("active_period_key"),
+    activeStartAt: timestamp("active_start_at", { withTimezone: true }),
+    activeEndAt: timestamp("active_end_at", { withTimezone: true }),
+    maintenanceNextAt: timestamp("maintenance_next_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    maintenanceCursor: text("maintenance_cursor"),
+    maintenanceError: text("maintenance_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    maintenanceDue: index("workspace_usage_allowances_maintenance_due")
+      .on(table.maintenanceNextAt, table.workspaceId)
+      .where(sql`${table.config} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceMemberAllowances = opengeniPrivateSchema.table(
+  "workspace_member_allowances",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    rule: jsonb("rule").$type<import("./usage-allowances").MemberAllowanceRule>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceGrants = opengeniPrivateSchema.table(
+  "workspace_allowance_grants",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    credits: bigint("credits", { mode: "number" }).notNull(),
+    remaining: bigint("remaining", { mode: "number" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    fefo: index("workspace_allowance_grants_fefo")
+      .on(table.workspaceId, table.expiresAt, table.createdAt, table.operationId)
+      .where(sql`${table.remaining} > 0`),
+  }),
+);
+export const workspaceAllowanceCounters = opengeniPrivateSchema.table(
+  "workspace_allowance_counters",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull().default(""),
+    used: bigint("used", { mode: "number" }).notNull().default(0),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull().default(0),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull().default(0),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceNotifications = opengeniPrivateSchema.table(
+  "workspace_allowance_notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull(),
+    threshold: numeric("threshold").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    crossing: uniqueIndex("workspace_allowance_notifications_crossing").on(
+      table.workspaceId,
+      table.periodKey,
+      table.subjectId,
+      table.threshold,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowancePeriods = opengeniPrivateSchema.table(
+  "workspace_allowance_periods",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    startAt: timestamp("start_at", { withTimezone: true }),
+    endAt: timestamp("end_at", { withTimezone: true }),
+    grantsRemaining: bigint("grants_remaining", { mode: "number" }).notNull().default(0),
+    grantsSnapshot: jsonb("grants_snapshot").$type<unknown[]>().notNull().default([]),
+    memberRules: jsonb("member_rules").$type<Record<string, unknown>>().notNull().default({}),
+    memberCount: integer("member_count").notNull().default(0),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceVideoAllowanceAllocations = opengeniPrivateSchema.table(
+  "workspace_video_allowance_allocations",
+  {
+    ledgerId: uuid("ledger_id")
+      .primaryKey()
+      .references(() => creditLedgerEntries.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    humanSubjectId: text("human_subject_id"),
+    amount: bigint("amount", { mode: "number" }).notNull(),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull(),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull(),
+    grantAllocations: jsonb("grant_allocations")
+      .$type<Array<{ operationId: string; credits: number }>>()
+      .notNull(),
+    reversedByLedgerId: uuid("reversed_by_ledger_id").references(() => creditLedgerEntries.id),
+  },
+  (table) => ({
+    operation: uniqueIndex("workspace_video_allowance_allocations_operation_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.operationId,
+    ),
+    refund: uniqueIndex("workspace_video_allowance_allocations_refund_idx")
+      .on(table.reversedByLedgerId)
+      .where(sql`${table.reversedByLedgerId} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 
@@ -13551,7 +14238,9 @@ export const workspaceGatewayCustomModels = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -13583,7 +14272,7 @@ export const workspaceGatewayCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "workspace_gateway_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
@@ -13622,9 +14311,13 @@ export const organizationModelProviderConnections = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
@@ -13644,7 +14337,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -13672,7 +14365,9 @@ export const organizationModelProviderConnectionOperations = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
@@ -13693,7 +14388,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -13717,7 +14412,9 @@ export const organizationModelProviderCustomModels = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    providerKind: text("provider_kind")
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -13742,7 +14439,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

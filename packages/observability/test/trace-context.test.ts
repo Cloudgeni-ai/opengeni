@@ -2,6 +2,27 @@ import { expect, test } from "bun:test";
 import { createObservability, withTraceContext, parseTraceparent, traceparent } from "../src";
 import { validTraceContext } from "../src/trace-context";
 
+test("valid unsampled host trace flags survive parsing, scoping, and child spans", () => {
+  const header = `00-${"a".repeat(32)}-${"b".repeat(16)}-00`;
+  const context = parseTraceparent(header)!;
+  expect(traceparent(context)).toBe(header);
+  const obs = createObservability(
+    {
+      serviceName: "test",
+      environment: "test",
+      observabilityStructuredLogs: false,
+      observabilityMetricsEnabled: false,
+      observabilityOtlpHeaders: "",
+    },
+    { component: "worker" },
+  );
+  withTraceContext(context, () => {
+    const span = obs.startSpan("child");
+    expect(traceparent(span)).toBe(`00-${context.traceId}-${span.spanId}-00`);
+    span.end();
+  });
+});
+
 test("trace identities reject accessors, prototypes, coercion and hostile descriptor traps", async () => {
   const traceId = "a".repeat(32);
   const spanId = "b".repeat(16);
@@ -152,7 +173,11 @@ test("interleaved async operations export exact parent identity without cross-re
   }
   expect(JSON.stringify(bodies)).not.toContain("SECRET_CANARY");
   expect(obs.startSpan("outside").traceId).not.toBe(a.traceId);
-  expect(parseTraceparent(traceparent(a))).toEqual({ traceId: a.traceId, spanId: a.spanId });
+  expect(parseTraceparent(traceparent(a))).toEqual({
+    traceId: a.traceId,
+    spanId: a.spanId,
+    traceFlags: "01",
+  });
   expect(parseTraceparent("00-" + "0".repeat(32) + "-" + a.spanId + "-01")).toBeUndefined();
 });
 

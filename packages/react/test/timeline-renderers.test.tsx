@@ -1,9 +1,10 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/sdk";
+import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
-import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } from "../src/timeline";
+import { registerDom, renderComponent, flush, actRun } from "./render-hook";
+import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
+import { formatAllowanceDate } from "../src/usage/allowance-copy";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -13,8 +14,6 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
-import { MessageTimeline } from "../src";
-import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -26,6 +25,14 @@ import { TimelineRow } from "../src/components/message-timeline";
    -------------------------------------------------------------------------- */
 
 registerDom();
+
+// Radix chooses its layout-effect implementation at import time. Load the real
+// renderers only after the DOM exists so close/open assertions test browser
+// behavior, not the server no-op that leaves initially open content mounted.
+const { defaultToolRegistry, ActivityRail, TimelineComputeLabelProvider } =
+  await import("../src/timeline");
+const { MessageTimeline } = await import("../src");
+const { TimelineRow } = await import("../src/components/message-timeline");
 
 test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
   for (const origin of ["native", "codemode"]) {
@@ -59,6 +66,19 @@ test("account-qualified native and Codemode calls render persisted labels after 
 
 let timelineSequence = 0;
 
+test("repeated empty final renders its notice without a failure label", async () => {
+  const rendered = await renderComponent(
+    <MessageTimeline
+      events={[timelineEvent("turn.completed", { output: "", emptyFinalReply: true })]}
+      status="idle"
+    />,
+  );
+  await flush();
+  expect(rendered.container.textContent).toContain(EMPTY_FINAL_REPLY_NOTICE);
+  expect(rendered.container.textContent).not.toContain("Turn failed");
+  await rendered.unmount();
+});
+
 function timelineEvent(
   type: string,
   payload: unknown,
@@ -89,6 +109,88 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
 
   throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
 }
+
+describe("allowance refusal rendering", () => {
+  test.each(["workspace", "member"] as const)(
+    "renders one %s remedy from paired usage and completed events",
+    async (scope) => {
+      const refusal = {
+        code: "allowance_exhausted",
+        scope,
+        ...(scope === "member" ? { subjectId: "user:member" } : {}),
+        resetsAt: "2026-10-01T02:30:00+02:00",
+        message: "Private wrapper says buy credits",
+      };
+      const r = await renderComponent(
+        <MessageTimeline
+          events={[
+            timelineEvent("usage.exhausted", refusal),
+            timelineEvent("turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
+          ]}
+        />,
+      );
+      await flush();
+      const text = r.container.textContent ?? "";
+      expect(text).toContain(
+        scope === "workspace"
+          ? "An organization admin can raise the workspace budget."
+          : "A workspace admin can raise this limit.",
+      );
+      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
+      expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
+        "status",
+      );
+      expect(text).not.toMatch(/buy credits|subscription|private wrapper|API key/i);
+      await r.unmount();
+    },
+  );
+
+  test("hosts reword or replace the row and keep the typed refusal", async () => {
+    const refusal = {
+      code: "allowance_exhausted",
+      scope: "member",
+      subjectId: "user:member",
+      resetsAt: null,
+      message: "ignored",
+    };
+    const reworded = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", refusal)]}
+        allowanceExhaustedLabels={{
+          memberLimitReachedTitle: "You're out of usage for this plan",
+          memberRemedy: "Ask your team admin for more.",
+          noReset: "Buy a top-up to keep going.",
+        }}
+      />,
+    );
+    await flush();
+    const text = reworded.container.textContent ?? "";
+    expect(text).toContain("You're out of usage for this plan");
+    expect(text).toContain("Ask your team admin for more. Buy a top-up to keep going.");
+    await reworded.unmount();
+
+    const seen: unknown[] = [];
+    const replaced = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", { ...refusal, scope: "workspace" })]}
+        renderAllowanceExhausted={(typed, { defaultRow }) => {
+          seen.push(typed);
+          return typed.scope === "workspace" ? (
+            <p data-testid="custom">Your team has used this month's plan. Upgrade?</p>
+          ) : (
+            defaultRow
+          );
+        }}
+      />,
+    );
+    await flush();
+    expect(replaced.container.textContent).toContain("Upgrade?");
+    expect(replaced.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(0);
+    expect(seen[0]).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+    await replaced.unmount();
+  });
+});
 
 describe("context compaction rendering", () => {
   test("labels before and after values as estimated history tokens", async () => {
@@ -357,6 +459,31 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("does not render background command delivery notices in chat", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "command-result",
+                kind: "background_command_result",
+                classification: "success",
+                sourceId: "command-1",
+                summary: "execCommand: completed successfully.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("details[data-og-machine-input-batch]")).toBeNull();
+    expect(r.container.textContent).not.toContain("Command result received");
+    await r.unmount();
+  });
+
   test("opens the typed child source without treating receipt delivery as work completion", async () => {
     resetTimelineEvents();
     const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -542,6 +669,56 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("SiteArtifactRenderer", () => {
+  test("Site actions expose pending and retry state instead of swallowing failures", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const pending = new Promise<void>((_resolve, rejectPending) => {
+      reject = rejectPending;
+    });
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      status: "complete",
+      output: {
+        artifact: {
+          id: "22222222-2222-4222-8222-222222222222",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          title: "Board",
+        },
+        version: { revision: 1 },
+      },
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const view = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={() => ({
+          open: () => {
+            calls++;
+            return pending;
+          },
+        })}
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      await flush();
+      const button = view.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Board"]',
+      )!;
+      await actRun(() => button.click());
+      await flush();
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      button.click();
+      expect(calls).toBe(1);
+      await actRun(() => reject(new Error("failed")));
+      await flush();
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toBe("Retry open");
+    } finally {
+      await view.unmount();
+    }
+  });
   test("renders a direct durable Site link from the structured mutation result", async () => {
     const item = toolItem({
       name: "opengeni__artifacts_create",
@@ -564,10 +741,25 @@ describe("SiteArtifactRenderer", () => {
       status: "complete",
     });
     const Renderer = defaultToolRegistry.resolve(item);
-    const r = await renderComponent(<Renderer item={item} />);
+    // Without a host resolver the console route would 404 inside an embedder.
+    const bare = await renderComponent(<Renderer item={item} />);
     await flush();
+    expect(bare.container.textContent).toContain("Published Incident board");
+    expect(bare.container.querySelector('[aria-label="Open Incident board"]')).toBeNull();
+    await bare.unmount();
 
-    expect(r.container.textContent).toContain("Published Incident board");
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "site"
+            ? { href: `/workspaces/${target.workspaceId}/artifacts/${target.artifactId}` }
+            : null
+        }
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
     const link = r.container.querySelector('a[aria-label="Open Incident board"]');
     expect(link?.getAttribute("href")).toBe(
       "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
@@ -748,7 +940,7 @@ describe("published file presentation", () => {
         await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
         await flush();
         expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
-        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+        expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
       } finally {
         await r.unmount();
       }
@@ -756,7 +948,9 @@ describe("published file presentation", () => {
     10_000,
   );
 
-  test.each([false, true])(
+  // Readable turns have one stable work row; classic grouping retains its
+  // multi-cluster turn wrap. The readable variant follows this test.
+  test.each([false])(
     "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
     async (rolling) => {
       resetTimelineEvents();
@@ -855,6 +1049,83 @@ describe("published file presentation", () => {
     },
     10_000,
   );
+
+  test("readable turns keep an explicit image collapse while narration stays visible", async () => {
+    resetTimelineEvents();
+    const prepared = [
+      timelineEvent("user.message", { text: "Show the implementation" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      ...["inspect-project", "prepare-project"].flatMap((id) => [
+        timelineEvent("agent.toolCall.created", {
+          id,
+          name: "exec_command",
+          arguments: { cmd: id },
+        }),
+        timelineEvent("agent.toolCall.output", { id, output: "ready" }),
+      ]),
+      timelineEvent("agent.message.completed", { text: "The project is ready." }),
+    ];
+    const loadRetainedArtifact = async () => ({
+      url: "https://objects.example/implementation.png",
+    });
+    const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+      <MessageTimeline
+        events={events}
+        status={status}
+        turnSummary={{ rolling: true }}
+        loadRetainedArtifact={loadRetainedArtifact}
+      />
+    );
+    const r = await renderComponent(timeline(prepared));
+    try {
+      await flush();
+      // Phase-less narration is always an ordinary visible message.
+      expect(turnSummaryTrigger(r.container)?.textContent).toMatch(/^Working · /);
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toBe(
+        "The project is ready.",
+      );
+      const published = [
+        ...prepared,
+        timelineEvent("agent.toolCall.created", {
+          id: "published-image",
+          name: "opengeni__sandbox_file_publish",
+          arguments: { path: "/workspace/implementation.png" },
+        }),
+        timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+      ];
+      await r.rerender(timeline(published));
+      await flush();
+      // The work disclosure opens for its primary image; narration stays outside.
+      const live = turnSummaryTriggers(r.container);
+      expect(live.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual(["true"]);
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      expect(r.container.querySelector("[data-og-wide-table-message]")?.textContent).toContain(
+        "The project is ready.",
+      );
+      expect(r.container.querySelector("[data-og-activity-note]")).toBeNull();
+      await act(async () => live[0]?.click());
+      expect(live[0]?.getAttribute("aria-expanded")).toBe("false");
+
+      const settled = [
+        ...published,
+        timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        timelineEvent("turn.completed", {}),
+      ];
+      await r.rerender(timeline(settled, "idle"));
+      await flush();
+      const settledTriggers = turnSummaryTriggers(r.container);
+      expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+        "false",
+      ]);
+      expect(r.container.querySelector('img[alt="implementation.png"]') === null).toBe(true);
+      // The remembered choice is not a lock.
+      await act(async () => settledTriggers[0]?.click());
+      await flush();
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  }, 10_000);
 
   test.each([
     "sandbox_file_publish",
@@ -1095,7 +1366,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Gateway unavailable",
+    );
+    expect(r.container.querySelector('[role="status"] [title]')).toBeNull();
     expect(r.container.querySelector('[role="status"]')?.className).toContain(
       "text-og-status-failed",
     );
@@ -1109,6 +1383,43 @@ describe("timeline renderer isolation", () => {
       remove?.click();
     });
     expect({ retries, removals }).toEqual({ retries: 1, removals: 1 });
+    await r.unmount();
+  });
+
+  test("renders a credit refusal inline with Edit message instead of Retry", async () => {
+    let edits = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          {
+            kind: "user-message",
+            id: "credit-refused-message",
+            text: "Keep the original message",
+            resources: [],
+            tools: [],
+            occurredAt: new Date(0).toISOString(),
+            delivery: {
+              state: "failed",
+              error:
+                "Your organization has no OpenGeni credits left. Add credits before sending again.",
+              onEdit: () => {
+                edits += 1;
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "no OpenGeni credits left",
+    );
+    const buttons = [...r.container.querySelectorAll("button")];
+    expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();
+    const edit = buttons.find((button) => button.textContent === "Edit message");
+    expect(edit).toBeDefined();
+    await act(async () => edit?.click());
+    expect(edits).toBe(1);
     await r.unmount();
   });
 
@@ -1757,10 +2068,12 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(visibleOutcome?.hasAttribute("open")).toBe(false);
     expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
     expect(visibleOutcome?.getAttribute("role")).toBe("note");
-    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    // An open wait says since when; no delegated workers are known here.
+    expect(visibleOutcome?.querySelector("summary")?.textContent).toStartWith("Waiting · since ");
     expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
       events[2]!.occurredAt,
     );
+    // A wait from an earlier day keeps its date, so it never reads as current.
     expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
       String(new Date(events[2]!.occurredAt).getFullYear()),
     );
@@ -1984,6 +2297,30 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("terraform apply");
     expect(r.container.textContent).toContain("Approval needed");
+
+    await r.unmount();
+  });
+
+  test("readable turns carry a live approval wait in the header, not a second banner", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy it" }),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "terraform apply" },
+      }),
+      timelineEvent("session.requiresAction", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} status="requires_action" turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+
+    // The host's approval surface is the one place to decide.
+    expect(r.container.textContent).toContain("Waiting for you");
+    expect(r.container.textContent).not.toContain("Approval needed");
 
     await r.unmount();
   });

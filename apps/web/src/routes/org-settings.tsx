@@ -1,366 +1,149 @@
-import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-// Organization settings (formerly "Account"): identity, organization API
-// keys, account-wide billing usage, plan entitlements, and members.
-import { Link } from "@tanstack/react-router";
-import { ArrowUpRightIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Organization settings: General, People, Workspaces, Organization identity,
+// Models, Integrations, Billing & usage, Developer and Security & data.
+// They render inside the settings shell's Organization section
+// (components/settings/workspace-settings-shell.tsx); pages this person can't
+// use are hidden from the rail (lib/organization-settings-access.ts).
+import { useNavigate } from "@tanstack/react-router";
+import { PlusIcon, UserPlusIcon } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState } from "@/components/common";
+import type { ReturnTo } from "@/lib/return-to";
+import type { ModelsView } from "@/lib/models-route";
+import { OrganizationBillingPage } from "@/components/organization/billing-page";
+import { OrganizationGeneralPage } from "@/components/organization/general-page";
+import { OrganizationIdentityPage } from "@/components/organization/identity-page";
 import {
-  OrganizationPeopleSection,
-  OrganizationOverviewSection,
-  OrganizationPrivateSessionsSection,
-  OrganizationRetentionSection,
-} from "@/components/organization-admin";
-import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
-import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
-import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
-import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
-import { OrganizationRecoverySection } from "@/components/organization-recovery";
+  OrganizationDirectoryProvider,
+  useOptionalOrganizationDirectory,
+} from "@/components/organization/organization-directory";
+import { useOrganizationNavigation } from "@/components/organization/organization-nav";
+import { OrganizationPeoplePage } from "@/components/organization/people-page";
+import { OrganizationSecurityPage } from "@/components/organization/security-page";
+import { OrganizationWorkspacesPage } from "@/components/organization/workspaces-page";
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
+import {
+  organizationSettingsDescription,
+  organizationSettingsLabel,
+} from "@/components/settings/organization-settings-pages";
 import { Button } from "@/components/ui/button";
+import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { PageHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import { entitlementEntries, formatMoneyMicros, validTopupAmount } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
 import {
-  beginOrganizationAdminOperation,
+  canInviteOrganizationRole,
   organizationAdminIdentityKey,
-  organizationAdminOperationSlot,
-  ownsOrganizationAdminOperation,
   type OrganizationAdminIdentity,
-  type OrganizationAdminOperationLane,
-  type OrganizationAdminOperation,
-  type OrganizationAdminOperationSlot,
   type OrganizationAdminSection,
 } from "@/lib/organization-admin";
+import {
+  organizationSettingsAccess,
+  resolveOrganizationSettingsSection,
+} from "@/lib/organization-settings-access";
+import type { OrganizationView } from "@/lib/organization-route";
+import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
-import type {
-  BillingEntitlementsResponse,
-  BillingSummary,
-  CompanyProfileAgentPolicy,
-  CompanyProfileAgentPolicyMode,
-  OrganizationMembershipRole,
-} from "@/types";
-import { OrganizationKnowledgePrompt } from "./organization-knowledge-prompt";
-import { useCompanyProfileInventory } from "./workspace-state-loader";
+import {
+  completeWorkspaceDeletionFollowUp,
+  deleteOrganizationWorkspaceWithReconciliation,
+} from "@/lib/workspace-deletion";
+import type { OrganizationMembershipRole } from "@/types";
 
+const OrganizationDeveloperIntegrations = lazy(async () => {
+  const module = await import("@/components/workspace-developer-settings");
+  return { default: module.OrganizationDeveloperIntegrations };
+});
+
+const LazyOrganizationModelsSection = lazy(async () => {
+  const module = await import("@/components/models/organization-models-section");
+  return { default: module.OrganizationModelsSection };
+});
 const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
 });
 
-const COMPANY_PROFILE_AGENT_MODE_COPY: Record<
-  CompanyProfileAgentPolicyMode,
-  { label: string; description: string }
-> = {
-  off: {
-    label: "Off",
-    description: "Agents cannot stage or activate organization identity changes.",
-  },
-  suggest: {
-    label: "Require approval",
-    description: "Agents prepare a proposal and the initiating owner approves each change.",
-  },
-  automatic: {
-    label: "Autonomous",
-    description:
-      "Eligible proposals from an owner-initiated live chat activate without another prompt.",
-  },
-};
-
-function OrganizationCompanyProfileAgentPolicy({ workspaceId }: { workspaceId: string }) {
-  const client = useAppContext().client;
-  const [policy, setPolicy] = useState<CompanyProfileAgentPolicy | null>(null);
-  const [mode, setMode] = useState<CompanyProfileAgentPolicyMode>("suggest");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const value = await client.getCompanyProfileAgentPolicy(workspaceId);
-      setPolicy(value);
-      setMode(value.mode);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const save = async (nextMode: CompanyProfileAgentPolicyMode): Promise<void> => {
-    if (!policy || saving) return;
-    setMode(nextMode);
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const value = await client.updateCompanyProfileAgentPolicy(workspaceId, {
-        mode: nextMode,
-        expectedVersion: policy.version,
-        operationId: crypto.randomUUID(),
-      });
-      setPolicy(value);
-      setMode(value.mode);
-      setMessage(
-        value.mode === "automatic"
-          ? "Autonomous organization identity updates are enabled."
-          : value.mode === "suggest"
-            ? "Organization identity changes require owner approval."
-            : "Agent-authored organization identity changes are off.",
-      );
-    } catch (saveError) {
-      setMode(policy.mode);
-      setError(saveError instanceof Error ? saveError : new Error(String(saveError)));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <section className="grid gap-4 border-b border-border pb-6">
-      <div>
-        <h3 className="text-sm font-medium text-fg">Agent-managed organization identity</h3>
-        <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-          Choose whether agents may update the small identity and mission shared by every workspace.
-          Only a live chat initiated by an active organization owner can use this authority.
-        </p>
-      </div>
-      {error && !policy ? (
-        <LoadErrorState
-          title="Couldn't load agent autonomy"
-          error={error}
-          onRetry={() => void load()}
-        />
-      ) : loading || !policy ? (
-        <p role="status" className="flex items-center gap-2 text-xs text-fg-muted">
-          <Loader2Icon className="size-3.5 animate-spin" /> Loading agent autonomy…
-        </p>
-      ) : (
-        <>
-          <fieldset className="grid gap-2 sm:grid-cols-3" disabled={saving}>
-            <legend className="sr-only">Agent-managed organization identity mode</legend>
-            {(Object.keys(COMPANY_PROFILE_AGENT_MODE_COPY) as CompanyProfileAgentPolicyMode[]).map(
-              (candidate) => (
-                <label
-                  key={candidate}
-                  className="cursor-pointer rounded-md border border-border p-3 has-[:checked]:border-brand has-[:checked]:bg-brand/5"
-                >
-                  <span className="flex items-center gap-2 text-sm font-medium text-fg">
-                    <input
-                      type="radio"
-                      name="company-profile-agent-policy"
-                      value={candidate}
-                      checked={mode === candidate}
-                      onChange={() => void save(candidate)}
-                    />
-                    {COMPANY_PROFILE_AGENT_MODE_COPY[candidate].label}
-                  </span>
-                  <span className="mt-1 block text-xs leading-5 text-fg-muted">
-                    {COMPANY_PROFILE_AGENT_MODE_COPY[candidate].description}
-                  </span>
-                </label>
-              ),
-            )}
-          </fieldset>
-          {mode === "automatic" ? (
-            <p className="rounded-md border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
-              This is organization-wide. Eligible changes still pass live-owner, stale-head, and
-              compare-and-swap checks, and apply only to newly accepted agent runs.
-            </p>
-          ) : null}
-          {error ? (
-            <p role="alert" className="text-xs text-status-error">
-              {error.message}
-            </p>
-          ) : null}
-          {saving ? (
-            <p role="status" className="text-xs text-fg-muted">
-              <Loader2Icon className="mr-1 inline size-3.5 animate-spin" /> Saving autonomy mode…
-            </p>
-          ) : message ? (
-            <p role="status" className="text-xs text-status-success">
-              {message}
-            </p>
-          ) : null}
-        </>
-      )}
-    </section>
-  );
-}
-
-function OrganizationKnowledgeSummary({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const client = useAppContext().client;
-  const inventory = useCompanyProfileInventory(client, workspaceId);
-  const storedProfile = inventory.response?.activeRevision?.profile ?? null;
-  const profile = storedProfile?.identity || storedProfile?.mission ? storedProfile : null;
-  const legacyDetailCount = storedProfile
-    ? storedProfile.products.length +
-      storedProfile.customers.length +
-      storedProfile.goals.length +
-      storedProfile.constraints.length
-    : 0;
-
-  if (inventory.loading && !inventory.response) {
-    return (
-      <div className="flex items-center gap-2 border-b border-border py-5 text-xs text-fg-muted">
-        <Loader2Icon className="size-3.5 animate-spin" />
-        Loading organization identity…
-      </div>
-    );
-  }
-  if (inventory.error && !inventory.response) {
-    return (
-      <LoadErrorState
-        title="Couldn't load the organization identity"
-        error={inventory.error}
-        onRetry={() => void inventory.reload()}
-      />
-    );
-  }
-  if (!profile) {
-    return (
-      <div className="grid gap-3">
-        <div className="rounded-lg border border-dashed border-border bg-surface-2/20 p-4 text-xs leading-5 text-fg-muted">
-          {canManage
-            ? "No organization identity has been saved yet. Describe who the organization is and why it exists below, and OpenGeni will prepare a concise version."
-            : "No organization identity has been saved yet. An organization owner can add one."}
-        </div>
-        {legacyDetailCount > 0 ? (
-          <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
-            {legacyDetailCount} historical structured detail
-            {legacyDetailCount === 1 ? " is" : "s are"} still retained in agent context for
-            compatibility. An owner can move that information into Company Documents before
-            replacing this profile.
-          </p>
-        ) : null}
-      </div>
-    );
-  }
-
-  return (
-    <section className="border-b border-border pb-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-medium text-fg">Current organization identity</h3>
-          <p className="mt-1 text-xs text-fg-muted">
-            Small, stable context available to top-level agents.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={inventory.loading}
-          onClick={() => void inventory.reload()}
-        >
-          <RefreshCwIcon className={inventory.loading ? "size-3.5 animate-spin" : "size-3.5"} />
-          Refresh
-        </Button>
-      </div>
-      {legacyDetailCount > 0 ? (
-        <p className="mt-4 rounded-lg border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
-          {legacyDetailCount} historical structured detail
-          {legacyDetailCount === 1 ? " is" : "s are"} still retained in agent context for
-          compatibility. Move it into Company Documents before replacing this profile.
-        </p>
-      ) : null}
-
-      <div className="mt-4 grid gap-4">
-        {profile.identity ? (
-          <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Identity
-            </h4>
-            <p className="mt-2 text-sm leading-6 text-fg">{profile.identity}</p>
-          </div>
-        ) : null}
-        {profile.mission ? (
-          <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Mission
-            </h4>
-            <p className="mt-2 text-sm leading-6 text-fg">{profile.mission}</p>
-          </div>
-        ) : null}
-      </div>
-      {inventory.error ? (
-        <p className="mt-3 text-xs text-status-error">Refresh failed: {inventory.error.message}</p>
-      ) : null}
-    </section>
-  );
+// A Stripe return is a full page load, so one report per outcome per document
+// is one report per return, even when an effect runs twice.
+const reportedCheckoutReturns = new Set<string>();
+function takeCheckoutReturn(outcome: string): boolean {
+  if (reportedCheckoutReturns.has(outcome)) return false;
+  reportedCheckoutReturns.add(outcome);
+  return true;
 }
 
 export function OrgSettingsRoute({
   workspaceId,
   checkout,
-  section = "overview",
+  section: requestedSection,
+  modelsAccount,
+  modelsView,
+  returnTo,
+  organizationView,
+  person,
+  invitation,
+  workspace,
+  developer,
 }: {
   workspaceId: string;
+  /** Developer: the webhook or provider page, or form, that is open. */
+  developer?: DeveloperLocation | undefined;
   checkout?: "success" | "cancelled";
   section?: OrganizationAdminSection;
+  /** Models: the account page that is open. */
+  modelsAccount?: string | undefined;
+  /** Models: the form page that is open. */
+  modelsView?: ModelsView | undefined;
+  /** Where a cross-scope link came from; the back link returns there. */
+  returnTo?: ReturnTo | undefined;
+  /** People or Workspaces: the form page that is open. */
+  organizationView?: OrganizationView | undefined;
+  /** People: the person whose page is open (organization membership id). */
+  person?: string | undefined;
+  /** People: the invitation whose page is open. */
+  invitation?: string | undefined;
+  /**
+   * Workspaces: the workspace whose page is open. Models: the workspace whose
+   * model page is open, or that a page was opened from. Billing: the workspace
+   * whose budget page is open.
+   */
+  workspace?: string | undefined;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
-    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+    context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const organizationLabel = accountId
+  const fallbackLabel = accountId
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
-  const [billing, setBilling] = useState<BillingSummary | null>(null);
-  const [billingOwnerKey, setBillingOwnerKey] = useState("");
-  const [billingError, setBillingError] = useState<Error | null>(null);
-  const [billingLoading, setBillingLoading] = useState(false);
-  const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
-  const [entitlementsOwnerKey, setEntitlementsOwnerKey] = useState("");
-  const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
-  const [topupAmount, setTopupAmount] = useState("25.00");
-  const [busy, setBusy] = useState(false);
-  const [busyOwnerKey, setBusyOwnerKey] = useState("");
-  const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
-  const canReadBilling =
-    canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
-  const canManageOrganizationKnowledge = hasAccountPermission(
-    context.accessContext,
+  // The same rule decides which pages the settings rail lists.
+  const {
+    actorRole,
+    singleUser,
+    organizationAdministratorSession,
+    canReadBilling,
+    canManageBilling,
+    canManageOrganizationKnowledge,
+    canManageCompanyProfileAgentPolicy,
+    canManageOrganizationApiKeys,
+    administrator,
+    administeredWorkspaceIds,
+    visibleSections,
+  } = organizationSettingsAccess({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
     accountId,
-    "account:admin",
+  });
+  const section: OrganizationAdminSection = resolveOrganizationSettingsSection(
+    requestedSection,
+    visibleSections,
   );
-  const accountGrant =
-    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
-  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
-  const canManageOrganizationApiKeys = hasAccountPermission(
-    context.accessContext,
-    accountId,
-    "api_keys:manage",
-  );
-  const actorRole: OrganizationMembershipRole | null =
-    accountGrant?.role === "owner" ||
-    accountGrant?.role === "admin" ||
-    accountGrant?.role === "member"
-      ? accountGrant.role
-      : null;
-  const singleUser = context.clientConfig.productAccessMode === "local";
-  const organizationAdministratorSession =
-    context.clientConfig.auth.mode === "managedSession" || singleUser;
-  const canManageOrganizationModels =
-    organizationAdministratorSession && (actorRole === "owner" || actorRole === "admin");
+
   const adminIdentity = useMemo<OrganizationAdminIdentity>(
     () => ({
       principalGeneration: context.accessKeyVersion,
@@ -371,343 +154,212 @@ export function OrgSettingsRoute({
     [accountId, context.accessContext.subjectId, context.accessKeyVersion, workspaceId],
   );
   const identityKey = organizationAdminIdentityKey(adminIdentity);
-  const identityRef = useRef<OrganizationAdminIdentity | null>(adminIdentity);
-  identityRef.current = adminIdentity;
-  const billingSequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
-  const billingOperationRef = useRef(
-    new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>(),
+  const accessibleWorkspaceIds = useMemo(
+    () => new Set(context.workspaces.map((candidate) => candidate.id)),
+    [context.workspaces],
   );
-  const claimBillingOperation = useCallback(
-    (resource: "billing" | "entitlements", lane: OrganizationAdminOperationLane) => {
-      const slot = organizationAdminOperationSlot(resource, lane);
-      const operation = beginOrganizationAdminOperation({
-        identity: adminIdentity,
-        resource,
-        lane,
-        previousSequence: billingSequenceRef.current.get(slot) ?? 0,
-      });
-      billingSequenceRef.current.set(slot, operation.sequence);
-      billingOperationRef.current.set(slot, operation);
-      return operation;
-    },
-    [adminIdentity],
-  );
-  const ownsBillingOperation = useCallback(
-    (operation: OrganizationAdminOperation) =>
-      ownsOrganizationAdminOperation({
-        currentIdentity: identityRef.current,
-        currentOperation:
-          billingOperationRef.current.get(
-            organizationAdminOperationSlot(operation.resource, operation.lane),
-          ) ?? null,
-        accepted: operation,
-      }),
-    [],
-  );
-  useEffect(() => {
-    const activeOperations = billingOperationRef.current;
-    identityRef.current = adminIdentity;
-    return () => {
-      identityRef.current = null;
-      activeOperations.clear();
-    };
-  }, [adminIdentity]);
-
-  const listOrganizationApiKeys = useCallback(async () => {
-    return await client.listOrganizationApiKeys(accountId);
-  }, [accountId, client]);
-  const createOrganizationApiKey = useCallback(
-    async (request: Parameters<typeof client.createOrganizationApiKey>[1]) =>
-      await client.createOrganizationApiKey(accountId, request),
-    [accountId, client],
-  );
-  const deleteOrganizationApiKey = useCallback(
-    async (apiKeyId: string) => await client.deleteOrganizationApiKey(accountId, apiKeyId),
-    [accountId, client],
-  );
-
-  const refreshBilling = useCallback(async () => {
-    if (!accountId || !canReadBilling) {
-      setBilling(null);
-      setBillingOwnerKey(identityKey);
-      setBillingError(null);
-      return;
-    }
-    const operation = claimBillingOperation("billing", "read");
-    setBillingOwnerKey(identityKey);
-    setBilling(null);
-    setBillingLoading(true);
-    try {
-      const result = await client.getBilling({ accountId });
-      if (!ownsBillingOperation(operation)) return;
-      setBilling(result);
-      setBillingError(null);
-    } catch (error) {
-      if (!ownsBillingOperation(operation)) return;
-      setBilling(null);
-      setBillingError(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      if (ownsBillingOperation(operation)) setBillingLoading(false);
-    }
-  }, [accountId, canReadBilling, claimBillingOperation, client, identityKey, ownsBillingOperation]);
-
-  const refreshEntitlements = useCallback(async () => {
-    if (!accountId || !canReadBilling) {
-      setEntitlements(null);
-      setEntitlementsOwnerKey(identityKey);
-      setEntitlementsError(null);
-      return;
-    }
-    const operation = claimBillingOperation("entitlements", "read");
-    setEntitlementsOwnerKey(identityKey);
-    setEntitlements(null);
-    try {
-      const result = await client.getBillingEntitlements({ accountId });
-      if (!ownsBillingOperation(operation)) return;
-      setEntitlements(result);
-      setEntitlementsError(null);
-    } catch (error) {
-      if (!ownsBillingOperation(operation)) return;
-      setEntitlements(null);
-      setEntitlementsError(error instanceof Error ? error : new Error(String(error)));
-    }
-  }, [accountId, canReadBilling, claimBillingOperation, client, identityKey, ownsBillingOperation]);
-
-  const refresh = useCallback(async () => {
-    await Promise.all([refreshBilling(), refreshEntitlements()]);
-  }, [refreshBilling, refreshEntitlements]);
-
-  useEffect(() => {
-    if (!workspaceId) {
-      return;
-    }
-    void refresh();
-  }, [workspaceId, refresh]);
 
   // Confirm the Stripe checkout outcome the /billing return redirect forwarded
   // here. Credits post via the asynchronous webhook, so success is phrased as
   // "shortly" rather than implying the balance already reflects the top-up.
+  // The outcome is one-shot: it is dropped from the URL right away so a reload,
+  // back navigation, or bookmark neither repeats the toast nor re-counts the
+  // funnel event. The Stripe return is a full page load, so the event waits for
+  // the analytics module instead of the not-yet-installed observer shim.
   useEffect(() => {
+    if (!checkout) return;
+    if (takeCheckoutReturn(checkout)) {
+      void import("@/lib/analytics")
+        .then(({ captureAnalyticsEvent }) =>
+          captureAnalyticsEvent(
+            checkout === "success" ? "checkout_completed" : "checkout_cancelled",
+          ),
+        )
+        .catch(() => undefined);
+    }
     if (checkout === "success") {
       toast.success("Payment received", {
         description: "Your credits will appear shortly.",
       });
-    } else if (checkout === "cancelled") {
+    } else {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
-  }, [checkout]);
+    void navigate({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId },
+      search: requestedSection ? { section: requestedSection } : {},
+      replace: true,
+    });
+  }, [checkout, navigate, requestedSection, workspaceId]);
 
-  async function startCheckout(amountUsd: number) {
-    const operation = claimBillingOperation("billing", "mutation");
-    setBusyOwnerKey(identityKey);
-    setBusy(true);
-    try {
-      const session = await client.createBillingCheckout({
-        amountUsd,
-        ...(accountId ? { accountId } : {}),
-      });
-      if (!ownsBillingOperation(operation)) return;
-      window.location.assign(session.url);
-    } catch (error) {
-      if (!ownsBillingOperation(operation)) return;
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      if (ownsBillingOperation(operation)) setBusy(false);
-    }
-  }
+  const createWorkspace = useCallback(
+    async (name: string, operationId: string): Promise<string | null> => {
+      if (singleUser) {
+        const created = await context.createWorkspace({ accountId, name });
+        if (!created) throw new Error("The workspace wasn't created. Try again.");
+        return created.id;
+      }
+      const created = await client.createOrganizationWorkspace(accountId, { name, operationId });
+      await context.revalidatePrincipalAccess();
+      return created.id;
+    },
+    [accountId, client, context, singleUser],
+  );
 
-  async function openBillingPortal() {
-    const operation = claimBillingOperation("billing", "mutation");
-    setBusyOwnerKey(identityKey);
-    setBusy(true);
-    try {
-      const session = await client.createBillingPortalSession({
-        ...(accountId ? { accountId } : {}),
-        returnUrl: window.location.href,
+  const deleteWorkspace = useCallback(
+    async (deletedId: string) => {
+      let remaining: readonly { id: string }[] = context.workspaces.filter(
+        (candidate) => candidate.accountId === accountId && candidate.id !== deletedId,
+      );
+      if (singleUser) {
+        const deleted = await context.deleteWorkspace(deletedId);
+        if (!deleted) throw new Error("The workspace wasn't deleted. Try again.");
+      } else {
+        const overview = await deleteOrganizationWorkspaceWithReconciliation({
+          client,
+          organizationId: accountId,
+          workspaceId: deletedId,
+        });
+        if (overview) remaining = overview.workspaces.filter((each) => each.id !== deletedId);
+      }
+      // The URL is anchored on a workspace; leave it when that's the one deleted.
+      const next =
+        deletedId === workspaceId
+          ? (remaining.find((each) => accessibleWorkspaceIds.has(each.id)) ??
+            context.workspaces.find((each) => each.id !== deletedId) ??
+            null)
+          : { id: workspaceId };
+      const followUp = await completeWorkspaceDeletionFollowUp({
+        refreshAccess: async () => {
+          if (!singleUser) await context.revalidatePrincipalAccess();
+        },
+        navigate: async () => {
+          if (next) {
+            await navigate({
+              to: "/workspaces/$workspaceId/organization",
+              params: { workspaceId: next.id },
+              search: { section: "workspaces" },
+              replace: true,
+            });
+          } else {
+            await navigate({ to: "/", replace: true });
+          }
+        },
       });
-      if (!ownsBillingOperation(operation)) return;
-      window.location.assign(session.url);
-    } catch (error) {
-      if (!ownsBillingOperation(operation)) return;
-      toast.error("Couldn't open Stripe billing", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      if (ownsBillingOperation(operation)) setBusy(false);
-    }
-  }
+      if (followUp.status === "failed") {
+        toast.warning("Workspace deleted, but the page may be out of date", {
+          description: "Reload to refresh your workspace access.",
+        });
+      }
+    },
+    [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
+  );
 
-  const visibleBilling = billingOwnerKey === identityKey ? billing : null;
-  const visibleBillingError = billingOwnerKey === identityKey ? billingError : null;
-  const visibleBillingLoading = billingOwnerKey === identityKey ? billingLoading : true;
-  const visibleEntitlements = entitlementsOwnerKey === identityKey ? entitlements : null;
-  const visibleEntitlementsError = entitlementsOwnerKey === identityKey ? entitlementsError : null;
-  const visibleBusy = busyOwnerKey === identityKey && busy;
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession &&
+    Boolean(accountId) &&
+    hasAccountPermission(context.accessContext, accountId, "account:admin");
+  // A webhook or provider page, or a form, brings its own back link and title.
+  const developerSubPage = Boolean(developer?.view || developer?.webhook);
+  const navigateDeveloper = (next: DeveloperLocation) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId },
+      search: { section: "developer", ...next },
+    });
+  // Models is for signed-in people in this organization; a key or service gets a plain refusal.
+  const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
+
+  const subPage =
+    (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||
+    (section === "people" && Boolean(person || invitation || organizationView)) ||
+    (section === "workspaces" && Boolean(workspace || organizationView)) ||
+    (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||
+    // Opened from another scope (a workspace's Models): Billing brings its own back link.
+    // A workspace's budget page brings its own back link and title too.
+    (section === "billing" && Boolean(returnTo || workspace));
 
   return (
-    <OrganizationSettingsShell
-      workspaceId={workspaceId}
-      organizationLabel={organizationLabel}
-      section={section}
-      showModels={canManageOrganizationModels}
+    <OrganizationDirectoryProvider
+      key={identityKey}
+      client={client}
+      identity={adminIdentity}
+      actorRole={actorRole}
+      managedSession={organizationAdministratorSession}
+      singleUser={singleUser}
+      accessibleWorkspaceIds={accessibleWorkspaceIds}
+      youLabel={context.accessContext.subjectLabel ?? null}
+      onAuthorityChanged={context.revalidatePrincipalAccess}
+      onCreateWorkspace={createWorkspace}
+      onDeleteWorkspace={deleteWorkspace}
     >
-      <section className="grid gap-5 text-left">
-        {section === "overview" ? (
-          <>
-            <OrganizationOverviewSection
-              key={`${identityKey}:overview`}
-              client={client}
-              identity={adminIdentity}
-              actorRole={actorRole}
-              managedSession={organizationAdministratorSession}
-              singleUser={singleUser}
-              accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
-              onOrganizationChanged={context.revalidatePrincipalAccess}
-              onCreateWorkspace={async (name, operationId) => {
-                if (singleUser) {
-                  const created = await context.createWorkspace({ accountId, name });
-                  if (!created) throw new Error("workspace creation did not complete");
-                } else {
-                  await client.createOrganizationWorkspace(accountId, {
-                    name,
-                    operationId,
-                  });
-                  await context.revalidatePrincipalAccess();
-                }
-              }}
-            />
-            {!singleUser ? (
-              <OrganizationPrivateSessionsSection
-                key={`${identityKey}:private-sessions`}
-                client={client}
-                identity={adminIdentity}
-                actorRole={actorRole}
-                managedSession
-              />
-            ) : null}
-          </>
-        ) : null}
-
-        {section === "people" ? (
-          singleUser ? (
-            <p className="text-sm leading-6 text-fg-muted">
-              This installation has one local administrator. People, invitations, and private user
-              workspaces become available when managed sign-in is enabled.
-            </p>
-          ) : (
-            <OrganizationPeopleSection
-              key={identityKey}
-              client={client}
-              identity={adminIdentity}
-              actorRole={actorRole}
-              managedSession
-              onAuthorityChanged={context.revalidatePrincipalAccess}
-            />
-          )
-        ) : null}
-
-        {section === "models" && canManageOrganizationModels ? (
-          <section className="grid gap-2" aria-labelledby="organization-model-connections-heading">
-            <div>
-              <h2 id="organization-model-connections-heading" className="text-sm font-medium">
-                Connections
-              </h2>
-              <p className="mt-1 text-xs leading-5 text-fg-muted">
-                Choose which workspaces and models each connected account can serve. Codex and
-                SuperGrok subscriptions can also be made available to Personal workspaces.
-              </p>
-            </div>
-            <div className="min-w-0">
-              <OrganizationCodexSubscriptions
-                key={`${identityKey}:organization-codex`}
-                organizationId={accountId}
-              />
-              <SuperGrokSubscriptionsCard organizationId={accountId} canManage />
-              <OrganizationModelProviderConnection
-                organizationId={accountId}
-                providerKind="vercel_gateway"
-              />
-              <OrganizationModelProviderConnection
-                organizationId={accountId}
-                providerKind="openrouter"
-              />
-            </div>
-          </section>
-        ) : null}
-
-        {section === "models" && !canManageOrganizationModels ? (
-          <p className="text-xs leading-5 text-fg-muted">
-            Organization model subscriptions can be managed only by organization owners and admins
-            using an organization administrator session.
+      <OrganizationSettingsFrame
+        workspaceId={workspaceId}
+        fallbackLabel={fallbackLabel}
+        section={modelsRefused ? "models" : section}
+        hideDescription={modelsRefused}
+        hideHeader={subPage}
+        actorRole={actorRole}
+      >
+        {modelsRefused ? (
+          <p className="m-0 text-sm leading-5 text-fg-muted">
+            Only admins manage models. Ask an admin to add one.
           </p>
         ) : null}
 
-        {section === "knowledge" ? (
-          <section className="grid gap-6">
-            <div>
-              <h2 className="text-sm font-medium">Organization identity</h2>
-              <p className="mt-1 text-xs leading-5 text-fg-muted">
-                A concise answer to who the organization is and why it exists. This is always
-                available to top-level agents, so it should stay small and stable.
-              </p>
-            </div>
-            <OrganizationKnowledgeSummary
-              workspaceId={workspaceId}
-              canManage={canManageOrganizationKnowledge}
-            />
-            {canManageOrganizationKnowledge ? (
-              <>
-                {canManageCompanyProfileAgentPolicy ? (
-                  <OrganizationCompanyProfileAgentPolicy
-                    key={`${identityKey}:company-profile-agent-policy`}
-                    workspaceId={workspaceId}
-                  />
-                ) : (
-                  <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
-                    Agent-managed organization identity is owner-only. Ask an organization owner to
-                    change this mode.
-                  </p>
-                )}
-                <OrganizationKnowledgePrompt workspaceId={workspaceId} />
-              </>
-            ) : (
-              <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
-                Organization identity is read-only for you. An organization owner can update it.
-              </p>
-            )}
-            <section className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-6">
-              <div className="max-w-2xl">
-                <h3 className="text-sm font-medium text-fg">Organization documents</h3>
-                <p className="mt-1 text-xs leading-5 text-fg-muted">
-                  Products, customers, goals, constraints, strategy, and changing facts belong in
-                  organization-scoped Documents. Agents retrieve them only when relevant.
-                </p>
-              </div>
-              <Link
-                to="/workspaces/$workspaceId/documents"
-                params={{ workspaceId }}
-                search={{ authority: "organization" }}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-brand hover:underline"
-              >
-                Open documents
-                <ArrowUpRightIcon className="size-3.5" />
-              </Link>
-            </section>
-          </section>
-        ) : null}
+        {!modelsRefused && section === "general" ? <OrganizationGeneralPage /> : null}
 
-        {section === "retention" ? (
-          <OrganizationRetentionSection
-            key={identityKey}
-            client={client}
-            identity={adminIdentity}
-            actorRole={actorRole}
-            managedSession={organizationAdministratorSession}
+        {!modelsRefused && section === "people" ? (
+          <OrganizationPeoplePage
+            workspaceId={workspaceId}
+            person={person}
+            invitation={invitation}
+            view={organizationView === "invite" ? "invite" : undefined}
           />
         ) : null}
-        {section === "integrations" ? (
+
+        {!modelsRefused && section === "workspaces" ? (
+          <OrganizationWorkspacesPage
+            workspaceId={workspaceId}
+            workspace={workspace}
+            view={organizationView === "new-workspace" ? "new-workspace" : undefined}
+            returnTo={returnTo}
+            onEnterWorkspace={(createdId) => {
+              context.resetSessionView();
+              void navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId: createdId },
+              });
+            }}
+          />
+        ) : null}
+
+        {!modelsRefused && section === "models" ? (
+          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+            <OrganizationModelsSectionWithName
+              key={`${identityKey}:models`}
+              anchorWorkspaceId={workspaceId}
+              organizationId={accountId}
+              fallbackLabel={fallbackLabel}
+              administrator={administrator}
+              administeredWorkspaceIds={administeredWorkspaceIds}
+              workspace={workspace}
+              account={modelsAccount}
+              view={modelsView}
+            />
+          </Suspense>
+        ) : null}
+
+        {!modelsRefused && section === "identity" ? (
+          <OrganizationIdentityPage
+            workspaceId={workspaceId}
+            identityKey={identityKey}
+            canManage={canManageOrganizationKnowledge}
+            canManageAgentPolicy={canManageCompanyProfileAgentPolicy}
+          />
+        ) : null}
+
+        {!modelsRefused && section === "integrations" ? (
           <OrganizationIntegrationsSection
             key={`${identityKey}:integrations`}
             client={client}
@@ -717,193 +369,173 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {section === "recovery" ? (
-          singleUser ? (
-            <p className="text-sm leading-6 text-fg-muted">
-              Organization recovery protects managed multi-user accounts. This single-user local
-              installation is recovered through its server backup and deployment configuration.
-            </p>
-          ) : (
-            <OrganizationRecoverySection
-              key={`${identityKey}:recovery`}
-              client={client}
-              identity={adminIdentity}
-              managedSession
-            />
-          )
-        ) : null}
-
-        {section === "developer" ? (
+        {!modelsRefused && section === "developer" && developerSubPage ? (
           <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-            <LazyOrganizationApiKeysSection
-              key={`${identityKey}:organization-api-keys`}
+            <OrganizationDeveloperIntegrations
+              key={`${identityKey}:developer-integrations`}
+              client={client}
               organizationId={accountId}
-              canManage={canManageOrganizationApiKeys && Boolean(accountId)}
-              listApiKeys={listOrganizationApiKeys}
-              createApiKey={createOrganizationApiKey}
-              deleteApiKey={deleteOrganizationApiKey}
+              canManage={canManageOrganizationIntegrations}
+              location={developer}
+              onNavigate={navigateDeveloper}
             />
           </Suspense>
-        ) : null}
-
-        {section === "billing" ? (
-          <section className="grid gap-4 border-b border-border pb-6">
-            <OrganizationCreditBalance
-              billing={visibleBilling}
-              canReadBilling={canReadBilling}
-              hasAccount={Boolean(accountId)}
-              loading={visibleBillingLoading}
-              hasError={Boolean(visibleBillingError)}
-            />
-            {visibleBillingError ? (
-              <LoadErrorState
-                title="Couldn't load the billing balance"
-                error={visibleBillingError}
-                onRetry={() => void refreshBilling()}
+        ) : !modelsRefused && section === "developer" ? (
+          <div className="flex min-w-0 flex-col gap-8">
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationApiKeysSection
+                key={`${identityKey}:organization-api-keys`}
+                organizationId={accountId}
+                canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+                agentSettings={context.clientConfig.agentConfig?.enabled === true}
+                view={organizationView === "new-key" ? "new-key" : undefined}
+                onViewChange={(view) =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: view ? { section: "developer", view } : { section: "developer" },
+                  })
+                }
+                listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
+                createApiKey={async (request) =>
+                  await client.createOrganizationApiKey(accountId, request)
+                }
+                deleteApiKey={async (apiKeyId) =>
+                  await client.deleteOrganizationApiKey(accountId, apiKeyId)
+                }
               />
+            </Suspense>
+            {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
+              <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                <OrganizationDeveloperIntegrations
+                  key={`${identityKey}:developer-integrations`}
+                  client={client}
+                  organizationId={accountId}
+                  canManage
+                  location={{}}
+                  onNavigate={navigateDeveloper}
+                />
+              </Suspense>
             ) : null}
-            {visibleBilling?.mode === "stripe" && canManageBilling ? (
-              <div className="grid gap-2">
-                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <label className="grid gap-1">
-                    <span className="sr-only">Credit amount</span>
-                    <input
-                      className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
-                      type="number"
-                      name="credit-amount"
-                      autoComplete="off"
-                      inputMode="decimal"
-                      min="5"
-                      max="10000"
-                      step="0.01"
-                      value={topupAmount}
-                      onChange={(event) => setTopupAmount(event.target.value)}
-                    />
-                  </label>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    disabled={visibleBusy || !validTopupAmount(topupAmount)}
-                    onClick={() => void startCheckout(Number(topupAmount))}
-                  >
-                    Add credits
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {[25, 100, 500, 1000].map((amount) => (
-                    <Button
-                      key={amount}
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={visibleBusy}
-                      onClick={() => setTopupAmount(amount.toFixed(2))}
-                    >
-                      {formatMoneyMicros(amount * 1_000_000, "usd")}
-                    </Button>
-                  ))}
-                </div>
-                <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
-                  <p className="text-xs text-fg-muted">
-                    View invoices and manage payment information in Stripe.
-                  </p>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={visibleBusy}
-                    onClick={() => void openBillingPortal()}
-                  >
-                    Open Stripe billing
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-fg-subtle">
-                Credit checkout is available when Stripe billing is enabled for this deployment.
-              </p>
-            )}
-          </section>
+          </div>
         ) : null}
 
-        {section === "billing" ? (
-          <EntitlementsSection
-            enabled={canReadBilling && Boolean(accountId)}
-            entitlements={visibleEntitlements}
-            error={visibleEntitlementsError}
-            onRetry={() => void refreshEntitlements()}
-          />
+        {!modelsRefused && section === "billing" ? (
+          <BillingSection returnTo={workspace ? undefined : returnTo}>
+            <OrganizationBillingPage
+              key={`${identityKey}:billing`}
+              identity={adminIdentity}
+              canReadBilling={canReadBilling}
+              canManageBilling={canManageBilling}
+              budgetWorkspaceId={workspace}
+            />
+          </BillingSection>
         ) : null}
 
-        {section === "billing" ? (
-          <OrganizationUsageDashboard
-            key={identityKey}
-            accountId={accountId}
-            enabled={canReadBilling && Boolean(accountId)}
-          />
-        ) : null}
-      </section>
-    </OrganizationSettingsShell>
+        {!modelsRefused && section === "security" ? <OrganizationSecurityPage /> : null}
+      </OrganizationSettingsFrame>
+    </OrganizationDirectoryProvider>
   );
 }
 
-/** Plan & entitlements (/v1/billing/entitlements): the limits the org runs under. */
-function EntitlementsSection(props: {
-  enabled: boolean;
-  entitlements: BillingEntitlementsResponse | null;
-  error: Error | null;
-  onRetry: () => void;
+/**
+ * The page header and body of one organization page, with the organization's
+ * real name once it has loaded. The settings shell around it draws the rail.
+ */
+function OrganizationSettingsFrame({
+  workspaceId,
+  fallbackLabel,
+  section,
+  hideHeader,
+  hideDescription = false,
+  actorRole,
+  children,
+}: {
+  workspaceId: string;
+  fallbackLabel: string;
+  section: OrganizationAdminSection;
+  /** The page only says who can use it, so its usual subtitle would mislead. */
+  hideDescription?: boolean;
+  /** A sub-page (a person, a workspace, a form) brings its own back link and title. */
+  hideHeader: boolean;
+  actorRole: OrganizationMembershipRole | null;
+  children: ReactNode;
 }) {
-  const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
+  const directory = useOptionalOrganizationDirectory();
+  const nav = useOrganizationNavigation(workspaceId);
+  const organizationLabel = directory?.overview.value?.organization.name ?? fallbackLabel;
+  let actions: ReactNode = null;
+  if (section === "people" && canInviteOrganizationRole(actorRole, "member")) {
+    actions = (
+      <Button type="button" onClick={nav.openInvite} className="pointer-coarse:h-11">
+        <UserPlusIcon aria-hidden="true" />
+        Invite people
+      </Button>
+    );
+  } else if (section === "workspaces" && directory?.canAdminister) {
+    actions = (
+      <Button type="button" onClick={nav.openNewWorkspace} className="pointer-coarse:h-11">
+        <PlusIcon aria-hidden="true" />
+        New workspace
+      </Button>
+    );
+  }
+  const body = <div className="grid min-w-0 gap-8 text-left">{children}</div>;
+  if (hideHeader) return body;
   return (
-    <section className="grid gap-4 border-b border-border pb-6">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <GaugeIcon className="size-3.5 text-brand" />
-            Plan & entitlements
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            The limits and features this organization runs under.
-          </p>
-        </div>
-        <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
-          {props.entitlements?.mode ?? "unknown"}
-        </span>
-      </div>
+    <>
+      <PageHeader
+        title={organizationSettingsLabel(section)}
+        description={
+          hideDescription ? undefined : organizationSettingsDescription(section, organizationLabel)
+        }
+        actions={actions}
+      />
+      <div className="mt-6">{body}</div>
+    </>
+  );
+}
 
-      {!props.enabled ? (
-        <p className="text-xs text-fg-subtle">You don't have permission to view plan limits.</p>
-      ) : props.error ? (
-        <LoadErrorState
-          title="Couldn't load entitlements"
-          error={props.error}
-          onRetry={props.onRetry}
-        />
-      ) : !props.entitlements ? (
-        <div className="flex items-center gap-2 text-xs text-fg-muted">
-          <Loader2Icon className="size-3.5 animate-spin" />
-          Loading entitlements
-        </div>
-      ) : rows.length === 0 ? (
-        <p className="text-xs text-fg-subtle">
-          No entitlement limits — this deployment does not restrict the organization.
-        </p>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          {rows.map((row) => (
-            <span
-              key={row.name}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs"
-            >
-              <span className="font-medium">{row.name}</span>
-              <span className="font-mono text-2xs text-fg-muted">{row.value}</span>
-            </span>
-          ))}
-        </div>
-      )}
-    </section>
+/** Billing, with a back link to where a cross-scope link came from ("Design preview · Models"). */
+function BillingSection({
+  returnTo,
+  children,
+}: {
+  returnTo: ReturnTo | undefined;
+  children: ReactNode;
+}) {
+  const navigate = useNavigate();
+  if (!returnTo) return <>{children}</>;
+  return (
+    <DetailPage
+      back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
+      <DetailPageHeader title="Billing & usage" />
+      <div className="mt-6 min-w-0">{children}</div>
+    </DetailPage>
+  );
+}
+
+/** Models, named with the organization's real name once it has loaded. */
+function OrganizationModelsSectionWithName({
+  fallbackLabel,
+  ...props
+}: {
+  anchorWorkspaceId: string;
+  organizationId: string;
+  fallbackLabel: string;
+  administrator: boolean;
+  administeredWorkspaceIds: readonly string[];
+  workspace: string | undefined;
+  account: string | undefined;
+  view: ModelsView | undefined;
+}) {
+  const directory = useOptionalOrganizationDirectory();
+  return (
+    <LazyOrganizationModelsSection
+      {...props}
+      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
   );
 }

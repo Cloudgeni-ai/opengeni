@@ -1,4 +1,5 @@
 import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
+import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
@@ -163,7 +164,6 @@ export function capabilityErrorToast(
   error: unknown,
   fallbackTitle: string,
 ): { title: string; description: string } {
-  const description = cleanApiErrorMessage(error instanceof Error ? error.message : String(error));
   // The raw "requires credentials; pass them in the enable request 'headers'
   // field" 422 is an API-only contract detail — never surface it verbatim. The
   // UI collects credentials in the connect sheet before enabling, so this only
@@ -174,14 +174,20 @@ export function capabilityErrorToast(
       description: "This integration needs to be connected before it can be enabled.",
     };
   }
-  if (
-    /^MCP capability ".+" could not be enabled because OpenGeni could not initialize /.test(
-      description,
-    )
-  ) {
-    return { title: "Connection failed", description };
+  const serverMessage = cleanApiErrorMessage(apiErrorFacts(error).serverMessage ?? "");
+  const probe =
+    /^MCP capability ".+" could not be enabled because OpenGeni could not initialize (\S+?)\.?(?:\s|$)/u.exec(
+      serverMessage,
+    );
+  if (probe) {
+    return {
+      title: "Connection failed",
+      description: `Opengeni couldn't connect to ${probe[1]}. Check the endpoint address, then try again.`,
+    };
   }
-  return { title: fallbackTitle, description };
+  // Never the raw "OpenGeni API 422: ... Reference: <uuid>." string (DESIGN.md
+  // section 6): API errors become advice, an app error keeps its own sentence.
+  return { title: fallbackTitle, description: userErrorText(error) };
 }
 
 /**

@@ -18,6 +18,7 @@ export type IntegrationChipLabel =
   | "Needs attention"
   | "Not connected"
   | "Set up by an admin"
+  | "Access restricted"
   | "Loading"
   | "Installed"
   | "Not installed"
@@ -230,6 +231,8 @@ export type IntegrationViewModel = {
     };
     diagnostics?: IntegrationFact[];
   };
+  /** What it lets agents do, in product words (up to four). Shown on the page's About section. */
+  outcomes?: Array<{ title: string; description?: string }>;
   /** The tools this connection actually publishes; omitted when unavailable. */
   tools?: IntegrationToolsBlock;
   /** Optional plain-language notice shown above the blocks (state explanations). */
@@ -244,6 +247,34 @@ export type IntegrationViewModel = {
   /** Provider disclosures rendered after the blocks, before the footer. */
   disclosures?: IntegrationDisclosure[];
 };
+
+/** An initial 403 is not an indefinitely pending connection status. */
+export function connectionAccessChip(
+  chip: IntegrationChip,
+  accessDenied: boolean,
+): IntegrationChip {
+  return accessDenied && chip.label === "Loading"
+    ? { label: "Access restricted", tone: "plain" }
+    : chip;
+}
+
+/** Keep the sheet's explanation and actions consistent with its restricted tile. */
+export function connectionAccessModel(
+  model: IntegrationViewModel,
+  accessDenied: boolean,
+): IntegrationViewModel {
+  if (!accessDenied || model.chip.label !== "Loading") return model;
+  return {
+    ...model,
+    chip: connectionAccessChip(model.chip, true),
+    notice: {
+      tone: "waiting",
+      title: "Connection access required",
+      description: "Ask a workspace admin for connection access to view connected accounts.",
+    },
+    footer: { kind: "locked" },
+  };
+}
 
 export const INTEGRATION_LOCKED_SENTENCE =
   "A workspace admin looks after this integration. You do not need to connect anything.";

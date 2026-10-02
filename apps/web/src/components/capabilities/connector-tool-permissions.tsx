@@ -6,6 +6,7 @@ import type {
   UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
 import { useAppContext } from "@/context";
+import { isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 
@@ -57,13 +58,17 @@ export function PermissionSelect({
 export function ConnectorToolPermissions({
   workspaceId,
   capabilityId,
+  bare = false,
 }: {
   workspaceId: string;
   capabilityId: string;
+  /** Inside a page section that already names it: drop the frame and heading. */
+  bare?: boolean;
 }) {
   const { client } = useAppContext();
   const [data, setData] = useState<ConnectorToolPermissionsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // `denied`: the viewer may not see these permissions. Say who can help, no Retry.
+  const [error, setError] = useState<{ text: string; denied: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [saved, setSaved] = useState(false);
@@ -92,8 +97,15 @@ export function ConnectorToolPermissions({
         if (!controller.signal.aborted) setData(result);
       })
       .catch((failure) => {
-        if (!controller.signal.aborted)
-          setError(failure instanceof Error ? failure.message : "Could not load tool permissions.");
+        if (controller.signal.aborted) return;
+        setError(
+          isPermissionDenied(failure)
+            ? {
+                text: "You can't see this connector's tool permissions. Ask a workspace admin for access.",
+                denied: true,
+              }
+            : { text: `Couldn't load tool permissions. ${userErrorText(failure)}`, denied: false },
+        );
       });
     return () => controller.abort();
   }, [path, generation, client, workspaceId, capabilityId]);
@@ -142,7 +154,10 @@ export function ConnectorToolPermissions({
       // Aborting only discards this view's response. A write may have committed;
       // the next mount always reloads the authoritative saved permissions.
       if (isCurrent() && !controller.signal.aborted)
-        setError(failure instanceof Error ? failure.message : "Could not save tool permissions.");
+        setError({
+          text: `Couldn't save tool permissions. ${userErrorText(failure)}`,
+          denied: false,
+        });
     } finally {
       if (isCurrent()) {
         setBusy(false);
@@ -151,15 +166,20 @@ export function ConnectorToolPermissions({
     }
   }
   return (
-    <section className="space-y-3 border-t border-border pt-5" aria-label="Tool permissions">
-      <div>
-        <h3 className="text-sm font-medium">Tool permissions</h3>
-        <p className="mt-1 text-xs leading-5 text-fg-subtle">
-          Choose when OpenGeni can use this connector. Changes apply from the next turn. Existing
-          approvals remain in place.
-        </p>
-      </div>
-      {error ? <Notice tone="failed">{error}</Notice> : null}
+    <section
+      className={bare ? "space-y-3" : "space-y-3 border-t border-border pt-5"}
+      aria-label="Tool permissions"
+    >
+      {bare ? null : (
+        <div>
+          <h3 className="text-sm font-medium">Tool permissions</h3>
+          <p className="mt-1 text-xs leading-5 text-fg-subtle">
+            Choose when Opengeni can use this connector. Changes apply from the next turn. Existing
+            approvals remain in place.
+          </p>
+        </div>
+      )}
+      {error ? <Notice tone={error.denied ? "muted" : "failed"}>{error.text}</Notice> : null}
       {!data && !error ? (
         <p role="status" className="text-xs text-fg-subtle">
           Loading tools…
@@ -253,7 +273,7 @@ export function ConnectorToolPermissions({
           ) : null}
         </>
       ) : null}
-      {error || data?.discoveryError ? (
+      {(error && !error.denied) || data?.discoveryError ? (
         <Button
           variant="outline"
           size="sm"

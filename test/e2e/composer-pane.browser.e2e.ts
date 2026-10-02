@@ -56,7 +56,8 @@ describe("console composer in a split desktop pane", () => {
           }
         },
         captureWorkspaceInvocation: () => ({}), ownsWorkspaceInvocation: () => true
-      }; export function useAppContext() { return context; }`,
+      }; export function useAppContext() { return context; }
+      export function useOptionalAppContext() { return context; }`,
       }),
     );
     await page.goto(url, { waitUntil: "networkidle" });
@@ -107,6 +108,8 @@ describe("console composer in a split desktop pane", () => {
 
   test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
+    // The menu body is optional lazy code; the loading shell is not action readiness.
+    await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
@@ -130,6 +133,7 @@ describe("console composer in a split desktop pane", () => {
         const plus = page.getByRole("button", { name: "More composer actions" });
         expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();
+        await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
         expect(
           await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count(),
         ).toBe(1);
@@ -166,7 +170,7 @@ describe("console composer in a split desktop pane", () => {
           expect(await scroll.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
           await dialog.getByRole("button", { name: /option 30/ }).scrollIntoViewIfNeeded();
         }
-        await dialog.getByRole("button", { name: "Back", exact: true }).click();
+        await dialog.getByRole("menuitem", { name: "Back", exact: true }).click();
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
         await dialog.waitFor({ state: "visible" });
         await page.keyboard.press("Escape");
@@ -195,6 +199,7 @@ describe("console composer in a split desktop pane", () => {
       await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
       const plus = page.getByRole("button", { name: "More composer actions" });
       await plus.click();
+      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).waitFor();
       const menu = page.getByRole("menu");
       const white = await menu.evaluate((node) => getComputedStyle(node).backgroundColor);
       expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
@@ -207,7 +212,7 @@ describe("console composer in a split desktop pane", () => {
       await page.screenshot({
         path: `${root}/composer-settings-${newSession ? "new" : "existing"}.png`,
       });
-      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
       expect(await page.getByLabel("Knowledge", { exact: true }).inputValue()).toBe("off");
       await page.keyboard.press("Escape");

@@ -1,8 +1,13 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { RotateSessionMcpCredentialsReceipt, SessionTurnStatus } from "@opengeni/contracts";
+import {
+  McpServerConnectionRef,
+  RotateSessionMcpCredentialsReceipt,
+  SessionTurnStatus,
+} from "@opengeni/contracts";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { lockSessionEventWriteRows } from "./session-control";
 import * as schema from "./schema";
+export { connectionMetadataMatchesBinding } from "./connection-token-resolver";
 
 const action = "session.mcp.credentials.rotate";
 const liveTurnStatuses = SessionTurnStatus.exclude([
@@ -22,6 +27,7 @@ export class SessionMcpCredentialRotationError extends Error {
       | "version_conflict"
       | "destination_conflict"
       | "brokered_server"
+      | "connection_unavailable"
       | "operation_reuse"
       | "receipt_key_unavailable"
       | "authority_revoked",
@@ -40,12 +46,24 @@ export type AtomicSessionMcpCredentialRotationInput = {
   operationKey: string;
   requestDigest: string;
   digestKeyTag: string;
-  updates: Array<{
-    id: string;
-    expectedCredentialVersion: number;
-    expectedServerUrl: string;
-    headersEncrypted: Record<string, string>;
-  }>;
+  updates: Array<
+    {
+      id: string;
+      expectedCredentialVersion: number;
+      expectedServerUrl: string;
+    } & (
+      | { headersEncrypted: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
+  >;
+  /** Resolve an exact native connection using this authenticated transaction.
+   * Called only for a fresh, quiescent and CAS-valid operation. */
+  resolveNativeConnection?: (
+    tx: Database,
+    server: { url: string; connectionRef: McpServerConnectionRef | null },
+    connectionId: string,
+    replacementServerUrl?: string,
+  ) => Promise<McpServerConnectionRef>;
   /** Trusted request authorizer, mandatory even for a committed receipt replay.
    * Revalidate the original authenticated subject and permissions on this tx. */
   authorize: (tx: Database) => Promise<void>;
@@ -194,7 +212,8 @@ export async function rotateSessionMcpCredentialsAtomically(
         const row = rows.find((server) => server.serverId === update.id);
         if (!row || row.accountId !== input.accountId)
           throw new SessionMcpCredentialRotationError("not_found");
-        if (row.connectionRef) throw new SessionMcpCredentialRotationError("brokered_server");
+        if (row.connectionRef && "headersEncrypted" in update)
+          throw new SessionMcpCredentialRotationError("brokered_server");
         if (row.url !== update.expectedServerUrl)
           throw new SessionMcpCredentialRotationError("destination_conflict");
         if (
@@ -204,6 +223,29 @@ export async function rotateSessionMcpCredentialsAtomically(
           row.credentialVersion !== update.expectedCredentialVersion
         )
           throw new SessionMcpCredentialRotationError("version_conflict");
+      }
+      const nativeRefs = new Map<string, McpServerConnectionRef>();
+      for (const update of input.updates) {
+        if (!("nativeConnectionId" in update)) continue;
+        if (!input.resolveNativeConnection)
+          throw new SessionMcpCredentialRotationError("invalid_request");
+        const row = rows.find((server) => server.serverId === update.id)!;
+        const ref = McpServerConnectionRef.parse(
+          await input.resolveNativeConnection(
+            tx,
+            row,
+            update.nativeConnectionId,
+            update.replacementServerUrl,
+          ),
+        );
+        if (
+          ref.authoritySource ||
+          ref.hostBinding ||
+          ref.accountSelection ||
+          ref.connectionId !== update.nativeConnectionId
+        )
+          throw new SessionMcpCredentialRotationError("invalid_request");
+        nativeRefs.set(update.id, ref);
       }
       const receipt: RotateSessionMcpCredentialsReceipt = {
         operationKey: input.operationKey,
@@ -218,7 +260,13 @@ export async function rotateSessionMcpCredentialsAtomically(
         await tx
           .update(schema.sessionMcpServers)
           .set({
-            headersEncrypted: update.headersEncrypted,
+            ...("headersEncrypted" in update
+              ? { headersEncrypted: update.headersEncrypted }
+              : {
+                  headersEncrypted: {},
+                  connectionRef: nativeRefs.get(update.id)!,
+                  ...(update.replacementServerUrl ? { url: update.replacementServerUrl } : {}),
+                }),
             credentialVersion: update.expectedCredentialVersion + 1,
             updatedAt: new Date(receipt.appliedAt),
           })

@@ -37,6 +37,7 @@ import {
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   RemoveEnrollmentRequest,
+  RenewEnrollmentRequest,
   RevokeEnrollmentResponse,
   type EnrollmentArch,
   type EnrollmentOs,
@@ -50,6 +51,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -64,6 +66,7 @@ import {
   mintEnrollToken,
   pollDeviceEnrollment,
   startDeviceEnrollment,
+  renewEnrollmentCredentials,
   toLookupResponse,
 } from "../sandbox/enrollment";
 
@@ -98,11 +101,26 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
-    const ip = clientIp(c);
+    const ip = trustedRequestSourceRateLimitKey(c, settings);
     if (!limiter.take(ip)) {
       throw new HTTPException(429, { message: "too many requests; slow down" });
     }
   }
+
+  // Machine authentication: signed install-key proof + current enrollment grant.
+  app.post("/v1/enrollments/renew", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, exchangeLimiter);
+    const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data);
+    if (!credentials)
+      throw new HTTPException(401, {
+        message: "machine renewal not authorized",
+      });
+    c.header("Cache-Control", "no-store");
+    return c.json(EnrollTokenExchangeResponse.parse({ credentials }), 200);
+  });
 
   // ── POST /enrollments/device/start (agent-side, user-unauthenticated) ───────
   app.post("/v1/enrollments/device/start", async (c) => {
@@ -469,18 +487,6 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
   });
-}
-
-// The remote client IP for the per-IP rate-limit bucket. Honors the proxy's
-// X-Forwarded-For (the first hop) when present, falling back to a constant key when
-// neither is available (the bucket then caps the whole edge — still a useful cap).
-function clientIp(c: Context): string {
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return c.req.header("x-real-ip")?.trim() || "unknown";
 }
 
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained

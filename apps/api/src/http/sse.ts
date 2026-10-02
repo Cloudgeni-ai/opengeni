@@ -5,7 +5,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getWorkspaceInteractionRevisionState,
-  listSessionEvents,
+  listSessionEventPage,
   listWorkspaceControlEvents,
   type Database,
 } from "@opengeni/db";
@@ -21,6 +21,7 @@ import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
+const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
@@ -277,9 +278,10 @@ export async function sseSessionStream(
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
   if (isHttp1BrowserBatch(options)) {
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const { events } = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       limit: SESSION_REPLAY_PAGE_SIZE,
+      maxBytes: options.finiteResponseMaxBytes ?? HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
     });
     await options.reauthorize?.();
     const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
@@ -353,10 +355,12 @@ export async function sseSessionStream(
         targetSequence === undefined
           ? SESSION_REPLAY_PAGE_SIZE
           : Math.min(SESSION_REPLAY_PAGE_SIZE, targetSequence - lastSent);
-      const page = await listSessionEvents(db, workspaceId, sessionId, {
+      const replayPage = await listSessionEventPage(db, workspaceId, sessionId, {
         after: lastSent,
         limit,
+        maxBytes: SESSION_REPLAY_PAGE_MAX_BYTES,
       });
+      const page = replayPage.events;
       const eligible =
         targetSequence === undefined
           ? page
@@ -382,8 +386,10 @@ export async function sseSessionStream(
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
       }
       if (targetSequence !== undefined && lastSent >= targetSequence) return;
+      if (targetSequence === undefined && !replayPage.hasMore) return;
       // A byte-selected page may contain fewer rows than requested, especially
-      // when one large message travels alone. Only an empty read proves EOF.
+      // when one large message travels alone. Use explicit continuation rather
+      // than page length; live publication covers appends after the snapshot.
     }
   };
   let durableDeliveryTail = Promise.resolve();
@@ -448,17 +454,28 @@ export async function sseSessionStream(
   stopReconnectObservation = durableFanout.subscribeRecovery(scheduleReconnectReconciliation);
 
   void (async () => {
-    const release = await bus.subscribe(workspaceId, sessionId, (events) => {
-      if (bootstrapping) {
-        for (const event of events) {
-          if (!newestBuffered || event.sequence > newestBuffered.sequence) {
-            newestBuffered = event;
+    const release = await bus.subscribe(
+      workspaceId,
+      sessionId,
+      (events) => {
+        if (bootstrapping) {
+          for (const event of events) {
+            if (!newestBuffered || event.sequence > newestBuffered.sequence) {
+              newestBuffered = event;
+            }
           }
+        } else {
+          delivery?.publish(events);
         }
-      } else {
-        delivery?.publish(events);
-      }
-    });
+      },
+      {
+        // Live fanout stopped while this stream still held it. Heartbeats alone
+        // would keep a silently stale timeline open; fail retryably so the
+        // client reconnects and replays from the durable Postgres cursor.
+        onTerminated: (error) =>
+          fail(retryableSseFailure("session live fanout subscription ended", error)),
+      },
+    );
     if (channel.stopped()) {
       release();
       return;
@@ -632,13 +649,22 @@ export async function sseWorkspaceControlStream(
   delivery = createLatestWinsDelivery(send, fail);
 
   void (async () => {
-    const release = await bus.subscribeWorkspaceControl(workspaceId, (event) => {
-      if (bootstrapping) {
-        if (!newestBuffered || event.sequence > newestBuffered.sequence) newestBuffered = event;
-      } else {
-        delivery?.publish([event]);
-      }
-    });
+    const release = await bus.subscribeWorkspaceControl(
+      workspaceId,
+      (event) => {
+        if (bootstrapping) {
+          if (!newestBuffered || event.sequence > newestBuffered.sequence) newestBuffered = event;
+        } else {
+          delivery?.publish([event]);
+        }
+      },
+      {
+        // Same contract as session SSE: a dead live subscription must reconnect
+        // and replay the durable control cursor, not idle on heartbeats.
+        onTerminated: (error) =>
+          fail(retryableSseFailure("workspace control live subscription ended", error)),
+      },
+    );
     if (channel.stopped()) {
       release();
       return;

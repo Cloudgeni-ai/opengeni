@@ -30,7 +30,7 @@ export type DesktopViewerProps = {
   /** Render the built-in Watching ⇄ Take control toggle (default true). */
   showControlToggle?: boolean | undefined;
   scaleViewport?: boolean | undefined;
-  /** Custom RFB factory (tests / a WebRTC swap). Defaults to lazy @novnc/novnc. */
+  /** Custom RFB factory; otherwise enableDesktopViewer() supplies lazy noVNC. */
   rfbFactory?: DesktopRfbFactory | undefined;
   /** Authenticated controller protocols for proxied RFB transports. */
   webSocketProtocols?: string[] | undefined;

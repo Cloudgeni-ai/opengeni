@@ -109,7 +109,13 @@ export function tryParseJson(text: string): unknown {
  * workspace no longer has.
  */
 export const CREDIT_EXHAUSTION_MESSAGE =
-  "Out of OpenGeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+  "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+
+/** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
+export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE =
+  "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.";
+export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
+  "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.";
 
 /**
  * Actionable composer copy for an edge rejection before a turn is accepted.
@@ -117,14 +123,62 @@ export const CREDIT_EXHAUSTION_MESSAGE =
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "This turn requires OpenGeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+  "Your organization doesn't have enough OpenGeni credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
+
+/**
+ * The send named a model that is no longer in the live catalog (retired or
+ * removed). Retrying the same send cannot succeed; the person must choose
+ * another model, and the typed message stays recoverable via Edit message.
+ */
+export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
+
+/** `details.code` the API sets on a 422 for a model missing from the live catalog. */
+export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
+
+/**
+ * Is this send refusal "the model is no longer available"? Reads the typed
+ * `details.code`, and also the historical message so a refusal persisted
+ * before a reload (only its text survives) or from an older API is recognized.
+ */
+export function isModelUnavailableSubmissionError(error: Error): boolean {
+  if (error instanceof OpenGeniApiError && error.details?.code === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return true;
+  }
+  return (
+    error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    /^OpenGeni API 422: model is not available: /.test(error.message)
+  );
+}
 
 export function composerSubmissionErrorMessage(error: Error): string {
-  return error instanceof OpenGeniApiError &&
-    error.status === 402 &&
-    error.code === "payment_required"
-    ? COMPOSER_PAYMENT_REQUIRED_MESSAGE
-    : error.message;
+  if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
+  if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
+    // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
+    // so this startup-path helper adds no SDK or wording imports.
+    return (error as { scope?: unknown }).scope === "workspace"
+      ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
+      : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
+  }
+  return isComposerCreditRefusal(error) ? COMPOSER_PAYMENT_REQUIRED_MESSAGE : error.message;
+}
+
+/** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */
+export function composerSubmissionCanRetry(error: Error): boolean {
+  return !(
+    isComposerCreditRefusal(error) ||
+    isModelUnavailableSubmissionError(error) ||
+    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
+  );
+}
+
+function isComposerCreditRefusal(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError &&
+      error.status === 402 &&
+      (error.code === "payment_required" || error.code === "insufficient_credits")) ||
+    isCreditExhaustion(error.message)
+  );
 }
 
 /**
@@ -192,6 +246,18 @@ export function presentFailure(payload: Record<string, unknown>): {
   reason: string | null;
   safetyRefusal: boolean;
 } {
+  const databaseFailure =
+    payload.code === "db_deadlock" ||
+    payload.code === "db_serialization_failure" ||
+    payload.code === "db_failure" ||
+    (typeof payload.sqlState === "string" &&
+      /^[0-9A-Z]{5}$/.test(payload.sqlState) &&
+      payload.database !== null &&
+      typeof payload.database === "object" &&
+      !Array.isArray(payload.database));
+  if (databaseFailure) {
+    return { reason: "OpenGeni encountered a database error.", safetyRefusal: false };
+  }
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;

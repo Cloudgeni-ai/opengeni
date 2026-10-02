@@ -44,6 +44,29 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
 }
 
 describe("workspace deletion confirmation", () => {
+  test.each([
+    { canDelete: false, isOnlyWorkspaceInAccount: false, reason: "Only workspace admins" },
+    { canDelete: true, isOnlyWorkspaceInAccount: true, reason: "only workspace" },
+  ])("keeps deletion unavailable when $reason applies", async (props) => {
+    const onDelete = mock(async () => true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<DangerZone workspaceName="Workspace A" {...props} onDelete={onDelete} />);
+      });
+      // The reason replaces the action: no ghosted Delete button beside it.
+      expect(container.querySelector("button")).toBeNull();
+      expect(container.textContent).toContain(props.reason);
+      expect(document.body.querySelector('input[placeholder="Workspace name"]')).toBeNull();
+      expect(onDelete).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("reconciles organization-admin deletion and stays in its manageable workspace roster", () => {
     expect(workspaceSettingsSource).toContain("deleteOrganizationWorkspaceWithReconciliation({");
     expect(workspaceSettingsSource).toContain("completeWorkspaceDeletionFollowUp({");
@@ -78,7 +101,9 @@ describe("workspace deletion confirmation", () => {
         container.querySelector<HTMLButtonElement>("button")!.click();
       });
 
-      const input = document.body.querySelector<HTMLInputElement>("#confirm-workspace-name")!;
+      const input = document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Workspace name"]',
+      )!;
       await setInputValue(input, "Workspace A");
 
       const form = input.closest("form")!;
@@ -122,7 +147,9 @@ describe("workspace deletion confirmation", () => {
       await act(async () => {
         container.querySelector<HTMLButtonElement>("button")!.click();
       });
-      const input = document.body.querySelector<HTMLInputElement>("#confirm-workspace-name")!;
+      const input = document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Workspace name"]',
+      )!;
       await setInputValue(input, "Workspace A");
       await act(async () => {
         input.closest("form")!.requestSubmit();
@@ -130,7 +157,7 @@ describe("workspace deletion confirmation", () => {
       });
 
       expect(onDelete).toHaveBeenCalledTimes(1);
-      expect(document.body.querySelector("#confirm-workspace-name")).toBeNull();
+      expect(document.body.querySelector('input[placeholder="Workspace name"]')).toBeNull();
       expect(container.querySelector<HTMLButtonElement>("button")?.disabled).toBe(false);
     } finally {
       await act(async () => root.unmount());

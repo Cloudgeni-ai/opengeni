@@ -10,6 +10,7 @@ import {
   type ProviderCommandPersistence,
   type ProviderCommandSession,
   admittedProviderCommandHandle,
+  ProviderCommandStartOutcomeUnknownError,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
@@ -41,15 +42,39 @@ export function installModalCommandSession(
     execCommand?: ChannelASession["execCommand"];
     writeStdin?: ChannelASession["writeStdin"];
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
+    verifyExecReadiness?: (signal: AbortSignal) => Promise<number>;
   },
   control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
-    Partial<Pick<ModalCommandControl, "supervisionControl" | "verifySupervisionCapability">>,
+    Partial<
+      Pick<
+        ModalCommandControl,
+        "supervisionControl" | "verifySupervisionCapability" | "verifyExecReadiness"
+      >
+    >,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  if (control.verifyExecReadiness) {
+    const verify = control.verifyExecReadiness.bind(control);
+    session.verifyExecReadiness = async (signal: AbortSignal) => {
+      const cancellation = new AbortController();
+      const abort = () => cancellation.abort(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      pendingStarts.add(cancellation);
+      try {
+        const exit = await verify(cancellation.signal);
+        cancellation.signal.throwIfAborted();
+        return exit;
+      } finally {
+        signal.removeEventListener("abort", abort);
+        pendingStarts.delete(cancellation);
+      }
+    };
+  }
   session.verifyCommandSupervisionCapability = async () => {
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");
@@ -246,6 +271,16 @@ export function installModalCommandSession(
           exitCode: null,
         });
       }
+    } catch (error) {
+      if (error instanceof ProviderCommandStartOutcomeUnknownError) {
+        const entry = entries.get(handle);
+        if (entry && !sameExecution(entry.command, error.command))
+          throw new Error("Reserved Modal command changed during failed dispatch", {
+            cause: error,
+          });
+        entries.set(handle, entry ?? { command: error.command });
+      }
+      throw error;
     } finally {
       pendingStarts.delete(cancellation);
     }
@@ -298,12 +333,13 @@ export function installModalCommandSession(
     const receipt = receipts.get(result);
     if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
     if (
-      receipt.page.command.supervision &&
       !receipt.page.expected &&
       receipt.page.exitCode === null &&
       receipt.page.chunks.length === 0
     ) {
-      // Idle-launch receipt carries identity only; there are no bytes to ACK.
+      // Both a supervised idle launch and an unavailable first observation
+      // carry identity only. Retention already owns this command; there are
+      // no observed bytes or terminal evidence to ACK.
       receipts.delete(result);
       return true;
     }
@@ -373,6 +409,6 @@ export function installModalCommandSession(
       const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
       await control.write(retained, args.chars, index);
     }
-    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens);
+    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens, args.signal);
   };
 }

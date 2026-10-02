@@ -652,6 +652,153 @@ describe("GitHub owner-authority binding routes", () => {
     }
   });
 
+  test("browser failures render a page with a way back, never raw JSON", async () => {
+    const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
+    const expectPage = async (response: Response, status: number, title: string) => {
+      expect(response.status).toBe(status);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      const html = await response.text();
+      expect(html).toContain(title);
+      expect(html).toContain("Back to OpenGeni");
+      expect(html).not.toContain('{"error"');
+      return html;
+    };
+
+    // A connect link minted at page load and opened after its lifetime.
+    const stale = managerState({}, Math.floor(Date.now() / 1_000) - 11 * 60);
+    const staleHtml = await expectPage(
+      await app.request(
+        `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(stale)}`,
+      ),
+      400,
+      "This GitHub link expired",
+    );
+    expect(staleHtml).toContain(`/workspaces/${workspaceId}/plugins`);
+
+    // Cancel on GitHub's authorization screen.
+    const discovery = createSignedState(stateSecret, {
+      accountId,
+      workspaceId,
+      intent: "installation_authority_discovery",
+    });
+    const cancelled = await expectPage(
+      await app.request(
+        `http://test/v1/github/oauth/callback?error=access_denied&error_description=${encodeURIComponent("<script>x</script>")}&state=${encodeURIComponent(discovery)}`,
+      ),
+      400,
+      "GitHub connection cancelled",
+    );
+    expect(cancelled).toContain(`/workspaces/${workspaceId}/plugins`);
+    expect(cancelled).not.toContain("<script>x</script>");
+
+    // Unsigned state names no workspace, so the way back is the app home.
+    const tampered = await expectPage(
+      await app.request("http://test/v1/github/oauth/callback?code=fresh&state=tampered"),
+      400,
+      "This GitHub link expired",
+    );
+    expect(tampered).not.toContain("/plugins");
+
+    // An expired native Connect callback (usually in the popup) also gets a page.
+    const expiredConnect = createSignedState(
+      stateSecret,
+      {
+        kind: "github_app_connect",
+        accountId,
+        workspaceId,
+        subjectId,
+        personalOwnerVerified: false,
+        connectAttemptId: crypto.randomUUID(),
+        phase: "discover",
+        providerId: "github-app",
+      },
+      Math.floor(Date.now() / 1_000) - 11 * 60,
+    );
+    await expectPage(
+      await app.request(
+        `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(expiredConnect)}`,
+      ),
+      400,
+      "This GitHub link expired",
+    );
+  });
+
+  test("an organization that disabled GitHub sees a policy page, not JSON", async () => {
+    const app = appWithProvider();
+    const connect = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(managerState())}`,
+    );
+    expect(connect.status).toBe(302);
+    const discoveryState = new URL(connect.headers.get("location")!).searchParams.get("state")!;
+    const cookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    await shared.admin`
+      insert into organization_integration_policies
+        (account_id, mode, allowed_integration_keys, revision)
+      values (${accountId}, 'restricted', '[]'::jsonb, 1)`;
+    try {
+      const denied = await app.request(
+        `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+        { headers: { cookie } },
+      );
+      // The same status the app error handler gives OrganizationIntegrationDeniedError.
+      expect(denied.status).toBe(403);
+      expect(denied.headers.get("content-type")).toContain("text/html");
+      const html = await denied.text();
+      expect(html).toContain("GitHub is turned off for your organization");
+      expect(html).toContain(`/workspaces/${workspaceId}/plugins`);
+      expect(html).not.toContain('{"error"');
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${accountId}`;
+    }
+  });
+
+  test("an unexpected failure renders the generic page with the error handler's status", async () => {
+    // The database proxy throws a plain Error, as an unexpected fault would.
+    const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
+    const connect = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(managerState())}`,
+    );
+    expect(connect.status).toBe(302);
+    const discoveryState = new URL(connect.headers.get("location")!).searchParams.get("state")!;
+    const cookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const discover = () =>
+      app.request(
+        `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+        { headers: { cookie } },
+      );
+    app.onError((_error, c) => c.json({ error: { message: "unavailable" } }, 503));
+    const failed = await discover();
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("content-type")).toContain("text/html");
+    const html = await failed.text();
+    expect(html).toContain("GitHub couldn&#39;t finish connecting");
+    expect(html).toContain(`/workspaces/${workspaceId}/plugins`);
+    // No internal detail and no JSON envelope reach the browser.
+    expect(html).not.toContain("database must not be consulted");
+    expect(html).not.toContain("unavailable");
+  });
+
+  test("a non-owner sees who must connect the account", async () => {
+    const app = appWithProvider({
+      authorizeInstallationBinding: async () => {
+        throw new GitHubInstallationAuthorityError(
+          "authority_denied",
+          "Only a GitHub personal-account owner or organization owner may bind an installation",
+        );
+      },
+    });
+    const oauth = await startOAuth(app);
+    const response = await app.request(
+      `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(oauth.state)}`,
+      { headers: { cookie: oauth.browserHeader } },
+    );
+    expect(response.status).toBe(403);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const html = await response.text();
+    expect(html).toContain("An owner needs to connect this account");
+    expect(html).toContain(`/workspaces/${workspaceId}/plugins`);
+  });
+
   test("legacy PR #518 chooser remains disabled with authenticated state validation", async () => {
     const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
     const state = managerState();

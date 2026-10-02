@@ -17,6 +17,7 @@ import {
   getActiveSessionHistoryItemsPaged,
   getLatestRunState,
   getSession,
+  getSessionGoal,
   getSessionQueueSnapshot,
   getSessionTurn,
   initializeSessionStartAtomically,
@@ -33,6 +34,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
+import { eq } from "drizzle-orm";
 import {
   CompactionNeededError,
   CompactionProviderResponseError,
@@ -97,6 +99,151 @@ describe("standalone context compaction execution", () => {
     expect(ACTIVE_SESSION_HISTORY_MAX_JSON_NODES).toBe(131_072);
     expect(ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES).toBe(65_536);
   });
+
+  for (const mode of ["portable", "remote_v2"] as const) {
+    test(`${mode} durably retains the accepted agent-message input and frozen goal`, async () => {
+      const suffix = crypto.randomUUID();
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `account-${suffix}`,
+        accountName: "Accepted input compaction test",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `workspace-${suffix}`,
+        workspaceName: "Accepted input compaction test",
+        subjectId: `subject-${suffix}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const workspaceId = grant.workspaceId!;
+      const session = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        model: "scripted-compactor",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await withWorkspaceRls(client.db, workspaceId, async (db) => {
+        await db.insert(schema.sessionHistoryItems).values([
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            position: 0,
+            item: { type: "message", role: "user", content: "Earlier synthetic task" },
+          },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            position: 1,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Completed evidence ".repeat(2_000) }],
+            },
+          },
+        ]);
+      });
+      const goal = await createSessionGoal(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        text: "Inspect the revised read-only task",
+        rootConstraints: ["Preserve completed observations"],
+        mutationPolicy: "review_changes",
+        createdBy: "api",
+      });
+      const update = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `accepted-input:${suffix}`,
+        summary: "Inspect the revised task",
+        payload: {
+          type: "agent_message",
+          operationId: crypto.randomUUID(),
+          text: "Use the new direction and report completed observations accurately.",
+        },
+      });
+      if (!update.added) throw new Error("Agent-message input was not inserted");
+      const attemptId = crypto.randomUUID();
+      const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+      const original = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+      const current = original.find(
+        (row) => row.item.role === "system" && String(row.item.content).includes(update.update.id),
+      );
+      expect(current).toBeDefined();
+      expect(current!.item.content).toContain(`objective revision ${goal.objectiveRevision}`);
+      expect(current!.item.content).toContain(update.update.id);
+      const frozenTurnBefore = await getSessionTurn(client.db, workspaceId, turn.id);
+      const goalBefore = await getSessionGoal(client.db, workspaceId, session.id);
+      let providerCalls = 0;
+      const outcome = await maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+          attemptId,
+        },
+        null,
+        async () => {
+          providerCalls += 1;
+          return "Synthetic completed-evidence checkpoint";
+        },
+        {
+          force: true,
+          codexCompactionMode: mode,
+          isCodexSubscriptionTurn: mode === "remote_v2",
+          requestRemoteCompactionV2: async () => {
+            providerCalls += 1;
+            return { type: "compaction", encrypted_content: "synthetic-checkpoint" };
+          },
+        },
+      );
+      expect(outcome.compacted).toBe(true);
+      const reopened = createDb(shared.appUrl);
+      try {
+        const replacement = await getActiveSessionHistoryItemsPaged(
+          reopened.db,
+          workspaceId,
+          session.id,
+        );
+        expect(replacement.map((row) => row.item).slice(0, -1)).toEqual([
+          original[0]!.item,
+          current!.item,
+        ]);
+        expect(await getSessionTurn(reopened.db, workspaceId, turn.id)).toEqual(frozenTurnBefore);
+        expect(await getSessionGoal(reopened.db, workspaceId, session.id)).toEqual(goalBefore);
+        const audit = await withWorkspaceRls(reopened.db, workspaceId, (db) =>
+          db
+            .select()
+            .from(schema.sessionHistoryItems)
+            .where(eq(schema.sessionHistoryItems.id, current!.id)),
+        );
+        expect(audit[0]?.active).toBe(false);
+        expect(audit[0]?.item).toEqual(current!.item);
+        expect(
+          await listSessionSystemUpdatesForTurn(reopened.db, workspaceId, session.id, turn.id),
+        ).toHaveLength(1);
+        expect(
+          await listOutstandingSessionSystemUpdates(reopened.db, workspaceId, session.id),
+        ).toHaveLength(0);
+      } finally {
+        await reopened.close();
+      }
+      expect(providerCalls).toBe(1);
+    });
+  }
 
   test("does not touch durable history when provider accounting is below threshold", async () => {
     const inaccessibleDb = new Proxy(
@@ -403,10 +550,12 @@ describe("standalone context compaction execution", () => {
       forbiddenRuntimeCalls += 1;
       throw new Error("standalone compaction entered the agent/sandbox runtime");
     };
+    let compactionRequest: { messages?: Array<{ role?: string; content?: string }> } | undefined;
     const fakeClient = {
       chat: {
         completions: {
-          create: async () => {
+          create: async (request: { messages?: Array<{ role?: string; content?: string }> }) => {
+            compactionRequest = request;
             compactionCalls += 1;
             return {
               id: "chatcmpl-compaction",
@@ -421,6 +570,7 @@ describe("standalone context compaction execution", () => {
                     content:
                       "The user is building a correct queue and the implementation is in progress.",
                   },
+                  finish_reason: "stop",
                 },
               ],
             };
@@ -480,6 +630,8 @@ describe("standalone context compaction execution", () => {
     const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
     expect(turn?.source).toBe("compaction");
     expect(compactionCalls).toBe(1);
+    expect(compactionRequest?.messages?.[0]).toMatchObject({ role: "system" });
+    expect(compactionRequest?.messages?.at(-1)).toMatchObject({ role: "user" });
     expect(forbiddenRuntimeCalls).toBe(0);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
@@ -699,7 +851,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -789,7 +941,7 @@ describe("standalone context compaction execution", () => {
 
     const outcome = await maybeCompactContext(
       client.db,
-      testSettings({ contextWindowTokens: 10_000 }),
+      testSettings({ contextWindowTokens: 100_000 }),
       {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1507,6 +1659,7 @@ describe("standalone context compaction execution", () => {
                       message: {
                         content: "The prior work was compacted before changing direction.",
                       },
+                      finish_reason: "stop",
                     },
                   ],
                 };
@@ -2758,7 +2911,7 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
-  test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
+  test("preserves history instead of summarizing a checkpoint prompt alone", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -2827,11 +2980,12 @@ describe("standalone context compaction execution", () => {
         },
         { force: true, clearRequestedCompaction: true, trigger: "operator" },
       ),
-    ).rejects.toBe(overflow);
+    ).rejects.toMatchObject({
+      name: "EmptyCompactionSummaryError",
+      diagnostics: { stage: "portable_input_budget", reason: "no_history_fit" },
+    });
 
-    // Codex counts the synthesized checkpoint prompt in its input length. Our
-    // active-history lengths 1 -> 0 therefore equal Codex input lengths 2 -> 1.
-    expect(inputLengths).toEqual([2, 1]);
+    expect(inputLengths).toEqual([2]);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
