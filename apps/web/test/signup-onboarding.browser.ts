@@ -139,7 +139,7 @@ try {
         await check(page, "4-developer-setup", theme, width);
         await pace(page, 1_500);
         // Step 1 copies the key alone; step 2 copies a prompt without it.
-        await page.getByRole("button", { name: "Copy API key" }).click();
+        await page.getByRole("button", { name: "Copy key", exact: true }).click();
         if ((await page.evaluate(() => navigator.clipboard.readText())) !== KEY) {
           throw new Error("Copy key did not copy exactly the key");
         }

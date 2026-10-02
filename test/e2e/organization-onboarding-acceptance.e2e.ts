@@ -1457,11 +1457,12 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await page.getByRole("button", { name: /^(Continue|Skip for now)$/ }).click();
     await page.getByRole("heading", { name: "Add AI agents to your product" }).waitFor();
     // Shown once in its own copy step; the coding-agent prompt never carries it.
-    const keyField = page.locator("textarea").first();
+    const keyField = page.locator("[data-slot=developer-setup-key]");
     await keyField.waitFor();
-    const token = await keyField.inputValue();
+    const token = (await keyField.textContent())?.trim() ?? "";
     expect(token).toStartWith("ogk_");
-    await page.getByRole("button", { name: "Copy API key" }).click();
+    await page.getByRole("button", { name: "Copy key", exact: true }).click();
+    await page.getByRole("button", { name: "Key copied" }).waitFor();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
     await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
     await page.getByRole("button", { name: "Prompt copied" }).waitFor();

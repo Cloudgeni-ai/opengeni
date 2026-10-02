@@ -2484,6 +2484,7 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       returnUrl: "https://app.opengeni.ai/billing",
     });
+    await client.getBillingCheckout("cs_test_1", { accountId: "acc-1" });
     expect(
       requests.map(
         (request) =>
@@ -2495,6 +2496,7 @@ describe("OpenGeniClient billing", () => {
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
       "POST /v1/billing/portal",
+      "GET /v1/billing/checkout/cs_test_1?accountId=acc-1",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
     expect(JSON.parse(requests[4]!.body!)).toEqual({
