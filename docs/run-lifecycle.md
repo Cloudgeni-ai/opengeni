@@ -694,7 +694,15 @@ failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
 server replies. After exact never-started reservation settlement, OpenGeni
 resumes the same accepted turn through bounded connectivity backoff, including
 pre-model setup before `turn.started` eventing exists. The same durable five-replacement
-budget applies, with explicit typed exhaustion on the sixth failure. Retained
+budget applies. A sixth genuine pre-dispatch setup failure parks the same accepted
+turn as nonfailed **recovering** with `sandboxSetupRecoveryExhausted`, an explicit
+`not_started` outcome and unchanged count five. Existing `admission-blocked` work
+peek and direct claim both refuse automatic replay; wakes, time, provider recovery
+and lease changes never replenish the exhausted budget. This is separate from
+unknown-dispatch containment and does not fabricate a model tool, capacity waiter
+or human approval. An interrupted database checkpoint carries this exact fate
+through the DB-only control recovery lane. Configuration-definition mismatch and
+ordinary post-model provider exhaustion retain their existing failure behavior. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact

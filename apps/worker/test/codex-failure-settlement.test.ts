@@ -20,6 +20,7 @@ import {
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
 } from "../src/activities/agent-turn/errors";
@@ -577,16 +578,83 @@ describe("early accepted-definition mismatch", () => {
       }
       const exhausted = earlyDeps(error);
       exhausted.attempt.providerRecoveryCount = 5;
-      await expect(settleTurnFailure(exhausted as any)).rejects.toMatchObject({
-        type: "SandboxCommandStartUnavailableError",
-        nonRetryable: true,
-        message: expect.stringContaining("stopped after 5 retries"),
+      expect(await settleTurnFailure(exhausted as any)).toMatchObject({
+        status: "recovering",
+        turnId: "turn-1",
       });
-      expect(recovery).toHaveBeenCalledTimes(5);
+      expect(exhausted.control.activityStatus).toBe("recovering");
+      expect(recovery).toHaveBeenCalledTimes(6);
+      const checkpoint = recovery.mock.calls[5]?.[2];
+      expect(checkpoint).toMatchObject({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        triggerEventId: "trigger-1",
+        reason: "sandbox_command_start_recovery_exhausted",
+        sandboxSetupRecoveryExhausted: true,
+        detail: {
+          setupOutcome: "not_started",
+          retryable: false,
+          replay: "blocked",
+          recoveryExhausted: true,
+          providerRecoveryCount: 5,
+        },
+      });
+      expect(checkpoint).not.toHaveProperty("providerRecoveryCount");
+      expect(checkpoint).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+      expect(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT).toBe(5);
+      expect(MAX_AUTOMATIC_PROVIDER_RECOVERIES).toBe(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT);
     } finally {
       recovery.mockRestore();
     }
   });
+
+  test.each(["stale", "db_deadlock", "db_failure"] as const)(
+    "exhausted pre-dispatch setup preserves the park fate on %s",
+    async (failure) => {
+      const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+        waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+          callback(new Error("router not ready")),
+      } as never).catch((value) => value);
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+      if (failure === "stale") {
+        recovery.mockResolvedValue({ action: "stale", events: [] } as never);
+      } else {
+        recovery.mockRejectedValue(
+          failure === "db_deadlock"
+            ? Object.assign(new Error("test rollback"), { name: "PostgresError", code: "40P01" })
+            : Object.assign(new Error("test disconnected DB"), { code: "ECONNRESET" }),
+        );
+      }
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = 5;
+      deps.historySink.reconcileConversationTruth = mock(async () => undefined);
+      try {
+        if (failure === "stale") {
+          expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "cancelled" });
+        } else {
+          await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+            type: "OpenGeniPostClaimDatabaseRecovery",
+            nonRetryable: true,
+            details: [
+              {
+                turnId: "turn-1",
+                triggerEventId: "trigger-1",
+                executionGeneration: 1,
+                code: failure,
+                sandboxSetupRecoveryExhausted: true,
+              },
+            ],
+          });
+          expect(deps.control.activityStatus).toBe("recovering");
+        }
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(deps.attempt.providerRecoveryCount).toBe(5);
+        expect(deps.historySink.reconcileConversationTruth).not.toHaveBeenCalled();
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
 
   test("raw gRPC lookalikes never gain early command-start recovery authority", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
