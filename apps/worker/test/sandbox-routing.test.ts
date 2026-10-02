@@ -61,6 +61,7 @@ import {
   createMockSelfhostedOpStream,
   MockAgentResponder,
   RoutingBackendRecoveryRequiredError,
+  RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   subjectFor,
   type EstablishedSandboxSession,
@@ -623,8 +624,17 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
             yieldTimeMs: 0,
           })
           .catch((error) => error);
-        expect(inputFailure).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+        expect(inputFailure).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
         expect(inputFailure).toMatchObject({
+          op: "writeStdin",
+          retryable: false,
+          retainedProcess: {
+            id: retained!.id,
+            providerSessionId: retained!.providerSessionId,
+          },
+        });
+        expect(inputFailure.cause).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+        expect(inputFailure.cause).toMatchObject({
           byteOffset: 0,
           byteLength: Buffer.byteLength(input),
           command: {
