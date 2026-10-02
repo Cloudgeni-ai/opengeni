@@ -237,7 +237,7 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   });
   if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId)
     throw new Error("Private parent was not claimed");
-  const privateChild = await createSession(client.db, {
+  const childInput: Parameters<typeof createSession>[1] = {
     accountId: seeded.accountId,
     workspaceId: seeded.workspaceId,
     visibility: "user_private",
@@ -257,12 +257,26 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
       attemptId,
       executionGeneration: claim.turn.executionGeneration,
     },
+  };
+  const privateChild = await createSession(client.db, childInput);
+  const sharedChild = await createSession(client.db, {
+    ...childInput,
+    initialMessage: "Visible independent child",
+  });
+  await transitionSessionVisibility(client.db, {
+    workspaceId: seeded.workspaceId,
+    sessionId: sharedChild.id,
+    actorSubjectId: seeded.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 1,
+    operationKey: crypto.randomUUID(),
   });
   const deleted = await seeded.create();
   const missingId = (await seeded.create()).id;
   await shared.admin`update sessions set title = 'HIDDEN RECONCILIATION TITLE'
     where id in (${privateRoot.id}, ${privateChild.id}, ${deleted.id})`;
   await charge(seeded, publicRoot.id, { credits: 101, estimate: 77 });
+  await charge(seeded, sharedChild.id, { credits: 19, estimate: 11 });
   const hidden = await charge(seeded, privateRoot.id, { credits: 203, estimate: 133 });
   await charge(seeded, privateChild.id, { credits: 307, estimate: null, tokens: null });
   await charge(seeded, deleted.id, { credits: 401, estimate: 199 });
@@ -351,7 +365,10 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   );
   expect(models.payers.find((row) => row.payer === "subscription")?.calls).toBe("2");
   expect(models.payers.find((row) => row.payer === "own_key")?.calls).toBe("1");
-  expect(snapshot.recentCalls.every((row) => row.sessionId === publicRoot.id)).toBe(true);
+  expect(
+    snapshot.recentCalls.every((row) => [publicRoot.id, sharedChild.id].includes(row.sessionId)),
+  ).toBe(true);
+  expect(snapshot.drivers).toHaveLength(1);
   expect(snapshot.drivers.every((row) => row.id === `root:${publicRoot.id}`)).toBe(true);
   const wire = JSON.stringify({ response, organization, models });
   for (const secret of [
@@ -385,9 +402,17 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
     const scoped = (await seeded.readWorkspace(viewer, filter)).snapshot;
     expect(scoped.privateChats).toEqual([]);
     expect(scoped.privateChatsTruncated).toBe(false);
-    if (filter.rootSessionId === privateRoot.id || filter.sessionId === privateRoot.id)
+    if (filter.rootSessionId === privateRoot.id || filter.sessionId === privateRoot.id) {
       expect(scoped.modelCalls).toBe(0);
+      expect(scoped.scope).toEqual({ rootSessionId: null, sessionId: null });
+      expect(JSON.stringify(scoped)).not.toContain(privateRoot.id);
+    }
   }
+  const childScope = (await seeded.readWorkspace(viewer, { sessionId: sharedChild.id })).snapshot;
+  expect(childScope.modelCalls).toBe(1);
+  expect(childScope.drivers).toEqual([]);
+  expect(childScope.privateChats).toEqual([]);
+  expect(JSON.stringify(childScope)).not.toContain(privateRoot.id);
   const {
     privateChats: _workspacePrivate,
     privateChatsTruncated: _workspaceFlag,

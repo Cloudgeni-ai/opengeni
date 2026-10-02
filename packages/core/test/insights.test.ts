@@ -65,6 +65,10 @@ describe("getWorkspaceInsights", () => {
       name: "Acme",
     } as never);
     restores.push(() => requireWorkspace.mockRestore());
+    const scopeAccess = spyOn(opengeniDb, "getSessionAccessProjection").mockImplementation(
+      async (_db, _workspaceId, sessionId) => ({ sessionId }) as never,
+    );
+    restores.push(() => scopeAccess.mockRestore());
 
     const modelBundle = spyOn(opengeniDb, "readWorkspaceInsightsModelBundle").mockResolvedValue(
       emptyModelBundle(),

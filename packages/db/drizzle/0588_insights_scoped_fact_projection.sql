@@ -125,6 +125,20 @@ BEGIN
       IF p_until = p_since THEN
         RETURN;
       END IF;
+      -- A visible descendant does not make its private root visible. Do not
+      -- accept a guessed root UUID as authority to enumerate that tree.
+      IF p_root_session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM %1$I.sessions requested_root
+        WHERE requested_root.account_id = context_account_id
+          AND requested_root.workspace_id = p_workspace_id
+          AND requested_root.id = p_root_session_id
+          AND (context_subject_id IS NULL OR requested_root.visibility = 'workspace_shared'
+            OR %1$I.session_private_actor_visible(requested_root.account_id,
+              requested_root.workspace_id, requested_root.owner_organization_membership_id,
+              requested_root.owner_subject_id))
+      ) THEN
+        RETURN;
+      END IF;
 
       -- Only the shape of the statement varies; every value is a bound
       -- parameter, and each call is planned for its own selectivity.
@@ -174,7 +188,12 @@ BEGIN
               AND workspace_id = $2%%2$s
           )
           SELECT
-            fact.id, fact.session_id, session_row.root_session_id, fact.turn_id,
+            fact.id, fact.session_id,
+            CASE WHEN root_row.id IS NOT NULL AND ($9::text IS NULL
+              OR root_row.visibility = ''workspace_shared''
+              OR %%1$I.session_private_actor_visible(root_row.account_id, root_row.workspace_id,
+                root_row.owner_organization_membership_id, root_row.owner_subject_id))
+              THEN root_row.id END, fact.turn_id,
             fact.provider, fact.provider_api, fact.model, fact.billing_path,
             fact.scheduled_task_id, fact.input_tokens, fact.output_tokens,
             fact.cached_tokens, fact.cache_write_tokens, fact.reasoning_tokens,
@@ -187,6 +206,10 @@ BEGIN
             ON session_row.account_id = fact.account_id
             AND session_row.workspace_id = fact.workspace_id
             AND session_row.id = fact.session_id
+          LEFT JOIN %%1$I.sessions root_row
+            ON root_row.account_id = fact.account_id
+            AND root_row.workspace_id = fact.workspace_id
+            AND root_row.id = session_row.root_session_id
           WHERE fact.account_id = $1
             AND fact.workspace_id = $2
             AND fact.occurred_at >= $3

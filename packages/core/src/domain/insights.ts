@@ -11,6 +11,7 @@ import {
   countSessionsAttachedToGroups,
   enumerateUtcDays,
   enumerateUtcHours,
+  getSessionAccessProjection,
   listFloorSessions,
   listLiveWarmLeases,
   listScheduledTasks,
@@ -259,6 +260,10 @@ export async function getWorkspaceInsights(
   await measureInsightsPhase(observePhase, "require_workspace", () =>
     requireWorkspace(db, input.workspaceId),
   );
+  const [visibleRootScope, visibleSessionScope] = await Promise.all([
+    rootSessionId ? getSessionAccessProjection(db, input.workspaceId, rootSessionId) : null,
+    sessionId ? getSessionAccessProjection(db, input.workspaceId, sessionId) : null,
+  ]);
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
   const modelFilterActive = Boolean(provider || model);
@@ -672,7 +677,10 @@ export async function getWorkspaceInsights(
     modelFilterActive: modelFilterActive || scopeActive,
     dataThrough: dataThrough?.toISOString() ?? null,
     cacheHitPct: cacheHitPct(cachedTokens, cacheInputTokens),
-    scope: { rootSessionId, sessionId },
+    scope: {
+      rootSessionId: visibleRootScope ? rootSessionId : null,
+      sessionId: visibleSessionScope ? sessionId : null,
+    },
     driverGroups,
     driversTruncated,
     facetsTruncated,

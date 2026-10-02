@@ -27,9 +27,10 @@ BEGIN
     format(', visible_warm_groups AS MATERIALIZED (
           SELECT DISTINCT coalesce(sandbox_group_id, id)::text AS group_id
           FROM visible_sessions
-          WHERE context_subject_id IS NULL OR visibility = ''workspace_shared''
+          WHERE (context_subject_id IS NULL OR visibility = ''workspace_shared''
             OR %I.session_private_actor_visible(account_id, workspace_id,
-              owner_organization_membership_id, owner_subject_id)
+              owner_organization_membership_id, owner_subject_id))
+            AND (sandbox_group_id IS NULL OR sandbox_group_id = id)
         )
         SELECT usage_row.event_type, usage_row.quantity,', data_schema));
   definition := replace(definition, 'usage_row.occurred_at, usage_row.source_resource_id',
@@ -124,7 +125,7 @@ BEGIN
           SELECT
             CASE WHEN session_row.visible THEN fact.id END,
             CASE WHEN session_row.visible THEN fact.session_id END,
-            CASE WHEN session_row.visible THEN session_row.root_session_id END,
+            CASE WHEN session_row.visible AND root_row.visible THEN root_row.id END,
             CASE WHEN session_row.visible THEN fact.turn_id END,
             fact.provider, fact.provider_api, fact.model, fact.billing_path,
             CASE WHEN session_row.visible THEN fact.scheduled_task_id END,
@@ -140,6 +141,7 @@ BEGIN
             CASE WHEN NOT session_row.visible THEN coalesce(auth_user.name, access.subject_label) END
           FROM %1$I.model_call_facts fact
           LEFT JOIN inventory_sessions session_row ON session_row.id = fact.session_id
+          LEFT JOIN inventory_sessions root_row ON root_row.id = session_row.root_session_id
           LEFT JOIN %1$I.workspace_memberships access ON access.account_id = account_value
             AND access.workspace_id = p_workspace_id AND access.subject_id = session_row.owner_subject_id
           LEFT JOIN %1$I.auth_users auth_user ON access.subject_id = 'user:' || auth_user.id
@@ -328,6 +330,24 @@ BEGIN
   EXECUTE definition;
 END
 $private_chat_amounts$;
+
+-- PUBLIC is not the only possible CREATE-time grant. Owner defaults may admit
+-- arbitrary reporting roles; this helper must stay exclusively internal.
+DO $private_chat_usage_acl$
+DECLARE role_name text;
+BEGIN
+  REVOKE ALL ON FUNCTION opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz) FROM PUBLIC;
+  FOR role_name IN
+    SELECT DISTINCT role_row.rolname FROM pg_proc procedure
+    CROSS JOIN LATERAL aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) privilege
+    JOIN pg_roles role_row ON role_row.oid = privilege.grantee
+    WHERE procedure.oid = 'opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz)'::regprocedure
+      AND privilege.grantee <> procedure.proowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz) FROM %I CASCADE', role_name);
+  END LOOP;
+END
+$private_chat_usage_acl$;
 
 DO $acl$
 DECLARE role_name text; target regprocedure;
