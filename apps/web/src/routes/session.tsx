@@ -2373,7 +2373,9 @@ function SessionChatPane(props: {
   useEffect(() => {
     if (!composerModelUnavailable || !unavailableReplacement) return;
     if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
-    if (!canControlSession) return;
+    // A failed session keeps its model until the person chooses: the
+    // failure banner's Retry re-runs that turn with the composer's model.
+    if (!canControlSession || props.failure) return;
     setComposerModel(unavailableReplacement.model);
     setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
     if (unavailableReplacement.latencyMode) {
@@ -2381,6 +2383,7 @@ function SessionChatPane(props: {
     }
   }, [
     canControlSession,
+    props.failure,
     composerDraftLoading,
     composerModelUnavailable,
     hasComposerPolicy,
