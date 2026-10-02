@@ -8506,3 +8506,5 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./subscription-account-selection";
+export * from "./claude-subscription-capacity";

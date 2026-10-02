@@ -23,7 +23,7 @@ const providers = parseModelProvidersJson(
 );
 
 test("worker observations retain their captured identity and merge partial model responses", async () => {
-  const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+  const latest = new Map<string, CapturedClaudeUsage>();
   const observe = await createClaudeUsageObserver(providers, latest, async () => ({
     token: "sk-ant-oat01-fixture",
     connectionId: "original",
@@ -37,11 +37,11 @@ test("worker observations retain their captured identity and merge partial model
     "workspace-claude-subscription",
     new Response(null, { headers: { "anthropic-ratelimit-unified-7d-utilization": ".6" } }),
   );
-  expect(latest.get("workspace")).toMatchObject({
+  expect([...latest.values()][0]).toMatchObject({
     expectedConnectionId: "original",
     expectedCredentialVersion: 7,
   });
-  expect(latest.get("workspace")!.observation!.windows.map((window) => window.usedPercent)).toEqual(
+  expect([...latest.values()][0]!.observation!.windows.map((window) => window.usedPercent)).toEqual(
     [30, 60],
   );
 });
@@ -56,7 +56,7 @@ test("failed or mismatched telemetry binding never observes a replacement creden
       credentialVersion: 8,
     }),
   ]) {
-    const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+    const latest = new Map<string, CapturedClaudeUsage>();
     const observe = await createClaudeUsageObserver(providers, latest, read);
     expect(() =>
       observe(
@@ -69,6 +69,44 @@ test("failed or mismatched telemetry binding never observes a replacement creden
     ).not.toThrow();
     expect(latest.size).toBe(0);
   }
+});
+
+test("account and generation observations never merge within the same scope", async () => {
+  const latest = new Map<string, CapturedClaudeUsage>();
+  for (const [connectionId, credentialVersion, fraction] of [
+    ["11111111-1111-4111-8111-111111111111", 1, ".1"],
+    ["22222222-2222-4222-8222-222222222222", 1, ".2"],
+    ["11111111-1111-4111-8111-111111111111", 2, ".3"],
+  ] as const) {
+    const bound = parseModelProvidersJson(
+      JSON.stringify(
+        providers.map((provider) => ({
+          ...provider,
+          anthropic: { auth: "oauth", credentialBinding: { connectionId, credentialVersion } },
+        })),
+      ),
+    );
+    const observe = await createClaudeUsageObserver(bound, latest, async () => null);
+    observe(
+      bound[0]!.id,
+      new Response(null, {
+        headers: { "anthropic-ratelimit-unified-5h-utilization": fraction },
+      }),
+      "claude-opus-5-5",
+    );
+  }
+  expect(latest.size).toBe(3);
+  expect(
+    [...latest.values()].map((item) => [
+      item.expectedConnectionId,
+      item.expectedCredentialVersion,
+      item.observation!.windows[0]!.usedPercent,
+    ]),
+  ).toEqual([
+    ["11111111-1111-4111-8111-111111111111", 1, 10],
+    ["22222222-2222-4222-8222-222222222222", 1, 20],
+    ["11111111-1111-4111-8111-111111111111", 2, 30],
+  ]);
 });
 
 test("native generation bindings survive another replica renewing between catalog load and dispatch", async () => {
@@ -84,7 +122,7 @@ test("native generation bindings survive another replica renewing between catalo
       })),
     ),
   );
-  const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+  const latest = new Map<string, CapturedClaudeUsage>();
   const observe = await createClaudeUsageObserver(bound, latest, async () => ({
     token: "sk-ant-oat01-renewed",
     connectionId: id,
@@ -105,7 +143,7 @@ test("native generation bindings survive another replica renewing between catalo
       headers: { "anthropic-ratelimit-unified-5h-utilization": ".4" },
     }),
   );
-  expect(latest.get("workspace")!.token).toBe("sk-ant-oat01-renewed");
+  expect([...latest.values()][0]!.token).toBe("sk-ant-oat01-renewed");
   observe.renew("workspace-claude-subscription", {
     token: "sk-ant-oat01-replaced",
     connectionId: id,

@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../src/model-provider-client";
+import { AnthropicMessagesModel } from "../src/anthropic-messages";
+import type { ResolvedModelProvider } from "@opengeni/config";
 
 test("usage observer sees success and 429 headers without consuming responses", async () => {
   for (const status of [200, 429]) {
@@ -123,4 +125,53 @@ test("failed authentication renewal never dispatches a model request", async () 
     ),
   ).rejects.toThrow("Sign in again");
   expect(dispatched).toBe(false);
+});
+
+test("native concurrent model requests bind quota observations to their exact upstream model", async () => {
+  const seen: string[] = [];
+  const provider = {
+    id: "claude",
+    api: "anthropic-messages",
+    apiKey: "synthetic-key",
+    baseUrl: "https://example.test/v1",
+    kind: "api-key",
+  } as ResolvedModelProvider;
+  const fetcher = instrumentedModelFetch(provider.id, (async () => {
+    await Promise.resolve();
+    return Response.json({
+      id: "msg_fixture",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "fixture" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+  }) as typeof fetch);
+  const request = {
+    input: "Fixture",
+    modelSettings: {},
+    tools: [],
+    handoffs: [],
+    outputType: "text",
+    tracing: false,
+  } as const;
+  await withClaudeUsageObserver(
+    (_, __, model) => {
+      seen.push(model!);
+    },
+    () =>
+      Promise.all([
+        new AnthropicMessagesModel(provider, "claude-opus-5-5", fetcher).getResponse({
+          ...request,
+          tools: [],
+          handoffs: [],
+        }),
+        new AnthropicMessagesModel(provider, "claude-sonnet-5-5", fetcher).getResponse({
+          ...request,
+          tools: [],
+          handoffs: [],
+        }),
+      ]),
+  );
+  expect(seen.toSorted()).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
 });

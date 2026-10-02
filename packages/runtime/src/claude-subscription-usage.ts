@@ -1,11 +1,20 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-type Observer = (providerId: string, response: Response) => void;
+type Observer = (providerId: string, response: Response, upstreamModelId?: string) => void;
 type Prepare = (providerId: string, headers: Headers) => Promise<Headers>;
 const observers = new AsyncLocalStorage<{
   observe: Observer;
   prepare?: Prepare;
 }>();
+const modelRequests = new AsyncLocalStorage<string>();
+
+/** The native adapter knows the exact model without reading or cloning the wire body. */
+export function withClaudeModelRequest<T>(
+  upstreamModelId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return modelRequests.run(upstreamModelId, run);
+}
 
 /** Like Codex usage headers: free observations within this turn's provider context. */
 export function withClaudeUsageObserver<T>(
@@ -28,7 +37,7 @@ export async function prepareClaudeSubscriptionRequest(
 }
 export function observeClaudeUsageResponse(providerId: string, response: Response): void {
   try {
-    observers.getStore()?.observe(providerId, response);
+    observers.getStore()?.observe(providerId, response, modelRequests.getStore());
   } catch {
     // Usage telemetry must never change or consume a model response.
   }

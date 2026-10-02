@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 import {
   protocol,
   Usage,
@@ -601,12 +602,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
