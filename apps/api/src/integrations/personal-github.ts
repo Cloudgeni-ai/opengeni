@@ -19,6 +19,10 @@ import {
 } from "@opengeni/contracts/personal-github";
 import {
   externalActorContinuationForAuthorization,
+  hasPermission,
+  hasVerifiedOwningUserAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  requireResolvedAccessGrantAuthorization,
   requireEnvironmentEncryption,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
@@ -40,6 +44,7 @@ import {
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
   personalOnlyConnectionPrincipalMessage,
@@ -55,9 +60,30 @@ import {
 } from "./oauth-client";
 
 const PERSONAL_GITHUB_OAUTH_STATE_KIND = "personal_github_oauth";
+const PERSONAL_GITHUB_NATIVE_HANDOFF_KIND = "personal_github_native_handoff";
 const GITHUB_RESPONSE_MAX_BYTES = 256 * 1024;
 const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
 const GITHUB_API_VERSION = "2022-11-28";
+
+const PersonalGitHubNativeHandoff = z
+  .object({
+    kind: z.literal(PERSONAL_GITHUB_NATIVE_HANDOFF_KIND),
+    version: z.literal(1),
+    provider: z.literal("github-personal"),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    subjectId: z.string().regex(/^user:[^\s\u0000-\u001f\u007f]+$/),
+    permissions: z.tuple([z.literal("connections:write")]),
+    returnPath: z.string().min(1).max(2048),
+    oauthEnvironment: z.string().min(1),
+    oauthClientMarker: z.string().min(1),
+    connectAttemptId: z.string().uuid().optional(),
+    connectionId: z.string().uuid().optional(),
+    connectionVersion: z.number().int().positive().optional(),
+    nonce: z.string().min(1),
+    iat: z.number().int(),
+  })
+  .strict();
 
 type PersonalGitHubOAuthState = {
   connectAttemptId?: string;
@@ -213,6 +239,7 @@ export async function startPersonalGitHubOAuth(
     access: AccessGrantAuthorization;
     workspaceId: string;
     connectionId?: string;
+    expectedConnectionVersion?: number;
     returnPath?: string;
     connectAttemptId?: string;
   },
@@ -220,12 +247,23 @@ export async function startPersonalGitHubOAuth(
   const oauth = requirePersonalGitHubOAuthSettings(deps.settings);
   const { grant } = input.access;
   await withOrganizationIntegrationAcquisition(deps.db, grant, ["github-personal"], async () => {});
+  requireResolvedAccessGrantAuthorization(input.access, input.workspaceId);
+  if (
+    !hasVerifiedOwningUserAuthorization(input.access) ||
+    !hasPermission(grant.permissions, "connections:write")
+  )
+    throw new HTTPException(403, { message: "Verified owning-user connection authority required" });
   const existing = input.connectionId
     ? await getConnectionMetadata(deps.db, input.workspaceId, input.connectionId, grant.subjectId)
     : null;
   if (input.connectionId && !existing) {
     throw new HTTPException(404, { message: "personal GitHub connection not found" });
   }
+  if (
+    input.expectedConnectionVersion !== undefined &&
+    existing?.version !== input.expectedConnectionVersion
+  )
+    throw new HTTPException(409, { message: "Personal GitHub connection changed" });
   if (
     existing &&
     (existing.subjectId !== grant.subjectId || !isPersonalGitHubConnection(existing))
@@ -235,24 +273,54 @@ export async function startPersonalGitHubOAuth(
     });
   }
 
+  const returnPath = personalGitHubReturnPath(input.workspaceId, input.returnPath);
+  if (isVerifiedDelegatedHumanAuthorization(input.access)) {
+    // This is only an invitation to the exact native browser owner. It contains
+    // no provider state or PKCE challenge that the delegated client can redeem.
+    const intent = createSignedState(requireIntegrationsStateSecret(deps.settings), {
+      kind: PERSONAL_GITHUB_NATIVE_HANDOFF_KIND,
+      version: 1,
+      provider: "github-personal",
+      accountId: grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["connections:write"],
+      returnPath,
+      oauthEnvironment: oauth.oauthEnvironment,
+      oauthClientMarker: oauth.oauthClientMarker,
+      ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+      ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
+    });
+    const handoff = new URL(
+      `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/connections/github/oauth/native-start`,
+      oauth.callbackUrl,
+    );
+    handoff.searchParams.set("intent", intent);
+    return PersonalGitHubOAuthStartResponse.parse({
+      authorizationUrl: handoff.toString(),
+      expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+    });
+  }
+  const externalContinuation = externalActorContinuationForAuthorization(input.access);
+  if (!input.access.canonicalManagedHumanSession && !externalContinuation)
+    throw new HTTPException(403, { message: "Native browser or verified external owner required" });
   const key = requireEnvironmentEncryption(deps.settings);
   const verifier = randomBytes(48).toString("base64url");
-  const returnPath = personalGitHubReturnPath(input.workspaceId, input.returnPath);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
     accountId: grant.accountId,
     workspaceId: input.workspaceId,
     subjectId: grant.subjectId,
     kind: PERSONAL_GITHUB_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
-    ...(externalActorContinuationForAuthorization(input.access)
+    ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
             key,
-            JSON.stringify(externalActorContinuationForAuthorization(input.access)),
+            JSON.stringify(externalContinuation),
           ),
         }
       : {}),
-    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
+    [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: hasVerifiedOwningUserAuthorization(input.access),
     canonicalManagedHumanSession: input.access.canonicalManagedHumanSession,
     returnPath,
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
@@ -273,6 +341,94 @@ export async function startPersonalGitHubOAuth(
   return PersonalGitHubOAuthStartResponse.parse({
     authorizationUrl: authorizationUrl.toString(),
     expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+  });
+}
+
+/** Only a separately resolved canonical cookie owner can convert initiation
+ * into provider consent. State/headers never stamp native browser authority. */
+export async function resumePersonalGitHubOAuthInNativeBrowser(
+  deps: ApiRouteDeps,
+  input: { access: AccessGrantAuthorization; workspaceId: string; intent: string },
+) {
+  const grant = requireResolvedAccessGrantAuthorization(input.access, input.workspaceId);
+  if (
+    !input.access.canonicalManagedHumanSession ||
+    !hasVerifiedOwningUserAuthorization(input.access) ||
+    isVerifiedDelegatedHumanAuthorization(input.access) ||
+    externalActorContinuationForAuthorization(input.access) ||
+    !hasPermission(grant.permissions, "connections:write")
+  )
+    throw new HTTPException(403, { message: "Finish this action in your signed-in browser" });
+  const parsed = PersonalGitHubNativeHandoff.safeParse(
+    readSignedState(input.intent, requireIntegrationsStateSecret(deps.settings)),
+  );
+  if (!parsed.success)
+    throw new HTTPException(403, { message: "Invalid personal GitHub browser handoff" });
+  const intent = parsed.data;
+  const nowMs = Date.now();
+  const oauth = requirePersonalGitHubOAuthSettings(deps.settings);
+  if (
+    nowMs >= intent.iat * 1000 + oauthStateTtlMs ||
+    intent.iat * 1000 > nowMs ||
+    intent.accountId !== grant.accountId ||
+    intent.workspaceId !== input.workspaceId ||
+    intent.subjectId !== grant.subjectId ||
+    intent.oauthEnvironment !== oauth.oauthEnvironment ||
+    intent.oauthClientMarker !== oauth.oauthClientMarker ||
+    Boolean(intent.connectionId) !== Boolean(intent.connectionVersion)
+  )
+    throw new HTTPException(403, { message: "Personal GitHub browser handoff no longer matches" });
+  await requireConnectOwnerAuthority(deps.db, {
+    ...intent,
+    personalOwnerVerified: true,
+  });
+  if (intent.connectAttemptId) {
+    const stored = await getConnectAttempt(deps.db, intent, intent.connectAttemptId);
+    if (
+      stored.attempt.providerId !== "github-personal" ||
+      stored.attempt.ownership !== "personal" ||
+      stored.attempt.state !== "requires_user_action" ||
+      stored.operationInFlight
+    )
+      throw new HTTPException(409, { message: "Personal GitHub connection attempt changed" });
+  }
+  if (intent.connectionId) {
+    const existing = await getConnectionMetadata(
+      deps.db,
+      intent.workspaceId,
+      intent.connectionId,
+      intent.subjectId,
+    );
+    if (
+      !existing ||
+      existing.subjectId !== intent.subjectId ||
+      existing.version !== intent.connectionVersion ||
+      !isPersonalGitHubConnection(existing)
+    )
+      throw new HTTPException(409, { message: "Personal GitHub connection changed" });
+  }
+  // Consume only after real browser identity/scope and live owner checks. The
+  // known initiation nonce can never serve as a provider-consent nonce.
+  const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
+    accountId: intent.accountId,
+    workspaceId: intent.workspaceId,
+    subjectId: intent.subjectId,
+    nonce: intent.nonce,
+    expiresAt: new Date(intent.iat * 1000 + oauthStateTtlMs),
+    now: new Date(),
+  });
+  if (!consumed)
+    throw new HTTPException(409, { message: "Personal GitHub browser handoff already used" });
+  // This exact resolver-owned cookie authorization mints independent random
+  // PKCE/state here. Neither is returned to the delegated initiation request.
+  return startPersonalGitHubOAuth(deps, {
+    access: input.access,
+    workspaceId: intent.workspaceId,
+    returnPath: intent.returnPath,
+    ...(intent.connectAttemptId ? { connectAttemptId: intent.connectAttemptId } : {}),
+    ...(intent.connectionId
+      ? { connectionId: intent.connectionId, expectedConnectionVersion: intent.connectionVersion! }
+      : {}),
   });
 }
 
@@ -474,8 +630,8 @@ export async function completePersonalGitHubOAuthCallback(
         providerPrincipalId: identity.id,
         requireLiveUserAuthority: true,
         requiredLiveUserPermission: "connections:write",
-        // The external lane has passed its own owning-user proof; it does not
-        // impersonate a native login. Both use the same personal workspace anchor.
+        // Only native-browser-minted provider state or the independently
+        // verified external continuation may reach this owner seam.
         allowCanonicalPersonalWorkspaceOwner:
           state.canonicalManagedHumanSession || Boolean(state.externalContinuation),
         authorize: (locked) => requireConnectOwnerAuthority(locked, state, "connections:write"),
@@ -565,7 +721,17 @@ function readPersonalGitHubOAuthState(
     throw new PersonalGitHubCallbackError("disabled");
   }
   const payload = readSignedState(raw, secret) as Record<string, unknown> | null;
-  if (!payload || payload.kind !== PERSONAL_GITHUB_OAUTH_STATE_KIND) {
+  if (
+    !payload ||
+    payload.kind !== PERSONAL_GITHUB_OAUTH_STATE_KIND ||
+    // Even valid HMAC legacy initiation state was known to the delegated
+    // client. It cannot prove independent native provider consent.
+    payload.delegatedActor !== undefined ||
+    (payload.canonicalManagedHumanSession !== true &&
+      typeof payload.encryptedExternalContinuation !== "string") ||
+    (payload.canonicalManagedHumanSession === true &&
+      payload.encryptedExternalContinuation !== undefined)
+  ) {
     throw new PersonalGitHubCallbackError("invalid_state");
   }
   const iat = numberValue(payload.iat);
@@ -585,10 +751,12 @@ function readPersonalGitHubOAuthState(
     throw new PersonalGitHubCallbackError("invalid_state");
   }
   const workspaceId = requiredString(payload.workspaceId);
+  const accountId = requiredString(payload.accountId);
+  const subjectId = requiredString(payload.subjectId);
   return {
-    accountId: requiredString(payload.accountId),
+    accountId,
     workspaceId,
-    subjectId: requiredString(payload.subjectId),
+    subjectId,
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     canonicalManagedHumanSession: payload.canonicalManagedHumanSession === true,
     ...(typeof payload.connectAttemptId === "string"

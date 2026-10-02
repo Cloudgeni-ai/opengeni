@@ -81,6 +81,19 @@ describe("reviewed human-route classification", () => {
     expect(
       entries.get("POST /v1/workspaces/:workspaceId/connections/github/oauth/start")?.class,
     ).toBe("delegable_to_user");
+    expect(entries.get("POST /v1/workspaces/:workspaceId/codex/connect/start")?.class).toBe(
+      "delegable_to_user",
+    );
+    expect(
+      entries.get("GET /v1/workspaces/:workspaceId/connections/github/oauth/native-start")?.class,
+    ).toBe("person_present");
+    for (const path of [
+      "/v1/workspaces/:workspaceId/github/connect",
+      "/v1/workspaces/:workspaceId/pr-review/github/connect",
+    ])
+      expect(entries.get(`GET ${path}`)?.class).toBe("organization_allowed");
+    for (const path of ["/v1/billing/checkout", "/v1/billing/portal"])
+      expect(entries.get(`POST ${path}`)?.class).toBe("csrf_only");
     expect(entries.get("GET /v1/identity")?.class).toBe("delegable_to_user");
     expect(entries.get("GET /v1/auth/sign-in-methods")?.class).toBe("delegable_to_user");
     expect(entries.get("POST /v1/auth/sign-in-methods/connect")?.class).toBe("delegable_to_user");
@@ -99,5 +112,8 @@ describe("reviewed human-route classification", () => {
     expect(
       entries.get("POST /v1/workspaces/:workspaceId/agent-learning/instructions/review")?.class,
     ).toBe("delegable_to_user");
+    expect(
+      snapshot.missingGateCandidates.every((candidate) => candidate.status === "fixed_phase_2"),
+    ).toBe(true);
   });
 });

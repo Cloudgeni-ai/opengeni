@@ -292,23 +292,16 @@ worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
 recovery.
 
-Organization settings owns the cross-workspace roster and roles. A managed
-browser administrator is the ordinary authority. Single-user local deployments
-also admit only the access resolver's canonical `opengeni:local/default` + `dev`
-browser context to organization metadata, shared-workspace, retention,
-company-identity, and organization Codex controls. Provenance, not subject name,
-governs; configured, delegated, API-key, service, and agent principals are excluded.
-A shared-workspace creator gets an explicit named workspace-admin grant;
-organization authority alone grants no operational access. Owners and
-organization administrators may open `/workspaces/:workspaceId/settings` in
-restricted mode for shared workspaces they cannot otherwise enter. It exposes
-identity, direct access, and deletion only, never the workspace provider or
-sessions, files, credentials, integrations, or other content. A shared workspace's
-Members page is narrower: `members:manage` may add an already-active
-same-organization human and change or revoke access only there. Personal or
-cross-organization targets, self-demotion, and removing the final administrator
-fail closed. Candidate inventory shows only active same-organization humans
-lacking access, not their other workspace grants.
+Organization administration admits verified managed browsers, canonical local
+`opengeni:local/default` + `dev` browsers, or reviewed service/delegated proofs
+within literal account ceilings and live access. Configured/agent principals
+remain excluded; unavailable database service lifecycles fail closed.
+Shared-workspace creators receive named admin grants; organization authority
+alone grants no operational access. Restricted `/workspaces/:workspaceId/settings`
+exposes only identity, access and deletion, not workspace content. Shared
+`members:manage` controls already-active same-organization humans only. Personal
+or cross-organization targets, self-demotion and final-administrator removal
+fail closed; candidate lists reveal no other workspace grants.
 
 Managed browser login slots are explicit session-set actors, not tenant hints.
 Organization recovery custody is a separate quorum and actor-fenced authority;
@@ -320,17 +313,17 @@ them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
 port; it cannot grant access that OpenGeni denied.
 
-The managed personal-workspace owner receives a closed permission projection
-that includes `capabilities:manage`, so they can configure their own Plugins,
-Integrations, and Codex subscription without receiving the `workspace:admin`
-wildcard, member management, or API-key delegation.
-`requireWorkspaceSettingsGrant` in the access resolver separately admits the
-verified managed-cookie owner for Personal workspace preferences, model
-configuration, runtime pause/resume, and instruction/Skill autonomy. It checks
-the current active Personal pointer and returns the original closed grant;
-organization authority or a delegated owner-shaped token cannot use this
-exception. Membership, API-key management, and workspace deletion retain their
-existing authorization boundaries.
+Personal owners receive closed grants including `capabilities:manage`, never
+`workspace:admin`, member management or key delegation. The settings exception
+checks the live Personal pointer and returns that closed grant.
+Trusted OAuth dispatchers may stamp the exact raw Request before resolution with
+`stampDelegatedHumanAuthorization`: request-local WeakMap provenance, live native
+access, scope/permission intersections and exact owning-user verification, never
+browser presence. Delegated Personal settings also require literal
+`workspace:admin` in the proof ceiling. Headers, metadata, cloned requests or
+grant-shaped objects cannot supply proof. Membership, keys, deletion and private
+sessions retain independent permission/owner checks. See
+`docs/human-route-authorization.md` for the reviewed boundary.
 
 An already-onboarded verified managed human may create additional independent
 organizations from the organization switcher. The login and canonical human

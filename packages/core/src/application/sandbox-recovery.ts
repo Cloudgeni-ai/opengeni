@@ -3,7 +3,7 @@ import { consentPublicSandboxRecovery, readPublicSandboxRecovery } from "@openge
 import { requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
 import { requireSessionAuthorization } from "../session-authorization";
-import { requireCanonicalManagedHuman } from "./session-tenancy";
+import { requireVerifiedOwningUser } from "./session-tenancy";
 
 type Dependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
 
@@ -24,7 +24,7 @@ export function requireSandboxRecoveryPreviewHuman(
     !authorization.grant.serviceInitiator
   )
     return;
-  requireCanonicalManagedHuman(authorization, workspaceId);
+  requireVerifiedOwningUser(authorization, workspaceId);
 }
 
 async function authorize(
@@ -34,10 +34,11 @@ async function authorize(
   sessionId: string,
   intent: "preview" | "consent",
 ) {
-  // Cookie-verification stamp, never principal-shape inference or an actor from
-  // the body. The local human may only read; agents, API keys and delegated
-  // humans cannot accept data loss or broaden the consent mutation.
-  if (intent === "consent") requireCanonicalManagedHuman(authorization, workspaceId);
+  // Filesystem-loss acknowledgement is delegable only to the exact verified
+  // owning person, never a principal shape or an actor supplied by the body.
+  // The local human may only read; organization services cannot preview or
+  // accept data loss. Permission ceilings and session ownership still apply.
+  if (intent === "consent") requireVerifiedOwningUser(authorization, workspaceId);
   else requireSandboxRecoveryPreviewHuman(authorization, workspaceId);
   requirePermission(authorization.grant, "sessions:read");
   requirePermission(authorization.grant, "sessions:control");

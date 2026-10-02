@@ -25,15 +25,18 @@ import {
   externalActorContinuationForAuthorization,
   externalContinuationCommitAuthorizer,
   hasPermission,
+  hasVerifiedOwningUserAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 
-function nativeConfirmation(authorization: AccessGrantAuthorization) {
+function nativeConfirmation(authorization: AccessGrantAuthorization, personPresent = true) {
   if (
     !authorization.contextIntegrity ||
-    !authorization.canonicalManagedHumanSession ||
+    !(personPresent
+      ? authorization.canonicalManagedHumanSession
+      : hasVerifiedOwningUserAuthorization(authorization)) ||
     authorization.authenticatedSubjectId !== authorization.grant.subjectId ||
     !authorization.grant.subjectId.startsWith("user:")
   )
@@ -53,7 +56,7 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
       "workspace:read",
     );
     if (!externalActorContinuationForAuthorization(authorization))
-      nativeConfirmation(authorization);
+      nativeConfirmation(authorization, false);
     const parsedCursor = z.string().uuid().optional().safeParse(c.req.query("cursor"));
     if (!parsedCursor.success) throw new HTTPException(400, { message: "Invalid link cursor" });
     const cursor = parsedCursor.data;
@@ -122,8 +125,9 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
       "workspace:read",
     );
     const external = externalActorContinuationForAuthorization(authorization);
-    if (operation === "preview" || operation === "confirm" || !external)
-      nativeConfirmation(authorization);
+    if (operation === "confirm") nativeConfirmation(authorization);
+    else if (operation === "preview") nativeConfirmation(authorization, false);
+    else if (!external) nativeConfirmation(authorization, false);
     const grant = authorization.grant;
     const input = c.req.method === "POST" ? await readRequestJson(c) : null;
     try {

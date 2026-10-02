@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
+import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   finishConnectOperation,
@@ -50,6 +51,7 @@ export function isGitHubAppConnectState(deps: ApiRouteDeps, raw: string | undefi
 }
 
 type GitHubConnectScope = ConnectActorScope & {
+  externalContinuation?: ExternalActorContinuation;
   personalOwnerVerified?: boolean;
   providerId?: "github-app" | "github-lens";
 };
@@ -95,14 +97,19 @@ export function githubAppConnectNavigation(
     providerId,
     ...(installationId ? { installationId } : {}),
   });
+  const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl);
+  const nativeBrowserHandoff =
+    !scope.externalContinuation && !scope.subjectId.startsWith("external_user:");
   const url =
     phase === "install"
       ? `https://github.com/apps/${encodeURIComponent(settings.githubAppSlug.trim())}/installations/new?state=${encodeURIComponent(state)}`
-      : githubOAuthAuthorizeUrl({
-          clientId: settings.githubClientId!.trim(),
-          state,
-          redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}${providerId === "github-lens" ? "/v1/pr-review/github" : "/v1/github"}/oauth/callback`,
-        });
+      : nativeBrowserHandoff
+        ? `${baseUrl}/v1/workspaces/${encodeURIComponent(scope.workspaceId)}/${providerId === "github-lens" ? "pr-review/github" : "github"}/connect?state=${encodeURIComponent(state)}`
+        : githubOAuthAuthorizeUrl({
+            clientId: settings.githubClientId!.trim(),
+            state,
+            redirectUri: `${baseUrl}${providerId === "github-lens" ? "/v1/pr-review/github" : "/v1/github"}/oauth/callback`,
+          });
   return { authorizationUrl: url, expiresAt: new Date(Date.now() + lifetimeMs).toISOString() };
 }
 
@@ -153,8 +160,9 @@ export function prepareGitHubAppConnectAction(
   };
 }
 
-/** No browser login/cookie required: signed attempt + current stored origin,
- * then fresh GitHub owner proof, are the two separate authority boundaries. */
+/** Signed stored-stage and fresh commit authority. Native HTTP entrypoints
+ * additionally require independent browser/person proof before calling this;
+ * external continuations retain their separate stored-origin authorization. */
 export async function completeGitHubAppConnect(
   deps: ApiRouteDeps,
   input: {

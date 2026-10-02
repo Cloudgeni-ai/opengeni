@@ -3,8 +3,10 @@ import {
   ManagedSignInPasswordMutation,
   ManagedSignInProviderMutation,
   ManagedSignInMutationResponse,
+  ManagedSignInConnectResponse,
 } from "@opengeni/contracts/managed-sign-in-methods";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { verifiedDelegatedHumanAuthorizationForRequest, type ApiRouteDeps } from "@opengeni/core";
+import { requireManagedHumanRouteIdentity } from "../http/human-route-authorization";
 import {
   requireCanonicalHumanRequestIdentity,
   getManagedAuthRequestActorLeaseStamp,
@@ -61,11 +63,59 @@ async function rows<T>(deps: ApiRouteDeps, query: ReturnType<typeof sql>): Promi
 }
 
 async function identity(context: Context, deps: ApiRouteDeps) {
+  if (
+    verifiedDelegatedHumanAuthorizationForRequest(context.req.raw) ||
+    context.req.header("authorization")
+  )
+    throw new HTTPException(403, {
+      message: "Credential changes require independent native browser authentication",
+    });
   return requireCanonicalHumanRequestIdentity(context, {
     db: deps.db,
     managedAuth: deps.managedAuth,
     managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
     managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
+  });
+}
+
+/** Initiation is delegable; the adapter's native session/link intent is not.
+ * The existing security page requires the person to choose Connect after native
+ * authentication. No OAuth state, auth session, mutation fence or credential is
+ * created here, and this destination never selects/changes the browser actor. */
+async function startDelegatedManagedSignInConnect(context: Context, deps: ApiRouteDeps) {
+  if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth)
+    throw new HTTPException(404, { message: "Managed sign-in methods are unavailable" });
+  const person = await requireManagedHumanRouteIdentity(context, deps, "account:read");
+  const parsed = ManagedSignInProviderMutation.safeParse(
+    await context.req.json().catch(() => null),
+  );
+  if (!parsed.success) throw new HTTPException(422, { message: "Invalid sign-in method request" });
+  const body = parsed.data;
+  const projection = await getCanonicalHumanIdentityProjection(deps.db, person.user.id);
+  if (
+    projection.activeIdentity.id !== body.expectedIdentityId ||
+    projection.activeIdentity.identityRevision !== body.expectedIdentityRevision
+  )
+    return context.json(
+      {
+        code: "SIGN_IN_METHOD_IDENTITY_CHANGED",
+        message: "The signed-in account changed; reload security settings",
+      },
+      409,
+    );
+  if (!configured(deps, body.provider))
+    throw new HTTPException(409, { message: "Sign-in provider is not configured" });
+  const browserBase = deps.settings.webBaseUrl || deps.settings.publicBaseUrl;
+  if (!browserBase)
+    throw new HTTPException(503, { message: "Managed browser destination is not configured" });
+  return context.json({
+    ...ManagedSignInConnectResponse.parse({
+      url: new URL("/settings/security", browserBase).toString(),
+    }),
+    nextAction: "open_in_browser",
+    provider: body.provider,
+    providerFlowStarted: false,
+    message: "Sign in to OpenGeni, then choose Connect in your security settings.",
   });
 }
 
@@ -144,19 +194,25 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
     await next();
   });
   app.get(base, async (context) => {
-    const actor = await identity(context, deps);
-    const projection = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+    const delegated = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
+    const actor = delegated ? null : await identity(context, deps);
+    const authUserId = delegated
+      ? (await requireManagedHumanRouteIdentity(context, deps, "account:read")).user.id
+      : actor!.authUserId;
+    const projection = await getCanonicalHumanIdentityProjection(deps.db, authUserId);
     const [user] = await rows<{ email: string; emailVerified: boolean; fresh: boolean }>(
       deps,
-      sql`
+      delegated
+        ? sql`select email, email_verified as "emailVerified", false as fresh from auth_users where id=${authUserId}`
+        : sql`
       select u.email, u.email_verified as "emailVerified", s.created_at > clock_timestamp()-interval '5 minutes' as fresh
-      from auth_users u join auth_sessions s on s.user_id=u.id where u.id=${actor.authUserId} and s.id=${actor.authSessionId}`,
+      from auth_users u join auth_sessions s on s.user_id=u.id where u.id=${authUserId} and s.id=${actor!.authSessionId}`,
     );
     if (!user) throw new HTTPException(401);
     const accounts = await rows<{ provider: string; usable: boolean }>(
       deps,
       sql`
-      select provider_id as provider, (provider_id <> 'credential' or length(password)>0) as usable from auth_identities where user_id=${actor.authUserId}`,
+      select provider_id as provider, (provider_id <> 'credential' or length(password)>0) as usable from auth_identities where user_id=${authUserId}`,
     );
     const connected = (provider: string) =>
       accounts.some((a) => a.provider === provider && a.usable) &&
@@ -189,6 +245,8 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
   });
   for (const kind of ["connect", "disconnect", "password"] as const) {
     app.post(`${base}/${kind}`, async (context) => {
+      if (kind === "connect" && verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+        return startDelegatedManagedSignInConnect(context, deps);
       await admitManagedSignInMutation(context, deps);
       const actor = await identity(context, deps);
       const actorFence = getManagedAuthRequestActorLeaseStamp(context.req.raw);
@@ -366,6 +424,13 @@ export async function handleManagedSignInConnectCallback(
     throw new HTTPException(403, { message: "Invalid sign-in method OAuth proof" });
   const value = parsed.data,
     proof = value.opengeniSignInMethod;
+  if (
+    verifiedDelegatedHumanAuthorizationForRequest(context.req.raw) ||
+    context.req.header("authorization")
+  )
+    throw new HTTPException(403, {
+      message: "Credential binding requires independent native browser authentication",
+    });
   if (
     proof.provider !== provider ||
     value.callbackURL !==

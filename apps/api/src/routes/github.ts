@@ -54,6 +54,9 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  isVerifiedOrganizationServiceAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
   updateGitHubActionPolicyGroup,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -98,6 +101,10 @@ import {
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
 import { parseRequestJson } from "../http/request-body";
+import {
+  requirePersonPresentRouteAuthorization,
+  requireUserOrOrganizationRouteAuthorization,
+} from "../http/human-route-authorization";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -182,7 +189,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId: grant.workspaceId,
             intent: "installation_authority",
             ...(returnPath ? { returnPath } : {}),
-            ...githubBrowserGrantClaims(settings, grant),
+            ...githubInstallationInitiatorClaims(deps, grant),
           })
         : null;
     const connectUrl = connectState
@@ -306,6 +313,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!state) {
       throw new HTTPException(400, { message: "missing GitHub installation state" });
     }
+    if (isGitHubAppConnectState(deps, state))
+      return redirectNativeGitHubConnectBrowser(c, deps, state, workspaceId);
     const statePayload = readSignedState(state, githubStateSecret);
     if (
       !statePayload ||
@@ -316,6 +325,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
+    await requireGitHubManageGrant(c, deps, workspaceId, statePayload);
     const clientId = settings.githubClientId?.trim();
     if (!clientId || githubAppMissingSettings(settings).length > 0) {
       throw new HTTPException(409, {
@@ -329,7 +339,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: statePayload.accountId,
       workspaceId,
       intent: "installation_authority_discovery",
-      ...continuedGitHubBrowserGrantClaims(statePayload),
+      ...continuedGitHubInstallationClaims(statePayload),
     });
     setGitHubStateCookie(c, deps, discoveryState);
     return c.redirect(
@@ -487,7 +497,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: grant.workspaceId,
         expectedInstallationId: installationId,
         intent: "installation_authority_install",
-        ...continuedGitHubBrowserGrantClaims(statePayload),
+        ...continuedGitHubInstallationClaims(statePayload),
       });
       setGitHubStateCookie(c, deps, configureState);
       const configureUrl = githubInstallationSettingsUrl(installation);
@@ -552,14 +562,22 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   const handleGitHubInstallCallback = async (c: Context) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state")))
-      return completeGitHubAppConnect(deps, {
+    if (isGitHubAppConnectState(deps, c.req.query("state"))) {
+      const nativeBrowser = await requireGitHubConnectSetup(c, deps);
+      const response = await completeGitHubAppConnect(deps, {
         state: c.req.query("state"),
         installationId: c.req.query("installation_id"),
         setupAction: c.req.query("setup_action"),
         error: c.req.query("error"),
         requestUrl: c.req.url,
       });
+      if (nativeBrowser) {
+        c.res = response;
+        seedGitHubConnectBrowserState(c, deps, response);
+        return c.res;
+      }
+      return response;
+    }
     const state =
       c.req.query("state") ??
       allCookieValues(c, githubStateCookie).find((candidate) => {
@@ -581,8 +599,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
-    requireGitHubStateCookie(c, state);
-    const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
+    const grant = await requireGitHubManageGrant(
+      c,
+      deps,
+      statePayload.workspaceId,
+      statePayload,
+      state,
+    );
     if (grant.accountId !== statePayload.accountId) {
       throw new HTTPException(403, {
         message: "GitHub installation state does not match this workspace",
@@ -621,9 +644,10 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
       installationId,
       intent: "installation_authority_oauth",
-      ...continuedGitHubBrowserGrantClaims(statePayload),
+      ...continuedGitHubInstallationClaims(statePayload),
     });
-    setGitHubStateCookie(c, deps, oauthState);
+    if (await canSeedGitHubSetupBrowserState(c, deps, grant.workspaceId))
+      setGitHubStateCookie(c, deps, oauthState);
     return c.redirect(
       githubOAuthAuthorizeUrl({
         clientId,
@@ -637,13 +661,15 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/github/install/callback", handleGitHubInstallCallback);
 
   app.get("/v1/github/oauth/callback", async (c) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state")))
+    if (isGitHubAppConnectState(deps, c.req.query("state"))) {
+      const sourceState = await requireGitHubConnectConsent(c, deps);
       return completeGitHubAppConnect(deps, {
-        state: c.req.query("state"),
+        state: sourceState,
         code: c.req.query("code"),
         error: c.req.query("error"),
         requestUrl: c.req.url,
       });
+    }
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (c.req.query("error") === "access_denied") {
@@ -666,7 +692,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     if (statePayload.intent === "installation_authority_discovery") {
       requireGitHubStateCookie(c, state);
-      const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
+      const grant = await requireGitHubManageGrant(
+        c,
+        deps,
+        statePayload.workspaceId,
+        statePayload,
+        undefined,
+        true,
+      );
       if (grant.accountId !== statePayload.accountId) {
         throw new HTTPException(403, {
           message: "GitHub OAuth state does not match this workspace",
@@ -698,7 +731,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: grant.workspaceId,
         intent: "installation_authority_selection",
         allowedInstallationIds: candidates.map(({ installation }) => installation.installationId),
-        ...continuedGitHubBrowserGrantClaims(statePayload),
+        ...continuedGitHubInstallationClaims(statePayload),
       });
       if (candidates.length === 0) {
         return redirectToGitHubInstallation(c, deps, selectionState);
@@ -721,7 +754,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid GitHub installation id" });
     }
     requireGitHubStateCookie(c, state);
-    const grant = await requireGitHubManageGrant(c, deps, statePayload.workspaceId, statePayload);
+    const grant = await requireGitHubManageGrant(
+      c,
+      deps,
+      statePayload.workspaceId,
+      statePayload,
+      undefined,
+      true,
+    );
     if (grant.accountId !== statePayload.accountId) {
       throw new HTTPException(403, {
         message: "GitHub OAuth state does not match this workspace",
@@ -901,7 +941,7 @@ function redirectToGitHubInstallation(
     accountId: payload.accountId,
     workspaceId: payload.workspaceId,
     intent: "installation_authority_install",
-    ...continuedGitHubBrowserGrantClaims(payload),
+    ...continuedGitHubInstallationClaims(payload),
   });
   setGitHubStateCookie(c, deps, installState);
   return c.redirect(
@@ -962,7 +1002,7 @@ function redirectToExactGitHubAuthorization(
     workspaceId: payload.workspaceId,
     installationId,
     intent: "installation_authority_oauth",
-    ...continuedGitHubBrowserGrantClaims(payload),
+    ...continuedGitHubInstallationClaims(payload),
   });
   setGitHubStateCookie(c, deps, oauthState);
   return c.redirect(
@@ -997,20 +1037,40 @@ async function requireGitHubManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   expectedState: GitHubSignedStatePayload,
+  setupState?: string,
+  personPresent = false,
 ): Promise<IntegrationCommitGrant> {
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
-    requireLegacyOAuthActor(access);
+    if (personPresent) requirePersonPresentRouteAuthorization(access);
+    else requireUserOrOrganizationRouteAuthorization(access);
+    const nonBrowser =
+      isVerifiedDelegatedHumanAuthorization(access) ||
+      isVerifiedOrganizationServiceAuthorization(access);
+    requireGitHubInstallationInitiator(expectedState, access.grant, nonBrowser);
+    if (setupState && !nonBrowser && !allCookieValues(c, githubStateCookie).includes(setupState)) {
+      // An agent may prepare installation; only the actual native initiator can
+      // establish browser state at the non-redeeming setup return.
+      if (
+        !(access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) ||
+        c.req.header("authorization")
+      )
+        requireGitHubStateCookie(c, setupState);
+      requirePersonPresentRouteAuthorization(access);
+      requireGitHubInstallationInitiator(expectedState, access.grant, true);
+    }
     return integrationCommitGrant(access, ["github:manage"], {
       settings: deps.settings,
       authorizationHeader: c.req.header("authorization"),
     });
   } catch (error) {
-    if (!(error instanceof HTTPException) || error.status !== 401) {
+    if (personPresent || !(error instanceof HTTPException) || error.status !== 401) {
       throw error;
     }
     const grant = githubBrowserGrantFromState(deps.settings, expectedState, workspaceId);
     if (grant) {
+      requireGitHubInstallationInitiator(expectedState, grant);
+      if (setupState) requireGitHubStateCookie(c, setupState);
       return {
         ...grant,
         authorizeCommit: async () => {
@@ -1026,6 +1086,268 @@ async function requireGitHubManageGrant(
     }
     throw error;
   }
+}
+
+function githubInstallationInitiatorClaims(deps: ApiRouteDeps, grant: AccessGrant) {
+  return {
+    ...githubBrowserGrantClaims(deps.settings, grant),
+    initiatingSubjectId: grant.subjectId,
+    initiatingExpiresAt: Math.floor(Date.now() / 1_000) + githubBindingStateMaxAgeSeconds,
+  };
+}
+
+function continuedGitHubInstallationClaims(payload: GitHubSignedStatePayload) {
+  return {
+    ...continuedGitHubBrowserGrantClaims(payload),
+    ...(typeof payload.initiatingSubjectId === "string" &&
+    typeof payload.initiatingExpiresAt === "number"
+      ? {
+          initiatingSubjectId: payload.initiatingSubjectId,
+          initiatingExpiresAt: payload.initiatingExpiresAt,
+        }
+      : {}),
+  };
+}
+
+function requireGitHubInstallationInitiator(
+  payload: GitHubSignedStatePayload,
+  grant: AccessGrant,
+  required = false,
+): void {
+  if (
+    payload.accountId !== grant.accountId ||
+    payload.workspaceId !== grant.workspaceId ||
+    ((required || payload.initiatingSubjectId !== undefined) &&
+      (payload.initiatingSubjectId !== grant.subjectId ||
+        typeof payload.initiatingExpiresAt !== "number" ||
+        !Number.isInteger(payload.initiatingExpiresAt) ||
+        payload.initiatingExpiresAt < Math.floor(Date.now() / 1_000) ||
+        payload.initiatingExpiresAt > payload.iat + githubBindingStateMaxAgeSeconds))
+  ) {
+    throw new HTTPException(403, { message: "GitHub installation initiator expired or changed" });
+  }
+}
+
+async function requireGitHubConnectConsent(c: Context, deps: ApiRouteDeps): Promise<string> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw))
+    throw new HTTPException(403, { message: "Finish GitHub consent in your signed-in browser" });
+  const state = c.req.query("state")!;
+  const payload = readSignedState(state, deps.githubStateSecret)!;
+  if (payload.phase !== "discover" && payload.phase !== "bind")
+    throw new HTTPException(400, { message: "invalid GitHub consent stage" });
+  // External Connect continuations have their own stored origin and commit fence.
+  // A signed native/service subject is not a substitute for native browser consent.
+  if (
+    typeof payload.subjectId === "string" &&
+    payload.subjectId.startsWith("external_user:") &&
+    payload.nativeBrowserSourceState === undefined &&
+    !c.req.header("authorization")
+  )
+    return state;
+  if (c.req.header("authorization"))
+    throw new HTTPException(403, { message: "Finish GitHub consent in your signed-in browser" });
+  requireGitHubStateCookie(c, state);
+  const sourceState = requireNativeGitHubConnectBrowserSourceState(deps, state);
+  const source = readSignedState(sourceState, deps.githubStateSecret)!;
+  const access = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    source.workspaceId!,
+    "github:manage",
+  );
+  requirePersonPresentRouteAuthorization(access);
+  if (access.grant.accountId !== source.accountId || access.grant.subjectId !== source.subjectId)
+    throw new HTTPException(403, { message: "GitHub connection initiator changed" });
+  // The durable Connect stage retains its original revision/nonce fence. Only
+  // browser OAuth sees the independent state; it is never a replacement stage.
+  return sourceState;
+}
+
+function readNativeGitHubConnectSourceState(
+  deps: ApiRouteDeps,
+  state: string,
+): GitHubSignedStatePayload {
+  const source = readSignedState(state, deps.githubStateSecret);
+  if (
+    !source ||
+    source.kind !== "github_app_connect" ||
+    !isFreshGitHubBindingState(source) ||
+    (source.phase !== "discover" && source.phase !== "bind") ||
+    (source.providerId ?? "github-app") !== "github-app" ||
+    typeof source.accountId !== "string" ||
+    typeof source.workspaceId !== "string" ||
+    typeof source.subjectId !== "string" ||
+    !source.subjectId ||
+    typeof source.connectAttemptId !== "string" ||
+    !source.connectAttemptId ||
+    typeof source.personalOwnerVerified !== "boolean" ||
+    source.nativeBrowserSourceState !== undefined ||
+    (source.installationId !== undefined &&
+      (typeof source.installationId !== "number" ||
+        !Number.isSafeInteger(source.installationId) ||
+        source.installationId <= 0))
+  )
+    throw new HTTPException(400, { message: "invalid GitHub browser source state" });
+  return source;
+}
+
+function createNativeGitHubConnectBrowserState(deps: ApiRouteDeps, state: string): string {
+  const source = readNativeGitHubConnectSourceState(deps, state);
+  // Deliberately copy only bounded stage claims, never the agent-known nonce/iat.
+  return createSignedState(deps.githubStateSecret, {
+    kind: "github_app_connect",
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    subjectId: source.subjectId,
+    personalOwnerVerified: source.personalOwnerVerified,
+    connectAttemptId: source.connectAttemptId,
+    phase: source.phase,
+    providerId: "github-app",
+    ...(source.installationId !== undefined ? { installationId: source.installationId } : {}),
+    nativeBrowserSourceState: state,
+  });
+}
+
+function requireNativeGitHubConnectBrowserSourceState(deps: ApiRouteDeps, state: string): string {
+  const browser = readSignedState(state, deps.githubStateSecret);
+  if (
+    !browser ||
+    !isFreshGitHubBindingState(browser) ||
+    typeof browser.nativeBrowserSourceState !== "string"
+  )
+    throw new HTTPException(400, { message: "independent GitHub browser state required" });
+  const source = readNativeGitHubConnectSourceState(deps, browser.nativeBrowserSourceState);
+  if (
+    browser.kind !== source.kind ||
+    browser.accountId !== source.accountId ||
+    browser.workspaceId !== source.workspaceId ||
+    browser.subjectId !== source.subjectId ||
+    browser.personalOwnerVerified !== source.personalOwnerVerified ||
+    browser.connectAttemptId !== source.connectAttemptId ||
+    browser.phase !== source.phase ||
+    browser.providerId !== (source.providerId ?? "github-app") ||
+    browser.installationId !== source.installationId ||
+    browser.nonce === source.nonce ||
+    browser.iat < source.iat
+  )
+    throw new HTTPException(400, { message: "GitHub browser source state changed" });
+  return browser.nativeBrowserSourceState;
+}
+
+async function redirectNativeGitHubConnectBrowser(
+  c: Context,
+  deps: ApiRouteDeps,
+  state: string,
+  workspaceId: string,
+): Promise<Response> {
+  const payload = readNativeGitHubConnectSourceState(deps, state);
+  if (payload.workspaceId !== workspaceId)
+    throw new HTTPException(400, { message: "invalid GitHub browser handoff state" });
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) || c.req.header("authorization"))
+    throw new HTTPException(403, { message: "Open GitHub consent in your signed-in browser" });
+  const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
+  requirePersonPresentRouteAuthorization(access);
+  if (
+    !(access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) ||
+    access.grant.accountId !== payload.accountId ||
+    access.grant.subjectId !== payload.subjectId
+  )
+    throw new HTTPException(403, { message: "GitHub browser handoff initiator changed" });
+  const clientId = deps.settings.githubClientId?.trim();
+  if (!clientId || githubAppMissingSettings(deps.settings).length > 0)
+    throw new HTTPException(409, { message: "GitHub App is not configured" });
+  // A native browser visit, not the agent's start response, owns this nonce.
+  const browserState = createNativeGitHubConnectBrowserState(deps, state);
+  setGitHubStateCookie(c, deps, browserState);
+  return c.redirect(
+    githubOAuthAuthorizeUrl({
+      clientId,
+      state: browserState,
+      redirectUri: `${openGeniBaseUrl(deps.settings, c)}/v1/github/oauth/callback`,
+    }),
+  );
+}
+
+async function requireGitHubConnectSetup(c: Context, deps: ApiRouteDeps): Promise<boolean> {
+  const payload = readSignedState(c.req.query("state")!, deps.githubStateSecret)!;
+  if (payload.phase !== "install" || !isFreshGitHubBindingState(payload))
+    throw new HTTPException(400, { message: "invalid GitHub installation stage" });
+  // An anonymous provider redirect is authorized by the stored Connect origin.
+  // An authenticated continuation cannot substitute a different initiator.
+  const delegated = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw);
+  if (
+    deps.settings.productAccessMode !== "local" &&
+    !delegated &&
+    !c.req.header("authorization") &&
+    !c.req.header("cookie")
+  )
+    return false;
+  if (typeof payload.workspaceId !== "string")
+    throw new HTTPException(400, { message: "invalid GitHub connection workspace" });
+  let access;
+  try {
+    access = await requireAccessGrantAuthorization(c, deps, payload.workspaceId, "github:manage");
+  } catch (error) {
+    if (
+      !delegated &&
+      !c.req.header("authorization") &&
+      error instanceof HTTPException &&
+      error.status === 401
+    )
+      return false;
+    throw error;
+  }
+  requireUserOrOrganizationRouteAuthorization(access);
+  if (access.grant.accountId !== payload.accountId || access.grant.subjectId !== payload.subjectId)
+    throw new HTTPException(403, { message: "GitHub connection initiator changed" });
+  const nativeBrowser =
+    (access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) &&
+    !c.req.header("authorization") &&
+    !delegated;
+  if (nativeBrowser) requirePersonPresentRouteAuthorization(access);
+  return nativeBrowser;
+}
+
+async function canSeedGitHubSetupBrowserState(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<boolean> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) || c.req.header("authorization"))
+    return false;
+  try {
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
+    return access.canonicalManagedHumanSession || access.canonicalLocalHumanSession;
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 401) return false;
+    throw error;
+  }
+}
+
+function seedGitHubConnectBrowserState(c: Context, deps: ApiRouteDeps, response: Response): void {
+  const location = response.headers.get("location");
+  if (response.status !== 302 || !location) return;
+  const url = new URL(location, c.req.url);
+  if (url.origin !== "https://github.com" || url.pathname !== "/login/oauth/authorize") return;
+  const state = url.searchParams.get("state");
+  const next = state ? readSignedState(state, deps.githubStateSecret) : null;
+  const source = readSignedState(c.req.query("state")!, deps.githubStateSecret)!;
+  if (
+    !next ||
+    next.kind !== "github_app_connect" ||
+    next.phase !== "bind" ||
+    (next.providerId ?? "github-app") !== "github-app" ||
+    !isFreshGitHubBindingState(next) ||
+    next.accountId !== source.accountId ||
+    next.workspaceId !== source.workspaceId ||
+    next.subjectId !== source.subjectId ||
+    next.connectAttemptId !== source.connectAttemptId
+  )
+    throw new HTTPException(403, { message: "GitHub browser handoff state changed" });
+  const browserState = createNativeGitHubConnectBrowserState(deps, state!);
+  url.searchParams.set("state", browserState);
+  c.header("Location", url.toString());
+  setGitHubStateCookie(c, deps, browserState);
 }
 
 function allCookieValues(c: Context, name: string): string[] {

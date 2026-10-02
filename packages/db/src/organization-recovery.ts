@@ -209,7 +209,8 @@ export async function getOrganizationRecoveryOverview(
     organizationId: string;
     actorSubjectId: string;
     actorAuthUserId: string;
-    actorAuthSessionId: string;
+    /** Read-only delegation has no native browser session or recent-auth proof. */
+    actorAuthSessionId: string | null;
     actorFence: OrganizationRecoveryActorEvidence | null;
   },
 ): Promise<OrganizationRecoveryOverview> {

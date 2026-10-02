@@ -155,6 +155,7 @@ import {
 } from "@opengeni/db";
 import {
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   recordWorkspaceUsage,
   requireLimit,
@@ -193,6 +194,7 @@ import {
 import { retryWhileMissing } from "@opengeni/storage";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireDelegableHumanRouteAuthorization } from "../http/human-route-authorization";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   deriveBrowserControllerAdminToken,
@@ -1664,11 +1666,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         context,
         "sessions:control",
       );
-      if (grant.principalKind !== "human_session") {
-        throw new HTTPException(403, {
-          message: "hosted login flows can only be opened by an interactive user",
-        });
-      }
+      requireDelegableHumanRouteAuthorization(
+        await requireAccessGrantAuthorization(context, deps, workspaceId, "sessions:control"),
+      );
       const authRunId = requireUuidParam(context, "authRunId");
       const request = await parseJsonBody(context, ExternalAuthInteractiveRequest);
       const result = await withActiveBrowserController(

@@ -38,6 +38,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { requireUserOrOrganizationRouteAuthorization } from "../http/human-route-authorization";
 
 const RevisionId = z.string().uuid();
 
@@ -48,19 +49,7 @@ async function parseBody<S extends z.ZodType>(context: Context, schema: S): Prom
 }
 
 export function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
-  const { grant } = access;
-  if (
-    !access.contextIntegrity ||
-    access.authenticatedSubjectId !== grant.subjectId ||
-    grant.principalKind !== "human_session" ||
-    grant.serviceInitiator ||
-    grant.serviceInitiatorContext ||
-    grant.subjectId.startsWith("api_key:")
-  ) {
-    throw new HTTPException(403, {
-      message: "Company-profile administration requires a direct human-authorized request",
-    });
-  }
+  requireUserOrOrganizationRouteAuthorization(access);
   if (!access.accountGrant?.permissions.includes("account:admin")) {
     throw new HTTPException(403, { message: "missing permission: account:admin" });
   }

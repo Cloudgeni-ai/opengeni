@@ -7,7 +7,8 @@ import {
   PreviewOrganizationUserSetupRequest,
   SelfServiceOrganizationOnboardingStatus,
 } from "@opengeni/contracts";
-import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
+import { verifiedDelegatedHumanAuthorizationForRequest, type ApiRouteDeps } from "@opengeni/core";
+import { requireManagedHumanRouteIdentity } from "../http/human-route-authorization";
 import {
   completeSelfServiceOrganizationSetup,
   completeOrganizationUserSetup,
@@ -43,20 +44,24 @@ export function registerManagedOnboardingRoutes(
   const accountSetupLimiter = options.accountSetupLimiter ?? new PublicSetupRateLimiter();
   const hashPassword = options.hashPassword ?? hashManagedAuthPassword;
   app.get("/v1/auth/organization-onboarding", async (context) => {
-    const session = await requireManagedHuman(context, deps);
+    const user = await requireManagedHuman(context, deps);
     return context.json(
       SelfServiceOrganizationOnboardingStatus.parse({
         state: await getSelfServiceOrganizationOnboardingState(deps.db, {
-          authUserId: session.user.id,
-          email: session.user.email,
-          emailVerified: session.user.emailVerified,
+          authUserId: user.id,
+          email: user.email,
+          emailVerified: user.emailVerified,
         }),
       }),
     );
   });
 
   app.post("/v1/auth/organization-onboarding", async (context) => {
-    const session = await requireManagedHuman(context, deps);
+    if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+      throw new HTTPException(403, {
+        message: "Organization setup requires separate organization consent",
+      });
+    const user = await requireManagedHuman(context, deps);
     const parsed = CompleteSelfServiceOrganizationSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );
@@ -69,13 +74,13 @@ export function registerManagedOnboardingRoutes(
     const organizationName = parsed.data.organizationName.trim();
     try {
       const requestFingerprint = await selfServiceOrganizationSetupRequestFingerprint({
-        authUserId: session.user.id,
+        authUserId: user.id,
         organizationName,
       });
       const completed = CompleteSelfServiceOrganizationSetupResponse.parse(
         await completeSelfServiceOrganizationSetup(deps.db, {
-          authUserId: session.user.id,
-          actorSubjectId: `user:${session.user.id}`,
+          authUserId: user.id,
+          actorSubjectId: `user:${user.id}`,
           organizationName,
           operationId: parsed.data.operationId,
           requestFingerprint,
@@ -303,21 +308,5 @@ function refillSetupRateLimitBucket(
 }
 
 async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
-  if (
-    deps.settings.productAccessMode !== "managed" ||
-    !deps.managedAuth ||
-    !context.req.header("cookie") ||
-    context.req.header("authorization")
-  ) {
-    throw new HTTPException(401, { message: "managed human session required" });
-  }
-  const session = await getManagedSession(context, deps.managedAuth, {
-    db: deps.db,
-    sessionAdapter: deps.managedAuthSessionAdapter,
-    sessionSetMode: deps.settings.managedAuthSessionSetMode,
-  });
-  if (!session?.user) {
-    throw new HTTPException(401, { message: "managed human session required" });
-  }
-  return session;
+  return (await requireManagedHumanRouteIdentity(context, deps)).user;
 }

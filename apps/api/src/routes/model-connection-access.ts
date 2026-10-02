@@ -9,6 +9,8 @@ import {
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
 import {
   requireAccessGrant,
+  requireAccessGrantAuthorization,
+  hasVerifiedOwningUserAuthorization,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -24,8 +26,11 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
-import { managedCookieHuman, requireScopeMutation } from "./supergrok";
+import {
+  requireOrganizationCodexAdministrator,
+  requireNonCookieOrSameOriginMutation,
+} from "./codex";
+import { requireScopeMutation } from "./supergrok";
 
 const Kind = z.enum([
   "codex",
@@ -57,8 +62,8 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       if (kind === "codex" || kind === "supergrok")
         connectionId = z.string().uuid().parse(connectionId);
       if (scope === "organizations") {
-        if (mutate) requireSameOriginBrowserMutation(c, deps);
-        const human = await requireOrganizationCodexHuman(c, deps, scopeId);
+        if (mutate) await requireNonCookieOrSameOriginMutation(c, deps);
+        const human = await requireOrganizationCodexAdministrator(c, deps, scopeId);
         return {
           kind,
           connectionId,
@@ -76,8 +81,11 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         });
         if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
         if (snapshot.scope === "user") {
-          const human = await managedCookieHuman(c, deps);
-          if (!human || human.subjectId !== grant.subjectId)
+          const owner = await requireAccessGrantAuthorization(c, deps, scopeId, "connections:read");
+          if (
+            !hasVerifiedOwningUserAuthorization(owner) ||
+            owner.grant.subjectId !== grant.subjectId
+          )
             throw new HTTPException(403, {
               message: "Subscription owner browser session required",
             });

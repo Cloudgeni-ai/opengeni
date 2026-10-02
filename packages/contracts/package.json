@@ -58,6 +58,10 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-access": {
+      "types": "./src/organization-access.ts",
+      "default": "./src/organization-access.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"

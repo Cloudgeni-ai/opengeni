@@ -38,12 +38,11 @@ import {
   Workspace,
 } from "@opengeni/contracts";
 import {
-  getManagedSession,
+  verifiedDelegatedHumanAuthorizationForRequest,
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
   organizationMembershipHttpStatus,
-  requireCanonicalLocalAccountAdministrator,
   updateExternalIdentityMembershipForRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -88,6 +87,10 @@ import {
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
 import { readRequestJson } from "../http/request-body";
+import {
+  requireManagedHumanRouteIdentity,
+  requireOrganizationRouteAdministrator,
+} from "../http/human-route-authorization";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -101,6 +104,8 @@ async function requirePrivateSessionAdministrator(
   deps: ApiRouteDeps,
   organizationId: string,
 ): Promise<{ subjectId: string }> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+    return requireManagedHuman(context, deps);
   if (!context.req.header("authorization")) return requireManagedHuman(context, deps);
   const access = await requireAccessContext(context, deps);
   const key = accountScopedApiKeyWorkspaceAuthority(access);
@@ -142,23 +147,7 @@ async function requireOrganizationKeyWorkspaceDeletion(
 }
 
 async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
-  if (
-    deps.settings.productAccessMode !== "managed" ||
-    !deps.managedAuth ||
-    !context.req.header("cookie") ||
-    context.req.header("authorization")
-  ) {
-    throw new HTTPException(401, { message: "managed human session required" });
-  }
-  const session = await getManagedSession(context, deps.managedAuth, {
-    db: deps.db,
-    sessionAdapter: deps.managedAuthSessionAdapter,
-    sessionSetMode: deps.settings.managedAuthSessionSetMode,
-  });
-  if (!session?.user) {
-    throw new HTTPException(401, { message: "managed human session required" });
-  }
-  return { session, subjectId: `user:${session.user.id}` };
+  return requireManagedHumanRouteIdentity(context, deps);
 }
 
 async function requireOrganizationAdministrator(
@@ -166,20 +155,12 @@ async function requireOrganizationAdministrator(
   deps: ApiRouteDeps,
   organizationId: string,
 ): Promise<{ subjectId: string }> {
-  if (deps.settings.productAccessMode === "managed") {
-    return await requireManagedHuman(context, deps);
-  }
-  if (deps.settings.productAccessMode === "local") {
-    const { subjectId } = await requireCanonicalLocalAccountAdministrator(
-      context,
-      deps,
-      organizationId,
-    );
-    return { subjectId };
-  }
-  throw new HTTPException(401, {
-    message: "organization administrator session required",
-  });
+  return requireOrganizationRouteAdministrator(
+    context,
+    deps,
+    organizationId,
+    ["GET", "HEAD"].includes(context.req.method) ? "account:read" : "account:admin",
+  );
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -261,14 +242,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     }
   });
   app.post("/v1/organizations", async (context) => {
-    const { session, subjectId } = await requireManagedHuman(context, deps);
+    if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+      throw new HTTPException(403, {
+        message: "An organization-scoped delegation cannot create another organization",
+      });
+    const { user, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateOrganizationRequest);
     try {
       return context.json(
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: user.email || user.name,
             ...payload,
             trialCreditsEnabled:
               deps.settings.productAccessMode === "managed" &&
@@ -283,14 +268,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.post("/v1/organizations/additional", async (context) => {
-    const { session, subjectId } = await requireManagedHuman(context, deps);
+    if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+      throw new HTTPException(403, {
+        message: "An organization-scoped delegation cannot create another organization",
+      });
+    const { user, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
     try {
       return context.json(
         CreateAdditionalOrganizationResponse.parse(
           await createAdditionalManagedOrganization(deps.db, {
             subjectId,
-            subjectLabel: session.user.email || session.user.name,
+            subjectLabel: user.email || user.name,
             ...payload,
           }),
         ),
@@ -302,18 +291,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organization-memberships", async (context) => {
-    const { session } = await requireManagedHuman(context, deps);
+    const { user } = await requireManagedHuman(context, deps);
     try {
       const result = await ensureManagedAccessForUserWithOrganizationMemberships(deps.db, {
-        userId: session.user.id,
-        email: session.user.email,
-        name: session.user.name,
-        emailVerified: session.user.emailVerified,
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        emailVerified: user.emailVerified,
         provisionFallbackOrganization: false,
+        bindPendingInvitations: !verifiedDelegatedHumanAuthorizationForRequest(context.req.raw),
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
-          memberships: result.organizationMemberships,
+          memberships: result.organizationMemberships.filter((membership) => {
+            const proof = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
+            return !proof || membership.organizationId === proof.organizationId;
+          }),
         }),
       );
     } catch (error) {
@@ -332,7 +325,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organization-invitations", async (context) => {
-    const { session, subjectId } = await requireManagedHuman(context, deps);
+    // This global cursor spans organizations; an organization-scoped grant must
+    // use that organization's administration list instead of leaking other invites.
+    if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+      throw new HTTPException(403, { message: "Use the delegated organization's invitation list" });
+    const { user, subjectId } = await requireManagedHuman(context, deps);
     const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
     if (!query.success) {
       throw new HTTPException(422, {
@@ -340,10 +337,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       });
     }
     try {
-      if (session.user.emailVerified) {
+      if (user.emailVerified) {
         await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
           subjectId,
-          email: session.user.email,
+          email: user.email,
         });
       }
       return context.json(
@@ -462,7 +459,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
-    if (context.req.header("authorization")) {
+    if (
+      context.req.header("authorization") &&
+      !verifiedDelegatedHumanAuthorizationForRequest(context.req.raw)
+    ) {
       // An integrating backend deletes the organization workspaces it
       // provisions (tenant offboarding, test cleanup) with its organization
       // key. This is exactly the authority `DELETE /v1/workspaces/:id` already
@@ -515,7 +515,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.put(
     "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId",
     async (context) => {
-      const { subjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireOrganizationAdministrator(
+        context,
+        deps,
+        context.req.param("organizationId"),
+      );
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
@@ -579,7 +583,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           ),
         );
       }
-      const { subjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireOrganizationAdministrator(
+        context,
+        deps,
+        context.req.param("organizationId"),
+      );
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
@@ -661,7 +669,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.post("/v1/organizations/:organizationId/invitations", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
+    const { subjectId } = await requireOrganizationAdministrator(
+      context,
+      deps,
+      context.req.param("organizationId"),
+    );
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
@@ -715,7 +727,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organizations/:organizationId/invitations", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
+    const { subjectId } = await requireOrganizationAdministrator(
+      context,
+      deps,
+      context.req.param("organizationId"),
+    );
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
@@ -746,7 +762,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.post(
     "/v1/organizations/:organizationId/invitations/:invitationId/delivery/retry",
     async (context) => {
-      const { subjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireOrganizationAdministrator(
+        context,
+        deps,
+        context.req.param("organizationId"),
+      );
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
@@ -783,20 +803,23 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   );
 
   app.post("/v1/organization-invitations/:invitationId/accept", async (context) => {
-    const { session, subjectId } = await requireManagedHuman(context, deps);
+    const delegated = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
+    const { user, subjectId } = await requireManagedHuman(context, deps);
     const invitationId = parseId(InvitationId, context.req.param("invitationId"), "invitation id");
     const payload = await parseBody(context, AcceptOrganizationInvitationRequest);
     try {
-      if (session.user.emailVerified) {
+      if (user.emailVerified && !delegated) {
         await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
           subjectId,
-          email: session.user.email,
+          email: user.email,
         });
       }
       const invitation = await getSelfOrganizationInvitation(deps.db, {
         subjectId,
         invitationId,
       });
+      if (delegated && invitation.organizationId !== delegated.organizationId)
+        throw new HTTPException(403, { message: "Invitation belongs to another organization" });
       const result = await acceptOrganizationInvitation(deps.db, {
         organizationId: invitation.organizationId,
         actorSubjectId: subjectId,
@@ -817,7 +840,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.post(
     "/v1/organizations/:organizationId/invitations/:invitationId/revoke",
     async (context) => {
-      const { subjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireOrganizationAdministrator(
+        context,
+        deps,
+        context.req.param("organizationId"),
+      );
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
@@ -869,7 +896,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.patch("/v1/organizations/:organizationId/members/:membershipId", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
+    const { subjectId } = await requireOrganizationAdministrator(
+      context,
+      deps,
+      context.req.param("organizationId"),
+    );
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),

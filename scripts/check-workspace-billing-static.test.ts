@@ -22,6 +22,22 @@ describe("workspace provider import guard", () => {
     );
     expect(allowed).toEqual([]);
 
+    for (const file of [
+      "scripts/public-api/human-route-classification.json",
+      "scripts/public-api/human-route-classification.test.ts",
+    ]) {
+      checkBillingPortalSurface(file, `"${portalPath}"`, allowed);
+      expect(allowed).toEqual([]);
+    }
+
+    const neighboring: Finding[] = [];
+    checkBillingPortalSurface(
+      "scripts/public-api/unreviewed-route-classification.test.ts",
+      `"${portalPath}"`,
+      neighboring,
+    );
+    expect(neighboring).toHaveLength(1);
+
     checkBillingPortalSurface(
       "packages/sdk/src/site-browser-runtime.gen.ts",
       `const bundledClient = "${portalPath}";`,

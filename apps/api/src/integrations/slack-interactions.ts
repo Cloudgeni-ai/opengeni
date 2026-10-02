@@ -118,6 +118,7 @@ import {
   denySlackUserLinkAccessRequest,
   prepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessPersistenceError,
+  withAccountRls,
   type SlackInstallationRoute,
   type SlackAppHomeRefresh,
   type SlackInteraction,
@@ -127,6 +128,7 @@ import {
   type SlackInteractionTriggerKind,
 } from "@opengeni/db";
 import {
+  accessGrantAuthorizationFromContext,
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   createSessionForRequest,
@@ -136,6 +138,7 @@ import {
   requireAccessGrant,
   requireSessionAuthorizationListScope,
   resolveWorkspaceCatalogSettings,
+  verifiedDelegatedHumanAuthorizationForRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -170,6 +173,11 @@ import {
 } from "./slack-app-home";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 import { parseRequestJson } from "../http/request-body";
+import {
+  requireDelegableHumanRouteAuthorization,
+  requireManagedHumanRouteIdentity,
+  requirePersonPresentRouteAuthorization,
+} from "../http/human-route-authorization";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
 export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
@@ -686,7 +694,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const context = await requireManagedSlackLinkHuman(c, deps);
+      const context = await requireManagedSlackLinkHuman(c, deps, false);
       const requestId = c.req.param("requestId");
       try {
         const current = await completeSlackUserLinkAccessIfGranted(deps.db, {
@@ -712,7 +720,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/request-access",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const context = await requireManagedSlackLinkHuman(c, deps);
+      const context = await requireManagedSlackLinkHuman(c, deps, false);
       const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
       try {
         const request = await requestSlackUserLinkWorkspaceAccess(deps.db, {
@@ -738,7 +746,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/cancel",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const context = await requireManagedSlackLinkHuman(c, deps);
+      const context = await requireManagedSlackLinkHuman(c, deps, false);
       const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
       try {
         const request = await cancelSlackUserLinkAccessRequest(deps.db, {
@@ -6005,13 +6013,58 @@ function linkUrl(
   return url.toString();
 }
 
-async function requireManagedSlackLinkHuman(c: Context, deps: ApiRouteDeps) {
+async function requireManagedSlackLinkHuman(c: Context, deps: ApiRouteDeps, personPresent = true) {
+  const delegated = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw);
+  if (personPresent && c.req.header("authorization")) {
+    throw new HTTPException(401, { message: "managed browser sign-in required" });
+  }
+  if (personPresent && delegated) {
+    throw new HTTPException(403, { message: "managed browser sign-in required" });
+  }
+  const context = await requireAccessContext(c, deps);
+  // The requester may not yet belong to the target workspace. Verify browser
+  // or delegated owning-person authority, not target workspace membership.
+  const grant = context.workspaceGrants[0];
+  if (!personPresent && grant) {
+    requireDelegableHumanRouteAuthorization(accessGrantAuthorizationFromContext(context, grant));
+    if (delegated) {
+      const workspaceId = c.req.param("workspaceId");
+      if (
+        !workspaceId ||
+        (delegated.workspaceScope.kind === "selected" &&
+          !delegated.workspaceScope.workspaceIds.includes(workspaceId))
+      ) {
+        throw new HTTPException(403, { message: "Delegated Slack request scope is unavailable" });
+      }
+      // Owning a pending request does not widen the OAuth organization's scope.
+      // This tenancy check needs no membership in the requested workspace.
+      const workspace = await withAccountRls(deps.db, delegated.organizationId, (db) =>
+        getWorkspace(db, workspaceId),
+      );
+      if (!workspace || workspace.accountId !== delegated.organizationId) {
+        throw new HTTPException(403, { message: "Delegated Slack request scope is unavailable" });
+      }
+    }
+    return context;
+  }
   if (c.req.header("authorization")) {
     throw new HTTPException(401, { message: "managed browser sign-in required" });
   }
-  const context = await requireAccessContext(c, deps);
-  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) {
+  if (delegated || (!grant && context.accountGrants.length > 0)) {
     throw new HTTPException(403, { message: "managed browser sign-in required" });
+  }
+  // A newly signed-in person may not have completed organization setup yet.
+  // Verify the canonical cookie identity without inventing a workspace grant.
+  const native = await requireManagedHumanRouteIdentity(c, deps, "account:read");
+  if (native.subjectId !== context.subjectId) {
+    throw new HTTPException(403, { message: "managed browser sign-in required" });
+  }
+  if (grant) {
+    const authorization = accessGrantAuthorizationFromContext(context, grant);
+    requirePersonPresentRouteAuthorization(authorization);
+    if (!authorization.canonicalManagedHumanSession) {
+      throw new HTTPException(403, { message: "managed browser sign-in required" });
+    }
   }
   return context;
 }

@@ -4,6 +4,7 @@ import {
   organizationIntegrationCatalog,
   requireAccessContext,
   requireCanonicalLocalAccountAdministrator,
+  verifiedDelegatedHumanAuthorizationForRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -14,7 +15,8 @@ import { nestedPostgresSqlState } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireNonCookieOrSameOriginMutation } from "./codex";
+import { requireOrganizationRouteAdministrator } from "../http/human-route-authorization";
 import { managedCookieHuman } from "./supergrok";
 
 /** The database rechecks current organization membership/key authority at commit. */
@@ -34,14 +36,24 @@ async function authorizeAdministration(
   }
   if (deps.settings.productAccessMode === "local") {
     const local = await requireCanonicalLocalAccountAdministrator(context, deps, accountId);
-    if (mutation) requireSameOriginBrowserMutation(context, deps);
+    if (mutation) await requireNonCookieOrSameOriginMutation(context, deps);
     return { accountId, subjectId: local.subjectId };
+  }
+  if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw)) {
+    const human = await requireOrganizationRouteAdministrator(
+      context,
+      deps,
+      accountId,
+      mutation ? "account:admin" : "account:read",
+    );
+    if (mutation) await requireNonCookieOrSameOriginMutation(context, deps);
+    return { accountId, subjectId: human.subjectId };
   }
   const human = await managedCookieHuman(context, deps);
   if (!human || human.subjectId !== access.subjectId) {
     throw new HTTPException(403, { message: "Organization administration required" });
   }
-  if (mutation) requireSameOriginBrowserMutation(context, deps);
+  if (mutation) await requireNonCookieOrSameOriginMutation(context, deps);
   return { accountId, subjectId: human.subjectId };
 }
 

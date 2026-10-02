@@ -12,7 +12,7 @@ import {
   getManagedAuthRequestActorLeaseStamp,
   requireCanonicalHumanRequestIdentity,
 } from "@opengeni/core/canonical-human-identities";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { verifiedDelegatedHumanAuthorizationForRequest, type ApiRouteDeps } from "@opengeni/core";
 import {
   acceptOrganizationRecoveryCustody,
   approveOrganizationRecoveryOperation,
@@ -31,6 +31,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
+import { requireManagedHumanRouteIdentity } from "../http/human-route-authorization";
 
 const OrganizationId = z.string().uuid();
 const RecoveryOperationId = z.string().uuid();
@@ -74,7 +75,8 @@ async function requireRecoveryIdentity(
     deps.settings.productAccessMode !== "managed" ||
     !deps.managedAuth ||
     !context.req.header("cookie") ||
-    context.req.header("authorization")
+    context.req.header("authorization") ||
+    verifiedDelegatedHumanAuthorizationForRequest(context.req.raw)
   ) {
     throw new HTTPException(401, {
       message: "Managed human authentication required",
@@ -204,19 +206,35 @@ export function registerOrganizationRecoveryRoutes(
   const base = "/v1/organizations/:organizationId/recovery";
 
   app.get(base, async (context) => {
-    const identity = await requireRecoveryIdentity(context, deps, services);
+    const delegated = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
+    const identity = delegated
+      ? await requireManagedHumanRouteIdentity(context, deps, "account:read")
+      : await requireRecoveryIdentity(context, deps, services);
     try {
-      return context.json(
-        OrganizationRecoveryOverview.parse(
-          await services.getOrganizationRecoveryOverview(deps.db, {
-            organizationId: organizationId(context),
-            actorSubjectId: identity.actorSubjectId,
-            actorAuthUserId: identity.authUserId,
-            actorAuthSessionId: identity.authSessionId,
-            actorFence: services.getManagedAuthRequestActorAdmissionStamp(context.req.raw) ?? null,
-          }),
-        ),
+      const overview = OrganizationRecoveryOverview.parse(
+        await services.getOrganizationRecoveryOverview(deps.db, {
+          organizationId: organizationId(context),
+          actorSubjectId: "user" in identity ? identity.subjectId : identity.actorSubjectId,
+          actorAuthUserId: "user" in identity ? identity.user.id : identity.authUserId,
+          actorAuthSessionId: "user" in identity ? null : identity.authSessionId,
+          actorFence: delegated
+            ? null
+            : (services.getManagedAuthRequestActorAdmissionStamp(context.req.raw) ?? null),
+        }),
       );
+      if (delegated) {
+        overview.recentReauthenticationAt = null;
+        overview.capabilities = {
+          configure: false,
+          accept: false,
+          disable: false,
+          start: false,
+          approve: false,
+          cancel: false,
+          execute: false,
+        };
+      }
+      return context.json(overview);
     } catch (error) {
       throw organizationRecoveryHttpError(error);
     }

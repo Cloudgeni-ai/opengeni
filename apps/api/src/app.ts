@@ -160,6 +160,7 @@ import {
 } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import { requireDelegableHumanRouteAuthorization } from "./http/human-route-authorization";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
@@ -1374,7 +1375,7 @@ export function createAppComposition(deps: AppDependencies): {
         enableJsonResponse: true,
       });
       if (!grantUsesAttemptScopedMcp(grant)) {
-        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, c);
         const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
         try {
           await mcp.connect(transport);
@@ -1421,7 +1422,7 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, c);
     try {
       c.header("cache-control", "no-store");
       return c.json(prepared.toolGatewayCatalog);
@@ -1443,7 +1444,7 @@ export function createAppComposition(deps: AppDependencies): {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "Invalid tool gateway call" });
     }
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, c);
     try {
       return c.json(
         await callWorkspaceToolGateway(
@@ -1468,11 +1469,12 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
+    requireDelegableHumanRouteAuthorization(authorization);
     const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, { message: "Invalid tool gateway approval" });
     }
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, c);
     try {
       return c.json(
         await approveWorkspaceToolGatewayCall(
@@ -1498,7 +1500,7 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, c);
     try {
       c.header("cache-control", "no-store");
       return c.json(workspaceToolGatewayDeclarations(prepared));

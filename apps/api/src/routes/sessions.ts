@@ -252,6 +252,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireDelegableHumanRouteAuthorization } from "../http/human-route-authorization";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   getManagedAuthRequestActorEpoch,
@@ -683,7 +684,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           workspaceId,
           payload,
-          authorization.canonicalManagedHumanSession,
+          hasVerifiedOwningUserAuthorization(authorization),
           authorization,
         ),
       );
@@ -3626,6 +3627,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
 
     if (event.type === "user.approvalDecision") {
+      requireDelegableHumanRouteAuthorization(authorization);
       const accepted = await acceptSessionApprovalDecision(db, {
         accountId: grant.accountId,
         workspaceId,
@@ -3664,7 +3666,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           response: event.payload.response,
           respondedBy: grant.subjectId,
           canonicalHumanSession:
-            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
+            hasVerifiedOwningUserAuthorization(authorization) ||
+            authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
         });

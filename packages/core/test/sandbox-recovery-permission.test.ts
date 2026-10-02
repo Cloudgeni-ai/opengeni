@@ -27,7 +27,7 @@ function authorization(
   };
 }
 for (const [name, overrides] of [
-  ["agent/API/delegated principal", { canonicalManagedHumanSession: false }],
+  ["agent/API/unverified delegated principal", { canonicalManagedHumanSession: false }],
   ["substituted actor", { authenticatedSubjectId: "user:other" }],
   ["invalid context", { contextIntegrity: false }],
 ] as const) {

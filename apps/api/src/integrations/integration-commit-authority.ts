@@ -5,6 +5,7 @@ import {
   externalActorContinuationForAuthorization,
   requireConnectOwnerAuthority,
   hasPermission,
+  hasVerifiedOwningUserAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
@@ -26,7 +27,7 @@ export async function integrationCommitGrant(
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
-    personalOwnerVerified: authorization.canonicalManagedHumanSession,
+    personalOwnerVerified: hasVerifiedOwningUserAuthorization(authorization),
     ...(continuation ? { externalContinuation: structuredClone(continuation) } : {}),
   };
   const required = [...permissions];

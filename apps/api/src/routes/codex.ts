@@ -248,6 +248,20 @@ import {
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import {
+  requireOrganizationRouteAdministrator,
+  requireNonCookieOrSameOriginMutation,
+} from "../http/human-route-authorization";
+import {
+  isVerifiedDelegatedHumanAuthorization,
+  isVerifiedOrganizationServiceAuthorization,
+  requireAccessGrantAuthorization,
+  requireFreshAccessGrant,
+  requireVerifiedDelegatedHumanContext,
+  verifiedDelegatedHumanAuthorizationForRequest,
+} from "@opengeni/core";
+import type { Permission } from "@opengeni/contracts";
+export { requireNonCookieOrSameOriginMutation } from "../http/human-route-authorization";
 import * as z from "zod/v4";
 import {
   hashCodexBrowserSession,
@@ -281,6 +295,7 @@ export async function managedCookieHuman(
     deps.settings.productAccessMode !== "managed" ||
     !deps.managedAuth ||
     !c.req.header("cookie") ||
+    verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) ||
     c.req.header("authorization")
   ) {
     return null;
@@ -337,6 +352,137 @@ export async function requireOrganizationCodexHuman(
   return human;
 }
 
+/** Noninteractive pool administration; never returns browser-session proof. */
+export async function requireOrganizationCodexAdministrator(
+  c: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<{ subjectId: string }> {
+  const human = await requireOrganizationRouteAdministrator(
+    c,
+    deps,
+    organizationId,
+    ["GET", "HEAD"].includes(c.req.method) ? "connections:read" : "connections:write",
+  );
+  try {
+    await getOrganizationCodexRotationSettings(deps.db, {
+      organizationId,
+      actorSubjectId: human.subjectId,
+    });
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state === "42501")
+      throw new HTTPException(403, { message: "organization administration is not authorized" });
+    if (state === "P0002") throw new HTTPException(404, { message: "organization not found" });
+    throw error;
+  }
+  return human;
+}
+
+/** Signed continuation identity, NOT browser presence or an external-user claim. */
+export const DelegatedProviderActor = z
+  .object({
+    kind: z.literal("delegated_human"),
+    version: z.literal(1),
+    provider: z.enum(["codex", "supergrok", "claude_subscription"]),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid().nullable(),
+    subjectId: z.string().regex(/^user:[^\s\u0000-\u001f\u007f]+$/),
+  })
+  .strict();
+export type DelegatedProviderActor = z.infer<typeof DelegatedProviderActor>;
+
+export async function requireDelegatedProviderActor(
+  c: Context,
+  deps: ApiRouteDeps,
+  provider: DelegatedProviderActor["provider"],
+  scope: { workspaceId: string } | { organizationId: string },
+  permission: Permission = "connections:write",
+): Promise<DelegatedProviderActor> {
+  const person = await requireVerifiedDelegatedHumanContext(c, deps);
+  let organizationId: string;
+  let workspaceId: string | null;
+  if ("workspaceId" in scope) {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      scope.workspaceId,
+      permission,
+    );
+    if (!isVerifiedDelegatedHumanAuthorization(authorization))
+      throw new HTTPException(403, { message: "Verified native person required" });
+    organizationId = authorization.grant.accountId;
+    workspaceId = scope.workspaceId;
+  } else {
+    // Literal account administration AND connection authority, plus the existing
+    // DB role check. Never substitute a service's administrator/connecting user.
+    const administrator = await requireOrganizationCodexAdministrator(
+      c,
+      deps,
+      scope.organizationId,
+    );
+    if (administrator.subjectId !== person.subjectId)
+      throw new HTTPException(403, { message: "Provider connection identity changed" });
+    organizationId = scope.organizationId;
+    workspaceId = null;
+  }
+  return DelegatedProviderActor.parse({
+    kind: "delegated_human",
+    version: 1,
+    provider,
+    organizationId,
+    workspaceId,
+    subjectId: person.subjectId,
+  });
+}
+
+/** Both directions fail closed: native/external flows cannot adopt delegated state. */
+export function requireMatchingDelegatedProviderActor(
+  stored: unknown,
+  current: DelegatedProviderActor | null,
+): void {
+  if (stored === undefined && current === null) return;
+  const parsed = DelegatedProviderActor.safeParse(stored);
+  if (
+    !parsed.success ||
+    !current ||
+    parsed.data.provider !== current.provider ||
+    parsed.data.organizationId !== current.organizationId ||
+    parsed.data.workspaceId !== current.workspaceId ||
+    parsed.data.subjectId !== current.subjectId
+  )
+    throw new HTTPException(403, { message: "Provider connection delegation changed" });
+}
+
+/** Recheck the native profile/membership after provider I/O, before credential writes. */
+export async function reauthorizeDelegatedProviderActor(
+  c: Context,
+  deps: ApiRouteDeps,
+  actor: DelegatedProviderActor,
+  permission: Permission = "connections:write",
+): Promise<void> {
+  const person = await requireVerifiedDelegatedHumanContext(c, deps);
+  const workspaceId = actor.workspaceId ?? person.context.workspaceGrants[0]?.workspaceId;
+  if (!workspaceId) throw new HTTPException(403, { message: "Provider authority unavailable" });
+  const grant = await requireFreshAccessGrant(c, deps, workspaceId, permission);
+  if (grant.accountId !== actor.organizationId || grant.subjectId !== actor.subjectId)
+    throw new HTTPException(403, { message: "Provider connection identity changed" });
+  if (actor.workspaceId === null)
+    await requireOrganizationCodexAdministrator(c, deps, actor.organizationId);
+}
+
+export function requireNonServiceProviderActor(
+  authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+): void {
+  if (
+    isVerifiedOrganizationServiceAuthorization(authorization) ||
+    authorization.grant.principalKind === "service" ||
+    authorization.grant.serviceInitiator ||
+    authorization.grant.serviceInitiatorContext
+  )
+    throw new HTTPException(403, { message: "A consenting person must connect this provider" });
+}
+
 async function requireWorkspaceCodexManagementSource(
   deps: ApiRouteDeps,
   workspaceId: string,
@@ -355,6 +501,9 @@ async function requireWorkspaceCodexManagementSource(
 }
 
 export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
+    throw new HTTPException(403, { message: "Finish this action in your signed-in browser" });
+  }
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
     throw new HTTPException(403, {
@@ -493,7 +642,20 @@ async function requireCodexAppsHuman(
   c: Context,
   deps: ApiRouteDeps,
   workspaceId: string,
-): Promise<{ human: ManagedCookieHuman; accountId: string }> {
+): Promise<{ human: { subjectId: string }; accountId: string }> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    if (!isVerifiedDelegatedHumanAuthorization(authorization)) throw new HTTPException(403);
+    return {
+      human: { subjectId: authorization.grant.subjectId },
+      accountId: authorization.grant.accountId,
+    };
+  }
   if (c.req.header("authorization")) {
     throw new HTTPException(403, {
       message: "authorization bearer is not allowed for Codex Apps designation",
@@ -778,6 +940,7 @@ async function fetchCodexAccountOverview(
 }
 
 type CodexConnectState = {
+  delegatedActor?: DelegatedProviderActor;
   workspaceId?: string;
   organizationId?: string;
   actorSubjectId?: string;
@@ -867,7 +1030,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/organizations/:organizationId/codex/accounts", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const [accounts, rotation] = await Promise.all([
       listOrganizationCodexAccountStatuses(db, {
         organizationId,
@@ -891,8 +1054,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(c, deps, "codex", { organizationId })
+      : null;
+    if (!delegatedActor) requireSameOriginBrowserMutation(c, deps);
+    const human = delegatedActor ?? (await requireOrganizationCodexHuman(c, deps, organizationId));
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -911,14 +1077,18 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         actorSubjectId: human.subjectId,
         deviceAuthId: start.deviceAuthId,
         userCode: start.userCode,
+        ...(delegatedActor ? { delegatedActor } : {}),
       }),
     });
   });
 
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(c, deps, "codex", { organizationId })
+      : null;
+    if (!delegatedActor) requireSameOriginBrowserMutation(c, deps);
+    const human = delegatedActor ?? (await requireOrganizationCodexHuman(c, deps, organizationId));
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -936,6 +1106,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "codex connect state is invalid or expired",
       });
     }
+    requireMatchingDelegatedProviderActor(payload.delegatedActor, delegatedActor);
     if (
       typeof payload.iat === "number" &&
       Date.now() / 1000 - payload.iat > CODEX_DEVICE_EXPIRY_SECONDS
@@ -973,6 +1144,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const id = parseIdToken(tokens.idToken);
+    if (delegatedActor) await reauthorizeDelegatedProviderActor(c, deps, delegatedActor);
     await ensureOrganizationCodexRotationSettings(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -1025,8 +1197,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/accounts/:accountId/activate", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    await requireNonCookieOrSameOriginMutation(c, deps);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
     const activation = await setActiveOrganizationCodexCredential(db, {
       organizationId,
@@ -1042,8 +1214,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/settings", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    await requireNonCookieOrSameOriginMutation(c, deps);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const parsed = z
       .object({ rotationEnabled: z.boolean() })
       .safeParse(await c.req.json().catch(() => null));
@@ -1066,8 +1238,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    await requireNonCookieOrSameOriginMutation(c, deps);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const body = (await c.req.json().catch(() => null)) as {
       label?: unknown;
     } | null;
@@ -1089,8 +1261,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    await requireNonCookieOrSameOriginMutation(c, deps);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     let result: Awaited<ReturnType<typeof disconnectOrganizationCodexAccount>>;
     try {
       result = await disconnectOrganizationCodexAccount(db, {
@@ -1120,7 +1292,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // signed state that carries the device_auth_id back to `poll`.
   app.post("/v1/workspaces/:workspaceId/codex/connect/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    requireNonServiceProviderActor(authorization);
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(c, deps, "codex", { workspaceId })
+      : null;
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -1134,6 +1315,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       deviceAuthId: start.deviceAuthId,
       userCode: start.userCode,
+      ...(delegatedActor ? { delegatedActor } : {}),
     });
     return c.json({
       userCode: start.userCode,
@@ -1146,7 +1328,17 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Poll for authorization: pending | expired | connected (persists on success).
   app.post("/v1/workspaces/:workspaceId/codex/connect/poll", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    requireNonServiceProviderActor(authorization);
+    const grant = authorization.grant;
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(c, deps, "codex", { workspaceId })
+      : null;
     const { state } = (await c.req.json()) as { state?: string };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
@@ -1161,6 +1353,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "codex connect state is invalid or expired",
       });
     }
+    requireMatchingDelegatedProviderActor(payload.delegatedActor, delegatedActor);
     // The device code itself expires 15 minutes after start; surface that to the
     // client (the 1-hour signed-state TTL is longer than the device window).
     if (
@@ -1200,6 +1393,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const id = parseIdToken(tokens.idToken);
+    if (delegatedActor) await reauthorizeDelegatedProviderActor(c, deps, delegatedActor);
     const connectingHuman = await managedCookieHuman(c, deps);
     const key = environmentsEncryptionKeyBytes(settings);
     if (!key) {
@@ -1233,7 +1427,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountEmail: id.email ?? null,
         label: id.email ?? id.chatgptAccountId ?? null,
         connectedBySubjectId:
-          connectingHuman?.subjectId === grant.subjectId ? connectingHuman.subjectId : null,
+          delegatedActor?.subjectId ??
+          (connectingHuman?.subjectId === grant.subjectId ? connectingHuman.subjectId : null),
       });
       if (upserted.kind === "unresolved_redemption") {
         return { result: { upserted, isActive: false }, changed: false };

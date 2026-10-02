@@ -1,4 +1,13 @@
-import { requireOrganizationCodexHuman } from "./codex";
+import {
+  requireOrganizationCodexHuman,
+  requireOrganizationCodexAdministrator,
+  requireNonCookieOrSameOriginMutation,
+  requireDelegatedProviderActor,
+  requireMatchingDelegatedProviderActor,
+  reauthorizeDelegatedProviderActor,
+  requireNonServiceProviderActor,
+  type DelegatedProviderActor,
+} from "./codex";
 import {
   listOrganizationXaiSubscriptions,
   upsertOrganizationXaiSubscription,
@@ -40,6 +49,8 @@ import {
   getManagedSession,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  hasVerifiedOwningUserAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
   externalActorContinuationForAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -66,6 +77,7 @@ type XaiAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1;
 type ManagedCookieHuman = { subjectId: string };
 
 type SuperGrokConnectState = {
+  delegatedActor?: DelegatedProviderActor;
   externalContinuationEncrypted?: string;
   workspaceId: string;
   scope: "workspace" | "user";
@@ -95,6 +107,7 @@ export async function managedCookieHuman(
     deps.settings.productAccessMode !== "managed" ||
     !deps.managedAuth ||
     !c.req.header("cookie") ||
+    verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) ||
     c.req.header("authorization")
   ) {
     return null;
@@ -143,19 +156,14 @@ async function requirePrivateHuman(
   deps: ApiRouteDeps,
   workspaceId: string,
 ): Promise<{ accountId: string; subjectId: string }> {
-  if (c.req.header("authorization")) {
+  if (c.req.header("authorization") || verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
       workspaceId,
       "connections:write",
     );
-    const external = externalActorContinuationForAuthorization(authorization);
-    if (
-      external &&
-      authorization.contextIntegrity &&
-      external.actor.effectiveSubjectId === authorization.grant.subjectId
-    ) {
+    if (hasVerifiedOwningUserAuthorization(authorization)) {
       // The existing xAI user-pool domain requires an ordinary workspace
       // membership, not just the synthetic Personal-workspace owner grant.
       if (!(await getWorkspaceGrant(deps.db, authorization.grant.subjectId, workspaceId)))
@@ -198,7 +206,7 @@ export async function requireScopeMutation(
   if (scope === "user") {
     // Server-side external-user assertions do not use browser cookies. Ordinary
     // bearers remain rejected by requirePrivateHuman; native CSRF is unchanged.
-    if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
+    await requireNonCookieOrSameOriginMutation(c, deps);
     return await requirePrivateHuman(c, deps, workspaceId);
   }
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
@@ -386,10 +394,27 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   const organizationPath = "/v1/organizations/:organizationId/supergrok";
   const organizationActor = async (c: Context, mutation = false) => {
     requireEnabled(deps);
-    if (mutation) requireSameOriginBrowserMutation(c, deps);
+    const providerConnect =
+      c.req.path.endsWith("/connect/start") || c.req.path.endsWith("/connect/poll");
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    return { organizationId, actorSubjectId: human.subjectId };
+    const delegatedActor =
+      providerConnect && verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+        ? await requireDelegatedProviderActor(c, deps, "supergrok", { organizationId })
+        : null;
+    if (mutation) {
+      if (providerConnect && !delegatedActor) requireSameOriginBrowserMutation(c, deps);
+      else await requireNonCookieOrSameOriginMutation(c, deps);
+    }
+    const human =
+      delegatedActor ??
+      (await (
+        providerConnect ? requireOrganizationCodexHuman : requireOrganizationCodexAdministrator
+      )(c, deps, organizationId));
+    return {
+      organizationId,
+      actorSubjectId: human.subjectId,
+      ...(delegatedActor ? { delegatedActor } : {}),
+    };
   };
   app.get(`${organizationPath}/accounts`, async (c) => {
     const actor = await organizationActor(c);
@@ -437,6 +462,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       deviceCode?: string;
       intervalSeconds?: number;
       expiresAt?: number;
+      delegatedActor?: DelegatedProviderActor;
     } | null;
     if (
       !state ||
@@ -448,6 +474,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(400, { message: "SuperGrok connect state is invalid or expired" });
     }
+    requireMatchingDelegatedProviderActor(state.delegatedActor, actor.delegatedActor ?? null);
     if (Math.floor(Date.now() / 1000) >= state.expiresAt!) return c.json({ status: "expired" });
     try {
       const poll = await pollXaiDeviceCode(
@@ -459,6 +486,8 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
       if (!encryptionKey)
         throw new HTTPException(500, { message: "Connection encryption is not configured" });
+      if (actor.delegatedActor)
+        await reauthorizeDelegatedProviderActor(c, deps, actor.delegatedActor);
       const connected = await upsertOrganizationXaiSubscription(db, {
         ...actor,
         encryptionKey,
@@ -553,6 +582,16 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       parsed.data.scope === "workspace" ? "workspace:admin" : "connections:write",
     );
+    requireNonServiceProviderActor(authorization);
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(
+          c,
+          deps,
+          "supergrok",
+          { workspaceId },
+          parsed.data.scope === "workspace" ? "workspace:admin" : "connections:write",
+        )
+      : null;
     const continuation = externalActorContinuationForAuthorization(authorization);
     const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
     if (continuation && !encryptionKey)
@@ -576,6 +615,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
           deviceCode: start.deviceCode,
           intervalSeconds: start.intervalSeconds,
           expiresAt,
+          ...(delegatedActor ? { delegatedActor } : {}),
           ...(continuation
             ? {
                 externalContinuationEncrypted: encryptEnvironmentValue(
@@ -614,6 +654,25 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const authority = await requireScopeMutation(c, deps, workspaceId, state.scope);
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      state.scope === "workspace" ? "workspace:admin" : "connections:write",
+    );
+    requireNonServiceProviderActor(authorization);
+    const delegatedActor = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+      ? await requireDelegatedProviderActor(
+          c,
+          deps,
+          "supergrok",
+          { workspaceId },
+          state.scope === "workspace" ? "workspace:admin" : "connections:write",
+        )
+      : null;
+    requireMatchingDelegatedProviderActor(state.delegatedActor, delegatedActor);
+    if (delegatedActor && state.externalContinuationEncrypted)
+      throw new HTTPException(403, { message: "Provider connection origin changed" });
     if (authority.subjectId !== state.subjectId) {
       throw new HTTPException(403, {
         message: "SuperGrok connect identity changed",
@@ -659,6 +718,13 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       phase = "token_identity";
       const identity = xaiIdentityFromDeviceTokens(poll.tokens);
       phase = "credential_persist";
+      if (delegatedActor)
+        await reauthorizeDelegatedProviderActor(
+          c,
+          deps,
+          delegatedActor,
+          state.scope === "workspace" ? "workspace:admin" : "connections:write",
+        );
       await requireOrigin();
       const liveAuthority = await requireScopeMutation(c, deps, workspaceId, state.scope);
       if (

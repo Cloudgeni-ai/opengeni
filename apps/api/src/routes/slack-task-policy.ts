@@ -7,7 +7,6 @@ import {
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
-  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -20,22 +19,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-
-function requireDirectWorkspaceAdmin(access: AccessGrantAuthorization): void {
-  const { grant } = access;
-  if (
-    !access.contextIntegrity ||
-    access.authenticatedSubjectId !== grant.subjectId ||
-    grant.principalKind !== "human_session" ||
-    grant.serviceInitiator ||
-    grant.serviceInitiatorContext ||
-    grant.subjectId.startsWith("api_key:")
-  ) {
-    throw new HTTPException(403, {
-      message: "Slack task-policy administration requires a direct human-authorized request",
-    });
-  }
-}
+import { requireUserOrOrganizationRouteAuthorization } from "../http/human-route-authorization";
 
 function policyError(context: Context, error: unknown): Response {
   if (error instanceof SlackTaskPolicyConflictError) {
@@ -86,7 +70,7 @@ export function registerSlackTaskPolicyRoutes(app: Hono, deps: ApiRouteDeps): vo
       workspaceId,
       "workspace:admin",
     );
-    requireDirectWorkspaceAdmin(access);
+    requireUserOrOrganizationRouteAuthorization(access);
     const parsed = UpdateSlackTaskPolicyRequest.safeParse(
       await context.req.json().catch(() => null),
     );

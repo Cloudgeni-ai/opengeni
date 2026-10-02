@@ -19,6 +19,7 @@ import {
   requireAccountAdminAuthorizationStamp,
   requireAccessContext,
   requireCanonicalLocalAccountAdministrator,
+  isVerifiedDelegatedHumanAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -45,7 +46,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { organizationApiKeyAccess, requireOrganizationApiKeyControlPermission } from "./api-keys";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireNonCookieOrSameOriginMutation } from "./codex";
 import {
   integrationBody as body,
   integrationDeliveryProjection as deliveryProjection,
@@ -89,10 +90,15 @@ export function requireOrganizationIntegrationAdmin(
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     if (
       !authorization ||
-      !(authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) ||
+      !(
+        authorization.canonicalManagedHumanSession ||
+        authorization.canonicalLocalHumanSession ||
+        isVerifiedDelegatedHumanAuthorization(authorization)
+      ) ||
       authorization.grant.accountId !== organizationId ||
       authorization.authenticatedSubjectId !== context.subjectId ||
-      context.workspaceGrants.some((candidate) => candidate.metadata?.delegated === true)
+      (context.workspaceGrants.some((candidate) => candidate.metadata?.delegated === true) &&
+        !isVerifiedDelegatedHumanAuthorization(authorization))
     ) {
       throw new HTTPException(403, { message: "Canonical organization administrator required" });
     }
@@ -138,7 +144,7 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
     }
     const subjectId = requireOrganizationIntegrationAdmin(context, accountId, authorization);
     if (!accountScopedApiKeyWorkspaceAuthority(context) && !["GET", "HEAD"].includes(c.req.method))
-      requireSameOriginBrowserMutation(c, deps);
+      await requireNonCookieOrSameOriginMutation(c, deps);
     c.header("cache-control", "private, no-store");
     return { accountId, subjectId };
   };

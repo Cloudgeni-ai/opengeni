@@ -142,7 +142,7 @@
       "method": "GET",
       "path": "/v1/auth/sign-in-methods",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
-      "gates": ["requireCanonicalHumanRequestIdentity"],
+      "gates": ["requireCanonicalHumanRequestIdentity", "requireManagedHumanRouteIdentity"],
       "class": "delegable_to_user",
       "reason": "Read-only identity/sign-in metadata follows the exact verified native person and confers no fresh authentication or credential mutation proof."
     },
@@ -150,7 +150,11 @@
       "method": "POST",
       "path": "/v1/auth/sign-in-methods/connect",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
-      "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
+      "gates": [
+        "admitManagedSignInMutation",
+        "requireCanonicalHumanRequestIdentity",
+        "requireManagedHumanRouteIdentity"
+      ],
       "class": "delegable_to_user",
       "reason": "The verified person may initiate sign-in-method enrollment; independent native browser authentication and provider consent remain mandatory before a credential binding is committed."
     },
@@ -158,7 +162,11 @@
       "method": "POST",
       "path": "/v1/auth/sign-in-methods/disconnect",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
-      "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
+      "gates": [
+        "admitManagedSignInMutation",
+        "requireCanonicalHumanRequestIdentity",
+        "requireManagedHumanRouteIdentity"
+      ],
       "class": "person_present",
       "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
@@ -166,9 +174,29 @@
       "method": "POST",
       "path": "/v1/auth/sign-in-methods/password",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
-      "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
+      "gates": [
+        "admitManagedSignInMutation",
+        "requireCanonicalHumanRequestIdentity",
+        "requireManagedHumanRouteIdentity"
+      ],
       "class": "person_present",
       "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/billing/checkout",
+      "source": "apps/api/src/routes/billing.ts",
+      "gates": ["requireNonCookieOrSameOriginMutation"],
+      "class": "csrf_only",
+      "reason": "Creating a hosted billing link requires cookie CSRF admission and literal billing permission, not payment confirmation or browser presence."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/billing/portal",
+      "source": "apps/api/src/routes/billing.ts",
+      "gates": ["requireNonCookieOrSameOriginMutation"],
+      "class": "csrf_only",
+      "reason": "Creating a hosted billing link requires cookie CSRF admission and literal billing permission, not payment confirmation or browser presence."
     },
     {
       "method": "GET",
@@ -199,9 +227,12 @@
       "path": "/v1/github/install/callback",
       "source": "apps/api/src/routes/github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
@@ -211,9 +242,12 @@
       "path": "/v1/github/oauth/callback",
       "source": "apps/api/src/routes/github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "person_present",
       "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
@@ -223,9 +257,12 @@
       "path": "/v1/github/setup",
       "source": "apps/api/src/routes/github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
@@ -234,7 +271,7 @@
       "method": "GET",
       "path": "/v1/identity",
       "source": "apps/api/src/routes/canonical-human-identities.ts",
-      "gates": ["requireCanonicalHumanRequestIdentity"],
+      "gates": ["requireCanonicalHumanRequestIdentity", "requireManagedHumanRouteIdentity"],
       "class": "delegable_to_user",
       "reason": "Read-only identity/sign-in metadata follows the exact verified native person and confers no fresh authentication or credential mutation proof."
     },
@@ -362,7 +399,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -370,7 +407,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/codex/accounts",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman"],
+      "gates": ["requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -378,7 +415,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -386,7 +423,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -394,7 +431,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -402,7 +439,12 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/codex/connect/poll",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireOrganizationCodexAdministrator",
+        "requireOrganizationCodexHuman",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -410,7 +452,12 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/codex/connect/start",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireOrganizationCodexAdministrator",
+        "requireOrganizationCodexHuman",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -418,7 +465,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/codex/settings",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -430,7 +477,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -443,7 +490,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -456,7 +503,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -469,7 +516,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -481,7 +528,8 @@
       "gates": [
         "managedCookieHuman",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationRouteAdministrator"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -493,7 +541,8 @@
       "gates": [
         "managedCookieHuman",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationRouteAdministrator"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -505,7 +554,8 @@
       "gates": [
         "managedCookieHuman",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationRouteAdministrator"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -514,7 +564,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/invitations",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -522,7 +572,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/invitations",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -530,7 +580,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/invitations/:invitationId/delivery/retry",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -538,7 +588,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/invitations/:invitationId/revoke",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -546,7 +596,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/members",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -554,7 +604,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/members/:membershipId",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -562,7 +612,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -570,7 +620,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman"],
+      "gates": ["requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -578,7 +628,7 @@
       "method": "PUT",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -586,7 +636,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman"],
+      "gates": ["requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -594,7 +644,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -602,7 +652,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -610,7 +660,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman"],
+      "gates": ["requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -618,7 +668,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage/refresh",
       "source": "apps/api/src/routes/organization-model-providers.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireOrganizationCodexAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -640,8 +690,10 @@
       "source": "apps/api/src/routes/claude-subscription-oauth.ts",
       "gates": [
         "managedCookieHuman",
+        "requireOrganizationCodexAdministrator",
         "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation"
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
       ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
@@ -650,7 +702,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/overview",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -674,7 +726,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/recovery",
       "source": "apps/api/src/routes/organization-recovery.ts",
-      "gates": ["requireRecoveryIdentity"],
+      "gates": ["requireManagedHumanRouteIdentity", "requireRecoveryIdentity"],
       "class": "delegable_to_user",
       "reason": "The person's same-organization recovery status is read-only; no browser session, recent-auth proof or recovery mutation capability is delegated."
     },
@@ -738,7 +790,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/retention-policy",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -746,7 +798,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/retention-policy",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -754,7 +806,7 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/sessions",
       "source": "apps/api/src/routes/organization-sessions.ts",
-      "gates": ["canonicalManagedHumanSession"],
+      "gates": ["hasVerifiedOwningUserAuthorization"],
       "class": "organization_allowed",
       "reason": "Shared session discovery permits organization keys; Personal/private results still require the exact owning user."
     },
@@ -762,7 +814,12 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/supergrok/accounts",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -770,7 +827,12 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -778,7 +840,12 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -786,7 +853,12 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/activate",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -794,7 +866,12 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/allocator",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -802,7 +879,12 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/supergrok/connect/poll",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -810,7 +892,12 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/supergrok/connect/start",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -818,7 +905,12 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/supergrok/settings",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
+      "gates": [
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "organization_allowed",
       "reason": "Organization-owned model administration needs live administrator authority, not browser presence."
     },
@@ -830,7 +922,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -843,7 +935,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -856,7 +948,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -869,7 +961,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -882,7 +974,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -895,7 +987,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -908,7 +1000,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -921,7 +1013,7 @@
         "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "requireCanonicalLocalAccountAdministrator",
-        "requireSameOriginBrowserMutation"
+        "requireNonCookieOrSameOriginMutation"
       ],
       "class": "organization_allowed",
       "reason": "Organization-owned integration configuration already admits verified service authority and may admit scoped delegation."
@@ -930,7 +1022,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/workspaces",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -938,7 +1030,7 @@
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/workspaces/:workspaceId",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -946,7 +1038,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/workspaces/:workspaceId",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -954,7 +1046,7 @@
       "method": "PUT",
       "path": "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -962,7 +1054,7 @@
       "method": "POST",
       "path": "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId/revoke",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -970,7 +1062,7 @@
       "method": "PATCH",
       "path": "/v1/organizations/:organizationId/workspaces/:workspaceId/settings",
       "source": "apps/api/src/routes/organization-memberships.ts",
-      "gates": ["requireCanonicalLocalAccountAdministrator", "requireManagedHuman"],
+      "gates": ["requireOrganizationRouteAdministrator"],
       "class": "organization_allowed",
       "reason": "Organization administration is safe under live scoped administrator/key authority, not a cookie-only identity."
     },
@@ -979,9 +1071,9 @@
       "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
       "source": "apps/api/src/routes/model-connection-access.ts",
       "gates": [
-        "managedCookieHuman",
-        "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation",
+        "hasVerifiedOwningUserAuthorization",
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
         "requireScopeMutation"
       ],
       "class": "organization_allowed",
@@ -992,9 +1084,9 @@
       "path": "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
       "source": "apps/api/src/routes/model-connection-access.ts",
       "gates": [
-        "managedCookieHuman",
-        "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation",
+        "hasVerifiedOwningUserAuthorization",
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
         "requireScopeMutation"
       ],
       "class": "organization_allowed",
@@ -1013,9 +1105,12 @@
       "path": "/v1/pr-review/github/install/callback",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
@@ -1025,9 +1120,12 @@
       "path": "/v1/pr-review/github/oauth/callback",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "person_present",
       "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
@@ -1037,9 +1135,12 @@
       "path": "/v1/pr-review/github/setup",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
@@ -1057,9 +1158,9 @@
       "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
       "source": "apps/api/src/routes/model-connection-access.ts",
       "gates": [
-        "managedCookieHuman",
-        "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation",
+        "hasVerifiedOwningUserAuthorization",
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
         "requireScopeMutation"
       ],
       "class": "delegable_to_user",
@@ -1070,9 +1171,9 @@
       "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
       "source": "apps/api/src/routes/model-connection-access.ts",
       "gates": [
-        "managedCookieHuman",
-        "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation",
+        "hasVerifiedOwningUserAuthorization",
+        "requireNonCookieOrSameOriginMutation",
+        "requireOrganizationCodexAdministrator",
         "requireScopeMutation"
       ],
       "class": "delegable_to_user",
@@ -1170,7 +1271,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
       "source": "apps/api/src/routes/browser-sessions.ts",
-      "gates": ["principalKind=human_session"],
+      "gates": ["requireDelegableHumanRouteAuthorization"],
       "class": "delegable_to_user",
       "reason": "The verified owning user may request a hosted login handoff; entering credentials and completing provider consent still happens in the browser."
     },
@@ -1234,7 +1335,19 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/codex/connect/poll",
       "source": "apps/api/src/routes/codex.ts",
-      "gates": ["managedCookieHuman"],
+      "gates": [
+        "managedCookieHuman",
+        "requireOrganizationCodexAdministrator",
+        "requireVerifiedDelegatedHumanContext"
+      ],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/codex/connect/start",
+      "source": "apps/api/src/routes/codex.ts",
+      "gates": ["requireOrganizationCodexAdministrator", "requireVerifiedDelegatedHumanContext"],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1308,8 +1421,10 @@
       "source": "apps/api/src/routes/connect.ts",
       "gates": [
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "principalKind=human_session",
-        "requireConnectOwnerAuthority"
+        "requireConnectOwnerAuthority",
+        "requireDelegableHumanRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Noninteractive shared connection discovery/setup is scoped administration; personal and provider-consent variants keep stricter gates."
@@ -1318,7 +1433,11 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
       "source": "apps/api/src/routes/connect.ts",
-      "gates": ["principalKind=human_session", "requireConnectOwnerAuthority"],
+      "gates": [
+        "principalKind=human_session",
+        "requireConnectOwnerAuthority",
+        "requireDelegableHumanRouteAuthorization"
+      ],
       "class": "organization_allowed",
       "reason": "Noninteractive shared connection discovery/setup is scoped administration; personal and provider-consent variants keep stricter gates."
     },
@@ -1360,6 +1479,7 @@
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": [
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "principalKind=human_session",
         "requireLegacyOAuthActor"
       ],
@@ -1423,11 +1543,24 @@
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/connections/github/oauth/native-start",
+      "source": "apps/api/src/routes/connections.ts",
+      "gates": [
+        "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "requireConnectOwnerAuthority"
+      ],
+      "class": "person_present",
+      "reason": "Only the exact native browser owner may mint private PKCE/callback state; an agent-visible initiation intent cannot substitute an independently consenting browser."
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/github/oauth/start",
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": [
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "principalKind=human_session",
         "requireLegacyOAuthActor"
       ],
@@ -1612,12 +1745,30 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/github/connect",
+      "source": "apps/api/src/routes/github.ts",
+      "gates": [
+        "canonicalLocalHumanSession",
+        "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "requireConnectOwnerAuthority",
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
+      ],
+      "class": "organization_allowed",
+      "reason": "Live scoped administration advances signed installation authority to a browser consent URL without redeeming credentials or impersonating the consenting person."
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
       "source": "apps/api/src/routes/github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
@@ -1627,9 +1778,12 @@
       "path": "/v1/workspaces/:workspaceId/github/installations/select",
       "source": "apps/api/src/routes/github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
@@ -1672,7 +1826,7 @@
       "source": "apps/api/src/routes/external-identity-links.ts",
       "gates": ["nativeConfirmation"],
       "class": "delegable_to_user",
-      "reason": "Owner link management may delegate revocation; preview/confirm consent variants remain person-present."
+      "reason": "The exact verified owner may preview or revoke a link; committing a new native identity consent binding remains person-present."
     },
     {
       "method": "POST",
@@ -1950,7 +2104,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage/refresh",
       "source": "apps/api/src/routes/workspace-model-providers.ts",
-      "gates": ["requireSameOriginBrowserMutation", "requireWorkspaceSettingsGrant"],
+      "gates": ["requireNonCookieOrSameOriginMutation", "requireWorkspaceSettingsGrant"],
       "class": "csrf_only",
       "reason": "Refreshing authorized provider usage needs transport CSRF protection, not browser presence."
     },
@@ -1972,8 +2126,10 @@
       "source": "apps/api/src/routes/claude-subscription-oauth.ts",
       "gates": [
         "managedCookieHuman",
+        "requireOrganizationCodexAdministrator",
         "requireOrganizationCodexHuman",
-        "requireSameOriginBrowserMutation"
+        "requireSameOriginBrowserMutation",
+        "requireVerifiedDelegatedHumanContext"
       ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
@@ -1982,7 +2138,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/new-session-draft",
       "source": "apps/api/src/routes/sessions.ts",
-      "gates": ["canonicalManagedHumanSession"],
+      "gates": ["hasVerifiedOwningUserAuthorization"],
       "class": "delegable_to_user",
       "reason": "Private-session/Personal operations require exact owning-user proof, not organization administrator authority."
     },
@@ -2031,21 +2187,27 @@
       "path": "/v1/workspaces/:workspaceId/pr-review/github/connect",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
-      "class": "delegable_to_user",
-      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
+      "class": "organization_allowed",
+      "reason": "Live scoped administration advances signed installation authority to a browser consent URL without redeeming credentials or impersonating the consenting person."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/github/installations/:installationId/configure",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
@@ -2055,9 +2217,12 @@
       "path": "/v1/workspaces/:workspaceId/pr-review/github/installations/select",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "requireConnectOwnerAuthority",
-        "requireLegacyOAuthActor"
+        "requirePersonPresentRouteAuthorization",
+        "requireUserOrOrganizationRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
@@ -2066,7 +2231,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/pr-review/repositories",
       "source": "apps/api/src/routes/pr-review.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": ["hasVerifiedOwningUserAuthorization", "requireConnectOwnerAuthority"],
       "class": "organization_allowed",
       "reason": "Binding an already-authorized repository is shared workspace administration, not an OAuth consent ceremony."
     },
@@ -2178,7 +2343,11 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
       "source": "apps/api/src/routes/sessions.ts",
-      "gates": ["canonicalLocalHumanSession", "canonicalManagedHumanSession"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "requireDelegableHumanRouteAuthorization"
+      ],
       "class": "organization_allowed",
       "reason": "Shared session operations permit service authority; private-owner and person-present event variants stay separately fenced."
     },
@@ -2306,7 +2475,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/slack-task-policy",
       "source": "apps/api/src/routes/slack-task-policy.ts",
-      "gates": ["requireDirectWorkspaceAdmin"],
+      "gates": ["requireUserOrOrganizationRouteAuthorization"],
       "class": "organization_allowed",
       "reason": "Shared organization/workspace policy is safe for verified scoped service or user administration."
     },
@@ -2362,7 +2531,12 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/supergrok/connect/poll",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireConnectOwnerAuthority", "requireScopeMutation"],
+      "gates": [
+        "requireConnectOwnerAuthority",
+        "requireOrganizationCodexAdministrator",
+        "requireScopeMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -2370,7 +2544,11 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/supergrok/connect/start",
       "source": "apps/api/src/routes/supergrok.ts",
-      "gates": ["requireScopeMutation"],
+      "gates": [
+        "requireOrganizationCodexAdministrator",
+        "requireScopeMutation",
+        "requireVerifiedDelegatedHumanContext"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -2394,7 +2572,10 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/approvals",
       "source": "apps/api/src/app.ts",
-      "gates": ["requireWorkspaceToolGatewayAuthorization"],
+      "gates": [
+        "requireDelegableHumanRouteAuthorization",
+        "requireWorkspaceToolGatewayAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "The consenting person may approve their exact tool operation through verified user authority; services and live agent attempts cannot borrow that authority."
     },
@@ -2706,6 +2887,20 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/github/connect",
+      "when": "state.kind=github_app_connect native browser consent handoff",
+      "class": "person_present",
+      "reason": "The actual person establishes a fresh browser-only nonce; the delegated caller's known initiation state must not authorize OAuth account substitution."
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/pr-review/github/connect",
+      "when": "state.kind=github_app_connect native browser consent handoff",
+      "class": "person_present",
+      "reason": "The actual person establishes a fresh browser-only nonce; the delegated caller's known initiation state must not authorize OAuth account substitution."
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/sessions",
       "when": "target is a Personal workspace or user_private session",
       "class": "delegable_to_user",
@@ -2732,35 +2927,35 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
       "requiredGate": "verified owning-user proof for user.approvalDecision",
       "reason": "Session authorization rejects agent_attempt but service/human-shaped unverified grants must not manufacture the consenting person's approval.",
-      "status": "pending_phase_2"
+      "status": "fixed_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
       "requiredGate": "verified owning-user authorization",
       "reason": "The existing principalKind=human_session shape check alone does not prove the owning user requesting the browser handoff.",
-      "status": "pending_phase_2"
+      "status": "fixed_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/billing/checkout",
       "requiredGate": "cookie-only CSRF admission (not a person-present gate)",
       "reason": "This creates a payment link, not payment confirmation; verified bearer may call it, cookie mutations need explicit CSRF protection.",
-      "status": "pending_phase_2"
+      "status": "fixed_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/billing/portal",
       "requiredGate": "cookie-only CSRF admission (not a person-present gate)",
       "reason": "This creates a browser link; payment method/charge confirmation belongs at the hosted browser destination.",
-      "status": "pending_phase_2"
+      "status": "fixed_phase_2"
     },
     {
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/settings",
       "requiredGate": "explicit delegated settings-write ceiling on the Personal owner exception",
       "reason": "A workspace:read-only delegation must not gain mutation authority solely because it proves the owning person.",
-      "status": "pending_phase_2"
+      "status": "fixed_phase_2"
     }
   ]
 }

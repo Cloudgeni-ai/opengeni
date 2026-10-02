@@ -30,7 +30,10 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import {
+  requireOrganizationCodexAdministrator,
+  requireNonCookieOrSameOriginMutation,
+} from "./codex";
 
 const OrganizationId = z.string().uuid();
 
@@ -111,7 +114,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
   app.get("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const connection = await getOrganizationModelProviderConnection(deps.db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -125,7 +128,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     if (providerKind(c.req.param("providerKind")!) !== "claude_subscription")
       throw new HTTPException(404, { message: "Usage not available for this provider" });
     const organizationId = parseOrganizationId(c.req.param("organizationId")!);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     return {
       accountId: organizationId,
       workspaceId: null,
@@ -138,7 +141,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     return c.json(ClaudeSubscriptionUsage.parse(await readClaudeSubscriptionUsage(deps.db, input)));
   });
   app.post(`${usagePath}/refresh`, async (c) => {
-    requireSameOriginBrowserMutation(c, deps);
+    await requireNonCookieOrSameOriginMutation(c, deps);
     const input = await usageScope(c);
     return c.json(
       ClaudeSubscriptionUsage.parse(
@@ -149,9 +152,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
 
   app.put("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
-    requireSameOriginBrowserMutation(c, deps);
+    await requireNonCookieOrSameOriginMutation(c, deps);
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const payload = await jsonBody(
       c,
       UpsertOrganizationModelProviderConnectionRequest,
@@ -200,9 +203,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
 
   app.delete("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
-    requireSameOriginBrowserMutation(c, deps);
+    await requireNonCookieOrSameOriginMutation(c, deps);
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
     const payload = await jsonBody(
       c,
       RevokeOrganizationModelProviderConnectionRequest,
@@ -226,7 +229,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     async (c) => {
       c.header("cache-control", "private, no-store");
       const organizationId = parseOrganizationId(c.req.param("organizationId"));
-      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
       const models = await listOrganizationModelProviderCustomModels(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,
@@ -242,9 +245,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models",
     async (c) => {
       c.header("cache-control", "private, no-store");
-      requireSameOriginBrowserMutation(c, deps);
+      await requireNonCookieOrSameOriginMutation(c, deps);
       const organizationId = parseOrganizationId(c.req.param("organizationId"));
-      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
       const payload = await jsonBody(
         c,
         CreateOrganizationProviderCustomModelRequest,
@@ -276,9 +279,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     "/v1/organizations/:organizationId/model-providers/:providerKind/custom-models/:customModelId",
     async (c) => {
       c.header("cache-control", "private, no-store");
-      requireSameOriginBrowserMutation(c, deps);
+      await requireNonCookieOrSameOriginMutation(c, deps);
       const organizationId = parseOrganizationId(c.req.param("organizationId"));
-      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      const human = await requireOrganizationCodexAdministrator(c, deps, organizationId);
       const payload = await jsonBody(
         c,
         DeleteOrganizationProviderCustomModelRequest,

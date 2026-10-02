@@ -8,6 +8,7 @@ import {
 import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
+  hasVerifiedOwningUserAuthorization,
   requireAccessContext,
   requireAccessGrantAuthorization,
   requireSessionAuthorizationListScope,
@@ -298,7 +299,7 @@ async function listWorkspaceSessionPage(
           ? { scopeSubjectId: input.query.scopeSubjectId }
           : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
       });
     const withStatus = (rows: Session[]) =>
       input.query.status ? rows.filter((session) => session.status === input.query.status) : rows;

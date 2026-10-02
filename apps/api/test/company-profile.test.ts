@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  completeSelfServiceOrganizationSetup,
+  createDb,
+  createOrganizationSharedWorkspace,
+  ensureManagedAccessForUser,
+  grantWorkspaceAccess,
+  type DbClient,
+} from "@opengeni/db";
+import { stampDelegatedHumanAuthorization, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -21,14 +28,35 @@ beforeAll(async () => {
   if (!shared) return;
   client = createDb(shared.appUrl);
   const userId = `api-company-profile-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  await shared.admin`insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'API company profile owner', ${`${userId}@example.test`}, true)`;
+  const setup = await completeSelfServiceOrganizationSetup(client.db, {
+    authUserId: userId,
+    actorSubjectId: subjectId,
+    organizationName: "Company profile account",
+    operationId: crypto.randomUUID(),
+    requestFingerprint: "a".repeat(64),
+  });
+  const workspace = await createOrganizationSharedWorkspace(client.db, {
+    organizationId: setup.organizationId,
+    actorSubjectId: subjectId,
+    name: "Company profile workspace",
+    operationId: crypto.randomUUID(),
+  });
+  await grantWorkspaceAccess(client.db, {
+    accountId: setup.organizationId,
+    workspaceId: workspace.id,
+    subjectId,
+    role: "owner",
+    permissions: ["workspace:read", "workspace:admin"],
+  });
   const access = await ensureManagedAccessForUser(client.db, {
     userId,
     email: `${userId}@example.test`,
     name: "API company profile owner",
   });
-  grant = access.workspaceGrants.find(
-    (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
-  )!;
+  grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id)!;
   app = new Hono();
   registerCompanyProfileRoutes(app, {
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
@@ -52,38 +80,49 @@ async function bearer(permissions: Permission[]): Promise<string> {
   })}`;
 }
 
+function delegatedRequest(path: string, permissions: Permission[], init?: RequestInit) {
+  const request = new Request(path, init);
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: grant.accountId,
+    subjectId: grant.subjectId,
+    permissions,
+    workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
+  });
+  return app!.fetch(request);
+}
+
 describe("company-profile API authority", () => {
-  test("requires direct account admin for writes while exposing current history to readers", async () => {
+  test("requires verified literal account admin for writes while exposing current history to readers", async () => {
     if (!app) return;
     const policyEndpoint = `http://x/v1/workspaces/${grant.workspaceId}/company-profile/agent-policy`;
     expect(
-      (
-        await app.request(policyEndpoint, {
-          headers: { authorization: await bearer(["workspace:read", "workspace:admin"]) },
-        })
-      ).status,
+      (await delegatedRequest(policyEndpoint, ["workspace:read", "workspace:admin"])).status,
     ).toBe(403);
-    const initialPolicy = await app.request(policyEndpoint, {
-      headers: { authorization: await bearer(["account:admin", "workspace:read"]) },
-    });
+    const initialPolicy = await delegatedRequest(policyEndpoint, [
+      "account:admin",
+      "workspace:read",
+    ]);
     expect(initialPolicy.status).toBe(200);
     expect(await initialPolicy.json()).toMatchObject({
       organizationId: grant.accountId,
       mode: "suggest",
       version: 0,
     });
-    const automaticPolicy = await app.request(policyEndpoint, {
-      method: "PATCH",
-      headers: {
-        authorization: await bearer(["account:admin", "workspace:read"]),
-        "content-type": "application/json",
+    const automaticPolicy = await delegatedRequest(
+      policyEndpoint,
+      ["account:admin", "workspace:read"],
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: "automatic",
+          expectedVersion: 0,
+          operationId: crypto.randomUUID(),
+        }),
       },
-      body: JSON.stringify({
-        mode: "automatic",
-        expectedVersion: 0,
-        operationId: crypto.randomUUID(),
-      }),
-    });
+    );
     expect(automaticPolicy.status).toBe(200);
     expect(await automaticPolicy.json()).toMatchObject({
       organizationId: grant.accountId,
@@ -106,12 +145,12 @@ describe("company-profile API authority", () => {
       expectedActivationVersion: 0,
       reason: "Initial profile",
     };
-    const workspaceAdmin = await app.request(
+    const workspaceAdmin = await delegatedRequest(
       `http://x/v1/workspaces/${grant.workspaceId}/company-profile`,
+      ["workspace:read", "workspace:admin"],
       {
         method: "PUT",
         headers: {
-          authorization: await bearer(["workspace:read", "workspace:admin"]),
           "content-type": "application/json",
         },
         body: JSON.stringify(body),
@@ -119,7 +158,7 @@ describe("company-profile API authority", () => {
     );
     expect(workspaceAdmin.status).toBe(403);
 
-    const accountAdmin = await app.request(
+    const legacyHuman = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/company-profile`,
       {
         method: "PUT",
@@ -127,6 +166,17 @@ describe("company-profile API authority", () => {
           authorization: await bearer(["account:admin", "workspace:read"]),
           "content-type": "application/json",
         },
+        body: JSON.stringify(body),
+      },
+    );
+    expect(legacyHuman.status).toBe(403);
+
+    const accountAdmin = await delegatedRequest(
+      `http://x/v1/workspaces/${grant.workspaceId}/company-profile`,
+      ["account:admin", "workspace:read"],
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       },
     );

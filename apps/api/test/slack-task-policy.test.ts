@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  completeSelfServiceOrganizationSetup,
+  createDb,
+  createOrganizationSharedWorkspace,
+  ensureManagedAccessForUser,
+  grantWorkspaceAccess,
+  type DbClient,
+} from "@opengeni/db";
+import { stampDelegatedHumanAuthorization, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -14,22 +21,42 @@ const SECRET = "slack-task-policy-test-secret-at-least-32-bytes";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
-let grant: Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
+let grant: Awaited<ReturnType<typeof ensureManagedAccessForUser>>["workspaceGrants"][number];
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-slack-task-policy");
   if (!shared) return;
   client = createDb(shared.appUrl);
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `api-slack-task-policy-${crypto.randomUUID()}`,
-    accountName: "Slack policy account",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `api-slack-task-policy-workspace-${crypto.randomUUID()}`,
-    workspaceName: "Slack policy workspace",
-    subjectId: "human:slack-policy-admin",
+  const userId = `api-slack-task-policy-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  await shared.admin`insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'Slack policy owner', ${`${userId}@example.test`}, true)`;
+  const setup = await completeSelfServiceOrganizationSetup(client.db, {
+    authUserId: userId,
+    actorSubjectId: subjectId,
+    organizationName: "Slack policy account",
+    operationId: crypto.randomUUID(),
+    requestFingerprint: "a".repeat(64),
   });
-  grant = access.workspaceGrants[0]!;
+  const workspace = await createOrganizationSharedWorkspace(client.db, {
+    organizationId: setup.organizationId,
+    actorSubjectId: subjectId,
+    name: "Slack policy workspace",
+    operationId: crypto.randomUUID(),
+  });
+  await grantWorkspaceAccess(client.db, {
+    accountId: setup.organizationId,
+    workspaceId: workspace.id,
+    subjectId,
+    role: "owner",
+    permissions: ["workspace:read", "workspace:admin"],
+  });
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Slack policy owner",
+  });
+  grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id)!;
   app = new Hono();
   registerSlackTaskPolicyRoutes(app, {
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
@@ -51,6 +78,21 @@ async function bearer(permissions: Permission[]): Promise<string> {
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
+}
+
+function delegatedRequest(permissions: Permission[], body: unknown) {
+  const request = new Request(`http://x/v1/workspaces/${grant.workspaceId}/slack-task-policy`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: grant.accountId,
+    subjectId: grant.subjectId,
+    permissions,
+    workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
+  });
+  return app!.fetch(request);
 }
 
 const policy = {
@@ -87,7 +129,7 @@ describe("Slack task-policy API authority", () => {
     );
     expect(unauthorized.status).toBe(403);
 
-    const created = await app.request(
+    const legacyHuman = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/slack-task-policy`,
       {
         method: "PUT",
@@ -98,6 +140,9 @@ describe("Slack task-policy API authority", () => {
         body: JSON.stringify(body),
       },
     );
+    expect(legacyHuman.status).toBe(403);
+
+    const created = await delegatedRequest(["workspace:read", "workspace:admin"], body);
     expect(created.status, await created.clone().text()).toBe(200);
     const result = (await created.json()) as Record<string, any>;
     expect(result).toMatchObject({
@@ -106,50 +151,26 @@ describe("Slack task-policy API authority", () => {
       event: { newRevision: { id: result.revision.id }, oldRevision: null },
     });
 
-    const replay = await app.request(
-      `http://x/v1/workspaces/${grant.workspaceId}/slack-task-policy`,
-      {
-        method: "PUT",
-        headers: {
-          authorization: await bearer(["workspace:read", "workspace:admin"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      },
-    );
+    const replay = await delegatedRequest(["workspace:read", "workspace:admin"], body);
     expect(replay.status).toBe(200);
     expect((await replay.json()) as Record<string, any>).toMatchObject({
       revision: { id: result.revision.id },
       event: { id: result.event.id },
     });
 
-    const reusedOperation = await app.request(
-      `http://x/v1/workspaces/${grant.workspaceId}/slack-task-policy`,
-      {
-        method: "PUT",
-        headers: {
-          authorization: await bearer(["workspace:read", "workspace:admin"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ...body, reason: "A conflicting replay" }),
-      },
-    );
+    const reusedOperation = await delegatedRequest(["workspace:read", "workspace:admin"], {
+      ...body,
+      reason: "A conflicting replay",
+    });
     expect(reusedOperation.status).toBe(409);
     expect(await reusedOperation.json()).toMatchObject({
       code: "SLACK_TASK_POLICY_OPERATION_REUSED",
     });
 
-    const stale = await app.request(
-      `http://x/v1/workspaces/${grant.workspaceId}/slack-task-policy`,
-      {
-        method: "PUT",
-        headers: {
-          authorization: await bearer(["workspace:read", "workspace:admin"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ...body, operationId: crypto.randomUUID() }),
-      },
-    );
+    const stale = await delegatedRequest(["workspace:read", "workspace:admin"], {
+      ...body,
+      operationId: crypto.randomUUID(),
+    });
     expect(stale.status).toBe(409);
 
     const read = await app.request(

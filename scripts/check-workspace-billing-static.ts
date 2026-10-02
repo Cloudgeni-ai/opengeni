@@ -203,6 +203,8 @@ const billingPortalSurfaceFiles = new Set([
   "scripts/public-api/surface.gen.json",
   // Reviewed route data is an inventory, not another executable billing surface.
   "scripts/public-api/human-route-classification.json",
+  // Route-coverage assertions pin this inventory; they do not serve billing.
+  "scripts/public-api/human-route-classification.test.ts",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {

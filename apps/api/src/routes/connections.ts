@@ -88,6 +88,7 @@ import {
   openGeniSlackBotMetadata,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
   requireEnvironmentEncryption,
   externalContinuationCommitAuthorizer,
 } from "@opengeni/core";
@@ -131,7 +132,10 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
-import { disconnectPersonalGitHub } from "../integrations/personal-github";
+import {
+  disconnectPersonalGitHub,
+  resumePersonalGitHubOAuthInNativeBrowser,
+} from "../integrations/personal-github";
 import {
   browseAtlassianSources,
   completeAtlassianOAuthCallback,
@@ -1448,6 +1452,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
     return c.json(ConnectionResponse.parse({ connection }));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/connections/github/oauth/native-start", async (c) => {
+    assertIntegrationsEnabled();
+    // A native browser navigation, never a continuation of delegated/bearer
+    // dispatch even if cookie-shaped headers accompany it.
+    if (
+      deps.settings.productAccessMode !== "managed" ||
+      !c.req.header("cookie") ||
+      c.req.header("authorization") ||
+      verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)
+    )
+      throw new HTTPException(403, { message: "Finish this action in your signed-in browser" });
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    const result = await resumePersonalGitHubOAuthInNativeBrowser(deps, {
+      access,
+      workspaceId,
+      intent: c.req.query("intent") ?? "",
+    });
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    return c.redirect(result.authorizationUrl, 302);
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/oauth/start", async (c) => {

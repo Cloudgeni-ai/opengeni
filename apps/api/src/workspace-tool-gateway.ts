@@ -31,6 +31,8 @@ import {
   hasPermission,
   externalActorContinuationForAuthorization,
   isVerifiedOrganizationServiceAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  requireFreshAccessGrant,
   externalContinuationCommitAuthorizer,
   requireResolvedAccessGrantAuthorization,
   resolveCodexAppsCredentialIdForRun,
@@ -72,6 +74,7 @@ import {
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
+import type { Context } from "hono";
 
 import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
@@ -132,6 +135,7 @@ export function requireWorkspaceToolGatewayAuthorization(
       });
     return grant;
   }
+  if (isVerifiedDelegatedHumanAuthorization(authorization)) return grant;
   requireWorkspaceToolGatewayGrant(grant);
   if (
     !authorization.canonicalManagedHumanSession &&
@@ -146,11 +150,19 @@ export function requireWorkspaceToolGatewayAuthorization(
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
+  requestContext?: Context,
 ): Promise<PreparedWorkspaceToolGateway> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
   const external = externalActorContinuationForAuthorization(authorization);
   const reauthorizeExternal = externalContinuationCommitAuthorizer(authorization);
   const service = isVerifiedOrganizationServiceAuthorization(authorization);
+  const delegated = isVerifiedDelegatedHumanAuthorization(authorization);
+  if (
+    delegated &&
+    (!requestContext ||
+      !isVerifiedDelegatedHumanAuthorization(authorization, requestContext.req.raw))
+  )
+    throw new HTTPException(403, { message: "Delegated gateway requires its verified request" });
   const scope = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -158,8 +170,22 @@ export async function prepareWorkspaceToolGateway(
   };
   const permissions = [...grant.permissions];
   const reauthorize =
-    external || service
+    external || service || delegated
       ? async () => {
+          if (delegated) {
+            const live = await requireFreshAccessGrant(
+              requestContext!,
+              routeDeps,
+              scope.workspaceId,
+            );
+            if (
+              live.subjectId !== scope.subjectId ||
+              live.accountId !== scope.accountId ||
+              permissions.some((permission) => !hasPermission(live.permissions, permission))
+            )
+              throw new HTTPException(403, { message: "Delegated gateway authority changed" });
+            return;
+          }
           await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
             if (reauthorizeExternal) await reauthorizeExternal(tx);
             else {
@@ -335,18 +361,23 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           clientVersion: CODEX_CLIENT_VERSION,
           withAuthorization: async <T>(
             use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> =>
-            await resolver.getToken().then(
-              async (token) =>
-                await withCodexAppsRequestAuthorization(
-                  routeDeps.db,
-                  {
-                    workspaceId: grant.workspaceId,
-                    credentialId: codexAppsCredentialId,
-                  },
-                  async () => await use(token),
-                ),
-            ),
+          ): Promise<T> => {
+            await reauthorize?.();
+            const token = await resolver.getToken();
+            return await withCodexAppsRequestAuthorization(
+              routeDeps.db,
+              {
+                workspaceId: grant.workspaceId,
+                credentialId: codexAppsCredentialId,
+              },
+              async () => {
+                // Token refresh and native credential authorization can await
+                // independently. Neither substitutes the caller's live proof.
+                await reauthorize?.();
+                return await use(token);
+              },
+            );
+          },
         };
       })()
     : undefined;

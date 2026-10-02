@@ -13,6 +13,9 @@ import {
   requireAutomationAdapter,
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  isVerifiedOrganizationServiceAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
   requirePermission,
   verifyPrReviewWebhook,
   type ApiRouteDeps,
@@ -45,7 +48,10 @@ import {
   type GitHubSignedStatePayload,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
-import { requireLegacyOAuthActor } from "../connection-ownership";
+import {
+  requirePersonPresentRouteAuthorization,
+  requireUserOrOrganizationRouteAuthorization,
+} from "../http/human-route-authorization";
 import {
   integrationCommitGrant,
   type IntegrationCommitGrant,
@@ -202,6 +208,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/workspaces/:workspaceId/pr-review/github/connect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const state = requireStateQuery(c, "missing OpenGeni Lens installation state");
+    if (isGitHubAppConnectState(deps, state))
+      return redirectNativePrReviewConnectBrowser(c, deps, state, workspaceId);
     const payload = requireFreshState(state, deps, "pr_review_github_authority", workspaceId);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
 
@@ -261,8 +269,9 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   const handleInstallCallback = async (c: Context) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state")))
-      return completeGitHubAppConnect(deps, {
+    if (isGitHubAppConnectState(deps, c.req.query("state"))) {
+      const nativeBrowser = await requirePrReviewConnectSetup(c, deps);
+      const response = await completeGitHubAppConnect(deps, {
         expectedProvider: "github-lens",
         state: c.req.query("state"),
         installationId: c.req.query("installation_id"),
@@ -270,6 +279,13 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         error: c.req.query("error"),
         requestUrl: c.req.url,
       });
+      if (nativeBrowser) {
+        c.res = response;
+        seedPrReviewConnectBrowserState(c, deps, response);
+        return c.res;
+      }
+      return response;
+    }
     const state =
       c.req.query("state") ??
       allCookieValues(c, stateCookie).find((candidate) => {
@@ -278,8 +294,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       });
     if (!state) throw new HTTPException(400, { message: "missing OpenGeni Lens state" });
     const payload = requireFreshState(state, deps, "pr_review_github_install");
-    requireStateCookie(c, state);
-    await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
+    await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload, state);
 
     assertManagedCompute(deps);
     const setupAction = c.req.query("setup_action");
@@ -307,7 +322,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       intent: "pr_review_github_oauth",
       ...continuedBrowserGrantClaims(payload),
     });
-    setStateCookie(c, deps, oauthState);
+    if (await canSeedPrReviewSetupBrowserState(c, deps, payload.workspaceId!))
+      setStateCookie(c, deps, oauthState);
     return c.redirect(
       githubOAuthAuthorizeUrl({
         clientId: deps.settings.prReviewGithubClientId!,
@@ -321,14 +337,16 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/pr-review/github/install/callback", handleInstallCallback);
 
   app.get("/v1/pr-review/github/oauth/callback", async (c) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state")))
+    if (isGitHubAppConnectState(deps, c.req.query("state"))) {
+      const sourceState = await requirePrReviewConnectConsent(c, deps);
       return completeGitHubAppConnect(deps, {
         expectedProvider: "github-lens",
-        state: c.req.query("state"),
+        state: sourceState,
         code: c.req.query("code"),
         error: c.req.query("error"),
         requestUrl: c.req.url,
       });
+    }
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code || !state) {
@@ -336,7 +354,14 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     const payload = requireFreshState(state, deps);
     requireStateCookie(c, state);
-    const grant = await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
+    const grant = await requirePrReviewManageGrant(
+      c,
+      deps,
+      payload.workspaceId!,
+      payload,
+      undefined,
+      true,
+    );
 
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
@@ -533,19 +558,37 @@ async function requirePrReviewManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   state: GitHubSignedStatePayload,
+  setupState?: string,
+  personPresent = false,
 ): Promise<IntegrationCommitGrant> {
   let grant: IntegrationCommitGrant;
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
-    requireLegacyOAuthActor(access);
+    if (personPresent) requirePersonPresentRouteAuthorization(access);
+    else requireUserOrOrganizationRouteAuthorization(access);
+    const nonBrowser =
+      isVerifiedDelegatedHumanAuthorization(access) ||
+      isVerifiedOrganizationServiceAuthorization(access);
+    requirePrReviewInstallationInitiator(state, access.grant, nonBrowser);
+    if (setupState && !nonBrowser && !allCookieValues(c, stateCookie).includes(setupState)) {
+      if (
+        !(access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) ||
+        c.req.header("authorization")
+      )
+        requireStateCookie(c, setupState);
+      requirePersonPresentRouteAuthorization(access);
+      requirePrReviewInstallationInitiator(state, access.grant, true);
+    }
     grant = await integrationCommitGrant(access, ["workspace:admin", "secrets:write"], {
       settings: deps.settings,
       authorizationHeader: c.req.header("authorization"),
     });
   } catch (error) {
-    if (!(error instanceof HTTPException) || error.status !== 401) throw error;
+    if (personPresent || !(error instanceof HTTPException) || error.status !== 401) throw error;
     const handedOff = prReviewBrowserGrantFromState(deps, state, workspaceId);
     if (!handedOff) throw error;
+    requirePrReviewInstallationInitiator(state, handedOff);
+    if (setupState) requireStateCookie(c, setupState);
     grant = {
       ...handedOff,
       authorizeCommit: async () => {
@@ -569,27 +612,279 @@ async function requirePrReviewManageGrant(
 }
 
 function prReviewBrowserGrantClaims(deps: ApiRouteDeps, grant: AccessGrant) {
+  const initiator = {
+    initiatingSubjectId: grant.subjectId,
+    initiatingExpiresAt: Math.floor(Date.now() / 1_000) + bindingStateMaxAgeSeconds,
+  };
   if (
     deps.settings.productAccessMode !== "configured" ||
     !hasPermission(grant.permissions, "workspace:admin") ||
     !hasPermission(grant.permissions, "secrets:write")
   ) {
-    return {};
+    return initiator;
   }
   return {
+    ...initiator,
     prReviewBrowserGrantSubjectId: grant.subjectId,
     prReviewBrowserGrantExpiresAt: Math.floor(Date.now() / 1_000) + bindingStateMaxAgeSeconds,
   };
 }
 
 function continuedBrowserGrantClaims(payload: GitHubSignedStatePayload) {
-  return typeof payload.prReviewBrowserGrantSubjectId === "string" &&
+  return {
+    ...(typeof payload.prReviewBrowserGrantSubjectId === "string" &&
     typeof payload.prReviewBrowserGrantExpiresAt === "number"
-    ? {
-        prReviewBrowserGrantSubjectId: payload.prReviewBrowserGrantSubjectId,
-        prReviewBrowserGrantExpiresAt: payload.prReviewBrowserGrantExpiresAt,
-      }
-    : {};
+      ? {
+          prReviewBrowserGrantSubjectId: payload.prReviewBrowserGrantSubjectId,
+          prReviewBrowserGrantExpiresAt: payload.prReviewBrowserGrantExpiresAt,
+        }
+      : {}),
+    ...(typeof payload.initiatingSubjectId === "string" &&
+    typeof payload.initiatingExpiresAt === "number"
+      ? {
+          initiatingSubjectId: payload.initiatingSubjectId,
+          initiatingExpiresAt: payload.initiatingExpiresAt,
+        }
+      : {}),
+  };
+}
+
+function requirePrReviewInstallationInitiator(
+  payload: GitHubSignedStatePayload,
+  grant: AccessGrant,
+  required = false,
+): void {
+  if (
+    payload.accountId !== grant.accountId ||
+    payload.workspaceId !== grant.workspaceId ||
+    ((required || payload.initiatingSubjectId !== undefined) &&
+      (payload.initiatingSubjectId !== grant.subjectId ||
+        typeof payload.initiatingExpiresAt !== "number" ||
+        !Number.isInteger(payload.initiatingExpiresAt) ||
+        payload.initiatingExpiresAt < Math.floor(Date.now() / 1_000) ||
+        payload.initiatingExpiresAt > payload.iat + bindingStateMaxAgeSeconds))
+  ) {
+    throw new HTTPException(403, { message: "OpenGeni Lens initiator expired or changed" });
+  }
+}
+
+async function requirePrReviewConnectConsent(c: Context, deps: ApiRouteDeps): Promise<string> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw))
+    throw new HTTPException(403, {
+      message: "Finish OpenGeni Lens consent in your signed-in browser",
+    });
+  const state = c.req.query("state")!;
+  const payload = readSignedState(state, deps.githubStateSecret)!;
+  if (payload.phase !== "discover" && payload.phase !== "bind")
+    throw new HTTPException(400, { message: "invalid OpenGeni Lens consent stage" });
+  // External Connect callbacks retain the separately verified stored origin.
+  if (
+    typeof payload.subjectId === "string" &&
+    payload.subjectId.startsWith("external_user:") &&
+    payload.nativeBrowserSourceState === undefined &&
+    !c.req.header("authorization")
+  )
+    return state;
+  if (c.req.header("authorization"))
+    throw new HTTPException(403, {
+      message: "Finish OpenGeni Lens consent in your signed-in browser",
+    });
+  requireStateCookie(c, state);
+  const sourceState = requireNativePrReviewConnectBrowserSourceState(deps, state);
+  const source = readSignedState(sourceState, deps.githubStateSecret)!;
+  const access = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    source.workspaceId!,
+    "workspace:admin",
+  );
+  requirePersonPresentRouteAuthorization(access);
+  requirePermission(access.grant, "secrets:write");
+  if (access.grant.accountId !== source.accountId || access.grant.subjectId !== source.subjectId)
+    throw new HTTPException(403, { message: "OpenGeni Lens connection initiator changed" });
+  return sourceState;
+}
+
+function readNativePrReviewConnectSourceState(
+  deps: ApiRouteDeps,
+  state: string,
+): GitHubSignedStatePayload {
+  const source = readSignedState(state, deps.githubStateSecret);
+  if (
+    !source ||
+    source.kind !== "github_app_connect" ||
+    !isFreshState(source) ||
+    (source.phase !== "discover" && source.phase !== "bind") ||
+    source.providerId !== "github-lens" ||
+    typeof source.accountId !== "string" ||
+    typeof source.workspaceId !== "string" ||
+    typeof source.subjectId !== "string" ||
+    !source.subjectId ||
+    typeof source.connectAttemptId !== "string" ||
+    !source.connectAttemptId ||
+    typeof source.personalOwnerVerified !== "boolean" ||
+    source.nativeBrowserSourceState !== undefined ||
+    (source.installationId !== undefined &&
+      (typeof source.installationId !== "number" ||
+        !Number.isSafeInteger(source.installationId) ||
+        source.installationId <= 0))
+  )
+    throw new HTTPException(400, { message: "invalid OpenGeni Lens browser source state" });
+  return source;
+}
+
+function createNativePrReviewConnectBrowserState(deps: ApiRouteDeps, state: string): string {
+  const source = readNativePrReviewConnectSourceState(deps, state);
+  return createSignedState(deps.githubStateSecret, {
+    kind: "github_app_connect",
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    subjectId: source.subjectId,
+    personalOwnerVerified: source.personalOwnerVerified,
+    connectAttemptId: source.connectAttemptId,
+    phase: source.phase,
+    providerId: "github-lens",
+    ...(source.installationId !== undefined ? { installationId: source.installationId } : {}),
+    nativeBrowserSourceState: state,
+  });
+}
+
+function requireNativePrReviewConnectBrowserSourceState(deps: ApiRouteDeps, state: string): string {
+  const browser = readSignedState(state, deps.githubStateSecret);
+  if (!browser || !isFreshState(browser) || typeof browser.nativeBrowserSourceState !== "string")
+    throw new HTTPException(400, { message: "independent OpenGeni Lens browser state required" });
+  const source = readNativePrReviewConnectSourceState(deps, browser.nativeBrowserSourceState);
+  if (
+    browser.kind !== source.kind ||
+    browser.accountId !== source.accountId ||
+    browser.workspaceId !== source.workspaceId ||
+    browser.subjectId !== source.subjectId ||
+    browser.personalOwnerVerified !== source.personalOwnerVerified ||
+    browser.connectAttemptId !== source.connectAttemptId ||
+    browser.phase !== source.phase ||
+    browser.providerId !== source.providerId ||
+    browser.installationId !== source.installationId ||
+    browser.nonce === source.nonce ||
+    browser.iat < source.iat
+  )
+    throw new HTTPException(400, { message: "OpenGeni Lens browser source state changed" });
+  return browser.nativeBrowserSourceState;
+}
+
+async function redirectNativePrReviewConnectBrowser(
+  c: Context,
+  deps: ApiRouteDeps,
+  state: string,
+  workspaceId: string,
+): Promise<Response> {
+  const payload = readNativePrReviewConnectSourceState(deps, state);
+  if (payload.workspaceId !== workspaceId)
+    throw new HTTPException(400, { message: "invalid OpenGeni Lens browser handoff state" });
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) || c.req.header("authorization"))
+    throw new HTTPException(403, {
+      message: "Open OpenGeni Lens consent in your signed-in browser",
+    });
+  const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
+  requirePersonPresentRouteAuthorization(access);
+  requirePermission(access.grant, "secrets:write");
+  if (
+    !(access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) ||
+    access.grant.accountId !== payload.accountId ||
+    access.grant.subjectId !== payload.subjectId
+  )
+    throw new HTTPException(403, { message: "OpenGeni Lens browser handoff initiator changed" });
+  assertManagedCompute(deps);
+  requireConfiguredApp(deps);
+  const browserState = createNativePrReviewConnectBrowserState(deps, state);
+  setStateCookie(c, deps, browserState);
+  return c.redirect(
+    githubOAuthAuthorizeUrl({
+      clientId: deps.settings.prReviewGithubClientId!,
+      state: browserState,
+      redirectUri: `${openGeniBaseUrl(deps, c)}/v1/pr-review/github/oauth/callback`,
+    }),
+  );
+}
+
+async function requirePrReviewConnectSetup(c: Context, deps: ApiRouteDeps): Promise<boolean> {
+  const payload = readSignedState(c.req.query("state")!, deps.githubStateSecret)!;
+  if (payload.phase !== "install" || !isFreshState(payload))
+    throw new HTTPException(400, { message: "invalid OpenGeni Lens installation stage" });
+  const delegated = verifiedDelegatedHumanAuthorizationForRequest(c.req.raw);
+  if (
+    deps.settings.productAccessMode !== "local" &&
+    !delegated &&
+    !c.req.header("authorization") &&
+    !c.req.header("cookie")
+  )
+    return false;
+  if (typeof payload.workspaceId !== "string")
+    throw new HTTPException(400, { message: "invalid OpenGeni Lens connection workspace" });
+  let access;
+  try {
+    access = await requireAccessGrantAuthorization(c, deps, payload.workspaceId, "workspace:admin");
+  } catch (error) {
+    if (
+      !delegated &&
+      !c.req.header("authorization") &&
+      error instanceof HTTPException &&
+      error.status === 401
+    )
+      return false;
+    throw error;
+  }
+  requireUserOrOrganizationRouteAuthorization(access);
+  requirePermission(access.grant, "secrets:write");
+  if (access.grant.accountId !== payload.accountId || access.grant.subjectId !== payload.subjectId)
+    throw new HTTPException(403, { message: "OpenGeni Lens connection initiator changed" });
+  const nativeBrowser =
+    (access.canonicalManagedHumanSession || access.canonicalLocalHumanSession) &&
+    !c.req.header("authorization") &&
+    !delegated;
+  if (nativeBrowser) requirePersonPresentRouteAuthorization(access);
+  return nativeBrowser;
+}
+
+async function canSeedPrReviewSetupBrowserState(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<boolean> {
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw) || c.req.header("authorization"))
+    return false;
+  try {
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
+    return access.canonicalManagedHumanSession || access.canonicalLocalHumanSession;
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 401) return false;
+    throw error;
+  }
+}
+
+function seedPrReviewConnectBrowserState(c: Context, deps: ApiRouteDeps, response: Response): void {
+  const location = response.headers.get("location");
+  if (response.status !== 302 || !location) return;
+  const url = new URL(location, c.req.url);
+  if (url.origin !== "https://github.com" || url.pathname !== "/login/oauth/authorize") return;
+  const state = url.searchParams.get("state");
+  const next = state ? readSignedState(state, deps.githubStateSecret) : null;
+  const source = readSignedState(c.req.query("state")!, deps.githubStateSecret)!;
+  if (
+    !next ||
+    next.kind !== "github_app_connect" ||
+    next.phase !== "bind" ||
+    next.providerId !== "github-lens" ||
+    !isFreshState(next) ||
+    next.accountId !== source.accountId ||
+    next.workspaceId !== source.workspaceId ||
+    next.subjectId !== source.subjectId ||
+    next.connectAttemptId !== source.connectAttemptId
+  )
+    throw new HTTPException(403, { message: "OpenGeni Lens browser handoff state changed" });
+  const browserState = createNativePrReviewConnectBrowserState(deps, state!);
+  url.searchParams.set("state", browserState);
+  c.header("Location", url.toString());
+  setStateCookie(c, deps, browserState);
 }
 
 function prReviewBrowserGrantFromState(

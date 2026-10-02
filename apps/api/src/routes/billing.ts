@@ -31,6 +31,7 @@ import Stripe from "stripe";
 import { requireAccessContext } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { requireNonCookieOrSameOriginMutation } from "../http/human-route-authorization";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing", async (c) => {
@@ -102,6 +103,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post("/v1/billing/checkout", async (c) => {
+    await requireNonCookieOrSameOriginMutation(c, deps);
     if (deps.settings.billingMode !== "stripe") {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
@@ -146,6 +148,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post("/v1/billing/portal", async (c) => {
+    await requireNonCookieOrSameOriginMutation(c, deps);
     if (deps.settings.billingMode !== "stripe") {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }

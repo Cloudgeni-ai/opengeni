@@ -50,6 +50,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import { requireDelegableHumanRouteAuthorization } from "../http/human-route-authorization";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
 import { startAtlassianOAuth } from "../integrations/atlassian";
@@ -657,6 +658,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     // Older revisions still go through the receipt-aware claim path for replay.
     const stored = await getConnectAttempt(deps.db, scope, c.req.param("attemptId"));
     const before = stored.attempt;
+    if (
+      ["mcp-oauth", "slack-personal", "gmail"].includes(before.providerId) &&
+      action.type === "credentials"
+    )
+      requireDelegableHumanRouteAuthorization(authorization);
     const advancePermission =
       before.providerId === "mcp-install" ? "capabilities:manage" : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
@@ -1311,6 +1317,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       setupPermission,
     );
+    // These begin branches only collect a supplied credential or install an
+    // already-authorized resource. Other branches initiate a browser handoff;
+    // verified user delegation may start it but never supplies provider consent.
+    if (
+      !["mcp-install", "openapi", "graphql", "mcp-bearer", "mcp-headers", "fiken-token"].includes(
+        input.providerId,
+      )
+    )
+      requireDelegableHumanRouteAuthorization(authorization);
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, {

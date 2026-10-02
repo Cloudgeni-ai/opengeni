@@ -4,15 +4,17 @@ import {
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+import { requireDelegableHumanRouteAuthorization } from "./http/human-route-authorization";
 
-/** A verified external actor must not enter a native callback that has no
- * corresponding key/identity reauthorization proof. Remove at an entry point
- * only when that provider's signed continuation and commit fence are wired. */
+/** Verified owning people may start a provider flow; consent stays in the browser. A verified
+ * external actor also needs a provider-specific signed continuation and commit
+ * fence before entering a native callback. This is not a connection CRUD gate. */
 export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void {
   if (externalActorContinuationForAuthorization(access))
     throw new HTTPException(422, {
       message: "This provider does not yet support external-user OAuth continuation",
     });
+  requireDelegableHumanRouteAuthorization(access);
 }
 
 /**

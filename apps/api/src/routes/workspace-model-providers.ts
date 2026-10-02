@@ -1,6 +1,6 @@
 import { claudeProviderId } from "@opengeni/config";
 import { refreshClaudeSubscriptionUsage } from "../claude-subscription-usage";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireNonCookieOrSameOriginMutation } from "./codex";
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceGatewayCustomModelRequest,
@@ -73,7 +73,7 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     );
   });
   app.post(`${usagePath}/refresh`, async (c) => {
-    requireSameOriginBrowserMutation(c, deps);
+    await requireNonCookieOrSameOriginMutation(c, deps);
     const input = await scope(c, false);
     if (input.providerKind !== "claude_subscription")
       throw new HTTPException(404, { message: "Usage not available for this provider" });

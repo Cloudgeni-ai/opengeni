@@ -137,8 +137,13 @@ preserves the router, never removed execution authority.
   an owner-only personal-workspace grant only for the canonical managed-cookie
   (Better Auth) session, after the exact active organization membership and its
   personal-workspace pointer converge through the lifecycle SECURITY DEFINER
-  seam. Bearer/delegated principals, API keys, and account or organization
+  seam. Generic bearer/delegated principals, API keys, and account or organization
   administrators receive no personal-workspace access through that exception.
+  A separate trusted OAuth-dispatch WeakMap proof may authorize the exact native
+  owning person within live same-organization grants and explicit ceilings;
+  use `hasVerifiedOwningUserAuthorization`, never a principal shape or cookie
+  flag. Browser ceremonies still require the canonical cookie proof. See
+  `docs/human-route-authorization.md` for the reviewed boundary.
   The exact built-in `opengeni:local/default` + `dev` browser context is also
   the sole organization administrator in single-user local mode. It may manage
   organization metadata, shared workspaces, retention, company identity, and
@@ -155,10 +160,12 @@ preserves the router, never removed execution authority.
   in-scope one refuses to set that GUC and raises when the requested subject
   differs from the transaction's scope, but that is a **consistency check, not
   an authorization**: the scope was itself set from a caller-supplied argument,
-  so it catches only a caller naming a third party mid-transaction. The single
-  thing that authorizes the exception is the API layer's
+  so it catches only a caller naming a third party mid-transaction. The cookie
+  exception uses the API layer's
   `AccessGrantAuthorization.canonicalManagedHumanSession`, stamped only where a
-  Better Auth cookie was verified — never a shape check on the grant
+  Better Auth cookie was verified. Broader owner-only operations must use
+  `hasVerifiedOwningUserAuthorization`, which separately verifies trusted
+  external/native delegated proof — never a shape check on the grant
   (`principalKind`, `metadata.delegated`, `serviceInitiator`), all of which a
   delegated token chooses for itself. A new caller must get that stamp right;
   the resolvers will answer `true` for whatever subject they are given.

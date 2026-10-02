@@ -10,7 +10,8 @@ import {
   markManagedAuthRequestActorTransitionApplied,
   requireCanonicalHumanRequestIdentity,
 } from "@opengeni/core/canonical-human-identities";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { verifiedDelegatedHumanAuthorizationForRequest, type ApiRouteDeps } from "@opengeni/core";
+import { requireManagedHumanRouteIdentity } from "../http/human-route-authorization";
 import {
   applyCanonicalHumanIdentityOperation,
   CanonicalHumanIdentityAuthorityError,
@@ -30,6 +31,10 @@ import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifi
 const BindingId = z.string().uuid();
 
 async function requestIdentity(context: Context, deps: ApiRouteDeps) {
+  if (verifiedDelegatedHumanAuthorizationForRequest(context.req.raw))
+    throw new HTTPException(403, {
+      message: "Credential and identity changes require independent native browser authentication",
+    });
   return await requireCanonicalHumanRequestIdentity(context, {
     db: deps.db,
     ...(deps.managedAuth === undefined ? {} : { managedAuth: deps.managedAuth }),
@@ -139,11 +144,13 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
   const base = "/v1/identity";
 
   app.get(base, async (context) => {
-    const identity = await requestIdentity(context, deps);
+    const authUserId = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw)
+      ? (await requireManagedHumanRouteIdentity(context, deps, "account:read")).user.id
+      : (await requestIdentity(context, deps)).authUserId;
     try {
       return context.json(
         CanonicalHumanIdentityProjection.parse(
-          await getCanonicalHumanIdentityProjection(deps.db, identity.authUserId),
+          await getCanonicalHumanIdentityProjection(deps.db, authUserId),
         ),
       );
     } catch (error) {

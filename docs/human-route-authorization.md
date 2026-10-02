@@ -32,6 +32,8 @@ confirm and revoke. Its native confirmation is independent consent, not an
 opportunity for the external product to consent on the person's behalf.
 Provider flow initiation/polling can delegate to the exact verified user; actual
 provider consent or credential entry completes at the returned browser URL.
+Native GitHub handoffs mint a fresh cookie-bound browser nonce: the delegated
+caller's known initiation state is not itself proof of independent consent.
 Provider code redemption, browser login/session changes, canonical
 identity recovery, reset-credit payment confirmation and new native identity
 binding consent remain independent browser ceremonies. Merely returning a
