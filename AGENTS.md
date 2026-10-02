@@ -270,7 +270,9 @@ disabled tools or grant execution outside the current catalog.
 Claude Messages requests group retained system inputs after the user inputs in
 the same assistant-delimited phase: the system beta forbids `user → system → user`.
 This is a request-local projection; keep canonical roles/content and compaction
-truth unchanged. Bounded provider error type/message belongs on `turn.failed`
+truth unchanged. Machine-only system continuations use a clearly identified
+request-local input anchor, never a durable human message or new authority.
+Bounded provider error type/message belongs on `turn.failed`
 detail, not in generic transport exception text or serialized request logs.
 
 Message-boundary forks may copy an active source's validated retained prefix

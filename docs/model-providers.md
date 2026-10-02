@@ -1488,7 +1488,15 @@ an unrelated request. No live subscription probe is part of these tests.
 Mid-conversation system blocks must follow a user and precede an assistant (or
 end the request). The adapter groups retained system inputs at that boundary
 within each assistant-delimited phase, including after portable compaction;
-canonical roles and exact content remain unchanged. HTTP and SSE failures retain
+canonical roles and exact content remain unchanged.
+
+Machine-only system phases after an assistant receive a request-local user-role
+transport anchor identifying machine origin and the absence of human input.
+It adds no durable history, human intent or authority; system content remains
+system-role and stays after the same assistant. Tool pairing still validates
+before projection.
+
+HTTP and SSE failures retain
 only the provider error envelope's type/message in a UTF-8-bounded 4 KiB
 `turn.failed.detail`, plus the bounded provider request ID. Malformed/non-JSON
 bodies expose status only. Outgoing requests, arbitrary body fields and headers
