@@ -128,6 +128,11 @@ explicit waits; notices never block inbox input. Batching preserves causal autho
 messages/Steer inherit the sender’s human, independent of connections.
 See [`run-lifecycle.md`](run-lifecycle.md).
 
+Fresh agent-created sessions inherit omitted model/reasoning from the exact
+calling turn, but omitted latency defaults to `standard`. Explicit faster modes
+retain canonical model validation. Creation replay and later messages preserve
+the recipient's accepted settings; there is no follow-up latency reset.
+
 `runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
 effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
 fences; pre-dispatch proof alone permits recovery.
