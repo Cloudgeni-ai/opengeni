@@ -672,6 +672,9 @@ describe("release schema contract", () => {
     const organizationIntegrationPrimitives = completeSourceContract.migrations.some(
       (migration) => migration.path === "0546_organization_integration_primitives.sql",
     );
+    const idleCommandContainment = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0547_idle_command_containment.sql",
+    );
     const lostSandboxGroupContinuity = completeSourceContract.migrations.some(
       (migration) => migration.path === "0548_lost_sandbox_group_continuity.sql",
     );
@@ -1099,6 +1102,7 @@ describe("release schema contract", () => {
         (organizationOauthPendingStates ? 1 : 0) +
         (claudeSubscriptionUsage ? 1 : 0) +
         (lostSandboxGroupContinuity ? 1 : 0) +
+        (idleCommandContainment ? 1 : 0) +
         (organizationIntegrationPrimitives ? 1 : 0) +
         (workspaceClaudeModels ? 1 : 0) +
         (claudeModelConnections ? 1 : 0) +
@@ -1507,6 +1511,7 @@ describe("release schema contract", () => {
       ...(organizationIntegrationPrimitives
         ? { latestMigration: "0546_organization_integration_primitives.sql" }
         : {}),
+      ...(idleCommandContainment ? { latestMigration: "0547_idle_command_containment.sql" } : {}),
       ...(lostSandboxGroupContinuity
         ? { latestMigration: "0548_lost_sandbox_group_continuity.sql" }
         : {}),
@@ -1643,6 +1648,7 @@ describe("release schema contract", () => {
             "0544_claude_model_connections.sql",
             "0545_workspace_claude_models.sql",
             "0546_organization_integration_primitives.sql",
+            "0547_idle_command_containment.sql",
             "0549_claude_subscription_usage.sql",
             "0550_organization_oauth_pending_states.sql",
             "0548_lost_sandbox_group_continuity.sql",
@@ -3323,6 +3329,7 @@ describe("release schema contract", () => {
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
       "0546_organization_integration_primitives.sql",
+      "0547_idle_command_containment.sql",
       "0549_claude_subscription_usage.sql",
       "0550_organization_oauth_pending_states.sql",
       "0548_lost_sandbox_group_continuity.sql",
@@ -3898,6 +3905,7 @@ describe("release schema contract", () => {
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
       "0546_organization_integration_primitives.sql",
+      "0547_idle_command_containment.sql",
       "0549_claude_subscription_usage.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0550_organization_oauth_pending_states.sql",

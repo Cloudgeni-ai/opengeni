@@ -1285,6 +1285,32 @@ export function recordSandboxDeadlineRotationsRequested(
   });
 }
 
+/** Fixed outcomes of legacy retained-command containment: per-candidate
+ * enrollment inspection, then the enrolled drain's exact cold commit. */
+export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
+  "idle_enrolled",
+  "deadline_enrolled",
+  "resumed_enrolled",
+  "not_eligible",
+  "inspection_failed",
+  "contained",
+  "provider_missing",
+] as const;
+
+export type SandboxCommandContainmentOutcome =
+  (typeof SANDBOX_COMMAND_CONTAINMENT_OUTCOMES)[number];
+
+export function recordSandboxCommandContainment(
+  observability: Observability,
+  outcome: SandboxCommandContainmentOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_command_containment_total",
+    help: "Legacy retained-command containment inspections and enrolled drain commits by fixed outcome.",
+    labels: { outcome },
+  });
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */
