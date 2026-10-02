@@ -1,5 +1,5 @@
 import { withDirectModelProviders } from "@opengeni/config";
-import { listConnectionsMetadata, loadDirectModelProviderConnection } from "@opengeni/db";
+import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   applySessionTurnSettlement,
@@ -296,12 +296,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     input.workspaceId,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : (turn.model ?? ""),
   );
-  capabilitySettings = withDirectModelProviders(
-    capabilitySettings,
-    selectedDirectConnection
-      ? [selectedDirectConnection]
-      : await listConnectionsMetadata(db, input.workspaceId, null),
-  );
+  // Execution only needs the selected customer connection. Ordinary turns
+  // must not load or install unrelated workspace provider configurations.
+  if (selectedDirectConnection) {
+    capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
+  }
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
