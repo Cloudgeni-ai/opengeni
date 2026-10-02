@@ -321,10 +321,15 @@ describe("Workspace Insights usage bundle", () => {
           readWorkspaceInsightsUsageBundle(client!.db, input),
         ]),
       );
-      expect(comparable(bundled)).toEqual(comparable(legacy));
-      const owner = subjectId === seeded.ownerSubjectId;
-      expect(bundled.billableTokensUsed).toBe(owner ? 700 : 600);
-      expect(bundled.agentRunsUsed).toBe(owner ? 7 : 6);
+      const complete = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        legacyUsageBundle(client!.db, input),
+      );
+      expect(comparable({ ...bundled, warmGroups: [] })).toEqual(
+        comparable({ ...complete, warmGroups: [] }),
+      );
+      expect(bundled.warmGroups).toEqual(legacy.warmGroups);
+      expect(bundled.billableTokensUsed).toBe(700);
+      expect(bundled.agentRunsUsed).toBe(7);
       expect(bundled.warmGroups.every((group) => group.groupId !== "not-a-uuid")).toBe(true);
       expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(true);
     }
@@ -376,7 +381,7 @@ describe("Workspace Insights usage bundle", () => {
       (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
-    const projection = "visible_workspace_insights_usage_projection";
+    const projection = "complete_workspace_insights_usage_projection";
     const bundleQueries = bundledStatements.filter((statement) => statement.includes(projection));
     const bundledInvocations = bundleQueries.reduce(
       (total, statement) => total + (statement.match(new RegExp(projection, "g"))?.length ?? 0),

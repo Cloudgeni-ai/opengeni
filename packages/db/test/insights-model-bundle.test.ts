@@ -236,6 +236,8 @@ type LegacyComparableBundle = Omit<
   | "facetsTruncated"
   | "recentCallsTruncated"
   | "projects"
+  | "privateChats"
+  | "privateChatsTruncated"
 >;
 
 async function legacyModelBundle(
@@ -304,6 +306,8 @@ function comparable(input: LegacyComparableBundle | WorkspaceInsightsModelBundle
     facetsTruncated: _facetsTruncated,
     recentCallsTruncated: _recentCallsTruncated,
     projects: _projects,
+    privateChats: _privateChats,
+    privateChatsTruncated: _privateChatsTruncated,
     ...bundle
   } = input as WorkspaceInsightsModelBundle;
   return {
@@ -381,7 +385,7 @@ describe("Workspace Insights model bundle", () => {
     const source = await Bun.file(
       new URL("../src/insights-model-bundle.ts", import.meta.url),
     ).text();
-    expect(source).toContain("visible_workspace_insights_model_fact_rows");
+    expect(source).toContain("workspace_insights_amount_fact_rows");
     expect(source).not.toContain("visible_workspace_insights_model_call_facts");
     expect(source.match(/group by grouping sets/g)).toHaveLength(2);
     // Sessions are joined only for grouped roots and the bounded recent-call
@@ -474,7 +478,7 @@ describe("Workspace Insights model bundle", () => {
       {
         subjectId: `user:${crypto.randomUUID()}`,
         input: seeded.input,
-        expectedDataThrough: "2026-08-12T10:30:01.000Z",
+        expectedDataThrough: "2026-08-14T12:00:01.000Z",
       },
     ];
     for (const testCase of cases) {
@@ -486,7 +490,18 @@ describe("Workspace Insights model bundle", () => {
             readWorkspaceInsightsModelBundle(client!.db, testCase.input),
           ]),
       );
-      expect(comparable(bundled)).toEqual(comparable(legacy));
+      const complete = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        legacyModelBundle(client!.db, testCase.input),
+      );
+      expect(comparable(bundled)).toEqual(
+        comparable({
+          ...legacy,
+          modelRows: complete.modelRows,
+          priorModelRows: complete.priorModelRows,
+          factBuckets: complete.factBuckets,
+          facets: complete.facets,
+        }),
+      );
       expect(bundled.driverGroups).toBe(legacy.rootDrivers.length);
       expect(bundled.driversTruncated).toBe(false);
       expect(bundled.facetsTruncated).toBe(false);
@@ -602,6 +617,7 @@ describe("Workspace Insights model bundle", () => {
     const outsider = await read(`user:${crypto.randomUUID()}`);
     expect(outsider.projects.map((row) => [row.kind, row.name, row.calls])).toEqual([
       ["project", "Billing", 2],
+      ["unavailable", null, 2],
     ]);
 
     // One more filed root than the named limit leaves two projects in `other`.
@@ -934,7 +950,7 @@ describe("Workspace Insights model bundle", () => {
     }
 
     const legacySource = "visible_workspace_insights_model_call_facts";
-    const source = "visible_workspace_insights_model_fact_rows";
+    const source = "workspace_insights_amount_fact_rows";
     const legacyInvocations = legacyStatements.reduce(
       (total, statement) =>
         total + (statement.query.match(new RegExp(legacySource, "g"))?.length ?? 0),
@@ -1010,7 +1026,7 @@ describe("Workspace Insights model bundle", () => {
       await capturedDb.close();
     }
     const statement = statements.find((candidate) =>
-      candidate.query.includes("visible_workspace_insights_model_fact_rows"),
+      candidate.query.includes("workspace_insights_amount_fact_rows"),
     );
     expect(statement).toBeDefined();
     if (!statement) return;

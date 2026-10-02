@@ -2440,6 +2440,8 @@ describe("OpenGeniClient billing", () => {
       nextWorkspaceCursor: null,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(

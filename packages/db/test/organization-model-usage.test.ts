@@ -171,19 +171,17 @@ test("organization model usage splits billing paths and aggregates Personal work
   ]);
   expect(owner.modelsTruncated).toBe(false);
 
-  // An outsider loses exactly the owner-only private session, and whatever the
-  // Personal workspace's own session visibility withholds.
-  const [personalVisibility] = await shared.admin<Array<{ visibility: string }>>`
-    select visibility from sessions where id = ${personalSession.id}`;
+  // Billing authority sees complete amounts, never private chat metadata.
   const outsider = await read(`user:${crypto.randomUUID()}`);
-  const personalVisible = personalVisibility?.visibility === "workspace_shared";
-  expect(credits(outsider.billing)).toMatchObject({
-    calls: personalVisible ? "2" : "1",
-    creditMicros: personalVisible ? "300" : "100",
-  });
+  expect(outsider.billing).toEqual(owner.billing);
   expect(credits(outsider.workspaces[0]!.billing)).toMatchObject({
-    calls: "1",
-    creditMicros: "100",
+    calls: "2",
+    creditMicros: "400",
+  });
+  expect(outsider.payers.find((row) => row.payer === "opengeni_credits")).toMatchObject({
+    calls: "3",
+    creditMicros: "600",
+    estimatedProviderKnownCalls: "2",
   });
 
   const [leftover] = await shared.admin<Array<{ count: string }>>`
