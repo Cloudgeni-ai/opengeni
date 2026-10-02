@@ -782,6 +782,193 @@ describe("API Integration routes", () => {
     expect(removed.status).toBe(200);
   }, 60_000);
 
+  test("inline URL rotation keeps immutable versions and shared instance settings while fencing stale installs", async () => {
+    if (!client || !shared) throw new Error("URL rotation regression requires PostgreSQL");
+    const fetchesBefore = sourceFetches;
+    const source = {
+      kind: "openapi_document",
+      sourceKey: `url-rotation-${crypto.randomUUID()}`,
+      document: JSON.stringify(openApiDocument()),
+      baseUrl: "https://127.0.0.1/v1/",
+    };
+    let capabilityId: string | null = null;
+    try {
+      const previewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source }),
+      });
+      expect(previewResponse.status).toBe(200);
+      const preview = await previewResponse.json();
+      capabilityId = preview.capabilityId;
+      const installPayload = {
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      };
+      const installResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify(installPayload),
+      });
+      expect(installResponse.status).toBe(201);
+      const installed = await installResponse.json();
+      const same = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...installPayload,
+          source: { ...source, baseUrl: "https://127.0.0.1:443/a/../v1/" },
+        }),
+      });
+      expect(same.status).toBe(201);
+      expect(await same.json()).toEqual(installed);
+      const peerResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, instanceKey: "peer" }),
+      });
+      expect(peerResponse.status).toBe(201);
+      const peer = await peerResponse.json();
+      const oldVersions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(oldVersions).toHaveLength(1);
+
+      const rotatedSource = { ...source, baseUrl: "https://127.0.0.1/rotated/" };
+      const rotatedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: rotatedSource }),
+      });
+      expect(rotatedPreviewResponse.status).toBe(200);
+      const rotatedPreview = await rotatedPreviewResponse.json();
+      expect(rotatedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(rotatedPreview.revisionId).not.toBe(preview.revisionId);
+      expect(rotatedPreview.contentSha256).not.toBe(preview.contentSha256);
+      expect(rotatedPreview.tools).toEqual(preview.tools);
+      const stalePreview = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, source: rotatedSource }),
+      });
+      expect(stalePreview.status).toBe(409);
+      const rotatedPayload = {
+        source: rotatedSource,
+        expectedRevisionId: rotatedPreview.revisionId,
+        expectedContentSha256: rotatedPreview.contentSha256,
+      };
+      const staleVersion = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...rotatedPayload, expectedInstanceVersion: 9999 }),
+      });
+      expect(staleVersion.status).toBe(409);
+      const rotatedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...rotatedPayload,
+          expectedInstanceVersion: installed.instanceVersion,
+        }),
+      });
+      expect(rotatedResponse.status).toBe(200);
+      const rotated = await rotatedResponse.json();
+      expect(rotated.instanceId).toBe(installed.instanceId);
+      expect(rotated.instanceVersion).toBeGreaterThan(installed.instanceVersion);
+      const versions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(versions).toHaveLength(2);
+      expect(versions.find((version) => version.id === oldVersions[0]!.id)).toEqual(oldVersions[0]);
+      const listing = await (await request("/integrations")).json();
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: peer.instanceId,
+          instanceVersion: peer.instanceVersion + 1,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+          allowedTools: preview.tools.map((tool: { id: string }) => tool.id).sort(),
+          ownership: "none",
+        }),
+      );
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: rotated.instanceId,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+        }),
+      );
+      // A new instance must also be able to introduce a new executable URL
+      // under the same source key, without colliding with either stored revision.
+      const namedSource = { ...source, baseUrl: "https://127.0.0.1/new-instance-rotation/" };
+      const namedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: namedSource }),
+      });
+      expect(namedPreviewResponse.status).toBe(200);
+      const namedPreview = await namedPreviewResponse.json();
+      expect(namedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(namedPreview.revisionId).not.toBe(rotatedPreview.revisionId);
+      const namedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          source: namedSource,
+          instanceKey: "new-route",
+          expectedRevisionId: namedPreview.revisionId,
+          expectedContentSha256: namedPreview.contentSha256,
+        }),
+      });
+      expect(namedResponse.status).toBe(201);
+      expect(await namedResponse.json()).toMatchObject({
+        capabilityId: preview.capabilityId,
+        instanceKey: "new-route",
+        revisionId: namedPreview.revisionId,
+      });
+      const retained = await shared.admin`
+        select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+        from capability_plugin_versions v
+        join capability_plugins p on p.id = v.plugin_id
+        join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+        join integration_spec_revisions s on s.api_facet_id = f.id
+        where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+        order by v.id`;
+      expect(retained).toHaveLength(3);
+      for (const version of versions) {
+        expect(retained.find((candidate) => candidate.id === version.id)).toEqual(version);
+      }
+      expect(sourceFetches).toBe(fetchesBefore);
+    } finally {
+      if (capabilityId) {
+        const listing = (await (await request("/integrations")).json()) as {
+          integrations: { capabilityId: string; instanceKey: string }[];
+        };
+        for (const instance of listing.integrations.filter(
+          (integration) => integration.capabilityId === capabilityId,
+        )) {
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instance.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instanceKey: instance.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }
+  }, 60_000);
+
   test("installers can auto-approve selected write tools for unattended runs", async () => {
     if (!available || !client) return;
     const source = { kind: "openapi", url: "https://127.0.0.1/approval-openapi.json" };
