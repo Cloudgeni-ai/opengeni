@@ -1,7 +1,9 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   useId,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -67,6 +69,32 @@ function formatChartNumber(value: number, digits?: number): string {
   return value.toFixed(1);
 }
 
+/** Drawing width before the first measurement (and in tests without layout). */
+const DEFAULT_CHART_WIDTH = 720;
+
+/**
+ * The element's content width in px, so the chart draws one unit per pixel:
+ * axis text keeps its size and the plot keeps its height at any width.
+ */
+function useChartWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(DEFAULT_CHART_WIDTH);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const next = Math.round(element.clientWidth);
+      if (next > 0) setWidth(next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, width] as const;
+}
+
 export function AreaChart(props: {
   labels: readonly string[];
   series: Series[];
@@ -87,9 +115,9 @@ export function AreaChart(props: {
   const plotClipId = useId();
   const [pointerActive, setPointerActive] = useState<number | null>(null);
   const [keyboardActive, setKeyboardActive] = useState<number | null>(null);
+  const [frameRef, width] = useChartWidth();
   const active = pointerActive ?? keyboardActive;
   const height = props.height ?? 220;
-  const width = 720;
   const padL = 52;
   const padR = 12;
   const padTop = 16;
@@ -202,6 +230,7 @@ export function AreaChart(props: {
 
   return (
     <div
+      ref={frameRef}
       className={cn("relative w-full", props.className)}
       onPointerLeave={() => setPointerActive(null)}
     >
