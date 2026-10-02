@@ -136,6 +136,8 @@ const knowledgeTools = byCapability.get("knowledge") ?? [];
 
 `effectiveTools.tools` is a flat list of known tools, not a capability-keyed object; group it locally as above. An absent projection on an older session means unknown, not that every capability is off. Tool `visibility` (`"upfront"` or `"search"`) describes model discovery, not human access. `mcpServers[].toolsKnown: false` means that server's schemas are not known in this projection; do not invent names or infer that it is disabled.
 
+Enabling `media` adds image and video discovery guidance. An attached adapter may still have a deferred schema: the agent discovers it with `tool_search`. An empty literal-prefix result from `tool_list` does not establish that a capability is unavailable; suggested names come only from the current authorized catalog.
+
 Human visibility is `session.tenancy?.visibility`, not top-level `session.visibility`. Top-level `visibility` is a create-request field. A missing tenancy projection means unknown, not `"workspace"`. The OpenGeni web app shows the agent's settings in the session's Agent panel, and the exact instructions sent in Debug > Context.
 
 <Tip>

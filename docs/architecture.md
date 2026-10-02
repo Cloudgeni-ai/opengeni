@@ -921,21 +921,17 @@ selections, and keeps plugin/built-in defaults independent.
 `packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
 ceilings apply; defaults never rewrite sessions or accepted attempts.
 
-A fresh session selecting a workspace Gateway or OpenRouter custom model, an
-existing session explicitly switching from another model, a new/materially
-reaccepted scheduled task, automation trigger, or PR-review binding, or a fresh
-generated-session scheduled occurrence rechecks that exact provider-qualified
-active slug under the model catalog's shared transaction lock before the
-session, turn, task, trigger, binding, or accepted occurrence can commit.
-Adapter-rendered automation templates are the acceptance authority, so adapter
-parameters cannot hide a model override from this gate. Deployment-curated
-workspace provider models use their provider's public prefix but no mutable
-custom row, so they do not enter this fence. Custom-model retirement holds the
-exclusive counterpart; already accepted work, exact occurrence replay,
-same-model/existing-session continuations, and administrative-only task,
-trigger, or binding edits use retained definitions instead of reopening
-fresh-selection authority. Committed keyed session shells replay before
-active-only catalog checks, preserving repairable initialization.
+Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+slug under the catalog's shared transaction lock before committing a session,
+turn, task, trigger, binding, or occurrence. This covers fresh sessions,
+explicit switches, new/materially reaccepted schedules, automation triggers,
+PR-review bindings, and fresh generated-session occurrences. Automation adapter
+templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+workspace models retain public provider prefixes but have no mutable custom row
+and bypass this fence. Retirement holds the exclusive counterpart. Accepted
+work, exact replays, same-model/existing-session continuations, and
+administrative-only task/trigger/binding edits retain definitions. Committed
+keyed session shells replay before active-only checks.
 
 Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
@@ -984,6 +980,11 @@ Canonical: [`model-providers.md`](model-providers.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
 [`connected-machines.md`](connected-machines.md). Variable Set lifecycle and
 ordering are canonical in [`variable-sets.md`](variable-sets.md).
+
+Configured agents always receive discovery mechanics; `media` gates image/video
+guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
+and may suggest bounded authorized descriptors. Suggestions neither load schemas
+nor grant execution; exact `tool_search` resolves them.
 
 ### 5.6 Files, knowledge, and artifacts
 
