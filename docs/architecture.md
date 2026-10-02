@@ -667,33 +667,27 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 1. `apps/api` middleware establishes deployment perimeter, observability context,
    authentication, workspace, and permissioned grant.
-2. HTTP routes adapt the request into `@opengeni/core` domain operations.
-3. The domain operation validates the request and commits authoritative rows,
-   events, queue/control state, audit facts, and workflow-wake intent in
-   Postgres.
-4. The API returns the committed projection. NATS fanout and immediate Temporal
-   wake delivery happen as replayable follow-up work. Temporal transport
-   acceptance does not acknowledge the current durable wake while an accepted
-   human/API turn is still queued or an Agent Steer is still pending; only the
-   attempt-fenced Postgres claim proves admission.
-5. The session workflow observes the durable obligation and dispatches a turn
-   activity.
-6. The worker claims the logical turn, registers an exact attempt, freezes its
-   execution and authority snapshots, then invokes `@opengeni/runtime`.
-7. Runtime builds the model/tool environment and lazily establishes the
-   selected provisioned sandbox or Connected Machine when an operation needs
-   compute.
-8. Worker events are appended durably before best-effort live publication.
-   The API's SSE stream replays and gap-fills from Postgres.
+2. HTTP routes adapt requests into `@opengeni/core` domain operations.
+3. Domain operations validate and commit authoritative rows, events, queue/control state,
+   audit facts, and workflow-wake intent in Postgres.
+4. The API returns committed projections; NATS fanout and immediate Temporal
+   wakes are replayable follow-ups. Temporal acceptance acknowledges no durable
+   wake while accepted human/API turns remain queued or Agent Steer remains
+   pending; only attempt-fenced Postgres claims prove admission.
+5. Session workflows observe durable obligations and dispatch turn activities.
+6. Workers claim logical turns, register exact attempts, freeze execution and authority
+   snapshots, then invoke `@opengeni/runtime`.
+7. Runtime builds model/tools and lazily establishes selected provisioned
+   sandboxes or Connected Machines when operations need compute.
+8. Worker events commit before best-effort live publication; API SSE replays
+   and gap-fills from Postgres.
 
 ### 4.2 Control path versus data path
 
-API, Postgres, Temporal, and worker own durable control; NATS session fanout
-projects that state. Connected Machine
-commands also cross NATS, but authorization and durable ownership are decided
-before transport. Direct browser data planes are established only from a
-short-lived API-authorized grant and never become an independent source of
-session, tenant, or provider authority.
+API, Postgres, Temporal, and workers own durable control; NATS session fanout projects it.
+Connected Machine commands cross NATS after authorization and durable ownership
+decisions. Direct browser data planes use only short-lived API-authorized grants;
+they never establish independent session, tenant, or provider authority.
 
 Large or high-frequency bytes take separate paths:
 
@@ -708,8 +702,8 @@ Large or high-frequency bytes take separate paths:
 - editable artifacts use their typed artifact authority and kernels rather
   than treating Office files or rendered output as mutable truth.
 
-Canonical realtime behavior is in [`run-lifecycle.md`](run-lifecycle.md) and
-the public transport surface is in [`../packages/sdk/README.md`](../packages/sdk/README.md).
+Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
+[`../packages/sdk/README.md`](../packages/sdk/README.md).
 
 ### 4.3 Dependency direction
 
@@ -1067,17 +1061,16 @@ Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.t
 
 ## 6. Repository layout
 
-The TypeScript system is a Bun workspace over `apps/*`, `examples/*`, and
-`packages/*`. Internal packages are consumed from source. The Connected Machine
-agent and relay are a separate Rust Cargo workspace under `agent/`.
+Bun workspaces span `apps/*`, `examples/*`, and `packages/*`, consuming internal
+packages from source. Connected Machine agent/relay use the Rust Cargo workspace
+`agent/`.
 
-`examples/vue-conversation/app` sits below the root workspace glob: its
-standalone npm lock installs the published SDK rather than linking repository
-source, so the non-React recipe is also a real consumer build.
+`examples/vue-conversation/app` uses its standalone npm lock outside root
+workspaces to build the non-React recipe against the published SDK, never
+repository source.
 
-Package manifests and `.changeset/config.json` own exact publication status and
-entrypoints. The lists below describe responsibility, not current publish
-metadata.
+Package manifests and `.changeset/config.json` own exact publication
+status/entrypoints; these lists describe responsibility.
 
 ### 6.1 Applications
 
