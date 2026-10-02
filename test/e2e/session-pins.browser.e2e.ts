@@ -537,8 +537,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       cleanupPin = () =>
         setSessionPinThroughApi(sender, apiBaseUrl, workspaceId, pinnedTarget, false);
       await sender.evaluate(
-        async ({ workspaceId, sessionId }) => {
-          const channel = new BroadcastChannel(`opengeni.session-pins:${workspaceId}`);
+        async ({ workspaceId: broadcastWorkspaceId, sessionId }) => {
+          const channel = new BroadcastChannel(`opengeni.session-pins:${broadcastWorkspaceId}`);
           try {
             for (let index = 0; index < 8; index++) {
               channel.postMessage({
