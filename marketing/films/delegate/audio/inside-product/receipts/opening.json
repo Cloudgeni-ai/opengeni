@@ -1,0 +1,18 @@
+{
+  "id": "opening",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:43:07.730Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/opening.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "S87pcSXScuoFeV59l4fz",
+    "character-cost": "8",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "d51adb0c55e3e29b8705cf355039201c"
+  },
+  "bytes": 52288,
+  "durationSeconds": 3.239184
+}

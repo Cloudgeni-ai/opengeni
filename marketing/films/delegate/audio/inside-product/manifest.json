@@ -1,0 +1,78 @@
+{
+  "title": "Right here — OpenGeni launch film",
+  "budgetUsd": 50,
+  "billingNote": "Account billing is not readable by the scoped demo key (user_read missing). Reserve amounts below are deliberately conservative controls, NOT provider invoices. Public API pricing was inspected on 2026-10-02. Never automatically retry a submitted request.",
+  "jobs": [
+    {
+      "id": "opening",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "CwhRBWXzGAHq8TQ4Fs17", "text": "[warmly] This is what happens when your product gets an agent."}]
+      }
+    },
+    {
+      "id": "booking",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "EXAVITQu4vr4xnSDxMaL", "text": "[conversational] Move tomorrow's clients to next week. And let them know."}]
+      }
+    },
+    {
+      "id": "store",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "iP95p4xoKVk53GoZ742B", "text": "[casually] Send Maya a return label for that jacket."}]
+      }
+    },
+    {
+      "id": "projects",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "Xb7hH8MSUJpSbSDYk0k2", "text": "[conversational] Turn this brief into a launch plan."}]
+      }
+    },
+    {
+      "id": "connection",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "CwhRBWXzGAHq8TQ4Fs17", "text": "[warmly] Different products. Different brands. [short pause] An agent, right inside yours. Connected to your tools. With your users in control."}]
+      }
+    },
+    {
+      "id": "ending",
+      "kind": "speech",
+      "reserveUsd": 2,
+      "body": {
+        "model_id": "eleven_v4",
+        "language_code": "en",
+        "inputs": [{"voice_id": "CwhRBWXzGAHq8TQ4Fs17", "text": "[warmly] Give your users an agent."}]
+      }
+    },
+    {
+      "id": "score",
+      "kind": "music",
+      "reserveUsd": 10,
+      "body": {
+        "model_id": "music_v2_5",
+        "music_length_ms": 48000,
+        "force_instrumental": true,
+        "prompt": "An original instrumental score for a 48-second beautifully designed product film. Understated, tactile, curious, warm, quietly playful. 100 BPM. Start with one dry wooden tick and a soft felt-piano two-note motif, leaving air for a narrator. At 6 seconds bring in an intimate rubbery bass pulse, brushed shakers, finger taps, tiny mechanical clicks and sparse plucked synth. At 13 and 20 seconds introduce small new layers as we enter different products. At 27 seconds open into a warm spacious chord progression with restrained strings and a human-feeling groove, not a corporate anthem. At 39 seconds lift gently for the brand payoff, then resolve into a clear warm two-note sonic signature around 45 seconds, decaying naturally to silence by 48 seconds. Precise editing points, no vocals, no vocal chops, no speech, no epic trailer drums, no big EDM drop, no stock inspirational guitar. Keep the middle frequencies sparse so spoken dialogue stays clear. Studio-quality detailed stereo production."
+      }
+    }
+  ]
+}

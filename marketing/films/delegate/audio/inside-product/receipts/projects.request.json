@@ -1,0 +1,10 @@
+{
+  "model_id": "eleven_v4",
+  "language_code": "en",
+  "inputs": [
+    {
+      "voice_id": "Xb7hH8MSUJpSbSDYk0k2",
+      "text": "[conversational] Turn this brief into a launch plan."
+    }
+  ]
+}

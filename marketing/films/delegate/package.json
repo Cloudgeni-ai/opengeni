@@ -8,6 +8,8 @@
     "studio": "remotion studio src/index.ts",
     "audio": "python3 audio/compose.py",
     "render": "remotion render src/index.ts TheLastClick out/the-last-click.mp4",
+    "render:inside": "node scripts/mix-demo-audio.mjs && remotion render src/index.ts InsideYourProduct out/inside-your-product.mp4",
+    "qa:inside": "node scripts/qa-inside-product.mjs out/inside-your-product.mp4",
     "build": "bash scripts/build.sh",
     "qa": "bash scripts/qa.sh out/the-last-click.mp4",
     "typecheck": "tsc --noEmit"

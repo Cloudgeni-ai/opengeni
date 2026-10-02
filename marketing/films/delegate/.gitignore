@@ -7,3 +7,5 @@ audio/stems/
 audio/__pycache__/
 audio/cues.json
 public/audio/*.wav
+public/audio/inside-product/mix.wav
+audio/inside-product/receipts/*.response-headers.txt

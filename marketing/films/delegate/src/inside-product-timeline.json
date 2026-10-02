@@ -1,0 +1,17 @@
+{
+  "duration": 48,
+  "fps": 30,
+  "booking": 5.8,
+  "store": 14,
+  "projects": 21,
+  "connection": 28,
+  "ending": 39,
+  "voices": [
+    {"id":"opening","start":0.65,"text":"This is what happens when your product gets an agent."},
+    {"id":"booking","start":6.35,"text":"Move tomorrow’s clients to next week. And let them know."},
+    {"id":"store","start":14.55,"text":"Send Maya a return label for that jacket."},
+    {"id":"projects","start":21.55,"text":"Turn this brief into a launch plan."},
+    {"id":"connection","start":28.55,"text":"Different products. Different brands. An agent, right inside yours. Connected to your tools. With your users in control."},
+    {"id":"ending","start":40.4,"text":"Give your users an agent."}
+  ]
+}

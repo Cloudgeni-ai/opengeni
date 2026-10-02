@@ -1,0 +1,18 @@
+{
+  "id": "booking",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:43:58.526Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/booking.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "l8XTgqLV0HoEwIZCIneT",
+    "character-cost": "9",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "0a685cb4e668b0129479a70b1d84a824"
+  },
+  "bytes": 63991,
+  "durationSeconds": 3.970612
+}
