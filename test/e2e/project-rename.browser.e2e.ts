@@ -78,9 +78,9 @@ test("folders disclose four at a time independently of their cached pages", asyn
   await defaultFolder.getByText("Default conversation 65").waitFor();
   expect(await page.evaluate(() => (window as any).renameQa.pageCalls)).toEqual(
     expect.arrayContaining([
-      { channelId: "project-qa", cursor: undefined, limit: 50 },
-      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "50", limit: 50 },
-      { channelId: null, cursor: "50", limit: 50 },
+      { channelId: "project-qa", cursor: undefined, limit: 4 },
+      { channelId: "00000000-0000-4000-8000-000000000002", cursor: "52", limit: 4 },
+      { channelId: null, cursor: "64", limit: 4 },
     ]),
   );
   await bugfixes.getByRole("button", { name: "Bugfixes", exact: true }).click();

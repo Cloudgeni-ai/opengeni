@@ -1,3 +1,4 @@
+export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
@@ -11629,6 +11630,8 @@ export const CreateConnectionRequest = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
   operationId: z.string().uuid().optional(),
+  /** For direct OpenAI/Azure keys: run a short provider check before saving. */
+  verifyModelAccess: z.boolean().optional(),
   /** Retired: connection execution is authorized by the initiating user. */
   initialUseContexts: z.never().optional(),
 });
@@ -12899,6 +12902,40 @@ export const SessionCommandFailure = z
   );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export const SessionBackgroundCommandReconciliation = z
+  .object({
+    lastOutcome: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,63}$/)
+      .nullable(),
+    attempts: z.number().int().nonnegative(),
+    dueAt: z.string().datetime({ offset: true }),
+    claimedAt: z.string().datetime({ offset: true }).nullable(),
+    terminalProof: z
+      .discriminatedUnion("outcome", [
+        z
+          .object({
+            outcome: z.literal("exited"),
+            exitCode: z.number().int(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+        z
+          .object({
+            outcome: z.literal("lost"),
+            exitCode: z.null(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      ])
+      .nullable(),
+  })
+  .strict();
+export type SessionBackgroundCommandReconciliation = z.infer<
+  typeof SessionBackgroundCommandReconciliation
+>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -12907,6 +12944,7 @@ export const SessionBackgroundCommand = z
     provider: SessionBackgroundCommandProvider,
     state: SessionBackgroundCommandState,
     observationStatus: z.literal("unavailable").optional(),
+    reconciliation: SessionBackgroundCommandReconciliation.optional(),
     commandPreview: z.string().max(512),
     commandText: z.string().optional(),
     cancelRequestedAt: z.string().nullable(),
@@ -13286,6 +13324,55 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   }),
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
+
+/** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
+export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
+  Session.pick({
+    id: true,
+    workspaceId: true,
+    accountId: true,
+    status: true,
+    backgroundCommandActivity: true,
+    hasSchedules: true,
+    title: true,
+    titleSource: true,
+    createdBy: true,
+    channelId: true,
+    parentSessionId: true,
+    rootSessionId: true,
+    effectiveControl: true,
+    inputWait: true,
+    lastSequence: true,
+    pinned: true,
+    pinnedAt: true,
+    pinVersion: true,
+    unread: true,
+    activelyWorking: true,
+    attentionVersion: true,
+    archived: true,
+    archivedAt: true,
+    importedArchive: true,
+    archiveVersion: true,
+    treeStats: true,
+    requiresActionSince: true,
+    createdAt: true,
+    updatedAt: true,
+  }).extend({
+    displayTitle: z.string(),
+    renameSeed: z.string(),
+    scheduledTaskId: z.string().nullable(),
+    siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+  }),
+);
+export type SessionListEntry = z.infer<typeof SessionListEntry>;
+export const SessionListEntryResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  SessionListResponse.omit({ pinned: true, sessions: true }).extend({
+    projection: z.literal("summary"),
+    pinned: z.array(SessionListEntry),
+    sessions: z.array(SessionListEntry),
+  }),
+);
+export type SessionListEntryResponse = z.infer<typeof SessionListEntryResponse>;
 
 /**
  * Organization session queries may filter a canonical scope subject and lifecycle
@@ -17924,6 +18011,13 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 /** Public OpenGeni documentation linked from the web console's Help menu by default. */
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
+/** An absolute http(s) URL the console may render as a plain link. */
+const ClientLegalDocumentUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
+
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     deploymentRevision: z.string(),
@@ -18060,6 +18154,17 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       })
       .default({ consentRequired: true, providers: {} }),
+    // Operator-owned legal documents the signed-out console links to. Absent or
+    // empty on self-hosted deployments unless their operator configures them.
+    legal: z
+      .object({
+        privacyPolicyUrl: ClientLegalDocumentUrl.optional(),
+        termsOfServiceUrl: ClientLegalDocumentUrl.optional(),
+      })
+      .optional(),
+    // Operator support address the console offers as a mailto link. Absent
+    // unless the operator configures one.
+    supportEmail: z.string().email().max(254).optional(),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

@@ -118,6 +118,16 @@ on every deployment that never opted in, so never read it as "the trial is live"
 
 ## Meaningful child attention (0503)
 
+`0585_session_attention_cursor.sql` persists the newest meaningful attention
+sequence in the narrow event cursor. Stop the declared application login roles
+for this maintenance migration: it backfills one indexed history probe per
+existing cursor and restores FORCE RLS in the same transaction. Cursor-backed
+readers must start after the migration commits. Older writers remain compatible
+because the existing event-insert trigger advances the raw and meaningful
+frontiers together; the change does not alter personal acknowledgements or
+rewrite event history. The current partial attention index remains available
+for exact content and lifecycle evidence reads.
+
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
@@ -2717,6 +2727,21 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+  Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
+  origins; Checkout and billing-portal return URLs may use that configured web
+  origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
+  origin. Unconfigured external origins remain rejected.
+  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  manage Stripe products, coupons, promotion codes, customer eligibility,
+  redemption limits, and expiry in their own operations workflow; campaign
+  creation and account-specific offers are not part of the source package.
+  A discount changes the checkout price while OpenGeni credits the selected
+  package's full face value after the signed completion webhook, including a
+  zero-dollar checkout. For coupons restricted to the credits product, configure
+  `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
+  dispute holds on new checkouts remove the corresponding fraction of package
+  credits. Existing customer balances are account-wide.
 - sandbox backend credentials when required
 
 Do not commit real secret values.

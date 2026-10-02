@@ -7,7 +7,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { createDb } from "../src/database";
 import { recordOrganizationSignupUseCase } from "../src/organization-signup-use-cases";
 
-const migration = new URL("../drizzle/0585_organization_signup_use_cases.sql", import.meta.url);
+const migration = new URL("../drizzle/0586_organization_signup_use_cases.sql", import.meta.url);
 
 test("signup use cases are a rolling, private relation behind one capability", async () => {
   const source = await readFile(migration, "utf8");

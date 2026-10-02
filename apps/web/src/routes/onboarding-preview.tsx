@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { directModelConnectionSpec, type CreateConnectionRequest } from "@opengeni/contracts";
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -13,6 +14,7 @@ import { SetupAccountRoute } from "@/routes/setup-account";
 import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 
 // Local-only fixtures. No provider credentials or real payments are used.
+let previewModel: Record<string, unknown> | null = null;
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
@@ -59,11 +61,39 @@ const previewMethods = {
       return previewMethods.codexConnectPoll("", body?.state ?? "");
     throw new Error(`Not in the preview: ${path}`);
   },
-  async createConnection() {
-    return {};
+  async createConnection(_workspaceId: string, request: CreateConnectionRequest) {
+    const connection = {
+      id: crypto.randomUUID(),
+      version: 1,
+      status: "active",
+      subjectId: request.subjectId ?? null,
+      kind: request.kind,
+      providerDomain: request.providerDomain,
+      metadata: request.metadata,
+    };
+    const spec = directModelConnectionSpec(connection);
+    if (spec)
+      previewModel = {
+        id: spec.modelId,
+        label: spec.model,
+        provider: spec.providerId,
+        providerLabel: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+        api: "responses",
+        cost: "workspace",
+        policyAllowed: true,
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+        credentialReadiness: {
+          status: "ready",
+          reason: null,
+          basis: "connection",
+          checkedAt: null,
+        },
+      };
+    return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: [] };
+    return { models: previewModel ? [previewModel] : [] };
   },
   async getNewSessionDraft() {
     return {

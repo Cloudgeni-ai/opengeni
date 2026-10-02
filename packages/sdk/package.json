@@ -153,6 +153,10 @@
     "./hono": {
       "types": "./src/adapters/hono.ts",
       "default": "./src/adapters/hono.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {

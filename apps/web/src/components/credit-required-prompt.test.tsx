@@ -105,6 +105,46 @@ describe("credit required prompt", () => {
     ).not.toBeNull();
   });
 
+  test("workspace top-up accepts a $10 gift package without requiring a model", async () => {
+    createBillingCheckout.mockImplementationOnce(async () => {
+      throw new Error("checkout test");
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <CreditRequiredPromptView
+          client={client as never}
+          purpose="topup"
+          open
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          onOpenChange={() => undefined}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Add Opengeni credits");
+    expect(container.textContent).toContain("gift code");
+    expect(container.textContent).not.toContain("Connect a model");
+    const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
+    await act(async () => {
+      preset.value = "10.00";
+      preset.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const checkout = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Continue to Stripe",
+    )!;
+    await act(async () => checkout.click());
+    expect(createBillingCheckout).toHaveBeenCalledWith({
+      amountUsd: 10,
+      accountId: "account-a",
+      successUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=success`,
+      cancelUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=cancelled`,
+    });
+  });
+
   test("empty-credits notice appears only when the organization balance is empty", async () => {
     const container = document.createElement("div");
     document.body.append(container);

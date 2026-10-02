@@ -955,6 +955,11 @@ utilities from the agent's `PATH`, with standard `/usr/bin` and `/bin` fallbacks
 so Linux distributions with nonstandard installation paths are supported.
 Attached browsers are unaffected.
 
+Linux managed-browser cleanup matches an exact private profile and executable
+before signaling a process. Rewritten Chromium titles additionally require the
+profile's same-host PID lock; ambiguous titles are refused. Procfs start times
+fence discovery and fresh signal checks against PID reuse.
+
 During initial window layout, an observation may have `viewport: null` while
 semantic content remains available. Subsequent observations report the measured
 geometry when valid; the controller does not substitute guessed dimensions.

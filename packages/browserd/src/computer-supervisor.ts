@@ -14,7 +14,7 @@ import {
   type ComputerInteractionAuthority,
   type ComputerInteractionDriver,
 } from "@opengeni/interaction";
-import { NativeComputerDriver } from "./computer-driver";
+import { ComputerDriver } from "./computer-driver";
 import {
   ExistingComputerEnvironmentAllocator,
   type ComputerEnvironmentAllocator,
@@ -132,7 +132,7 @@ export class ComputerSupervisor {
             cwd: context.sessionDirectory,
           });
         const client = await clientFactory();
-        return new NativeComputerDriver({
+        return new ComputerDriver({
           computerSessionId: context.computerSessionId,
           controllerGeneration: context.controllerGeneration,
           client,

@@ -605,6 +605,11 @@ explicit activation brings a tab forward. The override ends when its controller
 detaches. Native **App controls** also work in the background where supported.
 Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
 makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
+
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
 
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
@@ -650,6 +655,12 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
 
 If the chat's latest browser was lost or failed, the viewer names it and explains
 why it is unavailable instead of showing the ordinary empty state. It offers the
@@ -774,7 +785,8 @@ state remains application-owned; durable draft and session state remain in
 
 - `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
   default, then live-streams on the SDK's exactly-once/ordered event delivery.
-  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  Initial replay reads one 1000-row raw page, with at most one extra page to
+  recover a dense turn's boundary; `loadOlder` is capped at two such pages;
   timeline group density is only an early stop. It returns the raw windowed
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
@@ -789,6 +801,8 @@ state remains application-owned; durable draft and session state remain in
   window.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  The live working set is at most 16 MiB or 20,000 events. One event larger than
+  the byte target stays complete in a window of its own.
   Live appends reuse the retained window's byte total, measuring only incoming
   and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
@@ -845,7 +859,10 @@ state remains application-owned; durable draft and session state remain in
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
-  fleet/manager views (optional polling).
+  fleet/manager views (optional polling). `useWorkspaceSessions({ projection:
+  "summary" })` returns compact list entries; omit the option for full sessions.
+  Scripted clients can omit the summary method and the hook projects full pages
+  locally while retaining cancellation and causal read revisions.
 - `useVariableSets()` — workspace variable sets with metadata-only generic
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an

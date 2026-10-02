@@ -1,3 +1,6 @@
+import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
+import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
 import {
   CreditDebitAttribution,
@@ -49,7 +52,6 @@ import {
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
-  meaningfulSessionSequenceSql,
 } from "./session-meaningful-events";
 import {
   boundedChildLifecycleEvidence,
@@ -295,6 +297,7 @@ import type {
   SessionScopeSubjectId,
   SessionMemoryScope,
   SessionListResponse,
+  SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
   SessionEventPayloadMode,
@@ -590,6 +593,7 @@ import {
   settleClaimedConnectedMachineBackgroundCommandWithMutation,
   settleConnectedMachineSessionBackgroundCommandWithMutation,
   settleSessionBackgroundCommandForRetainedProcessInTransaction,
+  unobservableRetainedProcessOutcomeSql,
   type ConnectedMachineBackgroundCommandClaim,
 } from "./session-background-commands";
 import {
@@ -5604,6 +5608,34 @@ export async function hasCreditLedgerEntry(
       )
       .limit(1);
     return Boolean(row);
+  });
+}
+
+export async function getCreditLedgerEntry(
+  db: Database,
+  accountId: string,
+  idempotencyKey: string,
+): Promise<{
+  amountMicros: number;
+  sourceType: string | null;
+  metadata: Record<string, unknown>;
+} | null> {
+  return await withAccountRls(db, accountId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        amountMicros: schema.creditLedgerEntries.amountMicros,
+        sourceType: schema.creditLedgerEntries.sourceType,
+        metadata: schema.creditLedgerEntries.metadata,
+      })
+      .from(schema.creditLedgerEntries)
+      .where(
+        and(
+          eq(schema.creditLedgerEntries.accountId, accountId),
+          eq(schema.creditLedgerEntries.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
   });
 }
 
@@ -15020,8 +15052,19 @@ export async function getWorkspaceProviderApiKeyConnectionMetadata(
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): Promise<{ connectionId: string; version: number } | null> {
+  return workspaceProviderApiKeyConnectionMetadataFromConnections(
+    await listConnectionsMetadata(db, workspaceId, null),
+    providerKind,
+  );
+}
+
+/** Select readiness from an already authorized, newest-first metadata read. */
+export function workspaceProviderApiKeyConnectionMetadataFromConnections(
+  connections: readonly ConnectionMetadata[],
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): { connectionId: string; version: number } | null {
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
-  const connection = (await listConnectionsMetadata(db, workspaceId, null)).find(
+  const connection = connections.find(
     (candidate) =>
       candidate.subjectId === null &&
       candidate.providerDomain.toLowerCase() === spec.providerDomain &&
@@ -35601,6 +35644,8 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     search?: string | undefined;
     /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
     pinsOnly?: boolean | undefined;
+    /** Skip pin hydration when the caller reads the pinned section separately. */
+    includePinned?: boolean | undefined;
     /** List personally archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
     sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
@@ -35976,6 +36021,7 @@ async function canonicalSessionRowsFromEventCursors(
   db: Database,
   workspaceId: string,
   rows: readonly SessionRow[],
+  includeEffectivePolicy = true,
 ): Promise<SessionRow[]> {
   if (rows.length === 0) return [];
   const sessionIds = [...new Set(rows.map((row) => row.id))];
@@ -35985,10 +36031,7 @@ async function canonicalSessionRowsFromEventCursors(
       workspaceId: schema.sessionEventCursors.workspaceId,
       sessionId: schema.sessionEventCursors.sessionId,
       lastSequence: schema.sessionEventCursors.lastSequence,
-      meaningfulSequence: meaningfulSessionSequenceSql(
-        schema.sessionEventCursors.workspaceId,
-        schema.sessionEventCursors.sessionId,
-      ),
+      meaningfulSequence: schema.sessionEventCursors.lastMeaningfulSequence,
     })
     .from(schema.sessionEventCursors)
     .where(
@@ -35998,26 +36041,25 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return withEffectiveSessionPolicy(
-    db,
-    workspaceId,
-    (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
-      const cursor = cursorBySessionId.get(row.id);
-      if (
-        !cursor ||
-        cursor.accountId !== row.accountId ||
-        cursor.workspaceId !== row.workspaceId ||
-        cursor.lastSequence < row.lastSequence
-      ) {
-        throw new Error(`Session event cursor invariant failed for session ${row.id}`);
-      }
-      return {
-        ...row,
-        lastSequence: cursor.lastSequence,
-        meaningfulSequence: cursor.meaningfulSequence,
-      };
-    }),
-  );
+  const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
+    const cursor = cursorBySessionId.get(row.id);
+    if (
+      !cursor ||
+      cursor.accountId !== row.accountId ||
+      cursor.workspaceId !== row.workspaceId ||
+      cursor.lastSequence < row.lastSequence
+    ) {
+      throw new Error(`Session event cursor invariant failed for session ${row.id}`);
+    }
+    return {
+      ...row,
+      lastSequence: cursor.lastSequence,
+      meaningfulSequence: cursor.meaningfulSequence,
+    };
+  });
+  return includeEffectivePolicy
+    ? withEffectiveSessionPolicy(db, workspaceId, canonical)
+    : canonical;
 }
 
 function mapSessionAttention(
@@ -36242,7 +36284,7 @@ export async function sessionTreeStatsForSessions(
           select
             root.id,
             root.status,
-            ${meaningfulSessionSequenceSql(sql`root.workspace_id`, sql`root.id`)},
+            root_cursor.last_meaningful_sequence,
             greatest(
               case
                 when workspace_control.workspace_state = 'paused'
@@ -36267,7 +36309,7 @@ export async function sessionTreeStatsForSessions(
           select
             child.id,
             child.status,
-            ${meaningfulSessionSequenceSql(sql`child.workspace_id`, sql`child.id`)},
+            child_cursor.last_meaningful_sequence,
             greatest(
               case
                 -- A subtree resume defeats every inherited pause older than it.
@@ -37002,11 +37044,33 @@ export async function listSessionsForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, false);
+  if ("projection" in page) throw new Error("Unexpected compact session projection");
+  return page;
+}
+
+/** Same subject, paging and authorization fences, without execution configuration. */
+export async function listSessionEntriesForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+): Promise<SessionListEntryResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, true);
+  if (!("projection" in page)) throw new Error("Missing compact session projection");
+  return page;
+}
+
+async function readSessionListForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  summary: boolean,
+): Promise<SessionListResponse | SessionListEntryResponse> {
   const requestedLimit = options.limit ?? 50;
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
     : 50;
-  const listInTransaction = async (): Promise<SessionListResponse> => {
+  const listInTransaction = async (): Promise<SessionListResponse | SessionListEntryResponse> => {
     return await withWorkspaceSubjectRls(
       db,
       workspaceId,
@@ -37124,6 +37188,9 @@ export async function listSessionsForSubject(
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
         }
+        if (options.pinsOnly && options.includePinned === false) {
+          throw new SessionListCursorError("pins-only session lists require pin hydration");
+        }
         // Never reinterpret a boundary from a different ordering domain.
         // v4 envelopes retain the reserved snapshot id so older replicas also
         // take the typed expiry/rebase path instead of mixing sort domains.
@@ -37136,13 +37203,41 @@ export async function listSessionsForSubject(
           throw new SessionListCursorExpiredError();
         }
 
+        // Configuration is never exposed by the summary branch. SQL substitutes
+        // typed placeholders before transfer, so large JSON/prompt fields do not
+        // become process allocations. Full reads select every original column.
+        const fullColumns = getTableColumns(schema.sessions);
+        const listColumns = summary
+          ? {
+              ...fullColumns,
+              resources: sql<SessionRow["resources"]>`'[]'::jsonb`,
+              skills: sql<SessionRow["skills"]>`'[]'::jsonb`,
+              tools: sql<SessionRow["tools"]>`'[]'::jsonb`,
+              instructions: sql<SessionRow["instructions"]>`null::text`,
+              initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
+              agentConfig: sql<SessionRow["agentConfig"]>`null::jsonb`,
+              mcpApprovalPolicies: sql<SessionRow["mcpApprovalPolicies"]>`null::jsonb`,
+              metadata: sql<SessionRow["metadata"]>`jsonb_build_object(
+            'scheduledTaskId', ${schema.sessions.metadata}->'scheduledTaskId',
+            '_opengeniSiteOrigin', ${schema.sessions.metadata}->'_opengeniSiteOrigin')`,
+              createdByContext: sql<
+                SessionRow["createdByContext"]
+              >`jsonb_build_object('label', ${schema.sessions.createdByContext}->'label')`,
+              // Each tagged code unit may expand in storage. Derive the worst-case
+              // prefix from the codec, then apply the exact shared logical scan bound.
+              initialMessage: sql<string>`left(${schema.sessions.initialMessage},
+            case when ${schema.sessions.initialMessageCodecVersion} = 1
+              then ${PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS * toPostgresLosslessText("\0").length}::integer
+              else ${PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS}::integer end)`,
+            }
+          : fullColumns;
         let pageIds: string[];
         // Keep each selected row in the same MVCC statement as its filters and
         // keyset boundary. A second READ COMMITTED hydration can observe a move
         // or activity change and return content that no longer matches the page.
         let selectedOrdinaryRows:
           | Array<{
-              session: typeof schema.sessions.$inferSelect;
+              session: SessionRow;
               pin: typeof schema.sessionPins.$inferSelect | null;
             }>
           | undefined;
@@ -37252,7 +37347,7 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
-              session: schema.sessions,
+              session: listColumns,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
               archiveAt: exactArchiveSortAt,
@@ -37311,7 +37406,7 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
-              session: schema.sessions,
+              session: listColumns,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
               archiveAt: exactArchiveSortAt,
@@ -37361,10 +37456,10 @@ export async function listSessionsForSubject(
           }
         }
         const pinnedLookaheadRows =
-          archiveMode === "archived"
+          archiveMode === "archived" || options.includePinned === false
             ? []
             : await tx
-                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .select({ session: listColumns, pin: schema.sessionPins })
                 .from(schema.sessionPins)
                 .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
                 .where(
@@ -37384,7 +37479,7 @@ export async function listSessionsForSubject(
           (pageIds.length === 0
             ? []
             : await tx
-                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .select({ session: listColumns, pin: schema.sessionPins })
                 .from(schema.sessions)
                 .leftJoin(
                   schema.sessionPins,
@@ -37417,11 +37512,14 @@ export async function listSessionsForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
+          !summary,
         );
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
-        const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
+        const mcpServers = summary
+          ? new Map<string, SessionMcpServerMetadata[]>()
+          : await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
         const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
           tx,
           workspaceId,
@@ -37445,9 +37543,19 @@ export async function listSessionsForSubject(
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
-          const session = canonicalSessionById.get(row.session.id);
-          if (!session)
+          const canonical = canonicalSessionById.get(row.session.id);
+          if (!canonical)
             throw new Error(`Session event cursor missing for session ${row.session.id}`);
+          const session = summary
+            ? {
+                ...canonical,
+                initialMessage: fromPostgresLosslessText(
+                  canonical.initialMessage,
+                  canonical.initialMessageCodecVersion,
+                ).slice(0, PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS),
+                initialMessageCodecVersion: 0,
+              }
+            : canonical;
           const control = controls.get(session.id);
           if (!control) throw new Error(`Effective control missing for session ${session.id}`);
           return projectSessionForRelatedAccess(
@@ -37480,6 +37588,16 @@ export async function listSessionsForSubject(
             rootRelatedIds.has(session.id) ? "root" : "target",
           );
         };
+        if (summary)
+          return {
+            projection: "summary",
+            pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
+            pinnedTruncated,
+            sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
+            nextCursor,
+            sortBy,
+            archiveStatus: archiveMode,
+          };
         return {
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
@@ -37649,10 +37767,6 @@ export async function getSessionForSubject(
         session: schema.sessions,
         pin: schema.sessionPins,
         cursor: schema.sessionEventCursors,
-        meaningfulSequence: meaningfulSessionSequenceSql(
-          schema.sessions.workspaceId,
-          schema.sessions.id,
-        ),
       })
       .from(schema.sessions)
       // Status and replay cursor must share one statement snapshot. Otherwise a
@@ -37703,7 +37817,7 @@ export async function getSessionForSubject(
         {
           ...row.session,
           lastSequence: row.cursor.lastSequence,
-          meaningfulSequence: row.meaningfulSequence,
+          meaningfulSequence: row.cursor.lastMeaningfulSequence,
         },
       ]),
     );
@@ -40173,62 +40287,62 @@ export async function listSessionEventPage(
           requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX &&
           options.batchSize === undefined
         ) {
-          const candidateRows = scopedDb.$with("session_event_page_candidates").as(
-            scopedDb
-              .select({
-                ...sessionEventProjectionSelect("full"),
-                transferBytes:
-                  sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`.as(
-                    "transfer_bytes",
-                  ),
-              })
-              .from(schema.sessionEvents)
-              .where(and(...filters))
-              .orderBy(ordering)
-              .limit(queryLimit),
-          );
-          const candidateOrdering =
-            options.authoritativeLatest || direction === "before"
-              ? sql`${candidateRows.sequence} desc`
-              : sql`${candidateRows.sequence} asc`;
-          const rankedRows = scopedDb.$with("session_event_page_ranked").as(
-            scopedDb
-              .select({
-                ...sessionEventProjectionSelect("full", candidateRows),
-                transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
-                rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
-                  "row_number",
-                ),
-                sourceRowCount: sql<number>`count(*) over ()::int`.as("source_row_count"),
-                cumulativeTransferBytes:
-                  sql<number>`sum(${candidateRows.transferBytes} + 1) over (order by ${candidateOrdering})`.as(
-                    "cumulative_transfer_bytes",
-                  ),
-              })
-              .from(candidateRows),
-          );
           const remainingCount = Math.max(1, requestedLimit - events.length);
           const availableTransferBytes = Math.max(
             1,
             maxBytes - bytes + (events.length === 0 ? 1 : 0),
           );
-          const selectedRows = await scopedDb
-            .with(candidateRows, rankedRows)
-            .select({
-              ...sessionEventProjectionSelect("full", rankedRows),
-              sourceRowCount: rankedRows.sourceRowCount,
-            })
-            .from(rankedRows)
-            .where(
-              and(
-                lte(rankedRows.rowNumber, remainingCount),
-                or(
-                  lte(rankedRows.cumulativeTransferBytes, availableTransferBytes),
-                  eq(rankedRows.rowNumber, 1),
-                ),
-              ),
+          const candidateOrdering =
+            options.authoritativeLatest || direction === "before"
+              ? sql`sequence desc`
+              : sql`sequence asc`;
+          // Plan from IDs first, then size only the prefix that can reach this page.
+          // A window over payload sizes would detoast every lookahead row
+          // and repeat that work for each oversized event delivered alone.
+          // The recursive guard stops before reading the next payload once the
+          // count/byte target is reached. IDs still provide exact continuation.
+          const selection = sql`(
+            with recursive
+            candidates as materialized (
+              select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence}
+              from ${schema.sessionEvents}
+              where ${and(...filters)}
+              order by ${ordering}
+              limit ${queryLimit}
+            ),
+            ordered as materialized (
+              select id, row_number() over (order by ${candidateOrdering})::int as row_number
+              from candidates
+            ),
+            bounded as (
+              select ordered.id, ordered.row_number,
+                octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                  as cumulative_transfer_bytes
+              from ordered
+              join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
+              where ordered.row_number = 1
+              union all
+              select ordered.id, ordered.row_number,
+                bounded.cumulative_transfer_bytes
+                  + octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+              from bounded
+              join ordered on ordered.row_number = bounded.row_number + 1
+              join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
+              where bounded.cumulative_transfer_bytes <= ${availableTransferBytes}
+                and bounded.row_number < ${remainingCount}
             )
-            .orderBy(asc(rankedRows.rowNumber));
+            select id, row_number, (select count(*)::int from ordered) as source_row_count
+            from bounded
+            where row_number = 1 or cumulative_transfer_bytes <= ${availableTransferBytes}
+          ) as session_event_page_selected`;
+          const selectedRows = await scopedDb
+            .select({
+              ...sessionEventProjectionSelect("full"),
+              sourceRowCount: sql<number>`session_event_page_selected.source_row_count`,
+            })
+            .from(schema.sessionEvents)
+            .innerJoin(selection, sql`${schema.sessionEvents.id} = session_event_page_selected.id`)
+            .orderBy(sql`session_event_page_selected.row_number`);
           sourceRowCount = Number(selectedRows[0]?.sourceRowCount ?? 0);
           rows = selectedRows.map(({ sourceRowCount: _sourceRowCount, ...row }) => row);
           sourceRowsFullyConsumed = rows.length >= sourceRowCount;
@@ -51932,6 +52046,9 @@ export type MarkWarmLeaseInstanceLostResult =
       status: "marked";
       lease: LeaseSnapshot;
       settlement: LostProviderWorkspaceSettlement;
+      /** Terminal events of linked background commands, already durable in
+       * this commit; present only when a command settled. */
+      backgroundCommandEvents?: SessionEvent[];
     }
   | { status: "stale"; lease: LeaseSnapshot | null };
 
@@ -51943,15 +52060,7 @@ const LOST_PROVIDER_PROCESS_REASON = "provider_instance_lost";
  * tuple is revalidated under FOR UPDATE after these locks are acquired. */
 async function lockExactLostProviderWorkspaceBlockersTx(
   tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    leaseId: string;
-    sandboxGroupId: string;
-    lostEpoch: number;
-    lostBackend: string;
-    lostInstanceId: string;
-  },
+  input: LostProviderBlockerScope,
 ): Promise<void> {
   await tx.execute(sql`
     select id from sandbox_retained_processes
@@ -51994,18 +52103,112 @@ async function lockExactLostProviderWorkspaceBlockersTx(
   `);
 }
 
+type LostProviderBlockerScope = {
+  accountId: string;
+  workspaceId: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  lostEpoch: number;
+  lostBackend: string;
+  lostInstanceId: string;
+};
+
+/** Take the session-event write prefix (workspace control share, workspace,
+ * sessions, cursors) for every session whose background command is linked to
+ * an active process in the exact lost-provider scope. Call it before the
+ * process/admission/PTY/lease locks so terminal command delivery keeps the
+ * canonical control -> session -> process -> admission -> lease order. */
+async function linkedLostProviderCommandSessionIdsTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+): Promise<string[]> {
+  const sessions = await rawRows<{ session_id: string }>(
+    tx,
+    sql`
+      select distinct command.session_id
+      from session_background_commands command
+      join sandbox_retained_processes process on process.id = command.retained_process_id
+        and process.workspace_id = command.workspace_id
+        and process.session_id = command.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+        and command.state in ('running', 'stopping')
+      order by command.session_id
+    `,
+  );
+  return sessions.map((row) => row.session_id);
+}
+
+async function lockLostProviderCommandSessionsTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+): Promise<Set<string>> {
+  const sessionIds = await linkedLostProviderCommandSessionIdsTx(tx, input);
+  if (sessionIds.length) {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds,
+    });
+  }
+  return new Set(sessionIds);
+}
+
+class LostProviderCommandSessionsChangedError extends Error {
+  readonly name = "LostProviderCommandSessionsChangedError";
+}
+
+/** Re-read the linked sessions once every blocker and the lease are locked.
+ * A command adopted in the gap before the process locks would otherwise make
+ * delivery lock its session after process/admission/lease rows, inverting the
+ * canonical order; abort that transaction and retry instead. */
+async function assertLostProviderCommandSessionsLockedTx(
+  tx: Database,
+  input: LostProviderBlockerScope,
+  locked: ReadonlySet<string>,
+): Promise<void> {
+  const current = await linkedLostProviderCommandSessionIdsTx(tx, input);
+  if (current.some((sessionId) => !locked.has(sessionId))) {
+    throw new LostProviderCommandSessionsChangedError(
+      "A background command was linked to the lost provider while its sessions were being locked",
+    );
+  }
+}
+
+async function withLostProviderCommandSessionRetry<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof LostProviderCommandSessionsChangedError) || attempt >= 3) throw error;
+    }
+  }
+}
+
 async function settleExactLostProviderWorkspaceBlockersTx(
   tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    leaseId: string;
-    sandboxGroupId: string;
-    lostEpoch: number;
-    lostBackend: string;
-    lostInstanceId: string;
-  },
+  input: LostProviderBlockerScope,
+  options: {
+    /** Enrolled legacy commands that containment stopped after a verified
+     * checkpoint settle with this truthful reason instead of plain loss. */
+    containment?: { processIds: readonly string[]; reason: string };
+    /** Append each linked command's terminal event and agent input in this
+     * transaction, like ordinary exit/loss settlement. Requires a session
+     * activity scope and lockLostProviderCommandSessionsTx beforehand. */
+    deliverCommandResults?: {
+      activityTx: SessionActivityDatabase;
+      idleContainmentMinutes: number | null;
+      events: SessionEvent[];
+    };
+  } = {},
 ): Promise<LostProviderWorkspaceSettlement> {
+  const containedIds = options.containment?.processIds ?? [];
   // Only callers that locked and revalidated this exact provider tuple reach
   // here. Migration0495 independently checks the cold missing-provider outcome
   // at commit. This is loss classification, not a supervision/EOF receipt.
@@ -52020,7 +52223,11 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     .set({
       state: "lost",
       exitCode: null,
-      settlementReason: LOST_PROVIDER_PROCESS_REASON,
+      settlementReason:
+        options.containment && containedIds.length
+          ? sql`case when ${schema.sandboxRetainedProcesses.id} = any(${`{${containedIds.join(",")}}`}::uuid[])
+              then ${options.containment.reason} else ${LOST_PROVIDER_PROCESS_REASON} end`
+          : LOST_PROVIDER_PROCESS_REASON,
       settledAt: new Date(),
     })
     .where(
@@ -52038,6 +52245,8 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     .returning({
       id: schema.sandboxRetainedProcesses.id,
       holderId: schema.sandboxRetainedProcesses.holderId,
+      sessionId: schema.sandboxRetainedProcesses.sessionId,
+      settlementReason: schema.sandboxRetainedProcesses.settlementReason,
     });
   await tx.execute(sql`
     select set_config('opengeni.supervised_provider_loss_binding', ${priorLossBinding?.value ?? ""}, true)
@@ -52112,6 +52321,46 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     where lease.id = ${input.leaseId}
   `);
 
+  const delivery = options.deliverCommandResults;
+  if (delivery && lostProcesses.length) {
+    // The retained-process trigger already moved each linked command row to
+    // this terminal state. Append the same event/input/wake that ordinary
+    // exit/loss settlement commits, in this transaction and in stable order.
+    const linked = await rawRows<{ session_id: string; retained_process_id: string }>(
+      tx,
+      sql`
+        select session_id, retained_process_id from session_background_commands
+        where workspace_id = ${input.workspaceId}
+          and retained_process_id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by session_id, retained_process_id
+      `,
+    );
+    for (const command of linked) {
+      const process = lostProcesses.find((p) => p.id === command.retained_process_id);
+      if (!process) continue;
+      const mutation = backgroundCommandTerminalMutation({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: command.session_id,
+        idleContainmentMinutes: delivery.idleContainmentMinutes,
+      });
+      await settleSessionBackgroundCommandForRetainedProcessInTransaction(
+        delivery.activityTx,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: command.session_id,
+          retainedProcessId: process.id,
+          outcome: "lost",
+          exitCode: null,
+          reason: process.settlementReason ?? LOST_PROVIDER_PROCESS_REASON,
+        },
+        mutation,
+      );
+      delivery.events.push(...mutation.events);
+    }
+  }
+
   return {
     processesLost: lostProcesses.length,
     admissionsRejected: rejectedAdmissions.length,
@@ -52147,12 +52396,15 @@ export async function markWarmLeaseInstanceLost(
     diagnostic?: string;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
+  const backgroundCommandEvents: SessionEvent[] = [];
+  // Settling a linked command appends its terminal event and agent input, so
+  // the loss commit runs inside the session activity gate.
+  const result = await withLostProviderCommandSessionRetry(async () => {
+    backgroundCommandEvents.length = 0;
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
         const observedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -52181,6 +52433,7 @@ export async function markWarmLeaseInstanceLost(
           lostBackend: observed.backend,
           lostInstanceId: input.expectedInstanceId,
         };
+        const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         const currentRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
@@ -52203,7 +52456,14 @@ export async function markWarmLeaseInstanceLost(
           };
         }
 
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        await assertLostProviderCommandSessionsLockedTx(tx, blockerScope, lockedCommandSessions);
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+          deliverCommandResults: {
+            activityTx: tx,
+            idleContainmentMinutes: null,
+            events: backgroundCommandEvents,
+          },
+        });
 
         const observedAt = new Date().toISOString();
         const before = recoveryStateFromLeaseRow(current);
@@ -52307,8 +52567,12 @@ export async function markWarmLeaseInstanceLost(
           lease: mapLeaseRow(updated),
           settlement,
         };
-      }),
-  );
+      },
+    );
+  });
+  return result.status === "marked" && backgroundCommandEvents.length
+    ? { ...result, backgroundCommandEvents }
+    : result;
 }
 
 export type ReconcileColdLostLeaseInstanceBlockersResult =
@@ -52422,12 +52686,13 @@ export async function reconcileColdLostLeaseInstanceBlockers(
     expectedArchiveVerifiedAt: input.expectedArchiveVerifiedAt,
     providerObject: input.providerObject,
   };
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
+  // Settling a linked command appends its terminal event and agent input, as
+  // the automatic loss transaction does, so apply runs in the activity gate.
+  return await withLostProviderCommandSessionRetry(async () => {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
         const database = await readColdLostDatabasePostureTx(tx);
         const observedRows = await readColdLostSnapshotRowsTx(tx, previewInput);
         const observedPreview = evaluateColdLostSnapshot(previewInput, observedRows, database, {
@@ -52450,6 +52715,7 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           lostBackend: observed.backend,
           lostInstanceId: input.expectedLostInstanceId,
         };
+        const lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         const currentRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
@@ -52481,7 +52747,14 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           return { status: "blocked" as const, preview: currentPreview };
         }
 
-        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        await assertLostProviderCommandSessionsLockedTx(tx, blockerScope, lockedCommandSessions);
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+          deliverCommandResults: {
+            activityTx: tx,
+            idleContainmentMinutes: null,
+            events: [],
+          },
+        });
         const refreshedRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases where id = ${current.id}
         `);
@@ -52492,8 +52765,9 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           lease: mapLeaseRow(refreshed),
           settlement,
         };
-      }),
-  );
+      },
+    );
+  });
 }
 
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
@@ -53628,24 +53902,237 @@ export async function reapStaleLeaseHolders(
   );
 }
 
-// §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
-// SECURITY-DEFINER opengeni_private.reap_sandbox_leases() fn so the global
-// reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
-// pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
-// the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
-// is the sanctioned cross-workspace read). Each invocation runs in its own
-// transaction and opts into the recovery protocol fence; this also makes the
-// legacy fallback safe after PostgreSQL aborts an undefined-function call.
-export async function enrollUnobservableCommandIdleDrain(
+/** Settlement reasons for legacy retained commands that containment stopped
+ * after a verified checkpoint. Neither is exit proof: the command settles
+ * `lost` with no exit code. */
+export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
+export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+
+/** Bounded per-candidate containment inspection outcomes (metric labels). */
+export type CommandContainmentInspection =
+  | "idle_enrolled"
+  | "deadline_enrolled"
+  | "resumed_enrolled"
+  | "not_eligible"
+  | "inspection_failed";
+
+export type CommandContainmentEnrollment = ReapDrainable & {
+  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+   * existing enrollment whose drain has not committed yet. */
+  mode: "idle" | "deadline" | "resumed";
+};
+
+/** Whole-group "unused" from durable facts only. Every session of the group,
+ * and every session owning a process on the lease, must have no open turn
+ * (queued, running, requires_action, recovering, waiting_capacity), no
+ * non-closed attempt, no pending quiescence and no held `wait_for_input`; and
+ * the newest attempt close, turn finish, holder-set change and admission (or
+ * settlement) on this lease epoch must all be older than the window. A held input wait means
+ * the agent is deliberately waiting on its background work, so the command is
+ * not abandoned: only the provider-deadline backstop may stop it. Process age
+ * is deliberately not a fact here. */
+async function sandboxGroupIdleForCommandContainmentTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseId: string;
+    windowMs: number;
+  },
+): Promise<boolean> {
+  const [facts] = await rawRows<{
+    idle: boolean;
+    session_ids: string[];
+    idle_before: Date | string;
+  }>(
+    tx,
+    sql`
+      with member_sessions as (
+        select session.id from sessions session
+        where session.workspace_id = ${input.workspaceId}
+          and session.sandbox_group_id = ${input.sandboxGroupId}
+        union
+        select process.session_id from sandbox_retained_processes process
+        where process.lease_id = ${input.leaseId} and process.state = 'active'
+      ), attempts as (
+        select attempt.state,
+          coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at) as settled_at
+        from session_turn_attempts attempt
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id in (select id from member_sessions)
+      )
+      select
+        not exists (select 1 from attempts where state <> 'closed')
+          and not exists (
+            select 1 from session_turns turn
+            where turn.workspace_id = ${input.workspaceId}
+              and turn.session_id in (select id from member_sessions)
+              and turn.status in ('queued', 'running', 'requires_action', 'recovering',
+                'waiting_capacity'))
+          and coalesce(greatest(
+            (select lease.holders_changed_at from sandbox_leases lease
+              where lease.id = ${input.leaseId}),
+            (select max(settled_at) from attempts),
+            (select max(turn.finished_at) from session_turns turn
+              where turn.workspace_id = ${input.workspaceId}
+                and turn.session_id in (select id from member_sessions)),
+            -- Unclaimed turn-starting input is an idle-clock fact, not a
+            -- permanent blocker: input a paused session can never deliver
+            -- must not pin the box until its provider deadline.
+            (select max(pending_update.created_at) from session_system_updates pending_update
+              where pending_update.workspace_id = ${input.workspaceId}
+                and pending_update.session_id in (select id from member_sessions)
+                and pending_update.state = 'pending'
+                and (pending_update.kind in (${sql.join(
+                  COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.always.map((kind) => sql`${kind}`),
+                  sql`, `,
+                )})
+                  or (pending_update.kind in (${sql.join(
+                    COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS.withActiveGoal.map(
+                      (kind) => sql`${kind}`,
+                    ),
+                    sql`, `,
+                  )})
+                    and exists (select 1 from session_goals goal
+                      where goal.workspace_id = pending_update.workspace_id
+                        and goal.session_id = pending_update.session_id
+                        and goal.status = 'active')))),
+            (select max(coalesce(admission.settled_at, admission.admitted_at))
+              from sandbox_workspace_mutation_admissions admission
+              join sandbox_leases lease on lease.id = admission.lease_id
+              where admission.lease_id = ${input.leaseId}
+                and admission.lease_epoch = lease.lease_epoch)
+          ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
+        array(select id from member_sessions order by id) as session_ids,
+        now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
+    `,
+  );
+  if (!facts?.idle) return false;
+  const idleBefore = new Date(facts.idle_before).getTime();
+  const sessions = facts.session_ids.length
+    ? await tx
+        .select({
+          id: schema.sessions.id,
+          inputWaitTurnId: schema.sessions.inputWaitTurnId,
+          inputWaitUntil: schema.sessions.inputWaitUntil,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            inArray(schema.sessions.id, facts.session_ids),
+          ),
+        )
+        .orderBy(schema.sessions.id)
+    : [];
+  for (const session of sessions) {
+    // A wait that is not superseded puts its deadline on the idle clock: held
+    // until it ends, then the window runs from the deadline, so a timeout
+    // settlement that cannot run (a paused session) never pins the box.
+    const wait = await sessionInputWaitStateTx(tx, input.workspaceId, session.id, session);
+    if (
+      ((wait.disposition === "held" || wait.disposition === "timeout") &&
+        session.inputWaitUntil !== null &&
+        session.inputWaitUntil.getTime() >= idleBefore) ||
+      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+      }))
+    )
+      return false;
+  }
+  return true;
+}
+
+/** Pending machine input that would start a turn in an idle session, by the
+ * wake class map: every immediate kind except terminal command results (held
+ * for the next turn); child lifecycle notices only wake a parent with an active
+ * goal. Migration 0547's inventory screen repeats this set as SQL literals; a
+ * test pins the two together. */
+export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
+  const immediate = (
+    Object.entries(SESSION_SYSTEM_UPDATE_WAKE_CLASS) as Array<[SessionSystemUpdateKind, string]>
+  )
+    .filter(
+      ([kind, wakeClass]) => wakeClass === "immediate" && kind !== "background_command_result",
+    )
+    .map(([kind]) => kind);
+  return {
+    always: immediate.filter((kind) => !isChildLifecycleSystemUpdateKind(kind)),
+    withActiveGoal: immediate.filter((kind) => isChildLifecycleSystemUpdateKind(kind)),
+  };
+})();
+
+/** The deadline backstop's owner test is the idle rule's: a closed turn owner
+ * must hold no pending quiescence (unsettled interruption or attempt writer). */
+async function deadlineOwnerQuiescencePending(
+  tx: Database,
+  workspaceId: string,
+  processes: readonly { session_id: string; owner_attempt_id: string | null }[],
+): Promise<boolean> {
+  for (const process of processes) {
+    if (
+      process.owner_attempt_id &&
+      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+        workspaceId,
+        sessionId: process.session_id,
+        attemptId: process.owner_attempt_id,
+      }))
+    )
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Contain legacy retained commands that are the only thing keeping a Modal box
+ * warm. One rule decides, independent of command health: the lease holds only
+ * process holders and their parent admissions, no supervised process, capture
+ * or reaper hold, and either the whole sandbox group has been idle for
+ * `idleCommandContainmentMs`, or a provider-deadline rotation's bounded stop
+ * grace has elapsed for every command. Enrollment is lifecycle intent, not exit
+ * proof: the existing drain captures the current generation excluding exactly
+ * these holders/admissions, terminates the box, and settles the commands.
+ *
+ * The workspace control fence plus process -> admission -> lease row locks
+ * serialize this decision with every new holder or admission: an arrival that
+ * committed first is seen and refuses enrollment; a later one observes the
+ * requested rotation and is fenced until the successor box.
+ */
+export async function enrollRetainedCommandContainment(
   db: Database,
-  input: { accountId: string; workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
-): Promise<ReapDrainable | null> {
-  await withRlsContext(db, input, async (tx) => {
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    /** Omit to evaluate only the provider-deadline rule. */
+    idleCommandContainmentMs?: number | undefined;
+  },
+): Promise<CommandContainmentEnrollment | null> {
+  const screened = await withRlsContext(db, input, async (tx) => {
+    // Cheap unlocked screen, before touching the lease row, so a group that is
+    // in use does not take the exclusive workspace-control fence on every
+    // sweep. Only the locked re-check below may enroll.
+    const lease = await readLease(tx, input.workspaceId, input.sandboxGroupId);
+    const pass =
+      lease !== null &&
+      // Enrolled drains resume; any requested rotation also refreshes command
+      // observation backoff below and may meet the deadline rule.
+      (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        lease.rotationRequestedAt !== null ||
+        (input.idleCommandContainmentMs !== undefined &&
+          (await sandboxGroupIdleForCommandContainmentTx(tx, {
+            ...input,
+            leaseId: lease.id,
+            windowMs: input.idleCommandContainmentMs,
+          }))));
     // Round-robin inventory: an ineligible live lease cannot starve later rows.
     // This updates only the inspection cursor, never provider/holder authority.
     await tx.execute(sql`update sandbox_leases set unobservable_command_checked_at = now()
       where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}`);
+    return pass;
   });
+  if (!screened) return null;
   return await withRlsContext(db, input, async (tx) => {
     await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
     const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
@@ -53662,95 +54149,46 @@ export async function enrollUnobservableCommandIdleDrain(
       await tx.execute(sql`
         update sandbox_retained_processes set reconcile_after = least(reconcile_after, now())
         where lease_id = ${initial.id} and state = 'active' and reconcile_claim_id is null
-          and last_reconcile_outcome in ('process_observation_unavailable',
-            'quarantined_process_observation_unavailable', 'provider_binding_missing',
-            'quarantined_provider_binding_missing', 'provider_binding_mismatch',
-            'quarantined_provider_binding_mismatch')
+          and ${unobservableRetainedProcessOutcomeSql(sql`last_reconcile_outcome`)}
       `);
     }
     // A deadline gives a legacy command two minutes after cancellation intent
-    // to exit. Even when the provider cannot signal or observe that command,
-    // capture its current files while the old box still exists. Ordinary idle
-    // containment retains its longer grace.
+    // to exit, then captures its current files while the old box still exists.
     const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
     const deadlineRotation =
       initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
-    // Normal completion closes an attempt without the interruption-only
-    // quiesced_at receipt. A failed/interrupted owner without that receipt must
-    // remain fenced; a completed and closed owner has finished its own writes.
-    const settledOwnerAt = sql`coalesce(attempt.quiesced_at,
-      case when attempt.state = 'closed' and attempt.outcome = 'completed'
-        then attempt.closed_at else null end)`;
+    const deadlineGrace = sql`now() - (${deadlineStopGraceMs}::bigint * interval '1 millisecond')`;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
+      session_id: string;
+      owner_attempt_id: string | null;
       parent_admission_id: string;
       holder_id: string;
-      eligible: boolean;
       supervised: boolean;
+      owned: boolean;
+      deadline_ready: boolean;
     }>(
       tx,
       sql`
-      select process.id, process.parent_admission_id, process.holder_id,
+      select process.id, process.session_id, process.owner_attempt_id,
+        process.parent_admission_id, process.holder_id,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
-          and process.provider_backend = 'modal' and process.route_target_id is null
+          and process.provider_backend = 'modal' and process.route_target_id is null) as owned,
+        coalesce(${deadlineRotation}
+          and process.deadline_cancellation_requested_at < ${deadlineGrace}
+          and process.reconcile_attempts >= 1
           and (
-            process.last_reconcile_outcome in ('process_observation_unavailable',
-              'quarantined_process_observation_unavailable')
-            or (
-              process.last_reconcile_outcome = 'provider_error'
-              and process.reconcile_attempts >= 5
-              and ${settledOwnerAt} is not null
-              and exists (
-                select 1 from session_background_commands command
-                where command.retained_process_id = process.id
-                  and command.workspace_id = process.workspace_id
-                  and command.session_id = process.session_id
-                  and command.provider = 'managed'
-                  and command.state = 'stopping'
-                  and command.cancel_requested_at < now() -
-                    (${input.idleGraceMs}::bigint * interval '1 millisecond')
-              )
-            )
-            or (
-              ${deadlineRotation}
-              and process.deadline_cancellation_requested_at < now() -
-                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
-              and process.reconcile_attempts >= 1
-              and (
-                (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
-                  and ${settledOwnerAt} is not null
-                  and greatest(${settledOwnerAt}, process.started_at) < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
-                  and process.started_at < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-              )
-            )
-          )
-          and (attempt.state = 'closed' or (
-            ${deadlineRotation}
-            and process.owner_actor_kind = 'direct' and process.owner_attempt_id is null))
-          and (
-            (attempt.state = 'closed' and
-              greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
-                (${input.idleGraceMs}::bigint * interval '1 millisecond'))
-            or (
-              ${deadlineRotation}
-              and process.deadline_cancellation_requested_at < now() -
-                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
-              and (
-                (process.owner_actor_kind = 'turn' and ${settledOwnerAt} is not null
-                  and greatest(${settledOwnerAt}, process.started_at) < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
-                  and process.started_at < now() -
-                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
-              )
-            )
-          )) as eligible
+            -- Whatever its outcome, a closed owner is a writer no longer; its
+            -- pending quiescence is re-checked below with the idle rule's test.
+            (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
+              and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at),
+                process.started_at) < ${deadlineGrace})
+            or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+              and process.started_at < ${deadlineGrace})
+          ), false) as deadline_ready
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
         and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
@@ -53782,7 +54220,7 @@ export async function enrollUnobservableCommandIdleDrain(
     if (
       !ids.length ||
       processes.some((p) => p.supervised) ||
-      (!enrolled && processes.some((p) => !p.eligible)) ||
+      (!enrolled && processes.some((p) => !p.owned)) ||
       processes.some((p) => !ids.includes(p.id))
     )
       return null;
@@ -53800,31 +54238,59 @@ export async function enrollUnobservableCommandIdleDrain(
       )
     )
       return null;
-    if (!enrolled) {
-      if (
-        lease.archive_capture_id !== null ||
-        (await hasSandboxGroupAttemptActivityTx(tx, {
-          ...input,
-          idleGraceMs: deadlineRotation ? deadlineStopGraceMs : input.idleGraceMs,
-        }))
-      )
-        return null;
-      await tx.execute(sql`
-        update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
-          liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
-          rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
-        where id = ${lease.id}
-      `);
-    }
-    return {
+    const target = {
       workspaceId: input.workspaceId,
       sandboxGroupId: input.sandboxGroupId,
       instanceId: initial.instanceId,
       leaseEpoch: initial.leaseEpoch,
     };
+    if (enrolled) return { ...target, mode: "resumed" };
+    if (lease.archive_capture_id !== null) return null;
+    let mode: "idle" | "deadline" | null = null;
+    if (
+      deadlineRotation &&
+      processes.every((p) => p.deadline_ready) &&
+      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
+      !(await hasSandboxGroupAttemptActivityTx(tx, {
+        ...input,
+        idleGraceMs: deadlineStopGraceMs,
+      }))
+    ) {
+      mode = "deadline";
+    } else if (
+      input.idleCommandContainmentMs !== undefined &&
+      (await sandboxGroupIdleForCommandContainmentTx(tx, {
+        ...input,
+        leaseId: lease.id,
+        windowMs: input.idleCommandContainmentMs,
+      }))
+    ) {
+      mode = "idle";
+    }
+    if (!mode) return null;
+    await tx.execute(sql`
+      update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+        command_containment_reason = ${
+          mode === "deadline"
+            ? DEADLINE_COMMAND_CONTAINMENT_REASON
+            : IDLE_COMMAND_CONTAINMENT_REASON
+        },
+        liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
+        rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
+      where id = ${lease.id}
+    `);
+    return { ...target, mode };
   });
 }
 
+// §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
+// SECURITY-DEFINER opengeni_private.reap_sandbox_leases() fn so the global
+// reaper Temporal Schedule (P1.3) sees stale rows across ALL workspaces in ONE
+// pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
+// the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
+// is the sanctioned cross-workspace read). Each invocation runs in its own
+// transaction and opts into the recovery protocol fence; this also makes the
+// legacy fallback safe after PostgreSQL aborts an undefined-function call.
 export async function reapStaleLeaseHoldersGlobal(
   db: Database,
   input: {
@@ -53834,7 +54300,11 @@ export async function reapStaleLeaseHoldersGlobal(
     turnHolderTtlMs?: number;
     interactionHolderTtlMs?: number;
     idleGraceMs: number;
-    onUnobservableCommandDrainError?: (error: unknown) => void;
+    /** Whole-group idle window for legacy retained-command containment.
+     * Omitted: only the provider-deadline rule may enroll commands. */
+    idleCommandContainmentMs?: number | undefined;
+    onCommandContainment?: (outcome: CommandContainmentInspection) => void;
+    onCommandContainmentError?: (error: unknown) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -53883,31 +54353,38 @@ export async function reapStaleLeaseHoldersGlobal(
     instanceId: r.instance_id,
     leaseEpoch: Number(r.lease_epoch),
   }));
-  const reportDrainError =
-    input.onUnobservableCommandDrainError ??
+  const reportContainmentError =
+    input.onCommandContainmentError ??
     ((error: unknown) => {
-      console.warn("sandbox reaper: unobservable command drain inspection failed", error);
+      console.warn("sandbox reaper: retained command containment inspection failed", error);
     });
   const candidates = await rawRows<{
     account_id: string;
     workspace_id: string;
     sandbox_group_id: string;
-  }>(db, sql`select * from opengeni_private.list_unobservable_command_drain_candidates(32)`).catch(
-    (error) => {
-      reportDrainError(error);
-      return [];
-    },
-  );
+  }>(
+    db,
+    sql`select * from opengeni_private.list_command_containment_candidates(
+      32, ${input.idleCommandContainmentMs ?? null}::bigint)`,
+  ).catch((error) => {
+    reportContainmentError(error);
+    return [];
+  });
   for (const candidate of candidates) {
-    const enrolled = await enrollUnobservableCommandIdleDrain(db, {
+    const enrolled = await enrollRetainedCommandContainment(db, {
       accountId: candidate.account_id,
       workspaceId: candidate.workspace_id,
       sandboxGroupId: candidate.sandbox_group_id,
-      idleGraceMs: input.idleGraceMs,
-    }).catch((error) => {
-      reportDrainError(error);
-      return null;
+      ...(input.idleCommandContainmentMs === undefined
+        ? {}
+        : { idleCommandContainmentMs: input.idleCommandContainmentMs }),
+    }).catch((error: unknown) => {
+      reportContainmentError(error);
+      input.onCommandContainment?.("inspection_failed");
+      return undefined;
     });
+    if (enrolled === undefined) continue;
+    input.onCommandContainment?.(enrolled ? `${enrolled.mode}_enrolled` : "not_eligible");
     if (
       enrolled &&
       !ordinary.some(
@@ -53915,7 +54392,12 @@ export async function reapStaleLeaseHoldersGlobal(
           r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
       )
     )
-      ordinary.push(enrolled);
+      ordinary.push({
+        workspaceId: enrolled.workspaceId,
+        sandboxGroupId: enrolled.sandboxGroupId,
+        instanceId: enrolled.instanceId,
+        leaseEpoch: enrolled.leaseEpoch,
+      });
   }
   return ordinary;
 }
@@ -54230,14 +54712,19 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The idle window named in contained commands' agent notice. */
+    idleCommandContainmentMs?: number | undefined;
   },
-): Promise<{ wentCold: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
+): Promise<{ wentCold: boolean; backgroundCommandEvents?: SessionEvent[] }> {
+  const backgroundCommandEvents: SessionEvent[] = [];
+  // Settling a command appends its terminal session event and agent input, so
+  // the cold commit runs inside the session activity gate.
+  const result = await withLostProviderCommandSessionRetry(async () => {
+    backgroundCommandEvents.length = 0;
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
         // draining->cold: the box is terminated, so EVERY live-box field is cleared
         // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
         // nulled — if the reaper PERSISTED a /workspace snapshot onto it
@@ -54285,10 +54772,12 @@ export async function confirmDrainCold(
               }
             : null;
         // Provider loss settles process/admission/PTY rows before taking the
-        // lease lock, matching the canonical blocker -> lease lock order used
-        // by retained-process settlement. Revalidate the lease after locking
-        // the entire exact provider-owned blocker set.
+        // lease lock, matching the canonical session -> blocker -> lease lock
+        // order used by retained-process settlement. Revalidate the lease after
+        // locking the entire exact provider-owned blocker set.
+        let lockedCommandSessions: ReadonlySet<string> = new Set();
         if (blockerScope) {
+          lockedCommandSessions = await lockLostProviderCommandSessionsTx(tx, blockerScope);
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
@@ -54315,7 +54804,34 @@ export async function confirmDrainCold(
           return { wentCold: false };
         }
         if (blockerScope) {
-          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+          // Enrolled commands are contained only when this drain published the
+          // current checkpoint before stopping the box; otherwise the truthful
+          // reason is provider loss and no saved-workspace claim is made.
+          // A pre-0547 enrollment records no reason: settle it as plain loss.
+          const reason = row.command_containment_reason;
+          const contained =
+            !input.providerMissingBeforeCapture &&
+            row.archive_capture_published_at !== null &&
+            (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+            row.unobservable_command_drain_ids?.length
+              ? row.unobservable_command_drain_ids
+              : [];
+          await assertLostProviderCommandSessionsLockedTx(tx, blockerScope, lockedCommandSessions);
+          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope, {
+            containment: {
+              processIds: contained,
+              reason: typeof reason === "string" ? reason : LOST_PROVIDER_PROCESS_REASON,
+            },
+            deliverCommandResults: {
+              activityTx: tx,
+              idleContainmentMinutes:
+                input.idleCommandContainmentMs === undefined
+                  ? null
+                  : Math.max(1, Math.round(input.idleCommandContainmentMs / 60_000)),
+              events: backgroundCommandEvents,
+            },
+          });
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
@@ -54480,8 +54996,10 @@ export async function confirmDrainCold(
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
         return { wentCold: rows.length > 0 };
-      }),
-  );
+      },
+    );
+  });
+  return backgroundCommandEvents.length ? { ...result, backgroundCommandEvents } : result;
 }
 
 // §4.8b — persist the /workspace snapshot archive onto the lease BEFORE the
@@ -82519,6 +83037,8 @@ function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  /** Idle window named in an idle-containment notice, when known. */
+  idleContainmentMinutes?: number | null;
 }): {
   events: SessionEvent[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
@@ -82634,13 +83154,18 @@ function backgroundCommandTerminalMutation(input: {
           ? "success"
           : "failure";
       const commandLabel = command.commandPreview || "Background command";
+      const idleMinutes = input.idleContainmentMinutes;
       const summary = command.failure
         ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
-        : command.state === "lost"
-          ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
-          : command.exitCode === 0
-            ? `${commandLabel}: completed successfully.`
-            : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
+        : command.state === "lost" && reason === IDLE_COMMAND_CONTAINMENT_REASON
+          ? `\`${commandLabel}\` was stopped because nobody used this session${idleMinutes ? ` for ${idleMinutes} minute${idleMinutes === 1 ? "" : "s"}` : ""} and nothing was waiting on it; the workspace was saved. Restart it if you still need it.`
+          : command.state === "lost" && reason === DEADLINE_COMMAND_CONTAINMENT_REASON
+            ? `\`${commandLabel}\` was stopped because the sandbox reached its maximum lifetime; the workspace was saved. Restart it if you still need it.`
+            : command.state === "lost"
+              ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
+              : command.exitCode === 0
+                ? `${commandLabel}: completed successfully.`
+                : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
@@ -86376,4 +86901,40 @@ export async function updateConnectorToolPermissionPolicies(
       }
     }),
   );
+}
+
+/** Resolve only the selected immutable customer model connection; no deployment fallback. */
+export async function loadDirectModelProviderConnection(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  modelId: string,
+) {
+  if (!isDirectModelId(modelId)) return null;
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (candidate) => directModelConnectionSpec(candidate)?.modelId === modelId,
+  );
+  if (!metadata) throw new Error("OpenAI or Azure OpenAI connection is no longer available");
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: metadata.providerDomain,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    directModelConnectionSpec(connection)?.modelId !== modelId ||
+    typeof connection.credential.apiKey !== "string" ||
+    !connection.credential.apiKey.trim()
+  ) {
+    throw new Error("OpenAI or Azure OpenAI connection changed; reconnect and select its model");
+  }
+  await assertModelConnectionAllowsTurn(db, {
+    workspaceId,
+    subjectId: "worker:model-access",
+    modelId,
+    workspaceProviderConnectionId: connection.id,
+  });
+  return { ...metadata, apiKey: connection.credential.apiKey };
 }

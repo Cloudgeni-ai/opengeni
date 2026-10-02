@@ -8,13 +8,82 @@ import {
   type ModelResponse,
   type ResponseStreamEvent,
 } from "@openai/agents";
-import type { ResolvedModelProvider } from "@opengeni/config";
+import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
 
 export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
+}
+
+/** Closed provider rejections carry authored copy, never arbitrary response text. */
+export class AnthropicProviderRejection extends Error {
+  readonly name = "AnthropicProviderRejection";
+  constructor(
+    readonly code:
+      | "anthropic_model_access_suspended"
+      | "anthropic_permission_denied"
+      | "content_policy_violation",
+    readonly status: number,
+    readonly request_id?: string,
+    readonly suspendedUntil?: string,
+    readonly headers: Record<string, string> = {},
+  ) {
+    super(
+      code === "anthropic_model_access_suspended"
+        ? suspendedUntil
+          ? `Claude suspended access to this model for the connected account until ${suspendedUntil.replace("T", " ").replace(/(?:\.000)?Z$/, " UTC")}. Try again after that time.`
+          : "Claude suspended access to this model for the connected account. Signing in again will not lift this restriction."
+        : code === "content_policy_violation"
+          ? "Claude blocked this request through its safety systems. Automatic retries stopped."
+          : "Claude denied this request (HTTP 403). Check the connected account's permissions.",
+    );
+  }
+}
+
+function suspensionDeadline(error: Json): string | undefined {
+  if (typeof error.message !== "string") return undefined;
+  const raw =
+    /^model: "[A-Za-z0-9._:/-]{1,128}" is suspended for this organization until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/.exec(
+      error.message,
+    )?.[1];
+  if (!raw) return undefined;
+  const date = new Date(raw);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  const normalized = date.toISOString();
+  return normalized.replace(/\.000Z$/, "Z") === raw.replace(/\.000Z$/, "Z")
+    ? normalized
+    : undefined;
+}
+
+function providerRejection(
+  status: number,
+  detail: unknown,
+  responseHeaders: Headers,
+): AnthropicProviderRejection | undefined {
+  if (status !== 403) return undefined;
+  const requestId = responseHeaders.get("request-id") ?? undefined;
+  const headers = responseHeaders.has("retry-after")
+    ? { "retry-after": responseHeaders.get("retry-after")! }
+    : {};
+  const error =
+    detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Json) : {};
+  if (error.type === "permission_error" && error.details?.error_code === "model_access_suspended")
+    return new AnthropicProviderRejection(
+      "anthropic_model_access_suspended",
+      status,
+      requestId,
+      suspensionDeadline(error),
+      headers,
+    );
+  return new AnthropicProviderRejection(
+    "anthropic_permission_denied",
+    status,
+    requestId,
+    undefined,
+    headers,
+  );
 }
 
 function object(value: unknown): Json {
@@ -235,7 +304,7 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
-  provider: Pick<ResolvedModelProvider, "anthropic">,
+  provider: Pick<ResolvedModelProvider, "anthropic"> & Partial<Pick<ResolvedModelProvider, "kind">>,
   stream: boolean,
 ): Json {
   if (request.previousResponseId || request.conversationId)
@@ -245,6 +314,13 @@ export function buildAnthropicRequest(
   if (request.prompt)
     throw new AnthropicProtocolError("OpenAI prompt templates cannot be used with Claude");
   const settings = request.modelSettings;
+  const profile = claudeNativeModelProfile(model);
+  const managed =
+    provider.kind === "anthropic-workspace" ||
+    provider.kind === "anthropic-organization" ||
+    provider.kind === "claude-subscription-workspace" ||
+    provider.kind === "claude-subscription-organization";
+  const outputLimit = profile?.maxOutputTokens ?? (managed ? 32_000 : undefined);
   const names = toolNames(request);
   const forcedName = (name: string): string => {
     const matches = [...names].filter(([, identity]) => identity.name === name);
@@ -308,7 +384,13 @@ export function buildAnthropicRequest(
   }
   const body: Json = {
     model,
-    max_tokens: settings.maxTokens ?? provider.anthropic?.maxOutputTokens ?? 32000,
+    max_tokens: Math.min(
+      settings.maxTokens ??
+        provider.anthropic?.maxOutputTokens ??
+        profile?.maxOutputTokens ??
+        32000,
+      outputLimit ?? Infinity,
+    ),
     messages,
     stream,
   };
@@ -326,13 +408,20 @@ export function buildAnthropicRequest(
       ...(body.tool_choice ?? { type: "auto" }),
       disable_parallel_tool_use: true,
     };
-  const effort = settings.reasoning?.effort;
+  const requestedEffort = settings.reasoning?.effort;
+  // Preserve actual native levels; do not silently turn Extra into High.
+  const effort = requestedEffort === "minimal" ? "low" : requestedEffort;
+  const supportsThinking = profile ? profile.efforts.length > 0 : !managed;
   // Anthropic forbids forced tool selection together with thinking.
   const forcedTool = body.tool_choice?.type === "any" || body.tool_choice?.type === "tool";
-  if (effort && effort !== "none" && !forcedTool) {
+  if (supportsThinking && effort && effort !== "none" && !forcedTool) {
+    if (profile && !profile.efforts.includes(effort))
+      throw new AnthropicProtocolError(
+        "The selected Claude model does not support this reasoning effort",
+      );
     body.thinking = { type: "adaptive" };
     body.output_config = {
-      effort: effort === "minimal" ? "low" : effort === "xhigh" ? "high" : effort,
+      effort,
     };
   } else if (settings.temperature !== undefined) body.temperature = settings.temperature;
   if (settings.topP !== undefined && !body.thinking) body.top_p = settings.topP;
@@ -375,11 +464,11 @@ export function anthropicResponse(
   requestId?: string,
   names = new Map<string, { name: string; namespace?: string }>(),
 ): ModelResponse {
-  if (
-    !["end_turn", "tool_use", "stop_sequence", "max_tokens", "refusal"].includes(
-      message.stop_reason,
-    )
-  )
+  // A refused response can be HTTP 200 with no content blocks. It must not
+  // become an empty successful response or admit a tool call from partial output.
+  if (message.stop_reason === "refusal")
+    throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
+  if (!["end_turn", "tool_use", "stop_sequence", "max_tokens"].includes(message.stop_reason))
     throw new AnthropicProtocolError(`Claude response did not finish: ${message.stop_reason}`);
   text(message.id, "message ID");
   if (!Array.isArray(message.content))
@@ -461,6 +550,7 @@ export class AnthropicMessagesModel implements Model {
   ) {}
 
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
+    request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
     const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
@@ -470,6 +560,11 @@ export class AnthropicMessagesModel implements Model {
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
+    if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
+      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+      betas.add("context-1m-2025-08-07");
+      headers.set("anthropic-beta", [...betas].join(","));
+    }
     if (body.messages.some((message: Message) => message.role === "system")) {
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("mid-conversation-system-2026-04-07");
@@ -512,6 +607,10 @@ export class AnthropicMessagesModel implements Model {
       body: JSON.stringify(body),
       ...(request.signal ? { signal: request.signal } : {}),
     });
+    if (request.signal?.aborted) {
+      void response.body?.cancel().catch(() => undefined);
+      request.signal.throwIfAborted();
+    }
     if (!response.ok) {
       const detail = await readErrorDetail(
         response.body,
@@ -521,6 +620,14 @@ export class AnthropicMessagesModel implements Model {
       const contextExceeded =
         response.status === 400 &&
         /prompt is too long|context_length_exceeded|exceeds.*context window/i.test(detail);
+      let providerError: unknown;
+      try {
+        providerError = JSON.parse(detail).error;
+      } catch {
+        /* Diagnostics can be truncated. */
+      }
+      const rejection = providerRejection(response.status, providerError, response.headers);
+      if (rejection) throw rejection;
       // Classify the bounded provider detail without leaking echoed prompts or credentials.
       const message = contextExceeded
         ? "Claude context window exceeded"
@@ -558,6 +665,7 @@ export class AnthropicMessagesModel implements Model {
     for await (const event of anthropicSse(
       response.body,
       this.provider.anthropic?.streamIdleTimeoutMs ?? 600000,
+      request.signal,
     )) {
       request.signal?.throwIfAborted();
       if (event.type === "error") {
@@ -574,6 +682,8 @@ export class AnthropicMessagesModel implements Model {
           overloaded_error: 529,
         };
         const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
+        const rejection = providerRejection(status, event.error, response.headers);
+        if (rejection) throw rejection;
         throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
           status,
           code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
@@ -641,6 +751,12 @@ export class AnthropicMessagesModel implements Model {
           if (!message) throw new AnthropicProtocolError("Claude message_delta without a message");
           Object.assign(message, event.delta);
           message.usage = { ...message.usage, ...event.usage };
+          if (message.stop_reason === "refusal")
+            throw new AnthropicProviderRejection(
+              "content_policy_violation",
+              200,
+              response.headers.get("request-id") ?? undefined,
+            );
           finalDelta = true;
           break;
         case "message_stop": {
@@ -670,23 +786,39 @@ export class AnthropicMessagesModel implements Model {
 export async function* anthropicSse(
   body: ReadableStream<Uint8Array>,
   idleTimeoutMs = 600000,
+  signal?: AbortSignal,
 ): AsyncGenerator<Json> {
+  if (signal?.aborted) void body.cancel().catch(() => undefined);
+  signal?.throwIfAborted();
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let data: string[] = [];
   try {
     while (true) {
+      signal?.throwIfAborted();
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        if (signal) {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        }
+      });
       const chunk = await Promise.race([
         reader.read(),
+        aborted,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new AnthropicProtocolError("Claude stream timed out waiting for data")),
             idleTimeoutMs,
           );
         }),
-      ]).finally(() => clearTimeout(timer));
+      ]).finally(() => {
+        clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      });
       buffer += decoder.decode(chunk.value, { stream: !chunk.done });
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
@@ -700,7 +832,8 @@ export async function* anthropicSse(
       if (chunk.done) break;
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    // A terminal rejection must not wait on untrusted transport cleanup.
+    void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

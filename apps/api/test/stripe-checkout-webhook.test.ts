@@ -107,3 +107,26 @@ describe("Stripe checkout credit decision", () => {
     );
   });
 });
+
+test("a completed full-discount checkout grants the package face value", () => {
+  const session = {
+    ...openGeniCheckoutSession({ metadata: createdCheckoutMetadata(), paymentStatus: "paid" }),
+    payment_status: "no_payment_required",
+    amount_total: 0,
+    total_details: { amount_discount: 2500, amount_shipping: 0, amount_tax: 0 },
+  };
+  const granted = decide(session);
+  expect(granted.action).toBe("grant");
+  expect(granted.action === "grant" && granted.credit.amountMicros).toBe(25_000_000);
+  expect(decide({ ...session, status: "open" })).toEqual({
+    action: "ignore",
+    reason: "payment_not_paid",
+  });
+  expect(decide({ ...session, total_details: { amount_discount: 0 } })).toEqual({
+    action: "ignore",
+    reason: "payment_not_paid",
+  });
+  expect(() => decide({ ...session, amount_subtotal: 500 })).toThrow(
+    "invalid credit package totals",
+  );
+});

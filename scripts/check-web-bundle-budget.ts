@@ -482,13 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
-    // Post-signup onboarding (OPE-635) stays in its lazy panel chunk. Reusing
-    // the management primitives there (Disclosure, CopyField, ErrorMessage)
-    // only re-partitions entry-aware shared chunks: the direct-session module
-    // set is unchanged but for section-variant out and one lucide icon in.
-    // Bun 1.4 macOS/arm64: main 45bb903b5 measures 2,585,386 raw, this change
-    // 2,588,793. Keep the established 1.5 KiB headroom; every other cap stays.
-    wholeKibEnvelope(2_588_793, 1.5 * kib),
+    // Custom MCP OAuth endpoint discovery and isolated popup completion:
+    // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
+    // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_585_890, 1.5 * kib),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the

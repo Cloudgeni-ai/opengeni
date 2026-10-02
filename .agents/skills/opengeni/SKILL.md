@@ -58,7 +58,7 @@ Then open the smallest source files that answer the question:
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
@@ -134,6 +134,7 @@ Keep these boundaries explicit:
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
+- Customer OpenAI/Azure model keys use encrypted shared workspace Connections, with model identity bound to the exact connection and version. Discover the contract in `packages/contracts/src/direct-model-provider.ts` and execution loader in `packages/db/src/index.ts`; never fall back to deployment keys. See `docs/model-providers.md`.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
 

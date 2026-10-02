@@ -57,9 +57,9 @@ export function reserveBrowserConnectNavigation(browser: ConnectBrowserWindow): 
         popup.location.replace(url);
         return {
           close,
-          get closed() {
-            return popup.closed;
-          },
+          // Browser COOP can sever this WindowProxy and report closed while
+          // the provider window is still open. Keep polling durable completion;
+          // the host's Stop control and bounded timeout end observation.
         };
       },
       redirect(url) {
@@ -92,9 +92,8 @@ export function createBrowserConnectNavigation(browser: ConnectBrowserWindow): C
       }
       return {
         close: () => closeIsolatedPopup(popup),
-        get closed() {
-          return popup.closed;
-        },
+        // WindowProxy.closed is not a reliable user-cancellation signal after
+        // a provider moves the popup into a different browsing context group.
       };
     },
     redirect(url) {
