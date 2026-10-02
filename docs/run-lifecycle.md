@@ -2393,6 +2393,14 @@ stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+Session-authorized background-command GETs project stored Connected Machine
+`reconciliation` diagnostics: the last bounded outcome, attempt count, due/claim
+timestamps, and checkpointed terminal proof. Offline/error observations also
+project `observationStatus: unavailable`. These reads neither call the provider
+nor acknowledge output or model notifications. A proof can precede durable
+command settlement; `lost` may mean tracking ended, not physical process exit.
+The diagnostics expose no native final-ACK receipt or original routing locator.
+
 ### Modal retained-command observation
 
 A resumed Modal SDK session restores the sandbox but not adapter-local numeric

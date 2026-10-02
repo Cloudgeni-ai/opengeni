@@ -19660,6 +19660,7 @@
         "$.id": "string!",
         "$.observationStatus": "const?=[\"\\\"unavailable\\\"\"]",
         "$.provider": "ref(SessionBackgroundCommandProvider)!",
+        "$.reconciliation": "ref(SessionBackgroundCommandReconciliation)?",
         "$.sessionId": "string!",
         "$.settledAt": "string! null",
         "$.settlementReason": "string! null",
@@ -19696,6 +19697,19 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"managed\\\"\"]"
+      }
+    },
+    "SessionBackgroundCommandReconciliation": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attempts": "integer!",
+        "$.claimedAt": "string! null",
+        "$.dueAt": "string!",
+        "$.lastOutcome": "string! null",
+        "$.terminalProof": "unknown! null"
       }
     },
     "SessionBackgroundCommandState": {
@@ -25584,6 +25598,7 @@
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
+      "SessionBackgroundCommandReconciliation": "type",
       "SessionCapabilities": "type",
       "SessionCodexAccountsResponse": "type",
       "SessionCommandReceipt": "type",

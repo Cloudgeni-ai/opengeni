@@ -1026,6 +1026,7 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionBackgroundCommand,
+  SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,

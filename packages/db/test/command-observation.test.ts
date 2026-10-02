@@ -12,6 +12,8 @@ import {
 import {
   observeSessionBackgroundCommandCompletion as observe,
   readSessionBackgroundCommandOutput as read,
+  getSessionBackgroundCommand,
+  backgroundCommandActivityForSessions,
 } from "../src/session-background-commands";
 
 let shared: SharedTestDatabase;
@@ -228,6 +230,20 @@ test("managed provider uses the same running and terminal loss read contract", a
   await shared.admin`insert into sandbox_retained_processes ${shared.admin({ id: commandId, account_id: accountId, workspace_id: workspaceId, session_id: sessionId, lease_id: leaseId, sandbox_group_id: sandboxGroupId, parent_admission_id: admissionId, holder_id: `process:${commandId}`, owner_actor_kind: "direct", owner_actor_id: actorId, lease_epoch: 0, provider_backend: "local", provider_instance_id: "test-instance", route_kind: "active", route_epoch: 0, provider_session_id: 1 })}`;
   await shared.admin`insert into session_background_commands ${shared.admin({ id: commandId, account_id: accountId, workspace_id: workspaceId, session_id: sessionId, provider: "managed", state: "running", retained_process_id: commandId })}`;
   const identity = { accountId, workspaceId, sessionId, commandId };
+  await shared.admin`update session_background_commands set last_reconcile_outcome='provider_offline' where id=${commandId}`;
+  const available = await getSessionBackgroundCommand(client.db, identity);
+  expect(available?.reconciliation).toBeUndefined();
+  expect(available?.observationStatus).toBeUndefined();
+  await shared.admin`update sandbox_retained_processes set last_reconcile_outcome='process_observation_unavailable' where id=${commandId}`;
+  const unavailable = await getSessionBackgroundCommand(client.db, identity);
+  expect(unavailable?.reconciliation).toBeUndefined();
+  expect(unavailable?.observationStatus).toBe("unavailable");
+  const activity = await backgroundCommandActivityForSessions(client.db, {
+    accountId,
+    workspaceId,
+    sessionIds: [sessionId],
+  });
+  expect(activity.get(sessionId)?.unavailableCount).toBe(1);
   expect((await read(client.db, identity)).terminal).toBe(false);
   await shared.admin`update session_background_commands set state=${"lost"},settlement_reason=${"process_gone"},settled_at=now() where id=${commandId}`;
   const result = await read(client.db, identity);
