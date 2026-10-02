@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0585_quiescence_command_containment.sql",
+          (migration) => migration.path === "0586_quiescence_command_containment.sql",
         )
-          ? "0585_quiescence_command_containment.sql"
+          ? "0586_quiescence_command_containment.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0584_agent_instruction_size_parity.sql",
               )
@@ -789,7 +789,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0583_session_tenancy_operator_permission.sql",
     );
     const quiescenceCommandContainment = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0585_quiescence_command_containment.sql",
+      (migration) => migration.path === "0586_quiescence_command_containment.sql",
     );
     const agentInstructionSizeParity = completeSourceContract.migrations.some(
       (migration) => migration.path === "0584_agent_instruction_size_parity.sql",
@@ -1622,7 +1622,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0584_agent_instruction_size_parity.sql" }
         : {}),
       ...(quiescenceCommandContainment
-        ? { latestMigration: "0585_quiescence_command_containment.sql" }
+        ? { latestMigration: "0586_quiescence_command_containment.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -1699,7 +1699,7 @@ describe("release schema contract", () => {
             "0582_scheduled_setup_policy_identity.sql",
             "0583_session_tenancy_operator_permission.sql",
             "0584_agent_instruction_size_parity.sql",
-            "0585_quiescence_command_containment.sql",
+            "0586_quiescence_command_containment.sql",
           ].includes(migration.path),
       ),
     };
@@ -3011,9 +3011,9 @@ describe("release schema contract", () => {
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
       unfilteredSourceContract.migrations.some(
-        (migration) => migration.path === "0585_quiescence_command_containment.sql",
+        (migration) => migration.path === "0586_quiescence_command_containment.sql",
       )
-        ? "0585_quiescence_command_containment.sql"
+        ? "0586_quiescence_command_containment.sql"
         : unfilteredSourceContract.migrations.some(
               (migration) => migration.path === "0584_agent_instruction_size_parity.sql",
             )
@@ -3388,7 +3388,7 @@ describe("release schema contract", () => {
       "0582_scheduled_setup_policy_identity.sql",
       "0583_session_tenancy_operator_permission.sql",
       "0584_agent_instruction_size_parity.sql",
-      "0585_quiescence_command_containment.sql",
+      "0586_quiescence_command_containment.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3965,7 +3965,7 @@ describe("release schema contract", () => {
       "0582_scheduled_setup_policy_identity.sql",
       "0583_session_tenancy_operator_permission.sql",
       "0584_agent_instruction_size_parity.sql",
-      "0585_quiescence_command_containment.sql",
+      "0586_quiescence_command_containment.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
