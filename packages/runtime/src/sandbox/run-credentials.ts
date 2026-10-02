@@ -637,25 +637,30 @@ export async function materializeRunCredentials(
   await runCredentialCommand(
     session,
     [
+      // Bind validated identifiers once rather than repeatedly expanding long
+      // paths through cancellation and SDK run-as shell quoting.
+      `_opengeni_credential_root=${shellQuote(root)}`,
+      `_opengeni_credential_version_name=${shellQuote(versionName)}`,
+      `_opengeni_credential_prefix=${shellQuote(prefix)}`,
       ...pointerLockAcquireCommands(root),
-      `previous=$(cat -- ${shellQuote(`${root}/current`)} 2>/dev/null || :)`,
-      `mv -- ${shellQuote(stage)} ${shellQuote(version)}`,
-      `printf '%s\\n' ${shellQuote(versionName)} > ${shellQuote(`${root}/.next`)}`,
-      `mv -f -- ${shellQuote(`${root}/.next`)} ${shellQuote(`${root}/current`)}`,
+      'previous=$(cat -- "$_opengeni_credential_root/current" 2>/dev/null || :)',
+      'mv -- "$_opengeni_credential_root/versions/.stage-$_opengeni_credential_version_name" "$_opengeni_credential_root/versions/$_opengeni_credential_version_name"',
+      'printf \'%s\\n\' "$_opengeni_credential_version_name" > "$_opengeni_credential_root/.next"',
+      'mv -f -- "$_opengeni_credential_root/.next" "$_opengeni_credential_root/current"',
       ...(options.prunePreviousGenerations
         ? [
-            `find ${shellQuote(`${root}/versions`)} -mindepth 1 -maxdepth 1 ! -name ${shellQuote(versionName)} -exec rm -rf -- {} +`,
+            'find "$_opengeni_credential_root/versions" -mindepth 1 -maxdepth 1 ! -name "$_opengeni_credential_version_name" -exec rm -rf -- {} +',
           ]
         : options.pruneOtherAttempts
           ? [
-              `find ${shellQuote(`${root}/versions`)} -mindepth 1 -maxdepth 1 ! -name ${shellQuote(`${attemptId}-${options.executionGeneration}-*`)} -exec rm -rf -- {} +`,
+              'find "$_opengeni_credential_root/versions" -mindepth 1 -maxdepth 1 ! -name "${_opengeni_credential_prefix}*" -exec rm -rf -- {} +',
             ]
           : options.pruneSupersededGenerations
             ? [
-                `for candidate in ${shellQuote(`${root}/versions`)}/${prefix}*; do`,
+                'for candidate in "$_opengeni_credential_root/versions/$_opengeni_credential_prefix"*; do',
                 `  [ -e "$candidate" ] || continue`,
                 `  name=\${candidate##*/}`,
-                `  [ "$name" = ${shellQuote(versionName)} ] || [ "$name" = "$previous" ] || rm -rf -- "$candidate"`,
+                '  [ "$name" = "$_opengeni_credential_version_name" ] || [ "$name" = "$previous" ] || rm -rf -- "$candidate"',
                 "done",
               ]
             : []),

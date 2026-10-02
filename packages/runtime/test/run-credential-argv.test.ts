@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -24,6 +24,25 @@ const distributions = [
       .ModalSandboxSession as typeof ModalSandboxSession,
   },
 ];
+const maximumMetadata = {
+  sessionId: "s".repeat(128),
+  attemptId: "a".repeat(128),
+  generation: Number.MAX_SAFE_INTEGER,
+  filePath: `${"'".repeat(120)}/${"'".repeat(117)}\n\n`,
+};
+const pruningModes = [
+  { name: "prune other attempts", options: { pruneOtherAttempts: true } },
+  { name: "prune previous generations", options: { prunePreviousGenerations: true } },
+  { name: "prune superseded generations", options: { pruneSupersededGenerations: true } },
+  {
+    name: "pruning precedence",
+    options: {
+      pruneOtherAttempts: true,
+      prunePreviousGenerations: true,
+      pruneSupersededGenerations: true,
+    },
+  },
+];
 
 for (const distribution of distributions) {
   for (const metadata of [
@@ -33,14 +52,14 @@ for (const distribution of distributions) {
       attemptId: crypto.randomUUID(),
       generation: 3,
       filePath: "fixture/config",
+      pruning: {},
     },
     {
       name: "maximum quote-heavy paths and IDs",
-      sessionId: "s".repeat(128),
-      attemptId: "a".repeat(128),
-      generation: Number.MAX_SAFE_INTEGER,
-      filePath: `${"'".repeat(120)}/${"'".repeat(117)}\n\n`,
+      ...maximumMetadata,
+      pruning: {},
     },
+    ...pruningModes.map(({ name, options }) => ({ name, ...maximumMetadata, pruning: options })),
   ]) {
     test.skipIf(process.platform !== "linux" || !process.getuid)(
       `${distribution.name} large credential transfers preserve bytes below wrapped Modal argv limits (${metadata.name})`,
@@ -49,6 +68,10 @@ for (const distribution of distributions) {
         const sessionId = metadata.sessionId;
         const credentialRoot = runCredentialRoot(sessionId);
         const localCredentialRoot = join(root, "credentials");
+        const fenceDirectory = "/tmp/opengeni-turn-shell";
+        const previousName = `${metadata.attemptId}-${metadata.generation}-${crypto.randomUUID()}`;
+        const olderName = `${metadata.attemptId}-${metadata.generation}-${crypto.randomUUID()}`;
+        const otherName = `other-attempt-1-${crypto.randomUUID()}`;
         const blocked = new Error("Synthetic fixture forbids provider access");
         let lookups = 0;
         const modal = {
@@ -107,7 +130,11 @@ for (const distribution of distributions) {
           // the local sentinel lookup; no router URL, credentials or RPC exist.
           await expect(exec(argv, options)).rejects.toBe(blocked);
           const child = Bun.spawn(
-            argv.map((arg) => arg.replaceAll(credentialRoot, localCredentialRoot)),
+            argv.map((arg) =>
+              arg
+                .replaceAll(credentialRoot, localCredentialRoot)
+                .replaceAll(fenceDirectory, join(root, "fences")),
+            ),
             {
               cwd: root,
               env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
@@ -125,6 +152,13 @@ for (const distribution of distributions) {
           // The actual validator rejects one oversized request before lookup.
           await expect(exec(["/bin/sh", "-c", "x".repeat(70_610)])).rejects.toThrow("ARG_MAX");
           expect(lookups).toBe(0);
+          for (const name of [previousName, olderName, otherName]) {
+            await mkdir(join(localCredentialRoot, "versions", name), {
+              recursive: true,
+              mode: 0o700,
+            });
+          }
+          await Bun.write(join(localCredentialRoot, "current"), `${previousName}\n`);
           await materializeRunCredentials(
             session,
             normalizeRunCredentialsResolution(
@@ -143,11 +177,12 @@ for (const distribution of distributions) {
               sessionId,
               attemptId: metadata.attemptId,
               executionGeneration: metadata.generation,
+              ...metadata.pruning,
               commandRunner: async (_session, args) => {
                 commands++;
                 return await session.execCommand({
                   ...args,
-                  cmd: cancellableShellCommand(args.cmd, join(root, crypto.randomUUID())),
+                  cmd: cancellableShellCommand(args.cmd, join(fenceDirectory, crypto.randomUUID())),
                   runAs: String(process.getuid!()),
                 });
               },
@@ -156,6 +191,21 @@ for (const distribution of distributions) {
           expect(lookups).toBe(commands);
           expect(maxArgvBytes).toBeLessThan(65_536);
           const active = (await readFile(join(localCredentialRoot, "current"), "utf8")).trim();
+          const pruning = metadata.pruning as {
+            prunePreviousGenerations?: boolean;
+            pruneOtherAttempts?: boolean;
+            pruneSupersededGenerations?: boolean;
+          };
+          const retained = pruning.prunePreviousGenerations
+            ? [active]
+            : pruning.pruneOtherAttempts
+              ? [active, previousName, olderName]
+              : pruning.pruneSupersededGenerations
+                ? [active, previousName, otherName]
+                : [active, previousName, olderName, otherName];
+          expect((await readdir(join(localCredentialRoot, "versions"))).sort()).toEqual(
+            retained.sort(),
+          );
           expect((await stat(localCredentialRoot)).mode & 0o777).toBe(0o700);
           expect(
             (await stat(join(localCredentialRoot, "versions", active, "env"))).mode & 0o777,
