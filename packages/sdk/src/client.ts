@@ -8467,6 +8467,11 @@ export class OpenGeniClient {
     });
   }
 
+  /**
+   * @deprecated The numeric-only cache metric contract sunsets January 1, 2027.
+   * Handle null cache percentages as unknown; never coerce them to zero.
+   * The route remains available with the next major's nullable metrics.
+   */
   async getWorkspaceInsights(
     workspaceId: string,
     options: {

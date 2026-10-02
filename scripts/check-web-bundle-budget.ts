@@ -482,6 +482,14 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // #2768 complete-usage contracts, Bun 1.4 Linux/x64 at 5d492ac1c:
+    // 2,587,928 raw / 730,065 gzip across 39 direct-session files. The prior
+    // branch already measured 2,587,622 raw, over the 2,585,600 envelope.
+    // Insights remains route-lazy; only shared package contracts grew. Bind
+    // the exact raw graph plus the documented 18-byte configured-URL ceiling
+    // and the existing 1-KiB headroom to its whole-KiB envelope (2,589,696).
+    // Gzip and all other caps stay fixed.
+    wholeKibEnvelope(2_587_946),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
@@ -795,6 +803,9 @@ if (!manifest[sessionRouteKey]) {
   throw new Error(`bundle manifest is missing ${sessionRouteKey}`);
 }
 const directSessionGraph = staticGraph([...entryKeys, sessionRouteKey]);
+if (directSessionGraph.has("src/routes/insights.tsx")) {
+  throw new Error("Insights must remain lazy, outside the direct-session graph");
+}
 const directSessionMetrics = await metrics(assetPaths(directSessionGraph, true));
 const directSessionTotal = total(directSessionMetrics);
 

@@ -31,7 +31,15 @@ export type RouteDeprecation = {
  * server-side half of a deprecation; the breaking change itself still needs an
  * entry in scripts/public-api-breaking-changes.json and a new major.
  */
-export const DEPRECATED_ROUTES: readonly RouteDeprecation[] = [];
+export const DEPRECATED_ROUTES: readonly RouteDeprecation[] = [
+  {
+    method: "GET",
+    path: "/v1/workspaces/:workspaceId/insights",
+    deprecatedAt: "2026-10-02T00:00:00Z",
+    sunset: "2027-01-01T00:00:00Z",
+    link: "https://github.com/Cloudgeni-ai/opengeni/blob/6c042057087ce61b784c97c3a189931d58d5f194/.changeset/complete-private-usage-totals.md",
+  },
+];
 
 const MINIMUM_NOTICE_MS = 90 * 24 * 60 * 60 * 1000;
 

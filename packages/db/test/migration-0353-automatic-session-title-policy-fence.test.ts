@@ -1213,6 +1213,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       expect(modelFactCapabilityRoutines).toEqual([]);
       expect(evaluateRuntimeDatabasePosture(customPosture, currentBinaryOptions)).toEqual([
         ...expectedPost0353EvaluatorGaps,
+        "Insights complete usage amount projection is missing or unsafe",
+        "Insights amount fact projection is missing or unsafe",
         "organization model usage aggregate is missing or unsafe",
         "Insights scoped fact projection is missing or unsafe",
       ]);

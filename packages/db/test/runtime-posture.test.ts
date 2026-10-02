@@ -582,6 +582,14 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   const modelFactCapabilities = [
     {
+      name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+      violation: "Insights complete usage amount projection is missing or unsafe",
+    },
+    {
+      name: "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+      violation: "Insights amount fact projection is missing or unsafe",
+    },
+    {
       name: "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
       violation: "organization model usage aggregate is missing or unsafe",
     },
@@ -606,7 +614,7 @@ describe("runtime database posture evaluator", () => {
     return posture;
   }
 
-  test("requires both current model-fact capabilities without changing the frozen old contract", () => {
+  test("requires all current model-fact capabilities without changing the frozen old contract", () => {
     const posture = modelFactPosture();
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
     for (const { name, violation } of modelFactCapabilities) {
