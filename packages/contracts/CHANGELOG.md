@@ -1,5 +1,26 @@
 # @opengeni/contracts
 
+## 5.7.0
+
+### Minor Changes
+
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- 697263e: The web client beacon (`POST /v1/client-errors`) now also admits closed, content-free operational signals discriminated by `signal`: key requests that failed before any HTTP response (`opengeni_client_request_failures_total{action,reason}`), live-stream health (`opengeni_client_stream_events_total{stream,event}`), and web vitals (`opengeni_client_web_vital{metric,page}` histogram). Error reports are unchanged.
+- 31e3771: Expose stored Connected Machine command reconciliation diagnostics and unavailable observations through existing session-authorized reads, preserving provider execution and acknowledgement behavior.
+- 479ec20: Add the selectable opengeni-schedules bundled Skill for schedule creation. The
+  Schedules chat shortcut keeps setup guidance in the Skill and sends only the
+  user's scheduling request and time zone.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+
+### Patch Changes
+
+- 12ef019: Use the human workspace instruction size limit for agent writes too, so localized edits can preserve long existing policies. Keep exact-anchor, baseline, authorization and review safeguards unchanged.
+- 45e1b4f: Advertise background window input separately from background semantic controls. The CUA pilot viewer accepts targeted clicks and typing without offering unsupported foreground focus; existing native backends retain their focus guard.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- d2fe11d: Add capability-gated media instructions and bounded discovery hints so agents can find deferred image tools after an unmatched literal-prefix lookup. Preserve tool-family authorization, approval checks, and deferred schema visibility.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- 3a921bf: Allow unused client configuration and capability validators to be removed from browser bundles.
+
 ## 5.6.0
 
 ### Minor Changes

@@ -1,5 +1,31 @@
 # @opengeni/codemode
 
+## 0.7.0
+
+### Minor Changes
+
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+
+### Patch Changes
+
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/sdk@7.7.0
+  - @opengeni/tool-gateway@0.1.19
+
 ## 0.6.8
 
 ### Patch Changes

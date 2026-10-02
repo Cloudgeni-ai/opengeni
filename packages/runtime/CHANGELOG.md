@@ -1,5 +1,59 @@
 # @opengeni/runtime
 
+## 4.7.0
+
+### Minor Changes
+
+- 479ec20: Add the selectable opengeni-schedules bundled Skill for schedule creation. The
+  Schedules chat shortcut keeps setup guidance in the Skill and sends only the
+  user's scheduling request and time zone.
+
+### Patch Changes
+
+- 1ac93e3: Admit richer nested MCP tool schemas within a 512 KiB per-definition bound, and allow one such definition plus its disclosure envelope through tool search. Server, aggregate catalog, HTTP response, and tool-result limits remain unchanged.
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- b052ad3: Retain recent system-role conversation inputs during portable and Codex remote compaction, preserving accepted agent-message batches and their frozen goal context within the existing retention budgets.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- d2fe11d: Add capability-gated media instructions and bounded discovery hints so agents can find deferred image tools after an unmatched literal-prefix lookup. Preserve tool-family authorization, approval checks, and deferred schema visibility.
+- 7f70820: Stage large repository setup scripts in bounded chunks and pass run-as command payloads once in provider arguments to stay within Modal's command size limit. Preserve partial Modal output at quiet-stream deadlines without extending retry admission, accept identity-only first-observation receipts without advancing cursors, and reuse captured complete terminal observations after provider handles expire. Commands are never replayed.
+- fb55322: Retain original Modal command observation and cancellation ownership across transport failures without replaying Start or reporting false quiescence.
+- 82b6358: Continue fixed Modal capability and file-visibility probes through transient transport failures by observing their original invocation. Report uncertain retained stdin acknowledgements without encouraging another input write.
+- f146f78: Preserve genuine Modal command observation errors through the SDK adapter and prevent incomplete stdout or stderr from being reported as successful output.
+- 1f3e11a: Separate read-only native Modal Start preparation from single-use transport dispatch while preserving existing command-start compatibility and outcome-unknown handling.
+- 91cc03e: Correct native Claude model effort levels and defaults, apply per-model context
+  and output limits, and preserve terminal provider rejections and prompt stream
+  cancellation.
+- 328eaaa: Retain narrow private file staging and cleanup on the exact resolved provider during routed workspace imports, including providers that transfer bytes through stdin instead of a file-writing API.
+- 404854d: Let turn cleanup consume exact retained-command terminal proof committed by another worker, including when the original control transport hangs. Drain the worker gracefully when finalization stalls so concurrent turns checkpoint and resume without spending their unexpected-worker-death recovery allowance. Keep standalone host exit as a final backstop; bare activity hosts supply the worker drain edge and embedded services own their termination policy.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+- 103faae: Reuse subscription account lifecycle and table definitions while retaining existing SuperGrok behavior. Bind Claude response observations to the immutable credential receipt prepared with each physical request.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [c60d38a]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [91cc03e]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/sdk@7.7.0
+  - @opengeni/codemode@0.7.0
+  - @opengeni/config@3.3.0
+  - @opengeni/capabilities@0.3.6
+  - @opengeni/observability@0.8.38
+  - @opengeni/codex@0.2.32
+  - @opengeni/tool-gateway@0.1.19
+
 ## 4.6.0
 
 ### Minor Changes

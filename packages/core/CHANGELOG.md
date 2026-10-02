@@ -1,5 +1,65 @@
 # @opengeni/core
 
+## 5.2.0
+
+### Minor Changes
+
+- 351cd79: Resolve session-page connector availability and defaults from one current registry read instead of loading it twice. Keep workspace and subject scopes unchanged.
+
+  Reduce temporary query allocations and repeated session-path strings in the SDK without changing request values or legacy response handling.
+
+### Patch Changes
+
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- d1bb05c: Default omitted latency mode to standard for fresh agent-created sessions while preserving model and reasoning inheritance. Explicit faster modes retain model validation, and creation replay and later messages preserve accepted settings.
+- 946f6c3: Keep OAuth completion polling active when browser isolation detaches the provider window, and discover authentication for custom MCP connection setup from the live endpoint. Resolve tool-permission discovery for selectors with a single matching account, refusing ambiguous account choices.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [521ae01]
+- Updated dependencies [1ac93e3]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [b052ad3]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [c60d38a]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [7f70820]
+- Updated dependencies [fb55322]
+- Updated dependencies [7dc8eaf]
+- Updated dependencies [82b6358]
+- Updated dependencies [f146f78]
+- Updated dependencies [1f3e11a]
+- Updated dependencies [91cc03e]
+- Updated dependencies [3b7496e]
+- Updated dependencies [c755ff4]
+- Updated dependencies [e9b9730]
+- Updated dependencies [1133a8e]
+- Updated dependencies [351cd79]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [328eaaa]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [fcaf518]
+- Updated dependencies [404854d]
+- Updated dependencies [70af8bb]
+- Updated dependencies [103faae]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/db@6.6.0
+  - @opengeni/runtime@4.7.0
+  - @opengeni/config@3.3.0
+  - @opengeni/capabilities@0.3.6
+  - @opengeni/observability@0.8.38
+  - @opengeni/codex@0.2.32
+  - @opengeni/documents@0.8.41
+  - @opengeni/events@0.4.39
+  - @opengeni/storage@0.2.139
+
 ## 5.1.1
 
 ### Patch Changes
