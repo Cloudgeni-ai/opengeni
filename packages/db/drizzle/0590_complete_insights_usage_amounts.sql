@@ -204,7 +204,8 @@ BEGIN
   definition := replace(definition, $old$), grouped AS (
         SELECT$old$, $new$), payer_grouped AS (
         SELECT CASE WHEN billing_path = 'opengeni_credits' THEN 'opengeni_credits'
-          WHEN provider IN ('codex-subscription', 'supergrok-subscription') THEN 'subscription'
+          WHEN provider IN ('codex-subscription', 'supergrok-subscription',
+            'workspace-claude-subscription', 'organization-claude-subscription') THEN 'subscription'
           ELSE 'own_key' END AS payer,
           jsonb_build_object(
             'calls', sum(calls)::text, 'inputTokens', sum(input_tokens)::text,

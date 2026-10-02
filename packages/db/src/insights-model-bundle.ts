@@ -337,16 +337,21 @@ export async function readWorkspaceInsightsModelBundle(
       ${scoped ? rootSessionId : null}::uuid,
       ${scoped ? sessionId : null}::uuid
     )`;
-  // Facets and freshness are workspace-wide. Unnarrowed, the grouped pass already
-  // holds every (provider, model) and the newest recorded_at; narrowed, they need
-  // one unscoped read of the same window.
+  // Facets and freshness are visible-only workspace metadata, not complete
+  // amounts. Unnarrowed, reuse the masked current source; narrowed, use the
+  // existing visible reader without provider/model/root/session filters.
   const workspaceCurrentSource = narrowed
     ? sql`select fact.provider, fact.model, max(fact.recorded_at) as recorded_at
-        from ${factRows(input.since, input.until, false)} fact
+        from opengeni_private.visible_workspace_insights_model_fact_rows(
+          ${input.workspaceId}::uuid,
+          ${input.since.toISOString()}::timestamp with time zone,
+          ${input.until.toISOString()}::timestamp with time zone,
+          null::text, null::text, null::uuid, null::uuid
+        ) fact
         group by fact.provider, fact.model`
-    : sql`select provider, model, max(data_through) as recorded_at
-        from current_grouped
-        where by_model
+    : sql`select provider, model, max(recorded_at) as recorded_at
+        from current_visible
+        where id is not null
         group by provider, model`;
   const sums = sql`
           coalesce(sum(fact.input_tokens), 0)::bigint as input_tokens,

@@ -199,6 +199,7 @@ async function charge(
     tokens?: number | null;
     scheduledTaskId?: string | null;
     at?: string;
+    recordedAt?: string;
   },
 ) {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
@@ -211,13 +212,13 @@ async function charge(
   await shared.admin`insert into model_call_facts
     (account_id, workspace_id, session_id, turn_id, source_key, provider, provider_api, model,
      billing_path, input_tokens, output_tokens, cached_tokens, total_tokens, priced_cost_micros,
-     estimated_provider_cost_micros, pricing_source, context_contributions, scheduled_task_id, occurred_at)
+     estimated_provider_cost_micros, pricing_source, context_contributions, scheduled_task_id, occurred_at, recorded_at)
     values (${seeded.accountId}, ${seeded.workspaceId}, ${sessionId}, ${turnId}, ${source},
       ${provider}, 'responses', ${input.model ?? "ledger-model"}, ${billingPath},
       ${tokens}, 0, null, ${tokens}, ${input.credits}, ${input.estimate},
       ${input.estimate === null ? null : "configured_list_price"},
       '[{"source":"company_profile","items":1,"utf8Bytes":40,"estimatedTokens":10}]'::jsonb,
-      ${input.scheduledTaskId ?? null}, ${at})`;
+      ${input.scheduledTaskId ?? null}, ${at}, coalesce(${input.recordedAt ?? null}::timestamptz, now()))`;
   await shared.admin`insert into usage_events
     (account_id, workspace_id, session_id, event_type, quantity, unit,
      source_resource_type, source_resource_id, idempotency_key, occurred_at)
@@ -274,6 +275,112 @@ async function accountingState(seeded: Fixture) {
 
 const cost = (totals: OrganizationUsageSummary["totals"]) =>
   totals.find((total) => total.eventType === "model.cost" && total.unit === "usd_micros");
+
+test("complete amounts do not expose hidden model facets or freshness, even through narrowed reads", async () => {
+  if (!shared || !client) return;
+  const seeded = await fixture();
+  const publicRoot = await seeded.create();
+  const privateRoot = await seeded.create();
+  await seeded.makePrivate(privateRoot.id);
+  const visibleRecordedAt = "2026-09-14T04:00:00.000Z";
+  await charge(seeded, publicRoot.id, {
+    credits: 101,
+    estimate: 80,
+    model: "visible-facet-model",
+    recordedAt: visibleRecordedAt,
+  });
+  await charge(seeded, privateRoot.id, {
+    credits: 203,
+    estimate: 160,
+    provider: "private-facet-provider",
+    model: "private-facet-model",
+    recordedAt: "2099-01-01T00:00:00.000Z",
+  });
+  const unchanged = await accountingState(seeded);
+  const expected = await oracle(seeded);
+  const viewer = `user:facet-viewer-${crypto.randomUUID()}`;
+  const unscoped = (await seeded.readWorkspace(viewer)).snapshot;
+  expect(unscoped.modelCalls).toBe(Number(expected.facts.calls));
+  expect(unscoped.workspaceCreditUsd).toBe(Number(expected.ledger.amount) / 1_000_000);
+  for (const filter of [
+    {},
+    { provider: "private-facet-provider" },
+    { model: "private-facet-model" },
+    { rootSessionId: publicRoot.id },
+    { sessionId: publicRoot.id },
+  ]) {
+    const snapshot = (await seeded.readWorkspace(viewer, filter)).snapshot;
+    expect(snapshot.facets).toEqual([{ provider: "openai", model: "visible-facet-model" }]);
+    expect(snapshot.dataThrough).toBe(visibleRecordedAt);
+    if (filter.provider || filter.model) {
+      expect(snapshot.modelCalls).toBe(1);
+      expect(snapshot.creditUsd).toBe(203 / 1_000_000);
+      expect(snapshot.privateChats[0]).toMatchObject({ calls: 1, creditUsd: 203 / 1_000_000 });
+      expect(snapshot.recentCalls).toEqual([]);
+    }
+    if (filter.rootSessionId || filter.sessionId) {
+      expect(snapshot.modelCalls).toBe(1);
+      expect(snapshot.privateChats).toEqual([]);
+    }
+    expect(JSON.stringify(snapshot)).not.toContain(privateRoot.id);
+    expect(JSON.stringify(snapshot)).not.toContain("2099-01-01");
+  }
+  const owner = (await seeded.readWorkspace(seeded.subjectId)).snapshot;
+  expect(owner.facets).toHaveLength(2);
+  expect(owner.dataThrough).toBe("2099-01-01T00:00:00.000Z");
+  expect(await accountingState(seeded)).toEqual(unchanged);
+});
+
+test("both Claude subscription aliases join the uncapped subscription payer while charged credits retain priority", async () => {
+  if (!shared || !client) return;
+  const seeded = await fixture();
+  const privateRoot = await seeded.create();
+  await seeded.makePrivate(privateRoot.id);
+  for (const input of [
+    { provider: "codex-subscription", credits: 0, estimate: 23 },
+    { provider: "supergrok-subscription", credits: 0, estimate: 29 },
+    { provider: "workspace-claude-subscription", credits: 0, estimate: 31 },
+    { provider: "organization-claude-subscription", credits: 0, estimate: null },
+    { provider: "workspace-gateway", credits: 0, estimate: 37 },
+    { provider: "workspace-claude-subscription", credits: 11, estimate: 7 },
+  ])
+    await charge(seeded, privateRoot.id, input);
+  const unchanged = await accountingState(seeded);
+  const expected = await oracle(seeded);
+  const models = await seeded.readModels(`user:payer-viewer-${crypto.randomUUID()}`);
+  expect(models.payers.find((payer) => payer.payer === "opengeni_credits")).toMatchObject({
+    calls: "1",
+    creditMicros: "11",
+    estimatedProviderMicros: "7",
+    estimatedProviderKnownCalls: "1",
+  });
+  expect(models.payers.find((payer) => payer.payer === "subscription")).toMatchObject({
+    calls: "4",
+    creditMicros: "0",
+    estimatedProviderMicros: "83",
+    estimatedProviderKnownCalls: "3",
+  });
+  expect(models.payers.find((payer) => payer.payer === "own_key")).toMatchObject({
+    calls: "1",
+    creditMicros: "0",
+    estimatedProviderMicros: "37",
+    estimatedProviderKnownCalls: "1",
+  });
+  expect(models.payers.reduce((sum, payer) => sum + BigInt(payer.calls), 0n)).toBe(
+    BigInt(expected.facts.calls),
+  );
+  expect(models.payers.reduce((sum, payer) => sum + BigInt(payer.creditMicros), 0n)).toBe(
+    BigInt(expected.ledger.amount),
+  );
+  expect(
+    models.payers.reduce((sum, payer) => sum + BigInt(payer.estimatedProviderMicros), 0n),
+  ).toBe(BigInt(expected.facts.estimate));
+  expect(models.payers.reduce((sum, payer) => sum + BigInt(payer.totalTokens), 0n)).toBe(
+    BigInt(expected.facts.tokens),
+  );
+  expect(JSON.stringify(models)).not.toContain(privateRoot.id);
+  expect(await accountingState(seeded)).toEqual(unchanged);
+});
 
 test("complete org/workspace accounting reconciles to ledger/debits and separate provider facts without hidden JSON identity", async () => {
   if (!shared || !client) return;

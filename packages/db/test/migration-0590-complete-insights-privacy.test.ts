@@ -45,6 +45,45 @@ test("0590 inline private amounts add no owner-only helper to the frozen old EXE
   expect(routines.every((routine) => !routine.publicExecute)).toBe(true);
 });
 
+test("current provisioning repeatedly removes polluted PUBLIC grants on all four released amount readers", async () => {
+  if (!shared) throw new Error("PostgreSQL test database unavailable");
+  const signatures = [
+    "opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid)",
+    "opengeni_private.visible_workspace_insights_model_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)",
+    "opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[])",
+    "opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)",
+  ];
+  const role = new URL(shared.appUrl).username;
+  const roles = {
+    appRole: role,
+    appPassword: new URL(shared.appUrl).password,
+    rlsStrategy: "force" as const,
+  };
+  try {
+    for (const signature of signatures)
+      await shared.admin.unsafe(`grant execute on function ${signature} to PUBLIC`);
+    const [polluted] = await shared.admin<Array<{ readers: number }>>`
+      select count(*)::int as readers from pg_proc procedure
+      where procedure.oid = any(array(select signature::regprocedure::oid from unnest(${signatures}::text[]) signature))
+        and exists (select 1 from aclexplode(coalesce(proacl, acldefault('f', proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE')`;
+    expect(polluted?.readers).toBe(4);
+    for (let pass = 0; pass < 2; pass += 1) {
+      await provisionRoles(shared.adminUrl, roles);
+      const readers = await shared.admin<Array<{ execute: boolean; publicExecute: boolean }>>`
+        select has_function_privilege(${role}, procedure.oid, 'EXECUTE') as execute,
+          exists (select 1 from aclexplode(coalesce(proacl, acldefault('f', proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute"
+        from pg_proc procedure
+        where procedure.oid = any(array(select signature::regprocedure::oid from unnest(${signatures}::text[]) signature))`;
+      expect(readers).toHaveLength(4);
+      expect(readers.every((reader) => reader.execute && !reader.publicExecute)).toBe(true);
+    }
+  } finally {
+    await provisionRoles(shared.adminUrl, roles);
+  }
+});
+
 test("0590 scrubs polluted defaults without widening approved amount-reader grants", async () => {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   const signature =
@@ -89,6 +128,61 @@ test("0590 scrubs polluted defaults without widening approved amount-reader gran
               and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> ALL(${routine.grantees}::text[]))
               and acl.privilege_type = 'EXECUTE') as extra`;
       expect(clean).toEqual({ execute: false, ownerExecute: true, extra: "0" });
+      throw rollback;
+    });
+  } catch (error) {
+    if (error !== rollback) throw error;
+  }
+});
+
+test("0592 repairs the applied draft payer expression idempotently without changing owner, grants or security settings", async () => {
+  if (!shared) throw new Error("PostgreSQL test database unavailable");
+  const signature =
+    "opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid)";
+  const migration = await Bun.file(
+    new URL("../drizzle/0592_insights_claude_subscription_payers.sql", import.meta.url),
+  ).text();
+  const oldExpression =
+    "WHEN provider IN ('codex-subscription', 'supergrok-subscription') THEN 'subscription'";
+  const newExpression =
+    "WHEN provider IN ('codex-subscription', 'supergrok-subscription',\n" +
+    "            'workspace-claude-subscription', 'organization-claude-subscription') THEN 'subscription'";
+  const rollback = new Error("Rollback previously applied payer expression fixture");
+  try {
+    await shared.admin.begin(async (tx) => {
+      const [original] = await tx<
+        Array<{
+          definition: string;
+          owner: number;
+          acl: string | null;
+          config: string[];
+          definer: boolean;
+        }>
+      >`
+        select pg_get_functiondef(oid) as definition, proowner as owner, proacl::text as acl,
+          proconfig as config, prosecdef as definer from pg_proc where oid = ${signature}::regprocedure`;
+      if (!original) throw new Error("Organization model reader is missing");
+      expect(original.definition).toContain(newExpression);
+      await tx.unsafe(original.definition.replace(newExpression, oldExpression));
+      const [draft] = await tx<Array<{ definition: string }>>`
+        select pg_get_functiondef(${signature}::regprocedure) as definition`;
+      expect(draft!.definition).toContain(oldExpression);
+      expect(draft!.definition).not.toContain(newExpression);
+      for (let pass = 0; pass < 2; pass += 1) {
+        await tx.unsafe(migration);
+        const [repaired] = await tx<
+          Array<{
+            definition: string;
+            owner: number;
+            acl: string | null;
+            config: string[];
+            definer: boolean;
+          }>
+        >`
+          select pg_get_functiondef(oid) as definition, proowner as owner, proacl::text as acl,
+            proconfig as config, prosecdef as definer from pg_proc where oid = ${signature}::regprocedure`;
+        expect(repaired).toEqual(original);
+      }
       throw rollback;
     });
   } catch (error) {

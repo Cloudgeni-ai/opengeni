@@ -478,7 +478,7 @@ describe("Workspace Insights model bundle", () => {
       {
         subjectId: `user:${crypto.randomUUID()}`,
         input: seeded.input,
-        expectedDataThrough: "2026-08-14T12:00:01.000Z",
+        expectedDataThrough: "2026-08-12T10:30:01.000Z",
       },
     ];
     for (const testCase of cases) {
@@ -499,7 +499,6 @@ describe("Workspace Insights model bundle", () => {
           modelRows: complete.modelRows,
           priorModelRows: complete.priorModelRows,
           factBuckets: complete.factBuckets,
-          facets: complete.facets,
         }),
       );
       expect(bundled.driverGroups).toBe(legacy.rootDrivers.length);
@@ -1003,7 +1002,13 @@ describe("Workspace Insights model bundle", () => {
       0,
     );
     expect(filteredQueries).toHaveLength(1);
-    expect(filteredInvocations).toBe(3);
+    expect(filteredInvocations).toBe(2);
+    const visibleFacetInvocations = filteredQueries.reduce(
+      (total, statement) =>
+        total + (statement.query.match(/visible_workspace_insights_model_fact_rows/g)?.length ?? 0),
+      0,
+    );
+    expect(visibleFacetInvocations).toBe(1);
     expect(filteredQueries[0]?.query).toContain("::text");
   });
 
