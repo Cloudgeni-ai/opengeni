@@ -326,3 +326,45 @@ test("client/setup/public UI expectations preserve host matching, stock ownershi
   expect(primary).toContain("no extra cosmetic host CSS");
   expect(setup).toContain("not a passed UI");
 });
+
+test("exact host formatter example preserves neutral action guidance and reference without changing diagnostics", async () => {
+  const guide = await readGuide("compatibility-and-troubleshooting");
+  const { formatAssistantError } = await examples<{
+    formatAssistantError(error: unknown, defaultMessage: string): string;
+  }>(guide, ["formatAssistantError"]);
+  const error = Object.freeze({
+    message: "OpenGeni diagnostic, not display copy",
+    body: "private diagnostic body",
+    details: Object.freeze({ private: "diagnostic" }),
+    status: 0,
+    code: "network_error",
+    retryable: true,
+    outcomeUnknown: true,
+  });
+  for (const neutral of [
+    "The request could not be confirmed. Check its status before retrying. Reference: request-1.",
+    "You don’t have permission to do that. Reference: request-2.",
+    "Private conversations are unavailable. Ask an administrator to enable them.",
+    "Usage limit reached. Wait for the reset or ask an administrator for more usage.",
+    "Attachments require HTTPS. Open this page over a secure connection.",
+  ]) {
+    expect(formatAssistantError(error, neutral)).toBe(`ACME Assistant: ${neutral}`);
+  }
+  expect(error.message).toBe("OpenGeni diagnostic, not display copy");
+  expect(error.body).toBe("private diagnostic body");
+  expect(error.outcomeUnknown).toBe(true);
+  expect(error.retryable).toBe(true);
+  const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
+  for (const text of [guide, primary]) {
+    const prose = text.replaceAll(/\s+/g, " ");
+    expect(prose).toContain("formatErrorMessage(error, fallback?)");
+    expect(prose).toContain("ErrorMessageFormatter");
+    expect(prose).toContain("defaultMessage: string");
+    expect(prose).toContain("string | undefined");
+    expect(prose).toContain("empty string");
+    expect(prose).toContain("original error");
+    expect(prose).toContain("retry policy");
+    expect(prose).toContain("older installed/published package");
+  }
+  // Package implementation tests belong to the independent SDK/React source owner.
+});

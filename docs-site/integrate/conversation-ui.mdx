@@ -77,6 +77,26 @@ Dark is the default. Add `data-og-theme="light"` to an ancestor for the light th
 
 Menus and dialogs that render in a portal copy the theme from the element that opened them. The full token list is in [`tokens.css`](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/styles/tokens.css).
 
+## Error copy
+
+Check that your installed packages expose these additive APIs. For SDK-only/non-React renderers, `formatErrorMessage(error, fallback?)` from `@opengeni/sdk`, `@opengeni/sdk/core` or `@opengeni/sdk/browser` returns neutral, state-aware display copy, including a bounded support reference when available. Unknown errors use the safe fallback, not their raw message. Original typed errors and their diagnostic/policy fields remain unchanged; do not render `error.message`, response bodies or stacks.
+
+The matching React package applies neutral defaults to native error surfaces. Brand those notices through the existing provider, separately from heading/placeholder/label overrides:
+
+```tsx
+<OpenGeniProvider
+  client={client}
+  workspaceId={workspaceId}
+  formatError={(_error, defaultMessage) => `ACME Assistant: ${defaultMessage}`}
+>
+  <OpenGeniChat conversationProps={{ toolRegistry }} />
+</OpenGeniProvider>
+```
+
+`ErrorMessageFormatter` receives `(error: unknown, defaultMessage: string)` and returns `string | undefined`; an empty string or `undefined` keeps the neutral default. The callback receives the original error, so avoid logging private diagnostics in the browser. Keep the default's support reference and sign-in, permission, setup/allowance, HTTPS-upload and unknown-outcome guidance. An uncertain mutation still requires checking/reconciling status before retrying: formatting changes presentation, not authorization or retry policy.
+
+Explicit host-owned error props and custom command messages remain authored copy. This API does not rewrite user, assistant, tool, worker or Skill text; do not regex-scrub transcripts or source quotations. Source guidance alone does not prove an older installed/published package has the API or that a build passed visual qualification.
+
 ## Render your tools
 
 Tool calls to your own MCP server can render as product UI instead of a generic activity row. Tool names are `<server id>__<tool name>`:

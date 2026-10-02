@@ -108,6 +108,6 @@ Fold ordered, deduplicated approval events instead of treating every replayed re
 
 Catch SDK initialization, configuration, calls and local persistence inside the host route's error boundary. Return friendly host-branded notices, never upstream `error.message`, response bodies or stack traces. Keep redacted diagnostics server-only. An unknown outcome or accepted decision followed by local-save failure requires reconciliation, not a promise that nothing changed or a blind repeat action.
 
-Brand UI-owned notices, not legitimate source quotations or user/assistant transcript content. Verify the installed SDK/React error-copy API separately; conversation label overrides alone do not prove that exceptions are remapped, and host guidance does not change library defaults.
+Brand UI-owned notices, not legitimate source quotations or user/assistant transcript content. Check the installed [SDK formatter and React provider error-copy API](/integrate/conversation-ui#error-copy) separately; conversation label overrides alone do not prove that exceptions are remapped, and host guidance does not change library defaults.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>
