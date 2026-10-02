@@ -904,15 +904,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("button", { name: /^Session view/ }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
+      const groupedPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId, { cursor: null }) &&
+          url.searchParams.get("limit") === "50" &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.get("projection") === "summary" &&
+          url.searchParams.get("sortBy") === "updatedAt" &&
+          url.searchParams.get("archiveStatus") === "active" &&
+          !url.searchParams.has("createdBySubjectId") &&
+          !url.searchParams.has("channelId")
+        );
+      });
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
+      const groupedRoots = ((await (await groupedPage).json()) as BrowserSessionPage).sessions;
       await page.getByRole("button", { name: "Session view, customized" }).waitFor();
       const liveRegion = rail.locator('[aria-live="polite"]');
-      await page.waitForFunction(() => {
-        const message = document.querySelector(
-          '[data-sessionpin-session-list] [aria-live="polite"]',
-        )?.textContent;
-        return Boolean(message && message !== "1 matching session.");
-      });
+      await page.waitForFunction((count) => {
+        return (
+          document.querySelector('[data-sessionpin-session-list] [aria-live="polite"]')
+            ?.textContent === `${count} matching session${count === 1 ? "" : "s"}.`
+        );
+      }, groupedRoots.length);
       const rootCountAnnouncement = await liveRegion.textContent();
       expect(rootCountAnnouncement).toMatch(/^\d+ matching sessions?\.$/);
 
@@ -3788,24 +3802,34 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         activatedIds.push(session.id);
       }
       for (let index = 0; index < 60; index += 1) await seed(`Newer idle root ${index}`);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByRole("button", { name: /^Session view/ }).click();
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       const discoveryPage = page.waitForResponse((response) => {
         const url = new URL(response.url());
         return (
-          successfulSessionPageResponse(response, workspaceId) &&
+          successfulSessionPageResponse(response, workspaceId, { cursor: null }) &&
           url.searchParams.get("limit") === "50" &&
           url.searchParams.get("parentSessionId") === "null" &&
-          !url.searchParams.has("archivedOnly")
+          url.searchParams.get("projection") === "summary" &&
+          url.searchParams.get("sortBy") === "updatedAt" &&
+          url.searchParams.get("archiveStatus") === "active" &&
+          !url.searchParams.has("createdBySubjectId") &&
+          !url.searchParams.has("channelId")
         );
       });
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const discovery = (await (await discoveryPage).json()) as BrowserSessionPage;
       expect(
         discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
-      await page.getByRole("button", { name: /^Session view/ }).click();
-      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
-      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
+      await page.waitForFunction((count) => {
+        return (
+          document.querySelector('[data-sessionpin-session-list] [aria-live="polite"]')
+            ?.textContent === `${count} matching session${count === 1 ? "" : "s"}.`
+        );
+      }, discovery.sessions.length);
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
       const discoverOlder = activeGroup.getByRole("button", {
         name: "Show 4 more sessions in Active",
@@ -3813,7 +3837,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       });
       await discoverOlder.waitFor();
       expect(await activeGroup.locator("a[data-session-row]").count()).toBe(0);
+      const continuation = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId, { cursor: discovery.nextCursor }) &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.get("projection") === "summary" &&
+          !url.searchParams.has("channelId") &&
+          !url.searchParams.has("createdBySubjectId")
+        );
+      });
       await discoverOlder.click();
+      const continued = (await (await continuation).json()) as BrowserSessionPage;
+      expect(continued.sessions.some((row) => row.id === activeRoot.id)).toBe(true);
+      expect(continued.sessions.some((row) => row.id === ancestor.id)).toBe(true);
       await activeGroup.locator(`a[data-session-row="${activeRoot.id}"]`).waitFor();
       await activeGroup.locator(`a[data-session-row="${ancestor.id}"]`).waitFor();
       // Other scenarios in this shared workspace can also leave active roots.
