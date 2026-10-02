@@ -46,6 +46,14 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 Remount or reset the component when the signed-in user or tenant changes.
 
+## Appearance expectations
+
+For a custom-branded embed, match host fonts, colors, spacing, radius and the current theme through the shipped stylesheet and documented tokens/theme/density/label hooks. Keep UI-owned copy free of OpenGeni branding; do not rewrite legitimate source quotations or user/assistant messages. Verify error-copy support separately from heading/placeholder labels.
+
+Stock mode uses shipped components plus `compiled.css` with no extra cosmetic host CSS. It should be simple, polished and smooth around desktop 1440px/mobile 390px in supported light/dark themes; the host still owns placement and available height. A stock defect belongs in package React/CSS, not a host styling workaround or replacement chat implementation. These are quality expectations, not a claim that an untested build passed.
+
+Preserve first-try evaluation evidence alongside later repairs. In coordinated trials, the coordinator captures the actual browser matrix; screenshot submission is not a prerequisite for coding-agent handoff.
+
 ## Brand it
 
 `compiled.css` is scoped to the components and needs no Tailwind. Every visual decision is a `--og-*` CSS variable. Override them on any ancestor:

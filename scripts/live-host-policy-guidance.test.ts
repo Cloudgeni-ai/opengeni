@@ -306,3 +306,23 @@ test("guide retains trusted report provenance, callback capacity and DOM fallbac
   expect(errors).toContain("legitimate source quotations");
   expect(errors).toContain("does not change a package's default error behavior");
 });
+
+test("client/setup/public UI expectations preserve host matching, stock ownership and first-try evidence", async () => {
+  const client = await readGuide("product-shapes-and-ui");
+  const setup = await Bun.file(new URL(".agents/skills/opengeni-setup/SKILL.md", root)).text();
+  const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
+  for (const text of [client, setup, primary]) {
+    const prose = text.replaceAll(/\s+/g, " ");
+    expect(prose).toContain("1440px");
+    expect(prose).toContain("390px");
+    expect(prose).toContain("light/dark");
+    expect(prose).toContain("React/CSS");
+    expect(prose).toContain("first-try");
+    expect(prose).toContain("coordinator captures");
+    expect(prose).toContain("coding-agent handoff");
+  }
+  expect(client).toContain("fonts, colors, spacing");
+  expect(client).toContain("extra host\ncosmetic CSS");
+  expect(primary).toContain("no extra cosmetic host CSS");
+  expect(setup).toContain("not a passed UI");
+});
