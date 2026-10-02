@@ -1,5 +1,11 @@
 # @opengeni/connect
 
+## 0.3.2
+
+### Patch Changes
+
+- 946f6c3: Keep OAuth completion polling active when browser isolation detaches the provider window, and discover authentication for custom MCP connection setup from the live endpoint. Resolve tool-permission discovery for selectors with a single matching account, refusing ambiguous account choices.
+
 ## 0.3.1
 
 ### Patch Changes

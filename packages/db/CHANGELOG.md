@@ -1,5 +1,53 @@
 # @opengeni/db
 
+## 6.6.0
+
+### Minor Changes
+
+- 351cd79: Batch workspace model catalog provider reads within each request. Reuse authorized connection metadata and combine custom-model queries while preserving tenant isolation, provider limits, credential readiness and model selection.
+- 351cd79: Persist the meaningful attention frontier alongside the durable event cursor and advance both atomically on every accepted event-insert statement. Session and descendant reads reuse this narrow projection instead of probing event payloads repeatedly.
+
+  Migration `0585_session_attention_cursor.sql` requires the declared application roles to be stopped while it backfills the existing meaningful-attention index. Runtime FORCE RLS and existing cursor sequencing checks are preserved; older application writers remain compatible with the updated database trigger.
+
+### Patch Changes
+
+- 12ef019: Use the human workspace instruction size limit for agent writes too, so localized edits can preserve long existing policies. Keep exact-anchor, baseline, authorization and review safeguards unchanged.
+- 521ae01: Bound session stream replay pages by bytes before transferring event payloads. Stop interactive page sizing at the byte target and preserve complete oversized events, durable cursors, reconnect replay and tenant isolation.
+- 31e3771: Expose stored Connected Machine command reconciliation diagnostics and unavailable observations through existing session-authorized reads, preserving provider execution and acknowledgement behavior.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- c60d38a: Include normalized effective OpenAPI operation destinations and the primary manifest URL in immutable revision identity. URL rotation no longer reuses a document-only revision, while equivalent destinations still deduplicate and existing immutable versions and installation fences remain intact.
+
+  Classify known credential Connection rejection at install-time revalidation separately from internal failures. Missing or inaccessible references return 404, and inactive or incompatible references return 422 without weakening ownership, scope, or optimistic-concurrency checks.
+
+- 4a63d4f: A Modal box kept warm only by legacy background commands (a dev server, a command whose large output is still draining, a stopped command the provider no longer answers for) is no longer held until the provider deadline kills it uncaptured, which left the session unable to restore. Once every session of the sandbox group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default 30 minutes; above the idle grace, below the rotation lead, and before an explicit Modal idle timeout), the reaper checkpoints the current workspace excluding exactly those commands, stops the box, and settles the commands `lost` with reason `idle_containment`. The next turn restores the saved workspace. "Unused" comes from durable facts only: no open turn or pending approval or human-input request, no pending quiescence, no `wait_for_input` or unclaimed turn-starting input within the window (counted from the wait deadline and the input creation), no other holder or writer, and the newest turn, holder change and write older than the window. A command the agent is waiting on keeps running until the provider-deadline backstop. That backstop now also captures behind a cancelled, failed or superseded owner without a quiescence receipt, instead of letting the box die uncaptured. Rolling migration 0547 stamps holder changes on the lease and adds a health-independent containment inventory, replacing the separate unobservable-command and stopping-with-provider-errors predicates; pre-0547 workers keep their unchanged inventory. Commands settled by containment, by provider-deadline rotation (`provider_deadline_containment`), by provider loss during that drain, by provider loss seen while routing, or by the operator cold-loss reconciliation now get `session.command.finished` and the agent notice in the same transaction, for example "`bun run dev` was stopped because nobody used this session for 30 minutes and nothing was waiting on it; the workspace was saved. Restart it if you still need it." Previously those settlements were silent. Supervised commands keep their own proof gate. The reaper exports `opengeni_sandbox_command_containment_total{outcome}`.
+- 7dc8eaf: Park genuine pre-dispatch Modal setup exhaustion without failing or replaying the accepted turn or replenishing its finite recovery budget.
+- 3b7496e: Encode and decode tagged JSON strings with native UTF-16LE buffers to reduce CPU and temporary string allocations. Preserve the storage format, all code units, version checks and literal legacy content.
+- c755ff4: Reuse persisted command-completion observations when reading retained output. Subsequent reads no longer reacquire session/event write locks; the first acknowledgement, scoped reads and notification semantics remain unchanged.
+- e9b9730: Take the canonical session/cursor/turn/attempt lock prefix when acknowledging a consumed child answer, preventing the imported-archive turn guard from deadlocking parallel tool-result writers and lifecycle transactions. Preserve best-effort acknowledgment, exact-attempt checks, and duplicate-read no-ops without replaying tools.
+- 1133a8e: Lock sessions before workflow-wake failure updates and global wake claims, avoiding archive-guard deadlocks with turn settlement while preserving revision-scoped delivery and nonblocking dispatcher leases.
+- fcaf518: Settle browser and computer creation failures that occur before controller dispatch, while preserving dispatched operations and accepted controller bindings for reconciliation.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+- 103faae: Reuse subscription account lifecycle and table definitions while retaining existing SuperGrok behavior. Bind Claude response observations to the immutable credential receipt prepared with each physical request.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [91cc03e]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/codemode@0.7.0
+  - @opengeni/config@3.3.0
+  - @opengeni/observability@0.8.38
+  - @opengeni/codex@0.2.32
+
 ## 6.5.0
 
 ### Minor Changes
