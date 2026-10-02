@@ -2404,9 +2404,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writePlacementPrivate(args: unknown): Promise<unknown> {
     const input = placementPrivateWrite(args);
     return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
-      if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
-      if (session.writeFile) return await session.writeFile(input);
-      return await streamPlacementPrivateFile(session, input, backend.kind);
+      return await writePlacementPrivateOnBackend(session, input, backend.kind);
     });
   }
 
@@ -2414,36 +2412,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * control operation cannot be repurposed into a generic mutation bypass. */
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);
-    await this.dispatch("deletePlacementPrivate", false, async (session) => {
-      if (session.deletePlacementPrivate) {
-        await session.deletePlacementPrivate(privatePath, runAs);
-        return;
-      }
-      const args = {
-        cmd: `rm -f ${shellSingleQuote(privatePath)}`,
-        ...(runAs ? { runAs } : {}),
-      };
-      if (session.exec) {
-        const result = await session.exec(args);
-        if (
-          result &&
-          typeof result === "object" &&
-          typeof (result as { exitCode?: unknown }).exitCode === "number" &&
-          (result as { exitCode: number }).exitCode !== 0
-        ) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      if (session.execCommand) {
-        const result = await session.execCommand(args);
-        const exitCode = parseExecBannerExitCode(result);
-        if (exitCode !== null && exitCode !== 0) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    await this.dispatch("deletePlacementPrivate", false, async (session, backend) => {
+      await deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind);
     });
   }
 
@@ -2455,7 +2425,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<WorkspaceFileImportReceipt> {
     return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2476,7 +2446,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
     return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2803,6 +2773,80 @@ function placementPrivateWrite(value: unknown): {
     createParents: input.createParents ?? false,
     ...(typeof input.runAs === "string" ? { runAs: input.runAs } : {}),
   };
+}
+
+/** Preserve private staging on the already resolved provider. Calling the
+ * routing proxy here would re-resolve between staging, import and cleanup. */
+function withPlacementPrivateControl(
+  session: RoutableBackendSession,
+  backendKind: string,
+): ChannelASession {
+  return new Proxy(session, {
+    get(target, property) {
+      if (property === "writePlacementPrivate") {
+        return async (args: unknown) =>
+          await writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind);
+      }
+      if (property === "deletePlacementPrivate") {
+        return async (path: string, runAs?: string) =>
+          await deletePlacementPrivateOnBackend(
+            target,
+            placementPrivatePath(path),
+            runAs,
+            backendKind,
+          );
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as ChannelASession;
+}
+
+async function writePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  input: ReturnType<typeof placementPrivateWrite>,
+  backendKind: string,
+): Promise<unknown> {
+  if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
+  if (session.writeFile) return await session.writeFile(input);
+  return await streamPlacementPrivateFile(session, input, backendKind);
+}
+
+async function deletePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  privatePath: string,
+  runAs: string | undefined,
+  backendKind: string,
+): Promise<void> {
+  if (session.deletePlacementPrivate) {
+    await session.deletePlacementPrivate(privatePath, runAs);
+    return;
+  }
+  const args = {
+    cmd: `rm -f ${shellSingleQuote(privatePath)}`,
+    ...(runAs ? { runAs } : {}),
+  };
+  if (session.exec) {
+    const result = await session.exec(args);
+    if (
+      result &&
+      typeof result === "object" &&
+      typeof (result as { exitCode?: unknown }).exitCode === "number" &&
+      (result as { exitCode: number }).exitCode !== 0
+    ) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  if (session.execCommand) {
+    const result = await session.execCommand(args);
+    const exitCode = parseExecBannerExitCode(result);
+    if (exitCode !== null && exitCode !== 0) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  throw new RoutingUnsupportedError("deletePlacementPrivate", backendKind);
 }
 
 async function streamPlacementPrivateFile(
