@@ -165,6 +165,9 @@ export function inventoryHumanRoutes(repoRoot: string): HumanRoute[] {
     modules.set(path, module);
   }
   function gatesFor(node: Node, module: Module, seen = new Set<string>()): Set<string> {
+    if (node.type === "Identifier") {
+      return gatesFor({ type: "CallExpression", callee: node, arguments: [] }, module, seen);
+    }
     const gates = new Set<string>();
     walk(node, (child) => {
       if (child.type === "MemberExpression") {
@@ -184,6 +187,17 @@ export function inventoryHumanRoutes(repoRoot: string): HumanRoute[] {
             literal.value === "human_session"
           )
             gates.add("principalKind=human_session");
+          if (
+            isNode(member) &&
+            member.type === "MemberExpression" &&
+            name(member.property) === "kind" &&
+            isNode(member.object) &&
+            member.object.type === "MemberExpression" &&
+            name(member.object.property) === "actor" &&
+            isNode(literal) &&
+            literal.value === "human"
+          )
+            gates.add("actor.kind=human");
         }
       }
       if (child.type !== "CallExpression") return;

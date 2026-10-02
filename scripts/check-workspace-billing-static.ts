@@ -201,6 +201,8 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Reviewed route data is an inventory, not another executable billing surface.
+  "scripts/public-api/human-route-classification.json",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {

@@ -196,11 +196,27 @@
     },
     {
       "method": "GET",
+      "path": "/v1/github/install/callback",
+      "source": "apps/api/src/routes/github.ts",
+      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "class": "person_present",
+      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+    },
+    {
+      "method": "GET",
       "path": "/v1/github/oauth/callback",
       "source": "apps/api/src/routes/github.ts",
       "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+    },
+    {
+      "method": "GET",
+      "path": "/v1/github/setup",
+      "source": "apps/api/src/routes/github.ts",
+      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "class": "person_present",
+      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
     },
     {
       "method": "GET",
@@ -263,8 +279,8 @@
       "path": "/v1/integrations/github-personal/oauth/callback",
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "delegable_to_user",
-      "reason": "Existing personal GitHub repository authority follows the exact owning user; OAuth remains a separate browser ceremony."
+      "class": "person_present",
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",
@@ -280,7 +296,7 @@
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",
@@ -604,7 +620,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "POST",
@@ -616,7 +632,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",
@@ -982,11 +998,27 @@
     },
     {
       "method": "GET",
+      "path": "/v1/pr-review/github/install/callback",
+      "source": "apps/api/src/routes/pr-review-github.ts",
+      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "class": "person_present",
+      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+    },
+    {
+      "method": "GET",
       "path": "/v1/pr-review/github/oauth/callback",
       "source": "apps/api/src/routes/pr-review-github.ts",
       "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+    },
+    {
+      "method": "GET",
+      "path": "/v1/pr-review/github/setup",
+      "source": "apps/api/src/routes/pr-review-github.ts",
+      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "class": "person_present",
+      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
     },
     {
       "method": "GET",
@@ -994,7 +1026,7 @@
       "source": "apps/api/src/routes/social.ts",
       "gates": ["requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",
@@ -1026,41 +1058,41 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning",
       "source": "apps/api/src/routes/knowledge.ts",
-      "gates": ["principalKind=human_session", "requireWorkspaceSettingsGrant"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "gates": ["actor.kind=human", "principalKind=human_session", "requireWorkspaceSettingsGrant"],
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning/instructions/review",
       "source": "apps/api/src/routes/knowledge.ts",
-      "gates": ["principalKind=human_session", "requireWorkspaceSettingsGrant"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "gates": ["actor.kind=human", "principalKind=human_session", "requireWorkspaceSettingsGrant"],
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-learning/instructions/reviews",
       "source": "apps/api/src/routes/knowledge.ts",
-      "gates": ["principalKind=human_session", "requireWorkspaceSettingsGrant"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "gates": ["actor.kind=human", "principalKind=human_session", "requireWorkspaceSettingsGrant"],
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-learning/overrides",
       "source": "apps/api/src/routes/knowledge.ts",
       "gates": ["principalKind=human_session"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning/read",
       "source": "apps/api/src/routes/knowledge.ts",
       "gates": ["principalKind=human_session"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "DELETE",
@@ -1303,8 +1335,8 @@
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": ["canonicalManagedHumanSession", "principalKind=human_session"],
-      "class": "delegable_to_user",
-      "reason": "Existing personal GitHub repository authority follows the exact owning user; OAuth remains a separate browser ceremony."
+      "class": "person_present",
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",
@@ -1359,8 +1391,8 @@
       "path": "/v1/workspaces/:workspaceId/connections/github/oauth/start",
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": ["canonicalManagedHumanSession", "principalKind=human_session"],
-      "class": "delegable_to_user",
-      "reason": "Existing personal GitHub repository authority follows the exact owning user; OAuth remains a separate browser ceremony."
+      "class": "person_present",
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "POST",
@@ -1376,7 +1408,7 @@
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["principalKind=human_session"],
       "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "DELETE",
@@ -1575,8 +1607,8 @@
       "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
       "source": "apps/api/src/routes/external-identity-links.ts",
       "gates": ["nativeConfirmation"],
-      "class": "person_present",
-      "reason": "Native identity-link consent cannot be bootstrapped by an agent or the external identity being linked."
+      "class": "delegable_to_user",
+      "reason": "Owner link management may delegate revocation; preview/confirm consent variants remain person-present."
     },
     {
       "method": "POST",
@@ -1600,7 +1632,7 @@
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["principalKind=human_session"],
       "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "POST",
@@ -1695,8 +1727,8 @@
       "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/review",
       "source": "apps/api/src/routes/knowledge.ts",
       "gates": ["principalKind=human_session"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "POST",
@@ -1711,8 +1743,8 @@
       "path": "/v1/workspaces/:workspaceId/knowledge/entries/review",
       "source": "apps/api/src/routes/knowledge.ts",
       "gates": ["principalKind=human_session"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "POST",
@@ -1735,8 +1767,8 @@
       "path": "/v1/workspaces/:workspaceId/knowledge/review-groups",
       "source": "apps/api/src/routes/knowledge.ts",
       "gates": ["principalKind=human_session"],
-      "class": "organization_allowed",
-      "reason": "Shared resource administration permits scoped user/service authority; user layers and live-attempt variants remain independently constrained."
+      "class": "delegable_to_user",
+      "reason": "Human review and learning-policy decisions require verified user authority, not a service or live-agent principal."
     },
     {
       "method": "POST",
@@ -1868,7 +1900,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "POST",
@@ -1880,7 +1912,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "PUT",
@@ -1959,8 +1991,8 @@
       "path": "/v1/workspaces/:workspaceId/pr-review/repositories",
       "source": "apps/api/src/routes/pr-review.ts",
       "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "class": "organization_allowed",
+      "reason": "Binding an already-authorized repository is shared workspace administration, not an OAuth consent ceremony."
     },
     {
       "method": "POST",
@@ -2208,7 +2240,7 @@
       "source": "apps/api/src/routes/social.ts",
       "gates": ["principalKind=human_session"],
       "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
     },
     {
       "method": "GET",

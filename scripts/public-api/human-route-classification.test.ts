@@ -27,7 +27,10 @@ const Route = z
 describe("reviewed human-route classification", () => {
   test("every gated route is classified exactly once, with its current gate functions", () => {
     const entries = z.array(Route).parse(snapshot.routes);
-    const source = inventoryHumanRoutes(resolve(import.meta.dir, "../.."));
+    // A detached source tree lets Phase 1 be checked while Phase 2 is being edited.
+    const source = inventoryHumanRoutes(
+      process.env.OPENGENI_HUMAN_ROUTE_SOURCE_ROOT ?? resolve(import.meta.dir, "../.."),
+    );
     const key = (route: { method: string; path: string }) => `${route.method} ${route.path}`;
     const keys = entries.map(key);
     expect(new Set(keys).size).toBe(keys.length);
@@ -56,5 +59,39 @@ describe("reviewed human-route classification", () => {
     expect(snapshot.routes.find((entry) => entry.path.endsWith("/tools/approvals"))?.class).toBe(
       "person_present",
     );
+  });
+
+  test("critical browser callbacks and mixed routes cannot disappear vacuously", () => {
+    const entries = new Map(
+      snapshot.routes.map((entry) => [`${entry.method} ${entry.path}`, entry]),
+    );
+    for (const path of [
+      "/v1/github/setup",
+      "/v1/github/install/callback",
+      "/v1/pr-review/github/setup",
+      "/v1/pr-review/github/install/callback",
+    ])
+      expect(entries.get(`GET ${path}`)?.class).toBe("person_present");
+    for (const operation of ["prepare", "redeem"])
+      expect(
+        entries.get(
+          `POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/${operation}`,
+        )?.class,
+      ).toBe("person_present");
+    expect(
+      entries.get("POST /v1/workspaces/:workspaceId/connections/github/oauth/start")?.class,
+    ).toBe("person_present");
+    expect(entries.get("POST /v1/workspaces/:workspaceId/connect/attempts")?.class).toBe(
+      "organization_allowed",
+    );
+    expect(
+      entries.get("POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation")?.class,
+    ).toBe("delegable_to_user");
+    expect(entries.get("POST /v1/workspaces/:workspaceId/pr-review/repositories")?.class).toBe(
+      "organization_allowed",
+    );
+    expect(
+      entries.get("POST /v1/workspaces/:workspaceId/agent-learning/instructions/review")?.class,
+    ).toBe("delegable_to_user");
   });
 });
