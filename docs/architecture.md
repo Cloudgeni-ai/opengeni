@@ -1197,20 +1197,19 @@ Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 
 ### 7.2 Worker orchestration versus runtime execution
 
-`apps/worker` owns durable activity/workflow sequencing, turn claim and
-settlement, recovery, capacity waits, scheduling, and injected process
-dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
-model input/output handling, tool execution, progressive disclosure, and the
-sandbox interface.
+`apps/worker` owns durable activity/workflow sequencing, turn claim/settlement,
+recovery, capacity waits, scheduling and injected process dependencies.
+`@opengeni/runtime` owns provider-neutral agents, model input/output,
+tool execution, progressive disclosure and sandbox interfaces.
 
-Embedding processes—not the Agents SDK—own process-global rejection/termination
-policy. SDK background lifecycle work must settle owned promises, never detach
-rejecting tasks or install `unhandledRejection` handlers that exit shared workers.
-The worker's global rejection listener observes as a last resort; deliberate
-restarts remain OpenGeni drain-and-checkpoint decisions.
+Embedding processes—not the Agents SDK—own global rejection/termination policy.
+SDK background lifecycle work must settle owned promises, never detach rejecting
+tasks or install `unhandledRejection` handlers exiting shared workers. Worker global
+rejection listeners provide last-resort observation; OpenGeni drains/checkpoints
+before deliberate restarts.
 
-The worker supplies frozen authority and durable sinks. Runtime must not invent
-tenancy or persistence authority from its in-memory agent context.
+Workers supply frozen authority and durable sinks. Runtime must not invent
+tenancy/persistence authority from in-memory agent context.
 
 Canonical: `apps/worker/src/workflows/`,
 `apps/worker/src/activities/agent-turn/`, and `packages/runtime/src/`.
@@ -1433,29 +1432,27 @@ Sites install exact SDK/React/Codemode/CLI versions via virtual skill file
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased `/opt/opengeni/site-packages`
 archives locally, never in deployed images.
 
-`packages/react` owns timeline history; `use-session-events.ts` fences
-navigation by session/client lifetime independently of SSE reconnects. Web supplies
-source events/session keys. Overlap uses retained event identity; prepends may change
-partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
-`message-timeline.tsx` corrects residual browser-anchor movement without resuming
-tip-follow. Upward input loads bounded older pages despite collapsed rows.
-Underfill preserves tails with explicit earlier navigation at limits, never
-auto-paging forward; Jump to latest restores live tails. Normalization joins
-chunks by provider identity, completing each message once, in order, with
-`phase` (see `docs/run-lifecycle.md`).
-Pre-transfer metadata planning bounds database batches to 256 events and the
-default 1 MiB full-payload page budget.
+`packages/react` owns timeline history. `use-session-events.ts` fences navigation by
+session/client lifetime independently of SSE reconnects; Web supplies events/session keys.
+Overlap uses retained event identity; prepends may change partial-message row IDs.
+`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx` corrects
+residual browser-anchor movement without resuming tip-follow. Upward input loads
+bounded older pages despite collapsed rows. Underfill preserves tails, offers
+earlier navigation at limits, never auto-pages forward; Jump to latest restores
+live tails. Normalization joins chunks by provider identity, completing each message
+once, in order, with `phase` (see `docs/run-lifecycle.md`).
+Pre-transfer metadata planning bounds batches to 256 events and default 1 MiB full-payload pages.
 
 Lazy rail/Find search retained user/completed-assistant text through the browser SDK,
-excluding DOM, tools, reasoning and unfinished deltas. Rail providers preserve
-dialog state across session navigation and collapsed/mobile rails. Links carry
-query, event sequence and original UTF-16 offset.
+excluding DOM/tools/reasoning/unfinished deltas. Rail providers preserve dialog state
+across sessions and collapsed/mobile rails. Links carry query/event sequence/original
+UTF-16 offset.
 `useSessionEvents.jumpToSequence` loads cancellable, bounded target windows;
 `MessageTimeline.searchTarget` owns disclosure/occurrence navigation.
 Bounded browser batches/scan continuations keep counts provisional until traversal
-ends. Labeled, bounded Markdown source excerpts
-prevent raw offsets selecting wrong rendered occurrences. Closing Find removes
-highlights but preserves excerpt/reading position; formatted restoration is explicit.
+ends. Labeled, bounded Markdown source excerpts prevent raw offsets selecting wrong rendered
+occurrences. Closing Find removes highlights, preserves excerpt/reading position;
+formatted restoration is explicit.
 
 Web imports `@opengeni/sdk/browser`; operator backfills use
 `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
