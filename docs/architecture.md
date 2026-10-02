@@ -1018,8 +1018,9 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
-Insights usage uses a four-column projection (0484) with tenant/actor/visibility
-checks; capability writes need a writable database, including 0541/0542.
+Insights counts every ledger row, including private/missing/deleted sessions;
+`privateChats` exposes person-only amounts. Details/samples remain actor-visible;
+debits remain unchanged.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`.
 
