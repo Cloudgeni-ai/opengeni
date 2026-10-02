@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 7.6.1
+
+### Patch Changes
+
+- 09a991f: Hide Jump to latest when readers scroll back to the live bottom after returning to their question, preserving scroll intent across renders and releasing stale question focus.
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
 ## 7.6.0
 
 ### Patch Changes
