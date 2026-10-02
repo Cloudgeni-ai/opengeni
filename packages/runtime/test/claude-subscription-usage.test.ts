@@ -202,7 +202,7 @@ test("reordered responses keep the account receipt prepared with their dispatche
       headers.set("authorization", `Bearer ${dispatchedAccount}`);
       return {
         headers,
-        observe: (_provider, response, model, token) => {
+        observe: (_dispatchedProvider, response, model, token) => {
           seen.push([dispatchedAccount, model, token, response.status]);
         },
       };
