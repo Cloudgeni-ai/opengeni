@@ -347,6 +347,11 @@ membership/grants or invent a principal to make admission succeed. See
 
 ## Pull-request delivery across moving `main`
 
+Accepted model policies may tolerate additive latency modes and input modalities
+only by reconstructing the exact historical subset digest. Preserve the frozen
+mode/request tier, all retained declarations, and every other executable field;
+never ignore `definitionVersion` globally or compose unrelated digest migrations.
+
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
 the latest protected branch. Create the branch from current `main` initially,
 then keep the exact head frozen while CI and review run. Ordinary PRs into
