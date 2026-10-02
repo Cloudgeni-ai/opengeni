@@ -82,6 +82,9 @@ describe("native embedded error presentation", () => {
             await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
           ).toBe(true);
           expect(
+            await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight),
+          ).toBe(true);
+          expect(
             await page
               .locator("[data-error-preview]")
               .evaluate((node) => getComputedStyle(node).colorScheme),

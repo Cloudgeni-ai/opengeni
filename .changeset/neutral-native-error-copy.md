@@ -4,3 +4,5 @@
 ---
 
 Add brand-neutral SDK error presentation and a shared native React host error-copy override, preserving diagnostic errors and delivery/retry state.
+
+Keep NewChat's full-height composer contained when using shipped CSS without a host reset.

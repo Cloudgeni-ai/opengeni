@@ -225,7 +225,7 @@ function NewChat({
   return (
     <form
       onSubmit={(event) => void submit(event)}
-      className="flex h-full flex-col justify-end gap-2 p-3"
+      className="box-border flex h-full flex-col justify-end gap-2 p-3"
       data-og-new-chat-composer=""
     >
       {error ? (
