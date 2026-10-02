@@ -1,27 +1,29 @@
-import type { ReactNode } from "react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react/session-ui";
 
-import type { ExchangeId } from "./acme-script";
-import { ScriptedChatView, type ScriptedChat } from "./scripted-chat";
+import { DEMO_WORKSPACE_ID, type RecordedClient } from "./recorded-client";
 import { chatTokens, type ChatStyle } from "./style-knobs";
 
-/** The demo product: Acme's help page, with the recorded Opengeni chat embedded. */
+/**
+ * Acme, the sample product: its own nav and page, with Opengeni's
+ * `<OpenGeniChat />` embedded exactly as the code panel shows, running on the
+ * recorded client.
+ */
 export function AcmeProduct({
-  chat,
-  questions,
-  finished,
-  person,
+  client,
   style,
-  heroAside,
+  sessionId,
+  onSessionChange,
+  epoch,
+  person,
 }: {
-  chat: ScriptedChat;
-  questions: readonly ExchangeId[];
-  /** Outside the tour, everything has been asked. */
-  finished: boolean;
-  person: string;
+  client: RecordedClient;
   style: ChatStyle;
-  heroAside?: ReactNode;
+  sessionId: string | null;
+  onSessionChange: (sessionId: string | null) => void;
+  /** Bumps when the playground starts a chat itself, so the chat list re-reads. */
+  epoch: number;
+  person: string;
 }) {
-  const firstName = person.split(/[\s@.]/u)[0] || "there";
   const initials = person
     .split(/[\s@.]/u)
     .filter(Boolean)
@@ -33,39 +35,26 @@ export function AcmeProduct({
       className="og-root og-playground-product"
       data-og-theme={style.theme}
       style={chatTokens(style)}
-      data-tour="product"
+      data-playground-product=""
     >
       <nav className="acme-nav" aria-label="Acme (sample product)">
         <span className="acme-logo">
           <b aria-hidden="true">A</b>acme
         </span>
-        <span className="acme-links">
+        <span className="acme-links" aria-hidden="true">
           <span>Shop</span>
           <span>Orders</span>
-          <span>Billing</span>
-          <span aria-current="page">Help</span>
+          <span aria-current="page">Support</span>
         </span>
         <span className="acme-avatar" title={person} aria-hidden="true">
           {initials || "?"}
         </span>
       </nav>
-      <main className="acme-main">
-        <header className="acme-hero">
-          <div>
-            <p className="acme-kicker">Help center</p>
-            <h1>Acme support</h1>
-          </div>
-          {heroAside}
-        </header>
-        <section className="acme-chat" aria-label="Acme support chat" data-tour="chat">
-          <ScriptedChatView
-            chat={chat}
-            firstName={firstName}
-            questions={questions}
-            finished={finished}
-          />
-        </section>
-      </main>
+      <section className="acme-agent" aria-label="Acme support chat (recorded demo)">
+        <OpenGeniProvider client={client} workspaceId={DEMO_WORKSPACE_ID}>
+          <OpenGeniChat key={epoch} sessionId={sessionId} onSessionChange={onSessionChange} />
+        </OpenGeniProvider>
+      </section>
     </div>
   );
 }

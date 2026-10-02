@@ -11,12 +11,7 @@ const SUBJECT = "user:ada";
 const unexpected = mock(async () => {
   throw new Error("The playground called the API");
 });
-const client = new Proxy(
-  {},
-  {
-    get: () => unexpected,
-  },
-);
+const client = new Proxy({}, { get: () => unexpected });
 const context = {
   client,
   clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" }, models: [] },
@@ -34,15 +29,15 @@ mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
   Link: ({
     children,
-    to: _to,
+    to,
     params: _params,
-    search: _search,
+    search,
     ...rest
-  }: { children: ReactNode; to?: unknown; params?: unknown; search?: unknown } & Record<
+  }: { children: ReactNode; to?: string; params?: unknown; search?: { section?: string } } & Record<
     string,
     unknown
   >) => (
-    <a href="#link" {...rest}>
+    <a href={`${to ?? ""}${search?.section ? `?section=${search.section}` : ""}`} {...rest}>
       {children}
     </a>
   ),
@@ -58,7 +53,7 @@ beforeAll(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  // Play the recording (and the tour's pauses) without waiting for it.
+  // Play the recording without waiting for it.
   globalThis.setTimeout = ((handler: () => void, _delay?: number, ...rest: unknown[]) =>
     realSetTimeout(handler, 0, ...rest)) as typeof setTimeout;
 });
@@ -73,9 +68,9 @@ beforeEach(() => {
   unexpected.mockClear();
 });
 
-async function settle(rounds = 8) {
+async function settle(rounds = 40) {
   for (let index = 0; index < rounds; index += 1)
-    await act(async () => await new Promise((resolve) => realSetTimeout(resolve, 5)));
+    await act(async () => await new Promise((resolve) => realSetTimeout(resolve, 2)));
 }
 
 async function mount() {
@@ -83,7 +78,7 @@ async function mount() {
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => root.render(<PlaygroundRoute workspaceId={DEVELOPMENT} />));
-  await settle(1);
+  await settle(4);
   return {
     container,
     unmount: async () => {
@@ -93,111 +88,120 @@ async function mount() {
   };
 }
 
-const coach = (container: HTMLElement) => container.querySelector<HTMLElement>("[data-coach-mark]");
+const currentStep = (container: HTMLElement) =>
+  container.querySelector<HTMLElement>("[data-step][data-current]")?.dataset.step ?? null;
+const step = (container: HTMLElement, id: string) =>
+  container.querySelector<HTMLElement>(`[data-step="${id}"]`)!;
+const chat = (container: HTMLElement) =>
+  container.querySelector("[data-playground-product]")!.textContent ?? "";
 const buttonIn = (root: ParentNode, text: string) =>
-  Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
-    button.textContent?.includes(text),
+  Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find(
+    (button) => button.textContent?.includes(text) || button.getAttribute("aria-label") === text,
   );
-async function press(button: HTMLButtonElement | undefined) {
-  if (!button) throw new Error("Missing button");
-  await act(async () => button.click());
+async function press(element: HTMLElement | null | undefined) {
+  if (!element) throw new Error("Missing control");
+  await act(async () => element.click());
   await settle();
 }
+const code = (container: HTMLElement) =>
+  container.querySelector("[data-slot='line-tabs-content'][data-state='active'] pre")
+    ?.textContent ?? "";
 
 describe("playground", () => {
-  test("is Acme with a recorded chat, labelled as a demo, and no model gate", async () => {
+  test("is Acme with the real chat, four steps, and the code beside it", async () => {
     const { container, unmount } = await mount();
     try {
       expect(container.querySelector("h1")!.textContent).toBe("Playground");
-      expect(container.textContent).toContain("Hi Ada, how can we help?");
-      expect(container.textContent).toContain("This is a recorded demo.");
-      expect(container.textContent).not.toContain("Connect a model");
-      // Questions to pick, not a box to type into.
-      expect(container.querySelector("textarea")).toBeNull();
+      expect(container.textContent).toContain("A recording: no model, nothing saved.");
+      // The stock OpenGeniChat: its chat list and new-chat composer.
+      expect(chat(container)).toContain("Delivery address");
+      expect(container.querySelector("[data-og-new-chat-composer] textarea")).not.toBeNull();
+      expect(currentStep(container)).toBe("ask");
       expect(
-        Array.from(
-          container.querySelectorAll('[aria-label="Suggested questions"] button'),
-          (button) => button.textContent,
+        Array.from(container.querySelectorAll("[data-step] h2"), (heading) =>
+          heading.textContent?.replace(/^Step \d:\s*/u, ""),
         ),
-      ).toEqual(["Where is my order #4417?", "I was charged twice this month"]);
-      expect(coach(container)!.dataset.coachMark).toBe("send");
-      expect(coach(container)!.textContent).toContain("Step 1 of 6");
-      expect(container.querySelector("[data-tour='palette']")).toBeNull();
+      ).toEqual([
+        "Send a message",
+        "Click a color to restyle the chat",
+        "Turn on tools",
+        "Add it to your product",
+      ]);
+      expect(code(container)).toContain("<OpenGeniChat />");
+      expect(container.textContent).toContain("npm i @opengeni/sdk @opengeni/react");
+      expect(unexpected).not.toHaveBeenCalled();
     } finally {
       await unmount();
     }
   });
 
-  test("a question plays in the real timeline without calling the API", async () => {
+  test("ask, restyle, turn on tools, then add it: each step explains what happened", async () => {
     journeys.writeOnboardingJourney(
       journeys.onboardingJourneyStorageKey(SUBJECT, ORG),
       journeys.newOnboardingJourney({ intents: ["build"] }),
     );
     const { container, unmount } = await mount();
     try {
-      await press(
-        buttonIn(
-          container.querySelector('[aria-label="Suggested questions"]')!,
-          "Where is my order",
-        ),
-      );
-      const chat = container.querySelector("[data-tour='chat']")!;
-      expect(chat.textContent).toContain("Where is my order #4417?");
-      expect(chat.textContent).toContain("out for delivery");
-      expect(unexpected).not.toHaveBeenCalled();
-      // Watching it stream is the playground's checklist step.
+      // 1. Ask: the answer streams into the real conversation. No tools yet.
+      await press(buttonIn(step(container, "ask"), "Where is my order #4417?"));
+      expect(chat(container)).toContain("Where is my order #4417?");
+      expect(chat(container)).toContain("I can't see orders yet.");
+      expect(step(container, "ask").textContent).toContain("That's <OpenGeniChat />");
+      expect(currentStep(container)).toBe("style");
       expect(
         journeys.readOnboardingJourney(journeys.onboardingJourneyStorageKey(SUBJECT, ORG))!.marks
           .playground,
       ).toBeString();
-    } finally {
-      await unmount();
-    }
-  });
 
-  test("the tour walks through streaming, style, memory in a new chat, tools and the next step", async () => {
-    const { container, unmount } = await mount();
-    try {
-      await press(buttonIn(coach(container)!, "Where is my order"));
-      // The answer streamed; the tour moved to restyling.
-      expect(coach(container)!.dataset.coachMark).toBe("style");
-      await press(buttonIn(coach(container)!, "Skip"));
-      expect(coach(container)!.dataset.coachMark).toBe("memory");
-      await press(buttonIn(coach(container)!, "Remember that my plan is Pro."));
-      const chat = () => container.querySelector("[data-tour='chat']")!.textContent ?? "";
-      expect(chat()).toContain("I'll remember that you're on the Pro plan.");
-      expect(coach(container)!.dataset.coachMark).toBe("ask");
-      await press(buttonIn(coach(container)!, "What plan did I tell you I'm on?"));
-      // A new chat: the earlier exchange is gone, the answer comes from memory.
-      expect(chat()).not.toContain("Remember that my plan is Pro.");
-      expect(chat()).toContain("You told me you're on the Pro plan.");
-      expect(coach(container)!.dataset.coachMark).toBe("tool");
-      await press(buttonIn(coach(container)!, "Ask for a refund"));
-      expect(chat()).toContain("I refunded the duplicate $49 charge.");
-      expect(coach(container)!.dataset.coachMark).toBe("finish");
-      expect(coach(container)!.textContent).toContain("Add it to your product");
+      // 2. Restyle: the product's tokens change and styles.css shows the line.
+      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Indigo"]'));
+      const product = container.querySelector<HTMLElement>("[data-playground-product]")!;
+      expect(product.style.getPropertyValue("--og-color-accent")).toBe("#5b4bff");
+      expect(code(container)).toContain("--og-color-accent: #5b4bff;");
+      // The panel opened the file the click changed.
+      expect(container.querySelector("[role='tab'][aria-selected='true']")!.textContent).toBe(
+        "styles.css",
+      );
+      expect(currentStep(container)).toBe("tools");
+
+      // 3. Tools: new chats get them, and the code gains the MCP server line.
+      await press(
+        step(container, "tools").querySelector<HTMLElement>(
+          '[data-setting="tools"] button[role="switch"]',
+        ),
+      );
+      expect(code(container)).toContain("mcpServers");
+      await press(buttonIn(step(container, "tools"), "Ask in a new chat"));
+      expect(chat(container)).toContain("out for delivery with UPS");
+      expect(step(container, "tools").textContent).toContain("through your MCP server");
+      expect(currentStep(container)).toBe("ship");
+
+      // 4. Add it to your product: the Developer settings.
+      const link = step(container, "ship").querySelector("a")!;
+      expect(link.textContent).toContain("Add it to your product");
+      expect(link.getAttribute("href")).toContain("section=developer");
       expect(unexpected).not.toHaveBeenCalled();
     } finally {
       await unmount();
     }
   });
 
-  test("Skip tour hides the coach marks and offers every question; Restart tour starts over", async () => {
+  test("Skip moves on, and Start over resets the steps, style and settings", async () => {
     const { container, unmount } = await mount();
     try {
-      await press(buttonIn(container.querySelector("header")!, "Skip tour"));
-      expect(coach(container)).toBeNull();
+      await press(buttonIn(step(container, "ask"), "Skip"));
+      expect(currentStep(container)).toBe("style");
       expect(
-        JSON.parse(localStorage.getItem(`og.playground:v2:${encodeURIComponent(SUBJECT)}:tour`)!),
-      ).toMatchObject({ step: null });
-      expect(container.querySelectorAll('[aria-label="Suggested questions"] button').length).toBe(
-        4,
-      );
+        JSON.parse(localStorage.getItem(`og.playground:v3:${encodeURIComponent(SUBJECT)}:guide`)!),
+      ).toEqual({ current: "style", done: ["ask"] });
+      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Rose"]'));
+      await press(buttonIn(container.querySelector("header")!, "Start over"));
+      expect(currentStep(container)).toBe("ask");
       expect(
-        container.querySelector("[data-tour='palette'], [data-tour='palette-toggle']"),
-      ).not.toBeNull();
-      await press(buttonIn(container.querySelector("header")!, "Restart tour"));
-      expect(coach(container)!.dataset.coachMark).toBe("send");
+        container
+          .querySelector<HTMLElement>("[data-playground-product]")!
+          .style.getPropertyValue("--og-color-accent"),
+      ).toBe("#1f8f7a");
     } finally {
       await unmount();
     }

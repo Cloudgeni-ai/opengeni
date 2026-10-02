@@ -1,39 +1,32 @@
 import "@/components/playground/playground.css";
 
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, PaletteIcon } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { AcmeProduct } from "@/components/playground/acme-product";
 import {
-  ACME_EXCHANGES,
-  suggestedQuestions,
-  type ExchangeId,
+  DEFAULT_AGENT_SETTINGS,
+  QUESTIONS,
+  type AgentSettings,
 } from "@/components/playground/acme-script";
-import { useScriptedChat } from "@/components/playground/scripted-chat";
+import { CodePanel } from "@/components/playground/code-panel";
+import {
+  GUIDE_STEPS,
+  guideReducer,
+  parseGuideState,
+  type GuideStepId,
+} from "@/components/playground/guide";
+import { GuidePanel, STEP_TITLES, type AgentSettingId } from "@/components/playground/guide-panel";
+import { integrationCode } from "@/components/playground/integration-code";
+import { createRecordedClient, type RecordedAnswer } from "@/components/playground/recorded-client";
 import { defaultChatStyle, type ChatStyle } from "@/components/playground/style-knobs";
-import { CoachMark, Palette } from "@/components/playground/tour";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { MoreMenu } from "@/components/ui/page-actions";
 import { useAppContext } from "@/context";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
+import { MANAGED_API_ORIGIN } from "@/lib/coding-agent-setup";
 import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-journey";
 import { cn } from "@/lib/utils";
-
-type StepId = "send" | "stream" | "style" | "memory" | "tool" | "finish";
-const STEPS: readonly StepId[] = ["send", "stream", "style", "memory", "tool", "finish"];
-const STEP_TITLES: Record<StepId, string> = {
-  send: "Ask a question",
-  stream: "Streaming, out of the box",
-  style: "Match it to your product",
-  memory: "Remembers each customer",
-  tool: "Your product's actions as tools",
-  finish: "Add an agent to your product",
-};
-type Sub = "" | "ask" | "asked";
-
-type TourMemory = { step: number | null; done: StepId[] };
 
 function storageGet(key: string): string | null {
   try {
@@ -42,35 +35,32 @@ function storageGet(key: string): string | null {
     return null;
   }
 }
-function storageSet(key: string, value: string | null): void {
+function storageSet(key: string, value: string): void {
   try {
-    if (value === null) window.localStorage.removeItem(key);
-    else window.localStorage.setItem(key, value);
+    window.localStorage.setItem(key, value);
   } catch {
     // Private windows: the playground still works, it just forgets.
   }
 }
 
-function useNarrow(query = "(max-width: 1099px)"): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia?.(query).matches ?? false);
+function useWide(query = "(min-width: 1024px)"): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia?.(query).matches ?? true);
   useEffect(() => {
     const media = window.matchMedia?.(query);
     if (!media) return;
-    const update = () => setNarrow(media.matches);
+    const update = () => setWide(media.matches);
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, [query]);
-  return narrow;
+  return wide;
 }
 
 /**
- * The playground: Acme, a sample product with Opengeni's support chat inside.
- * The chat is a recorded demo: the real `@opengeni/react` timeline replays a
- * scripted conversation (questions, streaming, a memory save and recall, tool
- * calls), and visitors pick suggested questions instead of typing. Nothing
- * calls a model or creates a session, so it works before any model is
- * connected. A coach-mark tour walks through streaming, restyling, memory,
- * tools and how to put an agent in a product.
+ * The playground: Acme, a sample product with Opengeni's `<OpenGeniChat />`
+ * inside, beside the few lines of code that put it there. The chat is the
+ * real component on a recorded client: it never calls a model or creates
+ * anything. Four light steps walk through asking, restyling, agent settings
+ * and adding it to a product; every control also works on its own.
  */
 export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -78,274 +68,115 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   const subject = accessContext.subjectId;
   const routeWorkspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
   const organizationId = routeWorkspace?.accountId ?? accessContext.defaultAccountId ?? null;
-  const narrow = useNarrow();
   const journeyKey = organizationId ? onboardingJourneyStorageKey(subject, organizationId) : null;
-  const storageKey = `og.playground:v2:${encodeURIComponent(subject)}:tour`;
+  const guideKey = `og.playground:v3:${encodeURIComponent(subject)}:guide`;
+  const wide = useWide();
 
-  const [tour, setTour] = useState<TourMemory>(() => {
-    try {
-      const saved = JSON.parse(storageGet(storageKey) ?? "null") as TourMemory | null;
-      if (
-        saved &&
-        (saved.step === null || typeof saved.step === "number") &&
-        Array.isArray(saved.done)
-      )
-        return { step: saved.step, done: saved.done.filter((id) => STEPS.includes(id)) };
-    } catch {
-      // A malformed memory starts the tour over.
+  const [guide, dispatch] = useReducer(guideReducer, guideKey, (key) =>
+    parseGuideState(storageGet(key)),
+  );
+  useEffect(() => storageSet(guideKey, JSON.stringify(guide)), [guide, guideKey]);
+  // Each step counts once, when it is first done.
+  const reported = useRef(new Set(guide.done));
+  useEffect(() => {
+    for (const step of guide.done) {
+      if (reported.current.has(step)) continue;
+      reported.current.add(step);
+      captureAnalyticsEvent("playground_step_completed", { step });
     }
-    return { step: 0, done: [] };
-  });
-  useEffect(() => storageSet(storageKey, JSON.stringify(tour)), [storageKey, tour]);
-  const stepIndex = tour.step === null ? null : Math.min(tour.step, STEPS.length - 1);
-  const stepId = stepIndex === null ? null : STEPS[stepIndex]!;
-  const [sub, setSub] = useState<Sub>("");
+  }, [guide.done]);
+
   const [style, setStyle] = useState<ChatStyle>(() =>
     defaultChatStyle(document.documentElement.dataset.ogTheme === "light" ? "light" : "dark"),
   );
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settings, setSettings] = useState<AgentSettings>(DEFAULT_AGENT_SETTINGS);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const [playing, setPlaying] = useState(0);
+  const [lastAnswer, setLastAnswer] = useState<RecordedAnswer | null>(null);
 
-  const finish = useCallback(
-    (id: StepId, nextSub: Sub = "") => {
-      captureAnalyticsEvent("playground_step_completed", { step: id });
-      if (id === "stream" && journeyKey) markOnboarding(journeyKey, "playground");
-      const index = STEPS.indexOf(id) + 1;
-      setTour((current) => ({
-        step: index < STEPS.length ? index : null,
-        done: current.done.includes(id) ? current.done : [...current.done, id],
-      }));
-      setSub(nextSub);
+  const onAnswered = useCallback(
+    (answer: RecordedAnswer) => {
+      setPlaying((count) => Math.max(0, count - 1));
+      setLastAnswer(answer);
+      dispatch({ type: "answered", question: answer.question, settings: answer.settings });
+      if (journeyKey) markOnboarding(journeyKey, "playground");
     },
     [journeyKey],
   );
+  const answered = useRef(onAnswered);
+  answered.current = onAnswered;
+  const [client] = useState(() =>
+    createRecordedClient({
+      settings: () => settingsRef.current,
+      onAsked: () => setPlaying((count) => count + 1),
+      onAnswered: (answer) => answered.current(answer),
+    }),
+  );
+  useEffect(() => () => client.dispose(), [client]);
 
-  // The tour moves on when an answer finishes playing.
-  const onFinished = useCallback((id: ExchangeId) => {
-    if (id === "remember") setSub("ask");
-    else if (id === "recall" || id === "refund") setSub("asked");
-  }, []);
-  const chat = useScriptedChat({ onFinished });
-
-  // Watching the first answer stream is the stream step; it moves on after.
-  useEffect(() => {
-    if (stepId === "send" && chat.playing) finish("send");
-  }, [chat.playing, finish, stepId]);
-  useEffect(() => {
-    if (stepId !== "stream" || chat.playing || chat.events.length === 0) return;
-    const timer = setTimeout(() => finish("stream"), 1600);
-    return () => clearTimeout(timer);
-  }, [chat.events.length, chat.playing, finish, stepId]);
-  useEffect(() => {
-    if (sub !== "asked" || chat.playing) return;
-    if (stepId !== "memory" && stepId !== "tool") return;
-    const timer = setTimeout(() => finish(stepId), 2600);
-    return () => clearTimeout(timer);
-  }, [chat.playing, finish, stepId, sub]);
-  // On phones the palette folds behind Restyle; the restyle step opens it.
-  useEffect(() => {
-    if (narrow && stepId === "style") setPaletteOpen(true);
-  }, [narrow, stepId]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [epoch, setEpoch] = useState(0);
+  const ask = (text: string, { newChat }: { newChat: boolean }) => {
+    if (sessionId && !newChat) {
+      client.ask(sessionId, text);
+      return;
+    }
+    setSessionId(client.startChat(text));
+    // The chat list reads again, so the new chat shows in it.
+    setEpoch((value) => value + 1);
+  };
+  // Settings shape new chats, as on a real server: offer one when they changed.
+  const differs = (from: AgentSettings) =>
+    (Object.keys(settings) as AgentSettingId[]).some((id) => from[id] !== settings[id]);
+  const chatSettings = sessionId ? client.settingsOf(sessionId) : null;
+  const offerNewChat = chatSettings ? differs(chatSettings) : differs(DEFAULT_AGENT_SETTINGS);
+  const followUp =
+    lastAnswer?.sessionId === sessionId &&
+    lastAnswer.question === "charged" &&
+    lastAnswer.settings.tools
+      ? QUESTIONS.refund
+      : null;
 
   const changeStyle = (next: ChatStyle) => {
     setStyle(next);
-    if (stepId === "style" && !tour.done.includes("style")) {
-      setTour((current) => ({ ...current, done: [...current.done, "style"] }));
-      captureAnalyticsEvent("playground_step_completed", { step: "style" });
-      setTimeout(() => {
-        setTour((current) =>
-          current.step === STEPS.indexOf("style")
-            ? { ...current, step: STEPS.indexOf("memory") }
-            : current,
-        );
-        setSub("");
-      }, 2400);
-    }
+    dispatch({ type: "styled" });
   };
-  const restart = () => {
-    setTour({ step: 0, done: [] });
-    setSub("");
-    chat.newChat();
-  };
-  const jump = (index: number) => {
-    setTour((current) => ({ ...current, step: index }));
-    setSub("");
-  };
+  const changeSetting = (id: AgentSettingId, on: boolean) =>
+    setSettings((current) => ({ ...current, [id]: on }));
 
-  // What the visitor can ask: the tour's next question, or anything left.
-  const questions: ExchangeId[] =
-    stepId === "send"
-      ? ["order", "charged"]
-      : stepId === "memory"
-        ? sub === "" && !chat.playing
-          ? ["remember"]
-          : sub === "ask"
-            ? ["recall"]
-            : []
-        : stepId === "tool"
-          ? sub === "" && !chat.playing
-            ? ["refund"]
-            : []
-          : stepId === "stream"
-            ? []
-            : suggestedQuestions(chat.asked);
-
-  const touring = stepIndex !== null;
-  const showPalette = !touring || stepIndex >= STEPS.indexOf("style");
-  const stepLabel = (id: StepId) => `Step ${STEPS.indexOf(id) + 1} of ${STEPS.length}`;
-  const skip = (id: StepId) => (
-    <Button type="button" size="xs" variant="ghost" onClick={() => finish(id)}>
-      Skip
-    </Button>
+  const files = useMemo(
+    () => integrationCode(style, settings, MANAGED_API_ORIGIN),
+    [settings, style],
   );
-  const ask = (id: ExchangeId, options: { newChat?: boolean } = {}) => (
-    <Button
-      type="button"
-      size="xs"
-      disabled={chat.playing !== null}
-      onClick={() => {
-        if (options.newChat) chat.newChat();
-        chat.play(id);
-      }}
-    >
-      {ACME_EXCHANGES[id].question}
-    </Button>
-  );
-  const person = context.authSession?.user.name || context.authSession?.user.email || "there";
+  const person = context.authSession?.user.name || context.authSession?.user.email || "You";
   const sharedTarget = routeWorkspace?.kind === "shared" ? routeWorkspace.id : null;
+  const shipAction = (
+    <Button asChild size="sm" onClick={() => dispatch({ type: "shipped" })}>
+      <Link
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId: sharedTarget ?? workspaceId }}
+        search={{ section: "developer" } as never}
+      >
+        Add it to your product
+        <ArrowRightIcon aria-hidden="true" />
+      </Link>
+    </Button>
+  );
 
-  let coach: ReactNode = null;
-  if (stepId === "send")
-    coach = (
-      <CoachMark
-        id="send"
-        anchor="composer"
-        step={stepLabel("send")}
-        title={STEP_TITLES.send}
-        body="This is a recorded demo of an Opengeni agent inside a product. Pick a question."
-      >
-        {ask("order")}
-      </CoachMark>
-    );
-  else if (stepId === "stream" && chat.events.length > 0)
-    coach = (
-      <CoachMark
-        id="stream"
-        anchor="reply"
-        step={stepLabel("stream")}
-        title={STEP_TITLES.stream}
-        body="Replies stream in, with every step the agent takes. In your product it's one React component."
-        code="<SessionConversation />"
-      />
-    );
-  else if (stepId === "style")
-    coach = (
-      <CoachMark
-        id="style"
-        anchor="palette"
-        side="right"
-        step={stepLabel("style")}
-        title={STEP_TITLES.style}
-        body="Pick a color, corners, a font or a theme. It's a few CSS variables."
-        code="--og-color-accent"
-      >
-        {skip("style")}
-      </CoachMark>
-    );
-  else if (stepId === "memory" && sub === "asked")
-    coach = (
-      <CoachMark
-        id="recall"
-        anchor="reply"
-        step={stepLabel("memory")}
-        title={chat.playing ? "Looking it up in memory" : "Recalled from memory"}
-        body="A new chat, and it still knows. Memory is kept per customer."
-      />
-    );
-  else if (stepId === "memory" && sub === "ask")
-    coach = (
-      <CoachMark
-        id="ask"
-        anchor="composer"
-        step={stepLabel("memory")}
-        title="Now ask in a new chat"
-      >
-        {ask("recall", { newChat: true })}
-      </CoachMark>
-    );
-  else if (stepId === "memory")
-    coach = (
-      <CoachMark
-        id="memory"
-        anchor="composer"
-        step={stepLabel("memory")}
-        title={STEP_TITLES.memory}
-        body="Tell it something, then ask in a fresh chat."
-      >
-        {ask("remember", { newChat: true })}
-        {skip("memory")}
-      </CoachMark>
-    );
-  else if (stepId === "tool" && sub === "asked")
-    coach = (
-      <CoachMark
-        id="tool-run"
-        anchor="reply"
-        step={stepLabel("tool")}
-        title={chat.playing ? "Calling your tools" : "Tool calls show up here"}
-        body="It looked up the charges and refunded the extra one, with tools your product gives it."
-      />
-    );
-  else if (stepId === "tool")
-    coach = (
-      <CoachMark
-        id="tool"
-        anchor="composer"
-        step={stepLabel("tool")}
-        title={STEP_TITLES.tool}
-        body="Give the agent your product's actions, like billing, as MCP tools."
-        code="mcpServers: [{ url }]"
-      >
-        <Button
-          type="button"
-          size="xs"
-          disabled={chat.playing !== null}
-          onClick={() => {
-            chat.newChat();
-            chat.play("refund");
-            setSub("asked");
-          }}
-        >
-          Ask for a refund
-        </Button>
-        {skip("tool")}
-      </CoachMark>
-    );
-  else if (stepId === "finish")
-    coach = (
-      <CoachMark
-        id="finish"
-        anchor="chat"
-        side="right"
-        step={stepLabel("finish")}
-        title={STEP_TITLES.finish}
-        body="Your coding agent can build this into your product in a few minutes."
-        code="npm i @opengeni/react"
-      >
-        <Button asChild type="button" size="xs" onClick={() => finish("finish")}>
-          <Link
-            to="/workspaces/$workspaceId/organization"
-            params={{ workspaceId: sharedTarget ?? workspaceId }}
-            search={{ section: "developer" } as never}
-          >
-            Add it to your product
-          </Link>
-        </Button>
-        <Button type="button" size="xs" variant="ghost" onClick={() => finish("finish")}>
-          Done
-        </Button>
-      </CoachMark>
-    );
-
+  const startOver = () => {
+    dispatch({ type: "restart" });
+    setStyle(defaultChatStyle(style.theme));
+    setSettings(DEFAULT_AGENT_SETTINGS);
+    setSessionId(null);
+    setLastAnswer(null);
+  };
+  const codePanel = (
+    <CodePanel
+      files={files}
+      className="rounded-[14px] border border-border bg-surface lg:h-[34%] lg:max-h-[320px] lg:min-h-[220px] lg:shrink-0"
+    />
+  );
   return (
     <div
       className="flex h-full min-h-0 flex-1 flex-col bg-canvas text-fg"
@@ -365,111 +196,78 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
         </Button>
         <span aria-hidden="true" className="hidden h-5 w-px bg-border sm:block" />
         <h1 className="truncate text-sm font-semibold text-fg">Playground</h1>
-        <p className="hidden truncate text-xs text-fg-muted lg:block">
-          A sample product with Opengeni inside. The chat is a recorded demo.
+        <p className="hidden truncate text-xs text-fg-muted md:block">
+          Opengeni inside a sample product. A recording: no model, nothing saved.
         </p>
-        <div className="ml-auto flex min-w-0 items-center gap-1.5">
-          {touring ? (
-            <ol aria-label="Tour progress" className="mr-1 hidden items-center gap-1 sm:flex">
-              {STEPS.map((id, index) => (
-                <li key={id}>
-                  <button
-                    type="button"
-                    aria-label={`Step ${index + 1}: ${STEP_TITLES[id]}${tour.done.includes(id) ? " (done)" : ""}`}
-                    aria-current={index === stepIndex ? "step" : undefined}
-                    onClick={() => jump(index)}
-                    className="grid size-5 place-items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                  >
-                    <span
-                      className={cn(
-                        "block size-1.5 rounded-full transition-colors duration-[120ms]",
-                        index === stepIndex
-                          ? "size-2 bg-fg"
-                          : tour.done.includes(id)
-                            ? "bg-fg-muted"
-                            : "bg-border-strong",
-                      )}
-                    />
-                  </button>
-                </li>
-              ))}
-            </ol>
-          ) : null}
-          {narrow && showPalette ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-expanded={paletteOpen}
-              aria-label="Restyle"
-              data-tour="palette-toggle"
-              onClick={() => setPaletteOpen((open) => !open)}
-            >
-              <PaletteIcon aria-hidden="true" />
-              <span className="hidden sm:inline">Restyle</span>
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="hidden sm:inline-flex"
-            onClick={touring ? () => setTour((current) => ({ ...current, step: null })) : restart}
-          >
-            {touring ? "Skip tour" : "Restart tour"}
+        <div className="ml-auto flex min-w-0 items-center gap-1">
+          <ol aria-label="Steps" className="mr-1 flex items-center">
+            {GUIDE_STEPS.map((id, index) => (
+              <li key={id}>
+                <button
+                  type="button"
+                  aria-label={`Step ${index + 1}: ${STEP_TITLES[id]}${guide.done.includes(id) ? " (done)" : ""}`}
+                  aria-current={guide.current === id ? "step" : undefined}
+                  onClick={() => dispatch({ type: "jump", step: id })}
+                  className="grid size-6 place-items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11"
+                >
+                  <span
+                    className={cn(
+                      "block rounded-full transition-colors duration-[120ms]",
+                      guide.current === id ? "size-2 bg-fg" : "size-1.5",
+                      guide.current !== id &&
+                        (guide.done.includes(id) ? "bg-fg-muted" : "bg-border-strong"),
+                    )}
+                  />
+                </button>
+              </li>
+            ))}
+          </ol>
+          <Button type="button" variant="ghost" size="sm" onClick={startOver}>
+            Start over
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="hidden sm:inline-flex"
-            disabled={chat.events.length === 0}
-            onClick={chat.newChat}
-          >
-            New chat
-          </Button>
-          <div className="sm:hidden">
-            <MoreMenu label="Playground options" quiet>
-              <DropdownMenuItem
-                onSelect={
-                  touring ? () => setTour((current) => ({ ...current, step: null })) : restart
-                }
-              >
-                {touring ? "Skip tour" : "Restart tour"}
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={chat.events.length === 0} onSelect={chat.newChat}>
-                New chat
-              </DropdownMenuItem>
-            </MoreMenu>
-          </div>
         </div>
       </header>
-      {narrow && paletteOpen && showPalette ? (
-        <div className="flex shrink-0 justify-center border-b border-border bg-bg px-2 py-2">
-          <Palette style={style} onChange={changeStyle} orientation="horizontal" />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row lg:overflow-hidden">
+        <div className="z-10 flex shrink-0 flex-col gap-3 bg-canvas p-2 max-lg:sticky max-lg:top-0 max-lg:h-[min(56dvh,560px)] max-lg:min-h-[380px] max-lg:border-b max-lg:border-border sm:p-3 lg:min-h-0 lg:min-w-0 lg:flex-1 lg:p-4">
+          <div className="flex min-h-0 flex-1 overflow-hidden rounded-[14px] border border-border">
+            <AcmeProduct
+              client={client}
+              style={style}
+              sessionId={sessionId}
+              onSessionChange={setSessionId}
+              epoch={epoch}
+              person={person}
+            />
+          </div>
+          {wide ? codePanel : null}
         </div>
-      ) : null}
-      <div className="relative flex min-h-0 flex-1">
-        <AcmeProduct
-          chat={chat}
-          questions={questions}
-          finished={!touring && questions.length === 0}
-          person={person}
-          style={style}
-        />
-        {!narrow && showPalette ? (
-          <Palette
+        <aside
+          aria-label="Try it"
+          className="flex shrink-0 flex-col gap-3 p-2 sm:p-3 lg:w-[360px] lg:overflow-y-auto lg:border-l lg:border-border lg:bg-bg"
+        >
+          <GuidePanel
+            guide={guide}
             style={style}
-            onChange={changeStyle}
-            orientation="vertical"
-            className="absolute top-24 right-5 z-30"
+            settings={settings}
+            playing={playing > 0}
+            followUp={followUp}
+            offerNewChat={offerNewChat}
+            onStyle={changeStyle}
+            onSetting={changeSetting}
+            onAsk={ask}
+            onSkip={() => dispatch({ type: "skip" })}
+            shipAction={shipAction}
           />
-        ) : null}
+          {wide ? null : codePanel}
+        </aside>
       </div>
-      {coach}
       <p className="sr-only" aria-live="polite">
-        {stepId ? `${stepLabel(stepId)}: ${STEP_TITLES[stepId]}` : ""}
+        {guide.current ? stepAnnouncement(guide.current) : ""}
       </p>
     </div>
   );
+}
+
+function stepAnnouncement(step: GuideStepId): string {
+  return `Step ${GUIDE_STEPS.indexOf(step) + 1} of ${GUIDE_STEPS.length}: ${STEP_TITLES[step]}`;
 }

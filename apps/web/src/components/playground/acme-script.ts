@@ -2,11 +2,27 @@ import type { SessionEvent } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    The playground's recorded conversation: what Acme's support agent does for
-   each suggested question, as the session events the real timeline renders
-   (`@opengeni/react` MessageTimeline). Every event type and payload follows
-   `packages/react/src/timeline/projection.ts`, the same shapes the server
-   emits, so the demo is the product's own UI with no model behind it.
+   each question, given the agent settings the visitor picked. Replies are the
+   session events the real `@opengeni/react` components render (every type and
+   payload follows `packages/react/src/timeline/projection.ts`), so the demo is
+   the product's own UI with no model behind it.
    -------------------------------------------------------------------------- */
+
+/** The agent settings the playground offers; each maps to one line of server code. */
+export type AgentSettings = Readonly<{
+  /** Acme's own actions as MCP tools (`mcpServers`). */
+  tools: boolean;
+  /** Remembers each customer across chats (the `knowledge` capability). */
+  memory: boolean;
+  /** Thinks before answering (`reasoningEffort: "high"`). */
+  thinking: boolean;
+}>;
+
+export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
+  tools: false,
+  memory: false,
+  thinking: false,
+};
 
 export type ScriptBeat =
   | { kind: "think"; text: string }
@@ -14,7 +30,6 @@ export type ScriptBeat =
       kind: "tool";
       id: string;
       name: string;
-      display?: { title: string; accountLabel?: string };
       args: unknown;
       output: unknown;
       /** How long the call runs before its result shows. */
@@ -22,111 +37,154 @@ export type ScriptBeat =
     }
   | { kind: "say"; text: string };
 
-export type ExchangeId = "order" | "charged" | "remember" | "recall" | "refund";
+export type QuestionId = "order" | "charged" | "refund" | "other";
 
-export type ScriptedExchange = Readonly<{
-  id: ExchangeId;
-  question: string;
-  /** Asked in a new chat (recall shows memory carries across chats). */
-  freshChat?: boolean;
-  beats: readonly ScriptBeat[];
-}>;
-
-export const ACME_EXCHANGES: Record<ExchangeId, ScriptedExchange> = {
-  order: {
-    id: "order",
-    question: "Where is my order #4417?",
-    beats: [
-      {
-        kind: "say",
-        text: "Your order **#4417** shipped yesterday with UPS and is out for delivery. It should arrive **today by 6 pm**, and the tracking link is in your confirmation email.",
-      },
-    ],
-  },
-  charged: {
-    id: "charged",
-    question: "I was charged twice this month",
-    beats: [
-      {
-        kind: "say",
-        text: "Sorry about that. I can see two charges of **$49** on March 3, three seconds apart. The second one was an automatic retry, so it's a duplicate. Want me to refund it?",
-      },
-    ],
-  },
-  remember: {
-    id: "remember",
-    question: "Remember that my plan is Pro.",
-    beats: [
-      {
-        kind: "tool",
-        id: "call-remember",
-        name: "knowledge_save",
-        args: {
-          entry: { kind: "note", title: "Plan: Pro", content: "This customer is on the Pro plan." },
-        },
-        output: { entryId: "kn_pro_plan", version: 1, outcome: "published" },
-        ms: 700,
-      },
-      { kind: "say", text: "Got it. I'll remember that you're on the **Pro** plan." },
-    ],
-  },
-  recall: {
-    id: "recall",
-    question: "What plan did I tell you I'm on?",
-    freshChat: true,
-    beats: [
-      {
-        kind: "tool",
-        id: "call-recall",
-        name: "knowledge_search",
-        args: { query: "customer plan" },
-        output: [{ title: "Plan: Pro", snippet: "This customer is on the Pro plan." }],
-        ms: 800,
-      },
-      {
-        kind: "say",
-        text: "You told me you're on the **Pro** plan. That includes priority support and free returns.",
-      },
-    ],
-  },
-  refund: {
-    id: "refund",
-    question: "I was charged twice. Can you refund the extra one?",
-    beats: [
-      {
-        kind: "think",
-        text: "Find the second $49 charge on the March invoice, then refund only that one.",
-      },
-      {
-        kind: "tool",
-        id: "call-charges",
-        name: "billing__list_charges",
-        display: { title: "Look up charges", accountLabel: "Acme billing" },
-        args: { period: "March" },
-        output: {
-          charges: [
-            { id: "ch_3Pq81", amount: 49, created: "Mar 3, 09:12:04" },
-            { id: "ch_3Pq84", amount: 49, created: "Mar 3, 09:12:07", note: "automatic retry" },
-          ],
-        },
-        ms: 900,
-      },
-      {
-        kind: "tool",
-        id: "call-refund",
-        name: "billing__refund_charge",
-        display: { title: "Refund charge", accountLabel: "Acme billing" },
-        args: { charge: "ch_3Pq84", amount: 49 },
-        output: { refunded: true, amount: 49, arrives: "in 5-10 business days" },
-        ms: 800,
-      },
-      {
-        kind: "say",
-        text: "Done. I refunded the duplicate **$49** charge. It will be back on your card in 5-10 business days.",
-      },
-    ],
-  },
+export const QUESTIONS: Record<Exclude<QuestionId, "other">, string> = {
+  order: "Where is my order #4417?",
+  charged: "Was I charged twice this month?",
+  refund: "Yes, refund the extra one",
 };
+
+/** A short chat title, as the agent would set it. */
+export const QUESTION_TITLES: Record<QuestionId, string> = {
+  order: "Order #4417",
+  charged: "Double charge",
+  refund: "Refund",
+  other: "Question",
+};
+
+/** Which recorded answer a typed message gets. */
+export function matchQuestion(text: string): QuestionId {
+  const normalized = text.toLowerCase();
+  if (/\brefund|\byes\b/u.test(normalized)) return "refund";
+  if (/charg|bill|invoice|pay|twice|double/u.test(normalized)) return "charged";
+  if (/order|deliver|ship|track|package|parcel|#?\d{3,}/u.test(normalized)) return "order";
+  return "other";
+}
+
+const MEMORY_SEARCH: ScriptBeat = {
+  kind: "tool",
+  id: "call-memory",
+  name: "knowledge_search",
+  args: { query: "this customer's preferences" },
+  output: [
+    { title: "Plan", snippet: "Pro plan since 2024." },
+    { title: "Contact", snippet: "Prefers email updates." },
+  ],
+  ms: 650,
+};
+
+function thinkingFor(question: QuestionId, settings: AgentSettings): ScriptBeat[] {
+  if (!settings.thinking) return [];
+  const text = {
+    order: settings.tools
+      ? "They want the status of order 4417. Look it up instead of guessing."
+      : "They want order 4417's status, but I have no way to look orders up. Say so plainly.",
+    charged: settings.tools
+      ? "Check this month's charges for a duplicate before answering."
+      : "I can't see billing. Explain what I'd need instead of guessing.",
+    refund: settings.tools
+      ? "Refund only the duplicate, not the original charge."
+      : "I can't issue refunds without a billing tool.",
+    other: "Answer briefly and point to what I can help with.",
+  }[question];
+  return [{ kind: "think", text }];
+}
+
+/** What the agent adds when it remembers this customer (the memory lookup found Pro). */
+const REMEMBERED: Record<QuestionId, string> = {
+  order: " You're on Pro, so shipping and returns are free.",
+  charged: " You're on Pro, so refunds go out the same day.",
+  refund: " You're on Pro, so it goes out today.",
+  other: " Welcome back. You're on the Pro plan.",
+};
+
+/** The beats of one answer: thinking, a memory lookup, tool calls, then the reply. */
+export function replyBeats(question: QuestionId, settings: AgentSettings): ScriptBeat[] {
+  const beats: ScriptBeat[] = [...thinkingFor(question, settings)];
+  if (settings.memory) beats.push(MEMORY_SEARCH);
+  const say = (text: string): ScriptBeat => ({
+    kind: "say",
+    text: settings.memory ? `${text}${REMEMBERED[question]}` : text,
+  });
+  switch (question) {
+    case "order":
+      if (!settings.tools) {
+        beats.push(
+          say(
+            "I can't see orders yet. Once Acme gives me an order lookup, I can check **#4417** for you.",
+          ),
+        );
+        break;
+      }
+      beats.push(
+        {
+          kind: "tool",
+          id: "call-order",
+          name: "acme__get_order",
+          args: { orderId: "4417" },
+          output: { id: "4417", status: "out_for_delivery", carrier: "UPS", eta: "today, 6 pm" },
+          ms: 800,
+        },
+        say("Order **#4417** is out for delivery with UPS and should arrive **today by 6 pm**."),
+      );
+      break;
+    case "charged":
+      if (!settings.tools) {
+        beats.push(
+          say(
+            "I can't see your billing yet. With access to Acme's billing, I could check for a duplicate charge and refund it.",
+          ),
+        );
+        break;
+      }
+      beats.push(
+        {
+          kind: "tool",
+          id: "call-charges",
+          name: "acme__list_charges",
+          args: { period: "this month" },
+          output: {
+            charges: [
+              { id: "ch_81", amount: "$49.00", at: "Oct 1, 09:12:04" },
+              { id: "ch_84", amount: "$49.00", at: "Oct 1, 09:12:07", note: "payment retry" },
+            ],
+          },
+          ms: 900,
+        },
+        say(
+          "Yes. You were charged **$49** twice on Oct 1, three seconds apart. The second is a duplicate from a payment retry. Want me to refund it?",
+        ),
+      );
+      break;
+    case "refund":
+      if (!settings.tools) {
+        beats.push(
+          say("I can't issue refunds yet. Acme would need to give me a refund tool first."),
+        );
+        break;
+      }
+      beats.push(
+        {
+          kind: "tool",
+          id: "call-refund",
+          name: "acme__refund_charge",
+          args: { chargeId: "ch_84" },
+          output: { refunded: "$49.00", arrives: "in 5-10 business days" },
+          ms: 800,
+        },
+        say("Done. The duplicate **$49** is on its way back to your card."),
+      );
+      break;
+    default:
+      beats.push(
+        say(
+          "This is a recorded demo, so I can answer a few things: where order **#4417** is, or whether you were charged twice.",
+        ),
+      );
+  }
+  return beats;
+}
 
 /** A timed session event, relative to when the visitor asked. */
 export type TimedEvent = Readonly<{
@@ -137,7 +195,7 @@ export type TimedEvent = Readonly<{
 }>;
 
 /** How fast the recording plays: close to a real quick model. */
-export const SCRIPT_TIMING = { queueMs: 150, startMs: 450, wordMs: 38, beatGapMs: 260 } as const;
+export const SCRIPT_TIMING = { queueMs: 120, startMs: 380, wordMs: 34, beatGapMs: 240 } as const;
 
 function words(text: string): string[] {
   return text.match(/\S+\s*/gu) ?? [];
@@ -152,23 +210,28 @@ function mcpText(value: unknown): { content: { type: "text"; text: string }[] } 
 }
 
 /**
- * The events one exchange produces, each with its delay from the question:
- * the message, the turn starting, any thinking and tool calls, the answer
- * streamed word by word, and the turn completing.
+ * The events one answer produces after the question, each with its delay:
+ * the turn starting, thinking and tool calls, the reply streamed word by
+ * word, and the turn completing. The question itself is added by the caller.
  */
-export function exchangeTimeline(exchange: ScriptedExchange, turnId: string): TimedEvent[] {
+export function replyTimeline(beats: readonly ScriptBeat[], turnId: string): TimedEvent[] {
   const out: TimedEvent[] = [
-    { afterMs: 0, type: "user.message", payload: { text: exchange.question }, turnId: null },
     {
       afterMs: SCRIPT_TIMING.queueMs,
       type: "turn.queued",
       payload: { turnId, source: "user", routing: "accepted_for_execution" },
       turnId,
     },
+    {
+      afterMs: SCRIPT_TIMING.startMs,
+      type: "session.status.changed",
+      payload: { status: "running" },
+      turnId,
+    },
     { afterMs: SCRIPT_TIMING.startMs, type: "turn.started", payload: { turnId }, turnId },
   ];
   let at = SCRIPT_TIMING.startMs + SCRIPT_TIMING.beatGapMs;
-  for (const beat of exchange.beats) {
+  for (const beat of beats) {
     if (beat.kind === "think") {
       for (const word of words(beat.text)) {
         out.push({ afterMs: at, type: "agent.reasoning.delta", payload: { text: word }, turnId });
@@ -178,12 +241,7 @@ export function exchangeTimeline(exchange: ScriptedExchange, turnId: string): Ti
       out.push({
         afterMs: at,
         type: "agent.toolCall.created",
-        payload: {
-          id: beat.id,
-          name: beat.name,
-          arguments: beat.args,
-          ...(beat.display ? { display: { toolName: beat.name, ...beat.display } } : {}),
-        },
+        payload: { id: beat.id, name: beat.name, arguments: beat.args },
         turnId,
       });
       at += beat.ms;
@@ -201,19 +259,13 @@ export function exchangeTimeline(exchange: ScriptedExchange, turnId: string): Ti
       out.push({
         afterMs: at,
         type: "agent.message.completed",
-        payload: { text: beat.text },
+        payload: { phase: "final", text: beat.text },
         turnId,
       });
     }
     at += SCRIPT_TIMING.beatGapMs;
   }
   out.push({ afterMs: at, type: "turn.completed", payload: {}, turnId });
+  out.push({ afterMs: at, type: "session.status.changed", payload: { status: "idle" }, turnId });
   return out;
-}
-
-/** The questions to offer outside the tour: everything not yet asked, recall after remember. */
-export function suggestedQuestions(asked: readonly ExchangeId[]): ExchangeId[] {
-  return (["order", "charged", "refund", "remember", "recall"] as const).filter(
-    (id) => !asked.includes(id) && (id !== "recall" || asked.includes("remember")),
-  );
 }

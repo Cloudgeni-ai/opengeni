@@ -1,24 +1,22 @@
 import type { CSSProperties } from "react";
 
 /**
- * The restyle palette: what a product changes to make the embedded chat its
+ * The restyle controls: what a product changes to make the embedded chat its
  * own. Every knob is an `--og-*` custom property on an ancestor of the
  * `@opengeni/react` components, the same thing an integration sets.
  */
 export type Accent = { name: string; value: string };
 export type Corners = { name: string; sm: number; md: number; lg: number };
-export type Font = { name: string; css: string };
 export type ChatStyle = {
   accent: Accent;
   corners: Corners;
-  font: Font;
   theme: "light" | "dark";
 };
 
 export const ACCENTS: readonly Accent[] = [
   { name: "Teal", value: "#1f8f7a" },
-  { name: "Peach", value: "#e07b3c" },
   { name: "Indigo", value: "#5b4bff" },
+  { name: "Peach", value: "#e07b3c" },
   { name: "Rose", value: "#cf3f73" },
   { name: "Graphite", value: "#3d4644" },
 ];
@@ -27,20 +25,15 @@ export const CORNERS: readonly Corners[] = [
   { name: "Soft", sm: 6, md: 10, lg: 14 },
   { name: "Round", sm: 10, md: 18, lg: 24 },
 ];
-export const FONTS: readonly Font[] = [
-  { name: "DM Sans", css: '"DM Sans Variable", ui-sans-serif, system-ui, sans-serif' },
-  { name: "Inter", css: '"Inter Variable", ui-sans-serif, system-ui, sans-serif' },
-  { name: "Serif", css: 'Georgia, "Times New Roman", serif' },
-  { name: "Mono", css: '"JetBrains Mono Variable", ui-monospace, monospace' },
-];
 
 export function defaultChatStyle(theme: "light" | "dark"): ChatStyle {
-  return { accent: ACCENTS[0]!, corners: CORNERS[1]!, font: FONTS[0]!, theme };
+  return { accent: ACCENTS[0]!, corners: CORNERS[1]!, theme };
 }
 
 /**
- * The custom properties for one style. Derived accent shades are set too:
- * the defaults compute them from the page's own accent.
+ * The custom properties for one style. The snippet shows the base tokens;
+ * the derived shades are set here too because the app's own stylesheet
+ * computes them once, at the page root.
  */
 export function chatTokens(style: ChatStyle): CSSProperties {
   const accent = style.accent.value;
@@ -58,15 +51,5 @@ export function chatTokens(style: ChatStyle): CSSProperties {
     "--og-radius-sm": `${style.corners.sm}px`,
     "--og-radius-md": `${style.corners.md}px`,
     "--og-radius-lg": `${style.corners.lg}px`,
-    "--og-font-sans": style.font.css,
   } as CSSProperties;
-}
-
-/** The snippet a product would paste: the same properties, on its own class. */
-export function chatTokensCss(style: ChatStyle): string {
-  return `.my-agent {
-  --og-color-accent: ${style.accent.value};
-  --og-radius-md: ${style.corners.md}px;
-  --og-font-sans: ${style.font.css.split(",")[0]}, sans-serif;
-}`;
 }
