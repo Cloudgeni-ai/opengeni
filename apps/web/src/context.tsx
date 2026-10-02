@@ -51,6 +51,7 @@ import {
   fetchAuthSession,
   fetchClientConfig,
   checkDeploymentRevision,
+  mountApiUpdateNotice,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -2988,6 +2989,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
         verificationLinkError={
