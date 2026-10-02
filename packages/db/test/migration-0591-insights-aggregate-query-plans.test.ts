@@ -134,6 +134,22 @@ test("0591 aggregate source retains complete totals, private owner sums and deci
   expect(routine?.definition).toContain("WITH visible AS NOT MATERIALIZED");
   expect(routine?.definition).not.toContain("LEFT JOIN visible_sessions");
   expect(routine?.definition).toContain("usage_by_session AS MATERIALIZED");
+  // 0593 restricts only the attribution source before grouping. The main
+  // all-row totals source still has no private or visible session join.
+  const definition = routine!.definition;
+  const privateInventory = definition.indexOf("WITH private_sessions AS MATERIALIZED");
+  const privateGroups = definition.indexOf("usage_by_session AS MATERIALIZED");
+  const ownerGroups = definition.indexOf("owner_totals AS (");
+  expect(privateInventory).toBeGreaterThan(0);
+  expect(privateGroups).toBeGreaterThan(privateInventory);
+  expect(ownerGroups).toBeGreaterThan(privateGroups);
+  expect(definition.slice(privateGroups, ownerGroups)).toContain(
+    "JOIN private_sessions matched_session ON matched_session.id = usage_row.session_id",
+  );
+  expect(definition.slice(privateGroups, ownerGroups)).toContain(
+    "matched_session.workspace_id = usage_row.workspace_id",
+  );
+  expect(definition.slice(0, privateInventory)).not.toContain("JOIN private_sessions");
   expect(routine?.definition).toContain("sum(usage_row.event_count) AS event_count");
   expect(routine?.definition).toContain("'eventCount', event_count::text");
   expect(routine?.definition).toContain("'privateChatsTruncated'");
