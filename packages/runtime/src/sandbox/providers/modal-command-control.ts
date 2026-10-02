@@ -6,7 +6,7 @@ import { modalCommandArgv } from "./modal-command-argv";
 import {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
-  type ModalRouterProviderCommand,
+  ModalRouterProviderCommand,
 } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import type { ProviderCommandOutput } from "../provider-command-session";
@@ -23,7 +23,6 @@ import { classifyProviderSandboxFailure } from "../provider-errors";
 import {
   ModalCommandControl as LegacyControl,
   commandControlPlane,
-  decodePage,
 } from "./modal-legacy-command-control";
 import {
   ModalCommandRouterWire,
@@ -31,6 +30,7 @@ import {
   ModalCommandStartRejectedError,
   ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
+import { collectModalRawOutputPage, type ModalRawOutputPage } from "./modal-command-raw-page";
 
 export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
 export type ModalProviderCommand = SandboxProviderCommand;
@@ -663,6 +663,27 @@ export class ModalCommandControl {
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
     if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
+    return (await this.readNative(command, waitMs, signal)).output;
+  }
+
+  /** Native capture plumbing only. Raw bytes are acquired by the same joined
+   * read/poll path as read(); no legacy locator or new command is admitted. */
+  async readRaw(
+    command: ModalRouterProviderCommand,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<ModalRawOutputPage> {
+    return (await this.readNative(command, waitMs, signal)).raw;
+  }
+
+  private async readNative(
+    input: ModalRouterProviderCommand,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof collectModalRawOutputPage>> {
+    const command = structuredClone(ModalRouterProviderCommand.parse(input));
+    if (command.sandboxId !== this.sandboxId)
+      throw new Error("Modal command does not belong to this sandbox");
     if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
       throw new Error("Invalid Modal output read bounds");
     signal?.throwIfAborted();
@@ -679,14 +700,14 @@ export class ModalCommandControl {
       // Both complete streams and their matching terminal observation were
       // already captured. An expired provider handle cannot revoke that exact
       // evidence; the session still atomically verifies the retained cursor.
-      return {
-        command: structuredClone(command),
-        expected: structuredClone(command),
-        chunks: [],
-        exitCode: stdout.exitCode,
-        providerExited: true,
-        streamFidelity: command.pty ? "merged" : "separate",
-      };
+      return collectModalRawOutputPage(
+        command,
+        {
+          stdout: { bytes: Buffer.alloc(0), eof: true },
+          stderr: { bytes: Buffer.alloc(0), eof: true },
+        },
+        { source: "retained_terminal", code: stdout.exitCode },
+      );
     }
     const budget = new AbortController();
     const abort = () => budget.abort(signal?.reason);
@@ -751,8 +772,7 @@ export class ModalCommandControl {
     waitMs: number,
     signal: AbortSignal,
     deadline: number,
-  ): Promise<ModalProviderOutputPage> {
-    const next = structuredClone(command);
+  ): Promise<ReturnType<typeof collectModalRawOutputPage>> {
     const cancellation = new AbortController();
     const lookupCancellation = new AbortController();
     const abort = () => {
@@ -813,36 +833,11 @@ export class ModalCommandControl {
         const stderr = (results[1] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
         const exit = (results[2] as PromiseFulfilledResult<number | null>).value;
-        const chunks: ModalProviderOutputPage["chunks"] = [];
-        for (const [stream, page] of [
-          ["stdout", stdout],
-          ["stderr", stderr],
-        ] as const) {
-          const old = command.streams[stream];
-          const decoded = decodePage(old.utf8Remainder, [page.bytes], page.eof);
-          const byteOffset = old.byteOffset + page.bytes.length;
-          if (!Number.isSafeInteger(byteOffset)) throw new Error("Modal output offset exhausted");
-          next.streams[stream] = {
-            byteOffset,
-            utf8Remainder: decoded.remainder,
-            eof: page.eof,
-            exitCode: page.eof ? exit : null,
-          };
-          if (decoded.text)
-            chunks.push({
-              stream,
-              chunkId: `modal-router:${command.execId}:${stream}:${old.byteOffset}:${byteOffset}:${page.eof ? 1 : 0}`,
-              text: decoded.text,
-            });
-        }
-        return {
-          command: next,
-          expected: structuredClone(command),
-          chunks,
-          exitCode: next.streams.stdout.eof && next.streams.stderr.eof ? exit : null,
-          providerExited: exit !== null,
-          streamFidelity: command.pty ? "merged" : "separate",
-        };
+        return collectModalRawOutputPage(
+          command,
+          { stdout, stderr },
+          { source: "router_poll", code: exit },
+        );
       });
     } finally {
       clearTimeout(lookupTimeout);

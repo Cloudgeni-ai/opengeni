@@ -30,6 +30,12 @@ export {
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
+export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
+export type {
+  ModalRawOutputPage,
+  ModalRawOutputStreams,
+  ModalRawOutputExit,
+} from "./providers/modal-command-raw-page";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
 import { restoreHostWorkspaceArchive } from "./host-archive-spool";
 export {
