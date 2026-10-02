@@ -651,6 +651,12 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
+
 If the chat's latest browser was lost or failed, the viewer names it and explains
 why it is unavailable instead of showing the ordinary empty state. It offers the
 existing new-browser controls without reopening the lost controller or selecting
