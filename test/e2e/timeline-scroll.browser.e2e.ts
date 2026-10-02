@@ -479,7 +479,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(duringPrepend.id).toBe(beforePrepend.id);
     expect(duringPrepend.top).toBeCloseTo(beforePrepend.top ?? 0, 0);
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     // wheel() dispatches input without waiting for native scrolling to finish.
     // Capture the reader's new anchor at scrollend, not at an arbitrary timer
@@ -701,7 +701,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     await page.evaluate(() => window.timelineScrollHarness!.prepend());
     await nextFrames(page, 2);
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     await page.mouse.wheel(0, -96);
     await page.waitForTimeout(20);
@@ -720,7 +720,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
     await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.evaluate((node) => {
       node.scrollTop = node.scrollHeight - node.clientHeight - 24;
     });
@@ -737,7 +737,7 @@ describe("timeline scroll ownership browser regression", () => {
     // between the append and the snap.
     await page.waitForFunction(
       () => {
-        const node = document.querySelector("[data-timeline-test] .og-root > div");
+        const node = document.querySelector("[data-timeline-test] [data-og-timeline-scroller]");
         return (
           node instanceof HTMLElement && node.scrollHeight - node.scrollTop - node.clientHeight < 2
         );
@@ -877,7 +877,7 @@ describe("timeline scroll ownership browser regression", () => {
     await target.waitFor({ timeout: 15_000 });
     await target.evaluate(async (node) => {
       const scroller = document.querySelector<HTMLElement>(
-        "[data-timeline-merge-test] .og-root > div",
+        "[data-timeline-merge-test] [data-og-timeline-scroller]",
       );
       if (!scroller) throw new Error("timeline merge scroller is unavailable");
       const settled =
@@ -1880,7 +1880,7 @@ async function nestedVisible(
 ): Promise<{ text: string; top: number; scrollTop: number; overflowAnchor: string }> {
   return await page.evaluate((targetText) => {
     const scroller = document.querySelector<HTMLElement>(
-      "[data-timeline-merge-test] .og-root > div",
+      "[data-timeline-merge-test] [data-og-timeline-scroller]",
     );
     const target = [...document.querySelectorAll<HTMLElement>("span, p")].find(
       (candidate) => candidate.textContent === targetText,
