@@ -975,7 +975,7 @@ content, titles, session/root ids, or drilldown links. Shared-workspace
 per-person private amounts appear only in `privateChats`. Organization summary
 rows contain only `workspaceId`, nullable `membershipId`/`name`, and
 `eventType`/`unit`/`quantity` totals for other members' Only me chats, capped at
-200 people with the largest `model.cost`; `privateChatsTruncated` defaults to
+200 person/workspace rows with the largest `model.cost`; `privateChatsTruncated` defaults to
 false. Workspace Insights private rows identify the invisible session owner by
 opaque `ownerKey`, nullable `name`, and `you`, with calls, tokens, credit USD,
 estimated provider USD, and known-provider-cost call counts; they are capped at

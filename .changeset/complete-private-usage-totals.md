@@ -1,6 +1,8 @@
 ---
 "@opengeni/contracts": major
 "@opengeni/sdk": major
+"@opengeni/db": patch
+"@opengeni/core": patch
 ---
 
 Expose additive, defaulted private-chat amount summaries and organization model payer totals. Organization and workspace totals include every usage ledger row, including another member's Only me chats and retained usage for missing or deleted sessions, without changing billing debits.
