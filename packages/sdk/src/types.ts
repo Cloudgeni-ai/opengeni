@@ -4212,6 +4212,15 @@ export type ClientConfig = {
       ga4?: { measurementId: string } | undefined;
     };
   };
+  /** Operator-owned legal documents the signed-out console links to, when configured. */
+  legal?:
+    | {
+        privacyPolicyUrl?: string | undefined;
+        termsOfServiceUrl?: string | undefined;
+      }
+    | undefined;
+  /** Operator support address the console offers as a mailto link, when configured. */
+  supportEmail?: string | undefined;
   // Server-wide hint: does this deployment support Channel-A structured services
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt

@@ -9,6 +9,7 @@ export type RailFooterMenuConfig = {
   managed: boolean;
   analytics: boolean;
   documentationUrl: string | null;
+  supportEmail?: string;
   /** Grants sessions:create in the workspace, which is what enables Send feedback. */
   canSendFeedback?: boolean;
   pendingInvitations?: number;
@@ -51,6 +52,7 @@ export async function loadRailFooterMenuHarness() {
           ? { consentRequired: true, providers: { posthog: { key: "phc_test" } } }
           : null,
         documentationUrl: footer.documentationUrl,
+        supportEmail: footer.supportEmail,
       },
       authSession: null,
       accessContext: {

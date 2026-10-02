@@ -451,6 +451,43 @@ describe("console documentation link configuration", () => {
   });
 });
 
+describe("legal document links", () => {
+  test("stay unset by default so self-hosted consoles show no operator policies", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.legalPrivacyPolicyUrl).toBeUndefined();
+    expect(settings.legalTermsOfServiceUrl).toBeUndefined();
+    expect(settings.supportEmail).toBeUndefined();
+  });
+
+  test("parse an operator support address and reject a value that is not one", () => {
+    expect(
+      withEnv({ OPENGENI_SUPPORT_EMAIL: " support@opengeni.ai " }, () => getSettings())
+        .supportEmail,
+    ).toBe("support@opengeni.ai");
+    for (const value of ["mailto:support@opengeni.ai", "support", "javascript:alert(1)"]) {
+      expect(() => withEnv({ OPENGENI_SUPPORT_EMAIL: value }, () => getSettings())).toThrow();
+    }
+  });
+
+  test("parse configured http(s) links and reject anything a browser should not follow", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+      },
+      () => getSettings(),
+    );
+    expect(settings.legalPrivacyPolicyUrl).toBe("https://opengeni.ai/privacy");
+    expect(settings.legalTermsOfServiceUrl).toBe("https://opengeni.ai/terms");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_PRIVACY_POLICY_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "/terms" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("remote browser placement configuration", () => {
   test("keeps provider credentials optional and parses bounded launch policy", () => {
     const defaults = withEnv({}, () => getSettings());

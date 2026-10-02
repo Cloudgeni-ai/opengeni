@@ -2067,6 +2067,25 @@ describe("GET /v1/config/client", () => {
     ).toBeNull();
   });
 
+  test("publishes legal document links only when the operator configures them", async () => {
+    const unconfigured = await fetchClientConfig(testSettings());
+    expect(unconfigured.legal).toEqual({});
+    expect(unconfigured.supportEmail).toBeUndefined();
+
+    const configured = await fetchClientConfig(
+      testSettings({
+        legalPrivacyPolicyUrl: "https://opengeni.ai/privacy",
+        legalTermsOfServiceUrl: "https://opengeni.ai/terms",
+        supportEmail: "support@opengeni.ai",
+      }),
+    );
+    expect(configured.legal).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(configured.supportEmail).toBe("support@opengeni.ai");
+  });
+
   test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
