@@ -16616,29 +16616,31 @@ export const UpdateGitHubActionPolicyRequest = z.object({
 });
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
-export const ClientAuthConfig = z.discriminatedUnion("mode", [
-  z.object({
-    mode: z.literal("none"),
-  }),
-  z.object({
-    mode: z.literal("deploymentKey"),
-    headerName: z.literal("x-opengeni-access-key"),
-  }),
-  z.object({
-    mode: z.literal("configuredToken"),
-    headerName: z.literal("authorization"),
-    scheme: z.literal("bearer"),
-  }),
-  z.object({
-    mode: z.literal("managedSession"),
-    session: z.literal("cookie"),
-    emailVerificationRequired: z.boolean().default(true),
-    socialProviders: z
-      .array(z.enum(["google", "github"]))
-      .max(2)
-      .default([]),
-  }),
-]);
+export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.discriminatedUnion("mode", [
+    z.object({
+      mode: z.literal("none"),
+    }),
+    z.object({
+      mode: z.literal("deploymentKey"),
+      headerName: z.literal("x-opengeni-access-key"),
+    }),
+    z.object({
+      mode: z.literal("configuredToken"),
+      headerName: z.literal("authorization"),
+      scheme: z.literal("bearer"),
+    }),
+    z.object({
+      mode: z.literal("managedSession"),
+      session: z.literal("cookie"),
+      emailVerificationRequired: z.boolean().default(true),
+      socialProviders: z
+        .array(z.enum(["google", "github"]))
+        .max(2)
+        .default([]),
+    }),
+  ]),
+);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
@@ -18012,11 +18014,13 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
 /** An absolute http(s) URL the console may render as a plain link. */
-const ClientLegalDocumentUrl = z
-  .string()
-  .url()
-  .max(2_048)
-  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
+const ClientLegalDocumentUrl = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .string()
+    .url()
+    .max(2_048)
+    .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL"),
+);
 
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
