@@ -18257,6 +18257,7 @@ export async function recordScheduledTaskAdmissionFailure(
 /** Reasons a scheduled occurrence is refused before accepting execution. */
 export type ScheduledTaskAdmissionRefusalReason =
   | "scheduled_authority_unavailable"
+  | "scheduled_model_unavailable"
   | "machine_target_unavailable"
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"

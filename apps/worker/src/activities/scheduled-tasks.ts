@@ -92,6 +92,8 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   allowedFirstPartyMcpToolsForSession,
+  canonicalizeConfiguredModelId,
+  isModelAvailableForNewSelection,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
 } from "@opengeni/config";
@@ -1012,6 +1014,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         return await refuseAdmission(admissionDenial, true, "agent run admission denied");
       }
       const acceptedModel = targetSessionExecution?.model ?? model;
+      // Fresh occurrences resolve new policy even for an existing session.
+      // Retired selections cannot acquire that policy; record the refusal
+      // instead of retrying a deterministic resolver exception with no run.
+      // Accepted occurrences replay above with their frozen execution unchanged.
+      if (
+        !isModelAvailableForNewSelection(
+          settings,
+          canonicalizeConfiguredModelId(settings, acceptedModel),
+        )
+      ) {
+        return await refuseAdmission(
+          "scheduled_model_unavailable",
+          false,
+          "scheduled model is retired from new selection; choose an available model",
+        );
+      }
       const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
       const acceptedLatencyMode = targetSessionExecution?.latencyMode ?? "standard";
       const acceptedCustomModel = generatedTarget
