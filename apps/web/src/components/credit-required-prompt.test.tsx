@@ -27,9 +27,13 @@ mock.module("@tanstack/react-router", () => ({
     children: ReactNode;
     to: string;
     params: { workspaceId: string };
-    search: { section: string };
+    search: { section: string; workspace?: string };
   }) => (
-    <a href={`${to.replace("$workspaceId", params.workspaceId)}?section=${search.section}`}>
+    <a
+      href={`${to.replace("$workspaceId", params.workspaceId)}?section=${search.section}${
+        search.workspace ? `&workspace=${search.workspace}` : ""
+      }`}
+    >
       {children}
     </a>
   ),
@@ -95,7 +99,9 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
-      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+      container.querySelector(
+        'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
+      ),
     ).not.toBeNull();
   });
 
@@ -158,7 +164,9 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
-      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+      container.querySelector(
+        'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
+      ),
     ).not.toBeNull();
     const connect = [...container.querySelectorAll("a")].find((node) =>
       node.textContent?.includes("Connect a model"),

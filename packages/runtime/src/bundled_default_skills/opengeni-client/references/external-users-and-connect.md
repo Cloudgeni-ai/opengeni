@@ -102,6 +102,20 @@ needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
 
+### Read the member inventory: SDK versus REST
+
+```ts
+const members = await serviceClient.listWorkspaceMembers(authorizedWorkspaceId);
+console.log(members.length); // WorkspaceMember[]: iterate the array directly
+```
+
+The SDK unwraps the raw REST response. `GET /v1/workspaces/:workspaceId/members`
+returns `{ members: WorkspaceMember[] }`, but `listWorkspaceMembers()` returns
+`WorkspaceMember[]`, not that envelope. Do not read
+`(await serviceClient.listWorkspaceMembers(...)).members`. Inspect each installed
+SDK method's return type; other list methods may have different shapes. This
+inventory read needs `workspace:read` and does not grant or restore membership.
+
 ### Removal and account-wide lifecycle
 
 For recoverable onboarding, establish and retain the identity anchor before

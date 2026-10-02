@@ -13,6 +13,8 @@ import {
   applySessionTurnSettlement,
   applyContextCompaction,
   requestSessionCompaction,
+  appendSessionHistoryItems,
+  sessionHasToolRouterHistory,
 } from "../src/index";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -103,8 +105,59 @@ async function fixture() {
   const history = () => getActiveSessionHistoryItems(client.db, workspaceId, session.id);
   const install = (turn: Awaited<ReturnType<typeof claim>>, catalog: string) =>
     ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog });
-  return { claim, identity, settle, history, install };
+  return {
+    claim,
+    identity,
+    settle,
+    history,
+    install,
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+  };
 }
+
+test("router protocol history remains visible after compaction and is session-scoped", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const turn = await f.claim();
+  const scope = { accountId: f.accountId, workspaceId: f.workspaceId, sessionId: f.sessionId };
+  expect(await sessionHasToolRouterHistory(client.db, scope)).toBe(false);
+  expect(
+    await appendSessionHistoryItems(client.db, {
+      ...f.identity(turn),
+      items: [
+        {
+          position: 100,
+          item: {
+            type: "function_call",
+            name: "tool_list",
+            call_id: "router-call",
+            arguments: "{}",
+          },
+        },
+      ],
+    }),
+  ).toBe(true);
+  expect(await sessionHasToolRouterHistory(client.db, scope)).toBe(true);
+  expect(
+    (
+      await applyContextCompaction(client.db, {
+        ...f.identity(turn),
+        replacementItems: [],
+        summaryItem: { type: "compaction", encrypted_content: "router-history" },
+      })
+    ).applied,
+  ).toBe(true);
+  expect(await sessionHasToolRouterHistory(client.db, scope)).toBe(true);
+  expect(
+    await sessionHasToolRouterHistory(client.db, {
+      accountId: other.accountId,
+      workspaceId: other.workspaceId,
+      sessionId: other.sessionId,
+    }),
+  ).toBe(false);
+}, 180_000);
 
 test("catalog changes append without rewriting history; unchanged turns and retries freeze the same snapshot", async () => {
   const f = await fixture();

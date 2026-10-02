@@ -1,5 +1,10 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 export { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  modelConnectionClass,
+} from "@/lib/integration-connect-analytics";
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
@@ -12,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
+import { useClaudeUsage } from "@/components/models/claude-usage";
 import { userErrorText } from "@/lib/api-error";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter) shared with
@@ -70,6 +76,7 @@ export function useOrganizationProviderConnection({
   }, []);
 
   const connected = connection?.status === "active";
+
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(slug);
@@ -104,6 +111,17 @@ export function useOrganizationProviderConnection({
     }
   }, [client, organizationId, providerKind, enabled]);
 
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "organization",
+    scopeId: organizationId,
+    enabled: enabled && providerKind === "claude_subscription",
+    connected,
+    credentialVersion: connection?.version,
+    canManage: true,
+    onCredentialChanged: refreshConnection,
+  });
+
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
     if (!enabled) return undefined;
     const generation = ++modelsGenerationRef.current;
@@ -131,13 +149,10 @@ export function useOrganizationProviderConnection({
 
   useEffect(() => void refresh(), [refresh]);
 
-  async function saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean> {
+  async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
     if (!key || connectionBusy) return false;
-    const credentialIdentity = JSON.stringify([key, claudeIdentity]);
+    const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
     const operationId =
@@ -147,14 +162,18 @@ export function useOrganizationProviderConnection({
     pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
+    const journey = beginIntegrationConnect(
+      modelConnectionClass(providerKind) ?? "other",
+      "api_key",
+    );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
         expectedVersion: version,
         apiKey: key,
-        ...(claudeIdentity ? { claudeIdentity } : {}),
       });
     const commit = (saved: Connection) => {
+      journey.finish("connected");
       pendingSaveRef.current = null;
       setConnection(saved);
       setConnectionError(null);
@@ -178,6 +197,7 @@ export function useOrganizationProviderConnection({
       }
       // A newer version can belong to another administrator. Only the mutation's
       // idempotent receipt proves that this token and identity were committed.
+      journey.finish(integrationConnectErrorOutcome(finalError));
       await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
         description: userErrorText(finalError),
@@ -345,6 +365,7 @@ export function useOrganizationProviderConnection({
     customModelsError: modelsError,
     customModels: models,
     customModelsLoaded: modelsLoaded,
+    claudeUsage: providerKind === "claude_subscription" ? claudeUsage : undefined,
     busy: connectionBusy,
     modelSlug: slug,
     modelBusy,

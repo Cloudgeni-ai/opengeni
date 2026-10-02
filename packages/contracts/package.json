@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.3.0",
+  "version": "5.6.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,14 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
       "default": "./src/browser-storage.ts"
@@ -109,6 +117,10 @@
     "./session-titles": {
       "types": "./src/session-titles.ts",
       "default": "./src/session-titles.ts"
+    },
+    "./session-final-reply": {
+      "types": "./src/session-final-reply.ts",
+      "default": "./src/session-final-reply.ts"
     },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",

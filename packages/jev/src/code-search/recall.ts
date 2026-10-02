@@ -29,7 +29,35 @@ import {
 } from "./text";
 import { CODE_SEARCH_MAX_PATTERN_CHARS } from "./workspace";
 
+/**
+ * Directories that hold platform credential material, never workspace code: OpenGeni's per-session sandbox
+ * state (`.opengeni/`: Codemode bearer tokens, Git credential files and bindings, delivered clients), the Azure
+ * CLI login cache (`.azure/`, written by the sandbox's service-principal login in HOME=/workspace) and a
+ * Connected Machine agent's enrollment credentials (`.config/opengeni/`, when the workspace is its HOME).
+ * Each entry is a sequence of path segments matched at any depth, case-insensitively for explicit paths.
+ * No search stage reads them: every ripgrep call excludes them, and an explicit path into one is refused.
+ */
+export const CODE_SEARCH_CREDENTIAL_DIRS: readonly (readonly string[])[] = [
+  [".opengeni"],
+  [".azure"],
+  [".config", "opengeni"],
+];
+
+/** Whether a workspace-relative path (`/`-separated, already normalized) is inside a credential directory. */
+export function isCodeSearchCredentialPath(path: string): boolean {
+  // `a/./b` and `a//b` name `a/b`
+  const segs = path
+    .toLowerCase()
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".");
+  return CODE_SEARCH_CREDENTIAL_DIRS.some((dir) =>
+    segs.some((_, i) => dir.every((d, j) => segs[i + j] === d)),
+  );
+}
+
 export const BUILTIN_EXCLUDES = [
+  // credential material (CODE_SEARCH_CREDENTIAL_DIRS); never searched, whatever the other excludes say
+  ...CODE_SEARCH_CREDENTIAL_DIRS.map((dir) => `!**/${dir.join("/")}/**`),
   "!**/node_modules/**",
   "!**/dist/**",
   "!**/build/**",
@@ -76,6 +104,8 @@ export interface KeywordInfo {
   idf: number;
   /** Fragments used because the full keyword had zero hits. */
   fragments: string[];
+  /** An identifier added by symbol discovery (not one of the caller's keywords). */
+  symbol?: boolean | undefined;
 }
 
 export interface HitLine {
@@ -108,6 +138,8 @@ export interface RecallResult {
   validPrefixes: string[];
   /** Path-only candidates dropped because their content is binary (NUL in the first 8 KB). */
   binaryDropped: number;
+  /** The best files below the maxCandidates cut (at most 10), for the pack's cap report. */
+  cutTop: Array<{ path: string; lexScore: number }>;
   ms: number;
 }
 
@@ -410,7 +442,10 @@ export async function normalizePrefixes(
   return { ok: [...new Set(ok)], missing };
 }
 
-/** Workspace-relative form of a prefix, or null when it is absolute, climbs out, or starts with "-". */
+/**
+ * Workspace-relative form of a prefix, or null when it is absolute, climbs out, starts with "-" or names a
+ * credential directory (CODE_SEARCH_CREDENTIAL_DIRS).
+ */
 export function cleanPrefix(p: string): string | null {
   let s = p.trim().replace(/\\/g, "/");
   if (!s || s.startsWith("/") || s.startsWith("~") || /^[A-Za-z]:\//.test(s)) return null;
@@ -418,6 +453,8 @@ export function cleanPrefix(p: string): string | null {
   s = s.replace(/\/+$/, "").replace(/\/{2,}/g, "/");
   if (s === "" || s === ".") return ".";
   if (s.startsWith("-") || s.split("/").some((seg) => seg === "..")) return null;
+  // ripgrep searches an explicitly named path even when a -g glob excludes it
+  if (isCodeSearchCredentialPath(s)) return null;
   return s;
 }
 
@@ -620,6 +657,11 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     totalFiles: files.length,
     candidates,
     scoredFiles: scored.length,
+    cutTop: scored
+      .slice(next)
+      .filter((c) => c.hitLines.size > 0)
+      .slice(0, 10)
+      .map((c) => ({ path: c.path, lexScore: c.lexScore })),
     searchPaths,
     widened,
     missingPrefixes: prefixes.missing,

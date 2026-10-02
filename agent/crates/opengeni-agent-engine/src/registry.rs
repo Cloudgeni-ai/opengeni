@@ -510,7 +510,7 @@ mod tests {
         r.final_ack(&op);
         let report = r.gc(250);
         assert_eq!(report.dropped_completed, 1);
-        assert!(report.evicted_unacked.is_empty());
+        assert_eq!(report.evicted_unacked, Vec::<OpId>::new());
         assert_eq!(r.query(&op), QueryAnswer::Unknown);
         assert_eq!(r.counters().evicted_unacked_total, 0);
     }
@@ -556,7 +556,7 @@ mod tests {
         let op = id("long-runner");
         let _ = r.begin(&op, 1, 0);
         let report = r.gc(1_000_000);
-        assert!(report.evicted_unacked.is_empty());
+        assert_eq!(report.evicted_unacked, Vec::<OpId>::new());
         assert_eq!(
             r.query(&op),
             QueryAnswer::Running {

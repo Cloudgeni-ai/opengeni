@@ -110,6 +110,11 @@ describe("migration 0264 connection authority runtime activation", () => {
       // during fixture setup, then remove them before the ordered replay.
       await sql`
         alter table sessions
+        add column imported_archive_import_id text,
+        add column imported_archive_imported_at timestamptz,
+        add column imported_archive_request_hash text,
+        add column imported_archive_subject_id text,
+        add column imported_archive_next_offset integer,
         add column scope_subject_id text,
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
@@ -265,6 +270,11 @@ describe("migration 0264 connection authority runtime activation", () => {
 
       await sql`
         alter table sessions
+        drop column imported_archive_import_id,
+        drop column imported_archive_imported_at,
+        drop column imported_archive_request_hash,
+        drop column imported_archive_subject_id,
+        drop column imported_archive_next_offset,
         drop column scope_subject_id,
         drop column input_wait_turn_id,
         drop column input_wait_until,

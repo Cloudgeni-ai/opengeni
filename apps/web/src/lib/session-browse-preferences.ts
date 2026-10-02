@@ -1,6 +1,7 @@
 import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "./sessions-group";
 
-export type SessionBrowseStatus = "active" | "archived" | "all";
+/** "needs-you" is the Active list narrowed to workstreams waiting on the person. */
+export type SessionBrowseStatus = "active" | "needs-you" | "archived" | "all";
 export type SessionBrowsePreferences = {
   groupBy: SessionBrowseGroupBy;
   sortBy: SessionBrowseSortBy;
@@ -96,7 +97,9 @@ export function readSessionBrowsePreferences(
       sortBy: ["updatedAt", "createdAt", "name"].includes(parsed.sortBy)
         ? parsed.sortBy
         : "updatedAt",
-      status: ["active", "archived", "all"].includes(parsed.status) ? parsed.status : "active",
+      status: ["active", "needs-you", "archived", "all"].includes(parsed.status)
+        ? parsed.status
+        : "active",
       showEmptyGroups: parsed.showEmptyGroups === true,
     };
   } catch {

@@ -4,6 +4,8 @@ import { ModalCommandControl } from "../src/sandbox/providers/modal-command-cont
 import {
   withCommandSupervisionReady as withReady,
   withSupervisedLaunchReservation,
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
 } from "../src/sandbox/provider-command-session";
 import {
   ModalCommandStartPreDispatchUnavailableError,
@@ -23,6 +25,8 @@ function fixture() {
   let failStart: unknown = null;
   let exitCode = 0;
   let response = "";
+  let readFailures = 0;
+  const reads: Array<{ execId: string; stream: string; offset: number }> = [];
   const control = ModalCommandControl.forSandbox(
     {
       version: () => "0.9.0",
@@ -45,9 +49,11 @@ function fixture() {
           starts.push(args);
           if (failStart) throw failStart;
         },
-        read: async (_id: unknown, stream: string) => {
-          expect(stream).toBe("stdout");
-          return { bytes: Buffer.from(response), eof: true };
+        read: async (id: { execId: string }, stream: string, offset: number) => {
+          reads.push({ execId: id.execId, stream, offset });
+          if (stream === "stdout" && readFailures-- > 0)
+            throw Object.assign(new Error("observation unavailable"), { code: "14" });
+          return { bytes: Buffer.from(stream === "stdout" ? response : ""), eof: true };
         },
         poll: async () => exitCode,
       } as unknown as ModalCommandRouterWire);
@@ -56,6 +62,10 @@ function fixture() {
   return {
     control,
     starts,
+    reads,
+    failReads: (count: number) => {
+      readFailures = count;
+    },
     failStart: (error: unknown = new Error("ambiguous start")) => {
       failStart = error;
     },
@@ -102,6 +112,25 @@ test("only readiness-gated nonPTY commands without runAs get an idle supervisor"
     ).supervision,
   ).toBeUndefined();
 });
+
+test("capability read retries preserve one helper UUID and zero offsets", async () => {
+  const f = fixture();
+  f.response("native-subreaper-v1");
+  f.failReads(1);
+  await f.control.verifySupervisionCapability();
+  expect(f.starts).toHaveLength(1);
+  expect(new Set(f.reads.map((read) => read.execId))).toEqual(new Set([f.starts[0]!.execId]));
+  expect(f.reads.every((read) => read.offset === 0)).toBe(true);
+});
+
+test("capability observation exhaustion preserves its locator without another Start", async () => {
+  const f = fixture();
+  f.failReads(1000);
+  const error = await f.control.verifySupervisionCapability().catch((failure) => failure);
+  expect(error).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+  expect(error.command.execId).toBe(f.starts[0]!.execId);
+  expect(f.starts).toHaveLength(1);
+}, 7_000);
 
 test("supervised launch cannot dispatch without committed reservation", async () => {
   const f = fixture();
@@ -164,10 +193,31 @@ test("exact-instance capability requires native kernel probe, protocol and termi
 test("ambiguous supervised start retains exactly its client-chosen idle invocation without replay", async () => {
   const f = fixture();
   f.failStart();
-  const command = await withCommandSupervisionReady(true, () => f.control.start({ cmd: "once" }));
+  const error = await withCommandSupervisionReady(true, () =>
+    f.control.start({ cmd: "once" }),
+  ).catch((failure) => failure);
+  expect(error).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+  const command = error.command;
   expect(f.starts).toHaveLength(1);
   expect(command.execId).toBe(f.starts[0]!.execId);
   expect(command.supervision).toBeDefined();
+});
+
+test("ambiguous PTY and runAs Starts retain the exact locator, never fabricate running or replay", async () => {
+  for (const args of [
+    { cmd: "once", tty: true },
+    { cmd: "once", runAs: "root" },
+  ]) {
+    const f = fixture();
+    const cause = Object.assign(new Error("14 UNAVAILABLE: Connection dropped"), { code: 14 });
+    f.failStart(cause);
+    const error = await f.control.start(args).catch((failure) => failure);
+    expect(error).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+    expect(error.cause).toBe(cause);
+    expect(error.command.execId).toBe(f.starts[0]!.execId);
+    expect(f.starts).toHaveLength(1);
+    expect(error.command.supervision).toBeUndefined();
+  }
 });
 
 test("control uses a separate exact-task helper and validates invocation-bound receipts", async () => {

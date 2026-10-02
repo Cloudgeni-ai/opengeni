@@ -1,0 +1,107 @@
+---
+title: "Keep your existing chat UI"
+description: "Serve an existing Vercel AI SDK or OpenAI-shaped chat UI from OpenGeni with the chat facade."
+icon: "message-dots"
+---
+
+If your product already has a chat UI speaking the Vercel AI SDK `useChat` protocol or an OpenAI-shaped protocol, the chat facade in `@opengeni/sdk/chat` gives it an OpenGeni backend without replacing the UI. It also powers server-side bots through `og.chat(...).send()`.
+
+<Warning>
+  The facade is a text-only projection. Tool outputs are dropped, there are no files, attachments,
+  artifacts, or images, no goals, queue, or Steer UI, and reopening restores only a text snapshot.
+  When those matter, use [`SessionConversation`](/integrate/conversation-ui) instead.
+</Warning>
+
+## Serve your chat routes
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  source: "acme-product",
+});
+
+export const handleChat = createChatHandler(og, {
+  resolve: async (request) => {
+    const me = await authenticate(request);
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return {
+      tenant: me.tenantId,
+      user: me.userId,
+      chats: "private", // the default with a user; "shared" or "isolated"
+      agent: { identity: "You are Acme's assistant.", capabilities: "none" },
+    };
+  },
+  format: "vercel", // or "openai-chat", "openai-responses"; default "native"
+  toolParts: true, // optional Vercel activity indicators; off by default
+});
+```
+
+Register `handleChat` for:
+
+| Route                    | Purpose                                         |
+| ------------------------ | ----------------------------------------------- |
+| `GET /api/chat`          | Restore messages, pending decisions, and status |
+| `POST /api/chat`         | Send a message and stream the reply             |
+| `POST /api/chat/respond` | Answer a pending approval or question           |
+
+Each tenant maps to one workspace and each conversation to one session. Keep one stable conversation id per thread, sent by custom clients in `x-opengeni-conversation`, and check that the user may open it. [Onboard users](/integrate/users-and-tenants#onboard-users) first; chat requests never grant membership. With a `user`, chats default to `"private"` (personal knowledge on; `memory: false` turns saving off). Without a user, leaving `chats` out keeps workspace visibility, session-only reach, and knowledge off; use `"shared"` for service-owned chats. `agent` takes the same object as sessions ([Configure the agent](/integrate/configure-the-agent)), and the facade's renderer defaults to `"markdown"`.
+
+The Vercel and OpenAI formats send only the latest user message. Earlier messages from your app are imported only when the session is first created; after that, OpenGeni owns the history, and messages your app shows but never sends are not added. These routes are served by **your** backend: the OpenGeni API does not expose `/chat/completions` or `/responses`.
+
+Always pass `baseUrl`; without it the facade targets `app.opengeni.ai`.
+
+## Stream into an existing AI SDK route
+
+To keep an existing `useChat` route with its own request body, write OpenGeni's reply into your own UI message stream with `uiMessageStreamParts`:
+
+```ts
+import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
+import { uiMessageStreamParts } from "@opengeni/sdk/chat";
+
+export async function POST(request: Request) {
+  const { messages, dashboardId } = await request.json();
+  const me = await authenticate(request);
+  const chat = await og.chat({ tenant: me.tenantId, user: me.userId, conversation: me.chatId });
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      const chunks = chat.stream(lastUserText(messages), {
+        modelContext: `Dashboard ${dashboardId}`,
+      });
+      for await (const part of uiMessageStreamParts(chunks, { framing: false, toolParts: true })) {
+        writer.write(part as never);
+      }
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
+}
+```
+
+The Vercel format speaks the UI message stream used by AI SDK 5 and later; tool approval requests need AI SDK 6 or later. Ordinary tool activity is off by default. `toolParts: true` on the handler or `uiMessageStreamParts` emits `dynamic`, `providerExecuted` activity parts, so your app does not execute those tools. Successful outputs contain only `{ status }`, not actual tool results. This does not add artifacts or attachments. Approval requests are emitted even when `toolParts` is off. `framing: false` leaves message framing to the outer AI SDK stream.
+
+## Server-side bots
+
+```ts
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("What did we decide last time?");
+console.log(reply.status, reply.text); // "completed", "pending", or "cancelled"
+```
+
+`chat.stream(message)` yields text, tool activity, pending decisions, and the final reply. `chat.snapshot()` restores history, and `chat.respond(input)` continues after a pending approval or question.
+
+## Move to the full conversation later
+
+`og.client` is the full SDK client, and each chat exposes its `workspaceId` and `sessionId`. Render the same session with `SessionConversation` when you are ready. The [chat quickstart](/examples/chat-quickstart) is a runnable backend.
+
+## Custom polling or static renderers
+
+Backend authorization does not stop an account A response already in flight from arriving after account B signs in. On logout, login, tenant or session switch, stop polling, abort requests, reset private messages/approvals/cursors and cached session IDs, and increment an identity/session epoch. Guard both success and error rendering by the captured epoch: abort alone is insufficient, including for A → B → A. Never reuse A's session ID for B. These presentation guards do not replace server-side ownership checks.
+
+Fold ordered, deduplicated approval events instead of treating every replayed request as pending. Preserve the original approval and decision IDs; see [Approvals & questions](/integrate/approvals-and-questions). The full [client Skill](/reference/opengeni-client-skill) contains framework-neutral, tested identity-epoch and event-fold examples for your existing frontend module; no new app architecture is required.
+
+Catch SDK initialization, configuration, calls and local persistence inside the host route's error boundary. Return friendly host-branded notices, never upstream `error.message`, response bodies or stack traces. Keep redacted diagnostics server-only. An unknown outcome or accepted decision followed by local-save failure requires reconciliation, not a promise that nothing changed or a blind repeat action.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

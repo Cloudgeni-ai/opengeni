@@ -46,15 +46,42 @@ describe("sandbox health dashboard", () => {
     expect(fallback).toBeDefined();
     expect(dashboard.panels.filter((panel) => panel.id === fallback?.id)).toHaveLength(1);
     expect(fallback?.targets?.[0]?.expr).toContain(
-      'opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="selected"}',
+      'opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome=~"selected|selected_shared"}',
     );
+    expect(fallback?.targets?.[0]?.expr).not.toContain("fresh_workspace");
     expect(fallback?.targets?.[0]?.expr).toContain("offset 30m");
     expect(fallback?.targets?.[0]?.expr).toContain(
-      "max by (namespace, release, environment, backend)",
+      "max by (namespace, release, environment, backend, outcome)",
     );
     expect(fallback?.targets?.[0]?.legendFormat).toContain("{{release}}");
     expect(fallback?.description).toContain("does not prove the subsequent restore succeeded");
     expect(JSON.stringify(fallback)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
+  });
+
+  test("shows empty-workspace continuity as its own bounded signal", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./sandbox-health.json", import.meta.url), "utf8"),
+    ) as {
+      panels: Array<{
+        id: number;
+        title?: string;
+        description?: string;
+        gridPos?: { y: number };
+        targets?: Array<{ expr?: string; legendFormat?: string }>;
+      }>;
+    };
+    const fresh = dashboard.panels.find(
+      (panel) => panel.title === "Modal empty-workspace continuity",
+    );
+    expect(fresh).toBeDefined();
+    expect(dashboard.panels.filter((panel) => panel.id === fresh?.id)).toHaveLength(1);
+    expect(fresh?.targets?.[0]?.expr).toContain(
+      'opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="fresh_workspace"}',
+    );
+    expect(fresh?.targets?.[0]?.expr).toContain("offset 30m");
+    expect(fresh?.targets?.[0]?.legendFormat).toContain("{{release}}");
+    expect(fresh?.description).toContain("warned every member");
+    expect(JSON.stringify(fresh)).not.toMatch(/workspace_id|session_id|sandbox_group_id/);
   });
 
   test("reconstructs recovery signals from committed receipts per release", async () => {

@@ -1,25 +1,20 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
-import {
-  ClaudeTokenInstructions,
-  useClaudeIdentityFields,
-  CLAUDE_MODEL_CHOICES,
-  claudeModelLabel,
-} from "@/components/models/claude-setup";
+import { ClaudeSignInPage } from "@/components/models/claude-signin";
+import { CLAUDE_MODEL_CHOICES, claudeModelLabel } from "@/components/models/claude-setup";
 import { Disclosure } from "@/components/ui/disclosure";
+import {
+  ClaudeUsage,
+  ClaudeUsageReadout,
+  useClaudeUsage,
+  type ClaudeUsageState,
+} from "@/components/models/claude-usage";
 import { trackModelConnection } from "@/lib/analytics-observer";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import {
-  BuildingIcon,
-  FolderIcon,
-  KeyRoundIcon,
-  Loader2Icon,
-  MinusCircleIcon,
-  PlusIcon,
-  UnplugIcon,
-} from "lucide-react";
+import { KeyRoundIcon, Loader2Icon, MinusCircleIcon, PlusIcon, UnplugIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -40,7 +35,12 @@ import {
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ModelsFormPage, ProviderTile } from "@/components/models/models-ui";
+import {
+  ModelsFormPage,
+  NOT_IN_USE,
+  ProviderTile,
+  useModelsListLabel,
+} from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -252,7 +252,7 @@ function claudeWorkspaceConfig(
   };
 }
 
-function isProviderConnection(
+export function isProviderConnection(
   connection: ConnectionMetadata,
   config: ProviderConnectionConfig,
 ): boolean {
@@ -335,6 +335,7 @@ export interface ProviderConnectionView {
   customModelsError: Error | null;
   customModels: readonly CustomModelLike[];
   customModelsLoaded: boolean;
+  claudeUsage?: ClaudeUsageState;
   busy: boolean;
   modelSlug: string;
   modelBusy: boolean;
@@ -354,10 +355,7 @@ export interface ProviderConnectionView {
   refreshConnection(): Promise<unknown>;
   refreshCustomModels(): Promise<unknown>;
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean>;
+  saveKey(apiKey: string): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
@@ -423,6 +421,7 @@ export function useProviderConnection(
     );
   }, [config, connections]);
   const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
+
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(modelSlug);
@@ -500,6 +499,18 @@ export function useProviderConnection(
     }
   }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId, enabled]);
 
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "workspace",
+    scopeId: props.workspaceId,
+    enabled: enabled && config.provider === "claude_subscription",
+    connected: Boolean(connected),
+    credentialVersion: props.canManageConnection ? connection?.version : undefined,
+    credentialId: props.canManageConnection ? connection?.id : undefined,
+    canManage: props.canManageConnection,
+    onCredentialChanged: refreshConnection,
+  });
+
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshCustomModels()]);
   }, [refreshConnection, refreshCustomModels]);
@@ -530,24 +541,17 @@ export function useProviderConnection(
   }, [customModels, modelPendingRemoval]);
 
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  async function saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean> {
+  async function saveKey(apiKey: string): Promise<boolean> {
     const token = apiKey.trim();
     if (!token || !enabled || !props.canManageConnection || busy) return false;
-    if (config.id === "claude_subscription" && !claudeIdentity) return false;
-    const value =
-      config.id === "claude_subscription"
-        ? JSON.stringify({ version: 1, token, identity: claudeIdentity })
-        : token;
+    const value = token;
     const recordOutcome =
       config.id === "openrouter" || config.id === "vercel-ai-gateway"
         ? trackModelConnection(
             config.id === "openrouter" ? "openrouter" : "ai-gateway",
             props.workspaceId,
           )
-        : () => {};
+        : beginModelConnectJourney(config.id, "api_key");
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -831,6 +835,7 @@ export function useProviderConnection(
     connected,
     loaded,
     customModelsLoaded,
+    claudeUsage: config.provider === "claude_subscription" ? claudeUsage : undefined,
     settled: !enabled || settled,
     hidden: !enabled || hidden,
     error,
@@ -872,6 +877,8 @@ export function providerStatus(state: ProviderConnection): {
   label: string;
 } {
   if (!state.settled) return { status: "loading", label: "Loading…" };
+  if (state.claudeUsage?.value?.refreshStatus === "reconnect")
+    return { status: "unavailable", label: "Replace token" };
   if (state.error || state.customModelsError)
     return { status: "unavailable", label: "Unavailable" };
   return state.connected
@@ -902,9 +909,16 @@ export function providerListed(state: ProviderConnection): boolean {
 export function ProviderConnectionRow({
   state,
   onOpen,
+  scope,
+  setAside,
 }: {
   state: ProviderConnection;
-  onOpen: () => void;
+  /** Opens the provider's page; omitted for a read-only row. */
+  onOpen?: (() => void) | undefined;
+  /** Who the key is for: "Everyone in Acme", "This workspace only". */
+  scope?: string | undefined;
+  /** Why new work here doesn't use this key; the row then reads "Not in use". */
+  setAside?: string | null | undefined;
 }) {
   const { config } = state;
   const status = providerStatus(state);
@@ -917,17 +931,33 @@ export function ProviderConnectionRow({
       leading={<ProviderTile provider={config.provider} size="lg" />}
       title={config.title}
       meta={[
+        scope,
         status.status === "connected"
           ? config.provider === "claude_subscription"
             ? "Claude plan"
             : "API key"
           : status.label,
-        modelsLabel,
+        setAside ?? modelsLabel,
       ]}
-      indicator={
-        status.status === "unavailable" ? { kind: "unavailable", label: "Couldn't load" } : "open"
+      cells={
+        setAside
+          ? { usage: NOT_IN_USE }
+          : state.claudeUsage && state.connected
+            ? { usage: <ClaudeUsageReadout state={state.claudeUsage} /> }
+            : {}
       }
-      onOpen={onOpen}
+      {...(onOpen
+        ? {
+            onOpen,
+            indicator:
+              status.status === "unavailable"
+                ? {
+                    kind: "unavailable" as const,
+                    label: status.label === "Replace token" ? "Replace token" : "Couldn't load",
+                  }
+                : ("open" as const),
+          }
+        : {})}
     />
   );
 }
@@ -1147,30 +1177,35 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
-  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
-  const resetIdentity = claude.reset;
   useEffect(() => {
     if (!open) {
       setKey("");
-      resetIdentity();
     }
-  }, [open, resetIdentity]);
+  }, [open]);
   return (
     <FormDialog
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
       leading={<ProviderTile provider={config.provider} />}
-      title={`Replace the ${config.title} ${config.credentialLabelText === "Setup token" ? "token" : "key"}`}
+      title={
+        config.provider === "claude_subscription"
+          ? "Replace Claude setup token"
+          : `Replace the ${config.title} key`
+      }
       description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
-      submitDisabled={!key.trim() || !claude.valid}
-      onSubmit={async () => await state.saveKey(key, claude.identity)}
+      submitDisabled={!key.trim()}
+      onSubmit={async () => await state.saveKey(key)}
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
-        label={config.credentialLabelText ?? "API key"}
+        label={
+          config.provider === "claude_subscription"
+            ? "Setup token"
+            : (config.credentialLabelText ?? "API key")
+        }
         hint={`${config.keyHelp} It's stored encrypted and never shown again.`}
       >
         <SecretInput
@@ -1180,7 +1215,6 @@ export function ReplaceKeyDialog({
           onChange={(event) => setKey(event.target.value)}
         />
       </Field>
-      {claude.fields}
     </FormDialog>
   );
 }
@@ -1233,14 +1267,18 @@ export function ProviderConnectionPage({
   onBack,
   onConnect,
   onEditAccess,
+  footnote,
 }: {
   state: ProviderConnection;
   /** The workspace's or organization's name. */
   scopeName?: string | undefined;
+  /** A last quiet section, such as where else a key can be connected. */
+  footnote?: ReactNode;
   onBack?: (() => void) | undefined;
   onConnect: () => void;
   onEditAccess?: (() => void) | undefined;
 }) {
+  const listLabel = useModelsListLabel();
   const { config } = state;
   const status = providerStatus(state);
   const [replacing, setReplacing] = useState(false);
@@ -1286,14 +1324,19 @@ export function ProviderConnectionPage({
           state.connected ? (
             <>
               <RowButton
-                onClick={() =>
-                  config.provider === "claude_subscription" ? onConnect() : setReplacing(true)
+                onClick={
+                  config.provider === "claude_subscription" ? onConnect : () => setReplacing(true)
                 }
                 disabled={state.busy}
               >
-                {config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
+                {config.provider === "claude_subscription" ? "Sign in again" : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
+                {config.provider === "claude_subscription" ? (
+                  <DropdownMenuItem onSelect={() => setReplacing(true)}>
+                    Replace setup token
+                  </DropdownMenuItem>
+                ) : null}
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
                   <UnplugIcon />
                   Disconnect
@@ -1316,7 +1359,7 @@ export function ProviderConnectionPage({
   );
   return (
     <DetailPage
-      back={onBack ? { label: "Models", onClick: onBack } : undefined}
+      back={onBack ? { label: listLabel, onClick: onBack } : undefined}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       {header}
@@ -1335,12 +1378,7 @@ export function ProviderConnectionPage({
                     ? "Stored encrypted"
                     : "Not connected"}
             </DetailAsideItem>
-            <DetailAsideItem
-              label="Belongs to"
-              icon={state.organization ? <BuildingIcon /> : <FolderIcon />}
-            >
-              {scopeName ?? state.scopeLabel}
-            </DetailAsideItem>
+            {/* Who it's for is in the header meta; the aside doesn't repeat it. */}
             <DetailAsideItem label="Billed to">{config.billedTo}</DetailAsideItem>
           </DetailAside>
         }
@@ -1371,14 +1409,7 @@ export function ProviderConnectionPage({
             <p className="text-sm text-fg-muted">{config.connectionManagerDescription}</p>
           </DetailSection>
         ) : null}
-        {config.provider === "claude_subscription" ? (
-          <DetailSection title="Subscription">
-            <p className="text-sm text-fg-muted">
-              Model calls use your Claude plan. Usage limits and renewal are managed in Claude.
-              Replace the token here if it expires or is revoked.
-            </p>
-          </DetailSection>
-        ) : null}
+        {state.claudeUsage && state.connected ? <ClaudeUsage state={state.claudeUsage} /> : null}
         <CustomModels state={state} />
         {showAccess && onEditAccess ? (
           <DetailSection title="Access">
@@ -1392,6 +1423,7 @@ export function ProviderConnectionPage({
             </SettingRowGroup>
           </DetailSection>
         ) : null}
+        {footnote ? <DetailSection>{footnote}</DetailSection> : null}
       </DetailPageBody>
       <ReplaceKeyDialog state={state} open={replacing} onOpenChange={setReplacing} />
       <ProviderDisconnectDialog
@@ -1410,33 +1442,51 @@ export function ProviderConnectPage({
   onClose,
   onConnected,
   footerStart,
+  fields,
+  blockedReason,
+  afterSave,
 }: {
   state: ProviderConnection;
   onClose: () => void;
   onConnected: () => void;
   footerStart?: ReactNode;
+  /** Fields above the key, such as which workspaces can use it. */
+  fields?: ReactNode;
+  /** Why the key can't be saved yet (a choice above is incomplete). */
+  blockedReason?: string | null;
+  /** Runs once the key is saved, before its page opens (the form stays pending). */
+  afterSave?: (() => Promise<void>) | undefined;
 }) {
+  const listLabel = useModelsListLabel();
   const { config } = state;
   const [key, setKey] = useState("");
-  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
+  if (config.provider === "claude_subscription")
+    return (
+      <ClaudeSignInPage
+        key={`${state.organization}:${state.accessTarget.organizationId ?? state.accessTarget.workspaceId}`}
+        state={state}
+        onClose={onClose}
+        onConnected={onConnected}
+        footerStart={footerStart}
+        fields={fields}
+        blockedReason={blockedReason}
+        afterSave={afterSave}
+      />
+    );
   return (
     <ModelsFormPage
-      backLabel={state.connected ? config.title : "Models"}
+      backLabel={state.connected ? config.title : listLabel}
       headerAside={<ProviderTile provider={config.provider} />}
-      title={
-        state.connected
-          ? `Replace ${config.provider === "claude_subscription" ? "Claude token" : config.title + " API key"}`
-          : `Connect ${config.title}`
-      }
+      title={state.connected ? `Replace ${config.title} API key` : `Connect ${config.title}`}
       description={config.summary}
       onClose={onClose}
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !claude.valid || !state.canManageConnection}
+      submitDisabled={!key.trim() || !state.canManageConnection || Boolean(blockedReason)}
       disabledReason={
         state.canManageConnection
-          ? undefined
+          ? (blockedReason ?? undefined)
           : "Only people who can manage connections can add a key."
       }
       footerStart={
@@ -1445,18 +1495,18 @@ export function ProviderConnectPage({
           ? "Shared with your organization’s workspaces. You can limit access on the account page."
           : undefined)
       }
-      onSubmit={async () => await state.saveKey(key, claude.identity)}
+      onSubmit={async () => {
+        const saved = await state.saveKey(key);
+        if (saved) await afterSave?.();
+        return saved;
+      }}
       onSubmitted={onConnected}
     >
       <FieldStack>
-        {config.provider === "claude_subscription" ? <ClaudeTokenInstructions /> : null}
+        {fields}
         <Field
           label={config.credentialLabelText ?? "API key"}
-          hint={
-            config.provider === "claude_subscription"
-              ? "Paste the setup token from Claude Code. It is stored encrypted. Connecting makes no model calls."
-              : `${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`
-          }
+          hint={`${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`}
         >
           <SecretInput
             value={key}
@@ -1465,7 +1515,6 @@ export function ProviderConnectPage({
             onChange={(event) => setKey(event.target.value)}
           />
         </Field>
-        {claude.fields}
       </FieldStack>
     </ModelsFormPage>
   );

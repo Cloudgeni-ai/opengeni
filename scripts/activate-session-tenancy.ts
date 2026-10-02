@@ -14,10 +14,43 @@ const REQUIRED_MIGRATIONS = [
   "0303_session_tenancy_product_activation.sql",
   "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
+export const FLEET_PREPARATION_MIGRATION = "0583_session_tenancy_operator_permission.sql";
+// Deliberately absent from this preparatory PR. Applying only the rolling
+// definitions cannot admit an irreversible fleet activation.
+export const FLEET_MIGRATION = "0584_private_sessions_fleet_activation.sql";
 
-function argument(name: string): string | null {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? (process.argv[index + 1] ?? null) : null;
+export function requiredActivationMigrations(allOrganizations: boolean): readonly string[] {
+  return allOrganizations
+    ? [...REQUIRED_MIGRATIONS, FLEET_PREPARATION_MIGRATION, FLEET_MIGRATION]
+    : REQUIRED_MIGRATIONS;
+}
+
+function argument(name: string, argv: readonly string[] = process.argv): string | null {
+  const index = argv.indexOf(name);
+  return index >= 0 ? (argv[index + 1] ?? null) : null;
+}
+
+export function activationScope(argv: readonly string[]): {
+  organizationId: string | null;
+  allOrganizations: boolean;
+  enableOrganizationPrivateSessions: boolean;
+} {
+  const organizationId = argument("--organization-id", argv);
+  const allOrganizations = argv.includes("--all-organizations");
+  const enableOrganizationPrivateSessions = argv.includes("--enable-organization-private-sessions");
+  if (
+    allOrganizations === Boolean(organizationId) ||
+    (organizationId !== null &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(organizationId))
+  ) {
+    throw new Error("Supply exactly one of --organization-id <uuid> or --all-organizations");
+  }
+  if (allOrganizations !== enableOrganizationPrivateSessions) {
+    throw new Error(
+      "Fleet activation requires --enable-organization-private-sessions; single-org activation does not enable the preference",
+    );
+  }
+  return { organizationId, allOrganizations, enableOrganizationPrivateSessions };
 }
 
 function canonicalJson(value: unknown): string {
@@ -188,12 +221,129 @@ function applicationRoles(): string[] {
   return roles;
 }
 
-async function main(): Promise<void> {
-  const organizationId = argument("--organization-id");
-  const activatedBy = argument("--activated-by");
-  if (!organizationId || !/^[0-9a-f-]{36}$/i.test(organizationId)) {
-    throw new Error("--organization-id <uuid> is required");
+export async function activateSessionTenancyTransaction(
+  transaction: postgres.TransactionSql,
+  options: {
+    organizationId: string | null;
+    allOrganizations: boolean;
+    activatedBy: string;
+    roles: string[];
+  },
+): Promise<unknown> {
+  const { organizationId, allOrganizations, activatedBy, roles } = options;
+  // SHARE fixes the exact existing population until the receipt AND permission
+  // coverage check commits. Any failure rolls the entire cutover back.
+  if (allOrganizations) await transaction`lock table managed_accounts in share mode`;
+  const requiredMigrations = requiredActivationMigrations(allOrganizations);
+  const migrations = await transaction<{ name: string }[]>`
+    select name from schema_migrations where name = any(${[...requiredMigrations]})
+  `;
+  const applied = new Set(migrations.map((row) => row.name));
+  const missing = requiredMigrations.filter((name) => !applied.has(name));
+  if (missing.length > 0) {
+    throw new Error(`Session tenancy activation migrations are missing: ${missing.join(", ")}`);
   }
+  const organizations = allOrganizations
+    ? await transaction<{ id: string }[]>`select id from managed_accounts order by id`
+    : [{ id: organizationId! }];
+  if (organizations.length === 0) {
+    throw new Error(
+      "No organizations exist to establish the first session-tenancy activation witness",
+    );
+  }
+  const pending: Array<{
+    id: string;
+    inventoryDigest: string;
+    parityDigest: string;
+    backfillEvidence: unknown;
+  }> = [];
+  let alreadyActivated = 0;
+  // Settle every pending org before the first immutable receipt. SQL rechecks
+  // these exact evidence digests under its unchanged global drain/source fence.
+  for (const { id } of organizations) {
+    await transaction`select set_config('opengeni.account_id', ${id}, true)`;
+    if (allOrganizations) {
+      const [existing] = await transaction<{ activated: boolean }[]>`
+        select session_tenancy_product_activated(${id}::uuid, 1) as activated
+      `;
+      if (existing?.activated) {
+        alreadyActivated += 1;
+        continue;
+      }
+    }
+    const [inventoryRow] = await transaction<{ report: unknown }[]>`
+      select inventory_organization_tenancy(${id}::uuid) as report
+    `;
+    const [parityRow] = await transaction<{ report: unknown }[]>`
+      select check_organization_tenancy_parity(${id}::uuid, 10, 30) as report
+    `;
+    const [backfillRow] = await transaction<{ report: unknown }[]>`
+      select check_tenancy_backfill_activation_evidence(${id}::uuid) as report
+    `;
+    assertSessionTenancyActivationEvidence(inventoryRow?.report, parityRow?.report);
+    assertSessionTenancyBackfillEvidence(backfillRow?.report);
+    pending.push({
+      id,
+      inventoryDigest: digest(inventoryRow?.report),
+      parityDigest: digest(parityRow?.report),
+      backfillEvidence: backfillRow?.report,
+    });
+  }
+  const activations = [];
+  for (const { id, inventoryDigest, parityDigest, backfillEvidence } of pending) {
+    await transaction`select set_config('opengeni.account_id', ${id}, true)`;
+    const [activation] = await transaction<
+      Array<{
+        accountId: string;
+        activationVersion: number;
+        activatedAt: Date;
+        replay: boolean;
+      }>
+    >`
+      select account_id as "accountId", activation_version as "activationVersion",
+        activated_at as "activatedAt", replay
+      from activate_session_tenancy_product(
+        ${id}::uuid, ${inventoryDigest}, ${parityDigest}, ${activatedBy.trim()}, ${roles}::text[]
+      )
+    `;
+    if (!activation) throw new Error(`Session tenancy activation returned no receipt for ${id}`);
+    activations.push({ ...activation, inventoryDigest, parityDigest, backfillEvidence });
+  }
+  if (!allOrganizations) return activations[0];
+  let permissionsEnabled = 0;
+  // Do not skip already-activated orgs here: a receipt alone does NOT make the
+  // shared-workspace choice usable. The owner-only helper also enforces drain
+  // when the complete frozen population was already activated.
+  for (const { id } of organizations) {
+    const [row] = await transaction<{ setting: { enabled?: boolean; changed?: boolean } }[]>`
+      select enable_organization_private_sessions_from_activation(${id}::uuid, ${roles}::text[]) as setting
+    `;
+    if (row?.setting.enabled !== true)
+      throw new Error(`Session tenancy permission missing for ${id}`);
+    if (row.setting.changed) permissionsEnabled += 1;
+  }
+  for (const { id } of organizations) {
+    await transaction`select set_config('opengeni.account_id', ${id}, true)`;
+    const [verified] = await transaction<{ activated: boolean; enabled: boolean }[]>`
+      select session_tenancy_product_activated(${id}::uuid, 1) as activated,
+        organization_private_sessions_enabled(${id}::uuid) as enabled
+    `;
+    if (verified?.activated !== true || verified.enabled !== true) {
+      throw new Error(`Session tenancy activation and permission coverage missing for ${id}`);
+    }
+  }
+  return {
+    organizationCount: organizations.length,
+    alreadyActivated,
+    newlyActivated: activations.length,
+    permissionsEnabled,
+    activations,
+  };
+}
+
+async function main(): Promise<void> {
+  const { organizationId, allOrganizations } = activationScope(process.argv);
+  const activatedBy = argument("--activated-by");
   if (!activatedBy?.trim()) throw new Error("--activated-by <operator> is required");
 
   const settings = getSettings();
@@ -209,50 +359,14 @@ async function main(): Promise<void> {
     ...(searchPath ? { connection: { search_path: searchPath } } : {}),
   });
   try {
-    const result = await sql.begin(async (transaction) => {
-      await transaction`select set_config('opengeni.account_id', ${organizationId}, true)`;
-      const migrations = await transaction<{ name: string }[]>`
-        select name from schema_migrations where name = any(${[...REQUIRED_MIGRATIONS]})
-      `;
-      const applied = new Set(migrations.map((row) => row.name));
-      const missing = REQUIRED_MIGRATIONS.filter((name) => !applied.has(name));
-      if (missing.length > 0) {
-        throw new Error(`Session tenancy activation migrations are missing: ${missing.join(", ")}`);
-      }
-      const [inventoryRow] = await transaction<{ report: unknown }[]>`
-        select inventory_organization_tenancy(${organizationId}::uuid) as report
-      `;
-      const [parityRow] = await transaction<{ report: unknown }[]>`
-        select check_organization_tenancy_parity(${organizationId}::uuid, 10, 30) as report
-      `;
-      const [backfillRow] = await transaction<{ report: unknown }[]>`
-        select check_tenancy_backfill_activation_evidence(${organizationId}::uuid) as report
-      `;
-      const inventory = inventoryRow?.report;
-      const parity = parityRow?.report;
-      const backfillEvidence = backfillRow?.report;
-      assertSessionTenancyActivationEvidence(inventory, parity);
-      assertSessionTenancyBackfillEvidence(backfillEvidence);
-      const inventoryDigest = digest(inventory);
-      const parityDigest = digest(parity);
-      const [activation] = await transaction<
-        Array<{
-          accountId: string;
-          activationVersion: number;
-          activatedAt: Date;
-          replay: boolean;
-        }>
-      >`
-        select account_id as "accountId", activation_version as "activationVersion",
-          activated_at as "activatedAt", replay
-        from activate_session_tenancy_product(
-          ${organizationId}::uuid, ${inventoryDigest}, ${parityDigest},
-          ${activatedBy.trim()}, ${roles}::text[]
-        )
-      `;
-      if (!activation) throw new Error("Session tenancy activation returned no receipt");
-      return { ...activation, inventoryDigest, parityDigest, backfillEvidence };
-    });
+    const result = await sql.begin((transaction) =>
+      activateSessionTenancyTransaction(transaction, {
+        organizationId,
+        allOrganizations,
+        activatedBy,
+        roles,
+      }),
+    );
     console.log(JSON.stringify(result, null, 2));
   } finally {
     await sql.end();

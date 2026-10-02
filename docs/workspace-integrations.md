@@ -149,13 +149,19 @@ OpenGeni POSTs:
   "accountId": "…", "workspaceId": "…", "sessionId": "…", "rootSessionId": "…",
   "parentSessionId": null, "turnId": "…", "attemptId": "…",
   "initiator": { "kind": "subject", "subjectId": "user:alice" },
+  "initiatorContext": {
+    "kind": "human",
+    "initiator": { "kind": "subject", "subjectId": "user:alice" },
+    "context": {}
+  },
   "initiatingHumanSubjectId": "user:alice",
   "initiatingHuman": { "subjectId": "user:alice", "externalIdentity": null },
   "sandboxBackend": "modal", "sandboxOs": "linux"
 }
 ```
 
-The provider answers with one of:
+`purpose` is `provision`, `renewal`, or `test` (an administrator's Test
+connection; see [Test requests](#test-requests)). The provider answers with one of:
 
 ```json
 { "status": "ok",
@@ -204,6 +210,53 @@ external identity record, never from the session creator. No known human means
 fields are unchanged. These fields are informational identity, never
 authorization: authorize users and tools with the authenticated connection.
 
+`initiatorContext` carries the **exact accepted turn's frozen provenance**, not
+the session creator, latest human, or mutable session metadata. Its `kind` is
+`human`, `service`, or `agent` (the newest frozen `via` hop is an agent
+delegation). `initiator` retains the full accepted causal identity, including a
+signed service's subject and label; `context` retains the accepted non-secret
+host context without rewriting its keys. Service assertions are bounded to
+4096 UTF-8 bytes at acceptance. The complete object is part of the raw body
+covered by `OpenGeni-Signature`; `verifyCredentialProviderRequest` returns its
+typed value unchanged. It is optional in SDK types only for older senders;
+upgraded workers always send it on provision and renewal.
+
+Agent-created children inherit their calling turn's service identity and
+`context.via` records the exact calling session, turn, attempt, and execution
+generation. Internal continuations and child lifecycle inputs keep their
+existing service principal: at claim, their `via` chain freezes the exact
+target causal turn's session/turn ids, identity, and context. Each hop's context
+excludes its own `via`, avoiding recursive chains. Chains retain the root and
+newest hops, up to 32, with `viaTruncated: true` when clipped. Coalesced internal
+turns carry their own batch's `context.updateIds`, never a sender's older batch.
+Retries and renewals retain the same accepted facts. No historical missing
+service provenance is reconstructed from current session state.
+
+These fields grant **nothing** and do not replace `initiatingHuman`, the delegated
+grant subject, permissions, or OpenGeni's existing authorization checks. A host
+can apply its own credential-issuance policy to a scheduled service turn without
+pretending it is a human turn. For example, after independently mapping the
+trusted workspace id to its tenant and verifying the scheduled occurrence:
+
+```ts
+const request = await verifyCredentialProviderRequest({ body: rawBody, headers, secret });
+const tenant = await tenants.byOpenGeniWorkspaceId(request.workspaceId);
+const origin = request.initiatorContext;
+if (!tenant || origin?.kind !== "service" ||
+    origin.initiator.subjectId !== "product:scheduled-drift" ||
+    typeof origin.context.occurrenceId !== "string" ||
+    !await scheduledPolicy.authorize(tenant.id, origin.context.occurrenceId)) {
+  return Response.json({ status: "not_applicable" });
+}
+// Return only the credentials this tenant's scheduled-check policy permits.
+return Response.json({ status: "ok", environment: await scheduledCredentials(tenant.id) });
+```
+
+For an inherited continuation, apply that same host policy to the original
+service identity/context retained in the causal `via` chain, and validate the
+causal chain required by your policy. Never treat `kind`, a service label, an
+occurrence id, or the mere presence of a human as an authorization by itself.
+
 ### Renewable MCP headers
 
 Attach and select your remote MCP as usual when creating a session:
@@ -224,8 +277,15 @@ Return `mcp` entries from the credential provider's `ok` response. `url`
 matches only a selected, session-attached remote MCP by its exact normalized
 URL (WHATWG URL normalization), never by id. The request's `mcpServers` lists
 these selected product-supplied targets so your provider can authorize each URL.
+Selection uses the same effective turn policy as execution, including session
+defaults on composer and omitted-tools Send follow-ups. Optional and deferred
+servers remain selected; frozen scheduled selections are not widened.
 A reused id at a different endpoint cannot receive credentials for your URL.
 Deployment MCPs, workspace connectors and local bridges are not eligible.
+Servers with `connectionRef` use native connection authentication only: they
+never enter the provider's target list or receive provider headers, including
+historical turns without account-binding snapshots. Provider headers cannot
+replace an authorized native account or disclose native-denied selections.
 Provider headers override same-named static headers
 case-insensitively while valid; renewal replaces the turn-local material.
 Header values are secret material: never placed in session events, history,
@@ -269,6 +329,11 @@ secret and a subset of:
 | `session.status.changed` | The session status changes |
 | `session.requiresAction` | The agent waits for a tool approval |
 | `session.humanInput.requested` | The agent asks the user a structured question |
+| `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | Allowance lifecycle signals; see [usage allowances](usage-allowances.md#errors-and-event-handling) |
+
+Organization webhooks accept session events only. A create or update that names
+`usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
+the shared public event-type vocabulary remains unchanged.
 
 ```ts
 // Optional extra delivery destination for one workspace.
@@ -302,6 +367,8 @@ Organization endpoints receive matching non-personal workspaces' selected events
 workspace endpoints still receive their own events independently. Both gain
 the additive `workspace` routing object; turn events gain `initiatingHuman`
 when known. Pre-upgrade queued deliveries may lack these additions.
+Receivers default a missing `lane` to `"workspace"` for both session and usage
+events, after verifying the signature against the unchanged raw body.
 Import `listOrganizationWebhookDeliveries` and
 `redeliverOrganizationWebhookDelivery` from the focused subpath for organization
 registrations; call them with `client` first.
@@ -321,6 +388,40 @@ Provider PUT returns `{ provider, secret? }`, webhook creation returns
 individual webhook reads/updates return the webhook. Organization projections
 use `organizationId` and `workspaceFilter`; workspace projections retain
 `workspaceId`. Workspace helper names and endpoints remain available.
+
+### Test requests
+
+Workspace administrators can check an endpoint without waiting for real work.
+Both requests are signed exactly like real ones, sent once through the same
+pinned outbound policy (10-second limit), and never queued or retried:
+
+| HTTP | SDK helper (`@opengeni/sdk/workspace-integrations`) |
+| --- | --- |
+| POST `/v1/workspaces/:workspaceId/webhooks/:webhookId/test` | `testWorkspaceWebhook` |
+| POST `/v1/workspaces/:workspaceId/credential-provider/test` | `testWorkspaceCredentialProvider` |
+| GET `/v1/workspaces/:workspaceId/inherited-integrations` | `getWorkspaceInheritedIntegrations` |
+
+- The webhook test sends `{ "type": "webhook.test", "sessionId": null, "data": { "webhookId": "…" } }`
+  with the usual `OpenGeni-Signature` and `OpenGeni-Event-Id` headers.
+  `verifyWebhookEvent` accepts it; acknowledge it with any 2xx. It is not a
+  subscribable event type and is never recorded as a delivery.
+- The provider test targets the provider this workspace's runs use: its own
+  row (also while paused), else the matching organization provider. It sends an
+  ordinary `credentials.request` with `purpose: "test"`, the administrator as
+  initiating human, and the nil UUID as `sessionId`, `rootSessionId`, `turnId`
+  and `attemptId`. Answer as you would for a run in that workspace, or
+  `not_applicable`. OpenGeni validates the answer and returns only the names of
+  what a run would get (environment variable names, file paths, Git hosts, MCP
+  URLs, expiry); a successful provider answer's bytes never leave the API.
+- Both return `{ ok, status, durationMs, error, request, responseBody, credentials }`:
+  the exact signed body, and at most 1 KiB of a webhook answer or a failed
+  provider answer.
+
+`inherited-integrations` lets workspace administrators see organization
+registrations that reach their workspace: the enabled organization provider
+whose filter matches (shown even while the workspace overrides it) and the
+enabled organization webhooks that also receive its events. It returns URLs and
+event types only, never secrets, and is empty for Personal workspaces.
 
 ### Signing-secret rotation
 
@@ -344,6 +445,14 @@ enqueue errors are logged without aborting the turn's lifecycle transaction.
 A pump in every
 API replica claims them with short leases, so replicas share the work and a
 crash only delays a delivery. Settled deliveries are pruned after seven days.
+
+Usage events are workspace-scoped, without a synthetic session/turn identity
+or session sequence. Periodic allowance maintenance in the API dispatch loop
+evaluates thresholds, idle rollover, and grant expiry independently of usage
+GETs. Receipt/outbox enqueue is transactional and failed maintenance retries;
+bounded sweeps do not guarantee delivery at the exact wall-clock boundary. See
+[usage allowances](usage-allowances.md#errors-and-event-handling) before using
+them for a product meter.
 
 ## MCP identity
 

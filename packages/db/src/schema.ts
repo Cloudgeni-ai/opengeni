@@ -34,7 +34,7 @@ import type {
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
-import type { SessionToolPolicy } from "@opengeni/contracts";
+import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -1771,6 +1771,8 @@ export const connections = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     createOperationId: text("create_operation_id"),
     createRequestDigest: text("create_request_digest"),
     grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
@@ -3754,7 +3756,7 @@ export const integrationOauthPendingStates = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull(),
+    workspaceId: uuid("workspace_id"),
     stateEncrypted: text("state_encrypted").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4678,6 +4680,13 @@ export const sessions = pgTable(
     // attempt-snapshot boundary.
     policyRole: text("policy_role"),
     admissionBlock: jsonb("admission_block").$type<StoredSessionAdmissionBlock>(),
+    // Immutable timeline-only import identity, never inferred from metadata or
+    // a user's mutable session archive preference.
+    importedArchiveImportId: text("imported_archive_import_id"),
+    importedArchiveImportedAt: timestamp("imported_archive_imported_at", { withTimezone: true }),
+    importedArchiveRequestHash: text("imported_archive_request_hash"),
+    importedArchiveSubjectId: text("imported_archive_subject_id"),
+    importedArchiveNextOffset: integer("imported_archive_next_offset"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4910,6 +4919,9 @@ export const sessions = pgTable(
     // Frozen at create (migration 0520): whether the optional Jev-backed
     // code_search tool is offered. NULL, as on every older row, means off.
     codeSearchEnabled: boolean("code_search_enabled"),
+    // Frozen agent configuration (migration 0559); NULL means a legacy
+    // session. Mid-session updates share the tool_policy_version CAS.
+    agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Assigned once by the explicit transaction commit gate whenever canonical
@@ -4933,6 +4945,26 @@ export const sessions = pgTable(
     ),
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
+    workspaceImportedArchive: uniqueIndex("sessions_workspace_imported_archive_idx")
+      .on(table.workspaceId, table.importedArchiveImportId)
+      .where(sql`${table.importedArchiveImportId} is not null`),
+    importedArchiveIdentity: check(
+      "sessions_imported_archive_identity_check",
+      sql`
+      (${table.importedArchiveImportId} is null and ${table.importedArchiveImportedAt} is null
+        and ${table.importedArchiveRequestHash} is null and ${table.importedArchiveSubjectId} is null
+        and ${table.importedArchiveNextOffset} is null)
+      or (${table.importedArchiveImportId} is not null and octet_length(${table.importedArchiveImportId}) between 1 and 800
+        and ${table.importedArchiveImportedAt} is not null and ${table.importedArchiveRequestHash} is not null
+        and ${table.importedArchiveRequestHash} ~ '^[0-9a-f]{64}$' and ${table.importedArchiveSubjectId} is not null
+        and ${table.importedArchiveNextOffset} is not null and ${table.importedArchiveNextOffset} >= 0)`,
+    ),
+    importedArchiveInert: check(
+      "sessions_imported_archive_inert_check",
+      sql`
+      ${table.importedArchiveImportId} is null or
+      (${table.status} = 'idle' and ${table.activeTurnId} is null and ${table.temporalWorkflowId} is null and ${table.parentSessionId} is null)`,
+    ),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
       table.createdAt,
@@ -5237,6 +5269,11 @@ export const sessionRealtimeModes = pgTable(
     ownerSubjectId: text("owner_subject_id").notNull(),
     browserInstanceId: text("browser_instance_id").notNull(),
     ownerKeyHash: text("owner_key_hash").notNull(),
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
@@ -6748,6 +6785,12 @@ export const documents = pgTable(
     // document from agent retrieval surfaces (docs MCP) while humans keep REST.
     visibility: text("visibility").notNull().default("workspace"),
     createdBy: text("created_by"),
+    // Trusted ingestion causality, frozen before async source preparation.
+    // createdBy/authority ownership is not verified initiating-human evidence.
+    billingAttribution: jsonb("billing_attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull()
+      .default({ kind: "unknown" }),
     agentAccess: boolean("agent_access").notNull().default(true),
     // Auto-curation output (knowledge drops).
     summary: text("summary"),
@@ -9109,6 +9152,59 @@ export const sessionEventCursors = pgTable(
   }),
 );
 
+export const sessionImportBatches = opengeniPrivateSchema.table(
+  "session_import_batches",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    batchId: text("batch_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    eventOffset: integer("event_offset").notNull(),
+    eventCount: integer("event_count").notNull(),
+    nextOffset: integer("next_offset").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.sessionId, table.batchId] }),
+    workspaceAccountFk: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSessionFk: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    batchIdValid: check(
+      "session_import_batches_batch_id_check",
+      sql`octet_length(${table.batchId}) between 1 and 800`,
+    ),
+    requestHashValid: check(
+      "session_import_batches_request_hash_check",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    eventOffsetValid: check(
+      "session_import_batches_event_offset_check",
+      sql`${table.eventOffset} >= 0`,
+    ),
+    eventCountValid: check(
+      "session_import_batches_event_count_check",
+      sql`${table.eventCount} between 1 and 100`,
+    ),
+    nextOffsetValid: check(
+      "session_import_batches_next_offset_check",
+      sql`${table.nextOffset} = ${table.eventOffset} + ${table.eventCount}`,
+    ),
+  }),
+);
+
 export const sessionEvents = pgTable(
   "session_events",
   {
@@ -10276,9 +10372,9 @@ export const sandboxRetainedProcesses = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
     providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
-    supervisionRetentionXid: customType<{ data: string }>({ dataType: () => "xid8" })(
-      "supervision_retention_xid",
-    ).default(sql`pg_current_xact_id()`),
+    supervisionRetentionXid: customType<{ data: string }>({
+      dataType: () => "xid8",
+    })("supervision_retention_xid").default(sql`pg_current_xact_id()`),
     supervisionReceipt: jsonb("supervision_receipt").$type<CommandSupervisionReceipt>(),
     supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
     cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
@@ -12583,6 +12679,228 @@ export const creditLedgerEntries = pgTable(
   }),
 );
 
+/** Content-free immutable accepted billing facts; no runtime table privileges. */
+export const usageAllowanceAttributionReceipts = opengeniPrivateSchema.table(
+  "usage_allowance_attribution_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceKind: text("source_kind").$type<"turn" | "schedule" | "knowledge_query">().notNull(),
+    sourceId: text("source_id").notNull(),
+    sessionId: uuid("session_id"),
+    attribution: jsonb("attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull(),
+    quantity: bigint("quantity", { mode: "number" }),
+    idempotencyKey: text("idempotency_key"),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.accountId, table.workspaceId, table.sourceKind, table.sourceId],
+    }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+/** EXECUTE-only lifecycle/counter storage; migration 0547 owns FORCE-RLS policy. */
+export const workspaceAllowanceClearReceipts = opengeniPrivateSchema.table(
+  "workspace_allowance_clear_receipts",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<{ version: number }>().notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceUsageAllowances = opengeniPrivateSchema.table(
+  "workspace_usage_allowances",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    activePeriodKey: text("active_period_key"),
+    activeStartAt: timestamp("active_start_at", { withTimezone: true }),
+    activeEndAt: timestamp("active_end_at", { withTimezone: true }),
+    maintenanceNextAt: timestamp("maintenance_next_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    maintenanceCursor: text("maintenance_cursor"),
+    maintenanceError: text("maintenance_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    maintenanceDue: index("workspace_usage_allowances_maintenance_due")
+      .on(table.maintenanceNextAt, table.workspaceId)
+      .where(sql`${table.config} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceMemberAllowances = opengeniPrivateSchema.table(
+  "workspace_member_allowances",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    rule: jsonb("rule").$type<import("./usage-allowances").MemberAllowanceRule>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceGrants = opengeniPrivateSchema.table(
+  "workspace_allowance_grants",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    credits: bigint("credits", { mode: "number" }).notNull(),
+    remaining: bigint("remaining", { mode: "number" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    fefo: index("workspace_allowance_grants_fefo")
+      .on(table.workspaceId, table.expiresAt, table.createdAt, table.operationId)
+      .where(sql`${table.remaining} > 0`),
+  }),
+);
+export const workspaceAllowanceCounters = opengeniPrivateSchema.table(
+  "workspace_allowance_counters",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull().default(""),
+    used: bigint("used", { mode: "number" }).notNull().default(0),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull().default(0),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull().default(0),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceNotifications = opengeniPrivateSchema.table(
+  "workspace_allowance_notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull(),
+    threshold: numeric("threshold").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    crossing: uniqueIndex("workspace_allowance_notifications_crossing").on(
+      table.workspaceId,
+      table.periodKey,
+      table.subjectId,
+      table.threshold,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowancePeriods = opengeniPrivateSchema.table(
+  "workspace_allowance_periods",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    startAt: timestamp("start_at", { withTimezone: true }),
+    endAt: timestamp("end_at", { withTimezone: true }),
+    grantsRemaining: bigint("grants_remaining", { mode: "number" }).notNull().default(0),
+    grantsSnapshot: jsonb("grants_snapshot").$type<unknown[]>().notNull().default([]),
+    memberRules: jsonb("member_rules").$type<Record<string, unknown>>().notNull().default({}),
+    memberCount: integer("member_count").notNull().default(0),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceVideoAllowanceAllocations = opengeniPrivateSchema.table(
+  "workspace_video_allowance_allocations",
+  {
+    ledgerId: uuid("ledger_id")
+      .primaryKey()
+      .references(() => creditLedgerEntries.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    humanSubjectId: text("human_subject_id"),
+    amount: bigint("amount", { mode: "number" }).notNull(),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull(),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull(),
+    grantAllocations: jsonb("grant_allocations")
+      .$type<Array<{ operationId: string; credits: number }>>()
+      .notNull(),
+    reversedByLedgerId: uuid("reversed_by_ledger_id").references(() => creditLedgerEntries.id),
+  },
+  (table) => ({
+    operation: uniqueIndex("workspace_video_allowance_allocations_operation_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.operationId,
+    ),
+    refund: uniqueIndex("workspace_video_allowance_allocations_refund_idx")
+      .on(table.reversedByLedgerId)
+      .where(sql`${table.reversedByLedgerId} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
 export const billingCustomers = pgTable(
   "billing_customers",
   {
@@ -13982,6 +14300,8 @@ export const organizationModelProviderConnections = pgTable(
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),

@@ -2,6 +2,7 @@ import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
   recordCodexAccountUsageForFinalization,
+  recordClaudeSubscriptionUsage,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
@@ -410,6 +411,17 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
+    for (const [scope, snapshot] of providerTurn.latestClaudeUsage) {
+      await waitForTurnFinalizerStep(
+        recordClaudeSubscriptionUsage(
+          db,
+          settings,
+          { accountId: input.accountId, workspaceId: input.workspaceId, scope },
+          snapshot,
+        ).catch(() => null),
+        finalizerSignal,
+      );
+    }
     if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
       // full duration-identified snapshot (parseCodexUsageHeaders gates on both),

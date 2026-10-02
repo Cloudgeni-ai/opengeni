@@ -483,6 +483,14 @@ test("one Active disclosure traverses overlapping and sparse fifty-row pages to 
 }, 30_000);
 
 async function openKeyboardFocus(visibleCount: number) {
+  // Keep all 106 recent fixtures in Today, including when CI runs at midnight.
+  // Fix only the wall clock; loading and keyboard timers still run normally.
+  const noon = await page.evaluate(() => {
+    const date = new Date();
+    date.setHours(12, 0, 0, 0);
+    return date.getTime();
+  });
+  await page.clock.setFixedTime(noon);
   await page.goto(`${url}?scenario=keyboard-focus`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {
@@ -622,7 +630,10 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   await waitForHeldTodayPage();
   await selectView("Status", "All");
   await waitForRows("Today", 4);
-  await page.getByRole("button", { name: /^Session view/ }).evaluate((element) => element.blur());
+  const view = page.getByRole("button", { name: /^Session view/ });
+  // Finish the menu's deferred focus handoff before testing stale pagination.
+  await view.and(page.locator(":focus")).waitFor();
+  await view.evaluate((element) => element.blur());
   await releaseTodayPage();
   await page.waitForFunction(() =>
     window.sessionSidebarQa.listCalls.some(

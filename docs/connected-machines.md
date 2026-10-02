@@ -395,7 +395,12 @@ means a verified self-update is draining accepted work; `queue_breaker` and
 detail remains an unspecified admission refusal. The same distinction survives
 retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
 `update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Request an update
+long-lived servers, cancel accepted work, or restart the host. Open browser and
+computer controllers also keep the host busy, including pending creation and
+shutdown. The agent checks every owned browserd scope through its private
+admin-only idle proof after fencing new routed work; unavailable, crashed, or
+older incompatible controllers return retryable `update_state_unavailable`.
+An empty controller may remain running without blocking an update. Request an update
 again at a safe idle point. Older runners can remain draining indefinitely;
 inspect their accepted operations and coordinate a safe stop/restart with their
 owners instead of killing useful work or increasing concurrency limits.
@@ -692,6 +697,21 @@ not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
+
+Enrollment approval lasts until it is revoked; it is not a monthly login.
+The command and relay transport credentials last 30 days. The agent renews them
+with seven days remaining, using its existing install key and current enrollment
+generation. A machine returning after a longer offline period uses the same
+renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
+renewal cannot change ownership, scope or screen-control consent. Updated
+credentials load into the existing process, preserving host operations.
+
+Deploy the API renewal endpoint before upgrading agents. An older API returns
+404 and the agent retries with jitter while retaining its existing credentials.
+Older agents still need a one-time authorized reconnect after expiration; a
+restart alone cannot refresh credentials. Legacy connection files whose API
+origin has never been confirmed also require an explicit reconnect rather than
+sending their credentials to a guessed deployment.
 
 Mac app installations update the complete signed application, including bundled
 browser/computer helpers. The updater selects the signed manifest's

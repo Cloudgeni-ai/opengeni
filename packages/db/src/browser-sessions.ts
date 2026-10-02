@@ -39,6 +39,10 @@ import {
   type BrowserStateArtifactCommitInput,
 } from "./browser-state-artifacts";
 import * as schema from "./schema";
+import {
+  browserDeadlineCheckpoint,
+  type BrowserDeadlineCheckpointTarget,
+} from "./browser-deadline-checkpoints";
 
 type BrowserSessionRow = typeof schema.browserSessions.$inferSelect;
 type BrowserAssociationRow = typeof schema.browserSessionAssociations.$inferSelect;
@@ -1143,6 +1147,30 @@ function placementToColumns(placement: InteractionPlacement): {
   };
 }
 
+async function assertDeadlineCheckpointAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
+  },
+): Promise<void> {
+  const target = input.deadlineTarget;
+  if (!target) return;
+  if (
+    target.accountId !== input.accountId ||
+    target.workspaceId !== input.workspaceId ||
+    target.browserSessionId !== input.browserSessionId ||
+    target.controllerGeneration !== input.controllerGeneration ||
+    (await browserDeadlineCheckpoint(db, target))?.operationId !== input.operationId
+  ) {
+    throw new BrowserSessionOperationConflictError("Browser deadline checkpoint authority changed");
+  }
+}
+
 export async function dispatchBrowserSessionOperation(
   db: Database,
   input: {
@@ -1153,6 +1181,7 @@ export async function dispatchBrowserSessionOperation(
     controllerGeneration: string;
     controller?: InteractionControllerBinding;
     stateUpload?: { objectKey: string; cleanupAfter: Date };
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
   },
 ): Promise<InteractionLifecycleOperationReceiptValue> {
   const controller = input.controller ? InteractionControllerBinding.parse(input.controller) : null;
@@ -1167,6 +1196,7 @@ export async function dispatchBrowserSessionOperation(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await assertDeadlineCheckpointAuthority(tx, input);
         await lockOperation(tx, input.workspaceId, input.operationId);
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId);
@@ -1263,6 +1293,8 @@ export async function dispatchBrowserSessionOperation(
         }
         return operationReceipt(operation!, true);
       }),
+    undefined,
+    input.deadlineTarget ? "none" : "shared",
   );
 }
 
@@ -1411,6 +1443,7 @@ export async function failBrowserSessionOperation(
     operationId: string;
     browserSessionId: string;
     state?: "failed" | "outcome_unknown";
+    onlyIfPreparedCreate?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
@@ -1427,7 +1460,11 @@ export async function failBrowserSessionOperation(
         if (
           operation!.state === "completed" ||
           operation!.state === "failed" ||
-          operation!.state === "outcome_unknown"
+          operation!.state === "outcome_unknown" ||
+          (input.onlyIfPreparedCreate &&
+            (operation!.kind !== "create" ||
+              operation!.state !== "prepared" ||
+              operation!.controllerGeneration !== null))
         ) {
           return await replayedMutation(tx, input.workspaceId, operation!, {
             kind: operation!.kind,
@@ -1781,6 +1818,7 @@ export async function commitBrowserSessionSuspension(
     browserSessionId: string;
     controllerGeneration: string;
     artifact: BrowserStateArtifactCommitInput;
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   let artifact: BrowserStateArtifactCommitInput;
@@ -1797,6 +1835,7 @@ export async function commitBrowserSessionSuspension(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await assertDeadlineCheckpointAuthority(tx, input);
         await lockOperation(tx, input.workspaceId, input.operationId);
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId, "suspend");
@@ -1920,6 +1959,8 @@ export async function commitBrowserSessionSuspension(
           operation: operationReceipt(operationRow, false),
         });
       }),
+    undefined,
+    input.deadlineTarget ? "none" : "shared",
   );
 }
 

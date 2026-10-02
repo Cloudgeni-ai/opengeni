@@ -10,7 +10,7 @@ import {
   LayoutGridIcon,
   PencilIcon,
   PlusIcon,
-  ShieldIcon,
+  ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   SquareStackIcon,
@@ -172,7 +172,7 @@ function navEntries(questions: OrgQuestions, peopleTitle: string, local: boolean
     {
       id: "security",
       label: "Security & data",
-      icon: ShieldIcon,
+      icon: ShieldCheckIcon,
       description: "Private chats, how long data is kept, and recovery.",
     },
   ];

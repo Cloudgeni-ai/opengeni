@@ -1,3 +1,5 @@
+import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connection";
+import { refreshClaudeSubscriptionUsage } from "../claude-subscription-usage";
 import { claudeProviderId } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
@@ -8,6 +10,7 @@ import {
   OrganizationProviderCustomModelsResponse,
   RevokeOrganizationModelProviderConnectionRequest,
   UpsertOrganizationModelProviderConnectionRequest,
+  ClaudeSubscriptionUsage,
 } from "@opengeni/contracts";
 import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -21,6 +24,7 @@ import {
   retireOrganizationModelProviderCustomModel,
   revokeOrganizationModelProviderConnection,
   upsertOrganizationModelProviderConnection,
+  readClaudeSubscriptionUsage,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -115,6 +119,33 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     });
     return connection ? c.json(connectionJson(connection)) : c.json(null);
   });
+  const usagePath = "/v1/organizations/:organizationId/model-providers/:providerKind/usage";
+  async function usageScope(c: Context) {
+    c.header("cache-control", "private, no-store");
+    if (providerKind(c.req.param("providerKind")!) !== "claude_subscription")
+      throw new HTTPException(404, { message: "Usage not available for this provider" });
+    const organizationId = parseOrganizationId(c.req.param("organizationId")!);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    return {
+      accountId: organizationId,
+      workspaceId: null,
+      scope: "organization" as const,
+      actorSubjectId: human.subjectId,
+    };
+  }
+  app.get(usagePath, async (c) => {
+    const input = await usageScope(c);
+    return c.json(ClaudeSubscriptionUsage.parse(await readClaudeSubscriptionUsage(deps.db, input)));
+  });
+  app.post(`${usagePath}/refresh`, async (c) => {
+    requireSameOriginBrowserMutation(c, deps);
+    const input = await usageScope(c);
+    return c.json(
+      ClaudeSubscriptionUsage.parse(
+        await refreshClaudeSubscriptionUsage(deps.db, deps.settings, input),
+      ),
+    );
+  });
 
   app.put("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
     c.header("cache-control", "private, no-store");
@@ -133,17 +164,18 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       });
     if (kind === "claude_subscription" && !/^sk-ant-oat[0-9]+-\S+$/.test(payload.apiKey))
       throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
-    if (kind === "claude_subscription" && !payload.claudeIdentity)
-      throw new HTTPException(422, {
-        message: "Enter the Claude account UUID and device ID from your Claude Code configuration.",
-      });
     if (kind !== "claude_subscription" && payload.claudeIdentity)
       throw new HTTPException(422, {
         message: "Claude identity is only valid for subscription connections.",
       });
     const credential =
       kind === "claude_subscription"
-        ? JSON.stringify({ version: 1, token: payload.apiKey, identity: payload.claudeIdentity })
+        ? prepareClaudeSubscriptionCredential(
+            deps.settings,
+            "organization:" + organizationId,
+            payload.apiKey,
+            payload.claudeIdentity,
+          )
         : payload.apiKey;
     try {
       const connection = await upsertOrganizationModelProviderConnection(deps.db, {

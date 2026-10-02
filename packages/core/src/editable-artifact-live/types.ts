@@ -1,4 +1,6 @@
 import { EDITABLE_ARTIFACT_LIVE_WIRE_VERSION } from "@opengeni/contracts/editable-artifact-live";
+import type { AccessGrant } from "@opengeni/contracts";
+import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type {
   EditableArtifactActor,
   EditableArtifactCausalFrontier,
@@ -13,6 +15,13 @@ import type {
 } from "../domain/editable-artifacts/types";
 
 export const EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION = EDITABLE_ARTIFACT_LIVE_WIRE_VERSION;
+
+/** Authenticated by the digest of the complete one-use token, never client claims. */
+export type EditableArtifactLiveSourceSessionAuthority = Readonly<{
+  sessionId: string;
+  grant: AccessGrant;
+  externalContinuation?: ExternalActorContinuation | undefined;
+}>;
 
 export type EditableArtifactLiveTicket = Readonly<{
   artifactId: EditableArtifactId;
@@ -30,6 +39,7 @@ export type EditableArtifactLiveTicketRecord = Readonly<{
   artifactId: EditableArtifactId;
   modality: EditableArtifactModality;
   actor: EditableArtifactActor;
+  sourceSessionAuthority?: EditableArtifactLiveSourceSessionAuthority;
   /** Delegated ceiling captured by the authenticated ticket-minting request. */
   allowEdit: boolean;
   protocolVersion: number;

@@ -46,6 +46,7 @@ import {
   type SessionActivityDatabase,
 } from "../src/index";
 import * as schema from "../src/schema";
+import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -103,7 +104,7 @@ async function fixture() {
   return { grant, session, owner, started };
 }
 
-async function privateFixture() {
+async function privateFixture(withAccounts = false) {
   const suffix = crypto.randomUUID();
   const userId = `realtime-ledger-owner-${suffix}`;
   const subjectId = `user:${userId}`;
@@ -162,8 +163,9 @@ async function privateFixture() {
     ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
     model: "gpt-live-1-boulder-alpha" as const,
   };
+  const accounts = withAccounts ? await realtimeConnectionFixture(client.db, owner) : {};
   const started = await transaction(owner.workspaceId, (tx) =>
-    beginSessionRealtimeInTransaction(tx, owner),
+    beginSessionRealtimeInTransaction(tx, { ...owner, ...accounts }),
   );
   return { grant, session, owner, started };
 }
@@ -1426,6 +1428,40 @@ describe("session realtime ledger", () => {
     expect(persisted.count).toBe(before.count);
     expect(persisted.children).toBe(0);
     expect(persisted.session).toEqual(before.session);
+  });
+
+  test("voice delegation preserves its frozen connector snapshot through replay", async () => {
+    const value = await privateFixture(true);
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const input = delegationSyncInput(value, connection.claimed.connection);
+    const first = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(replay.accepted[0]!.entry.turnId).toBe(first.accepted[0]!.entry.turnId);
+    const facts = await transaction(value.owner.workspaceId, async (tx) => {
+      const [mode] = await tx
+        .select()
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, value.started.mode.id));
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, first.accepted[0]!.entry.turnId!));
+      return { mode, turn };
+    });
+    expect(JSON.stringify(facts.turn!.personalConnectionDelegations)).toBe(
+      JSON.stringify(facts.mode!.personalConnectionDelegations),
+    );
+    expect(facts.turn!.personalConnectionDelegations).toHaveLength(1);
+    expect(JSON.stringify(facts.turn!.mcpAccountBindings)).toBe(
+      JSON.stringify(facts.mode!.mcpAccountBindings),
+    );
+    expect(facts.turn!.initiatingHumanSubjectId).toBe(value.owner.ownerSubjectId);
   });
 
   test("private-session voice delegation retains human authority through Company Brain selection", async () => {

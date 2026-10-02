@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Settings } from "@opengeni/config";
@@ -44,6 +44,11 @@ function mockCodexBilled(active: boolean): () => void {
 }
 
 describe("API edge credit gate — codex bypass", () => {
+  let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+  beforeEach(() => {
+    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+  });
+  afterEach(() => allowance.mockRestore());
   test("(a) codex model + ACTIVE credential bypasses the 0-credit gate", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(true);

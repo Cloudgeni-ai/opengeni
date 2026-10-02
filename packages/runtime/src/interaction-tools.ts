@@ -681,6 +681,7 @@ export function createInteractionAttemptToolDefinitions(
           raw,
           context,
           options.execute,
+          options.readOnly,
         ),
     });
   };
@@ -1477,6 +1478,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
   scope: AttemptToolScope;
   subjectId?: string;
   subjectLabel?: string;
+  credentialRestriction?: "developer_setup";
   fetch?: typeof globalThis.fetch;
 };
 
@@ -1517,6 +1519,9 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
         turnId: input.scope.turnId,
         attemptId: input.scope.attemptId,
         executionGeneration: input.scope.executionGeneration,
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);
@@ -1915,6 +1920,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     value: z.output<TInput>,
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
+  readOnly: boolean,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -1936,11 +1942,18 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
     }
-    if (error instanceof OpenGeniApiError && !error.outcomeUnknown && error.status < 500) {
+    // A failed read is still a useful tool result. Preserve the API's public
+    // explanation; mutations and uncertain outcomes retain their failure path.
+    if (
+      error instanceof OpenGeniApiError &&
+      !error.outcomeUnknown &&
+      (error.status < 500 || readOnly)
+    ) {
       return interactionErrorResult(
         error.code ?? `http_${error.status}`,
         boundedErrorMessage(error.message),
         error.retryable,
+        error.correlationId,
       );
     }
     throw error;
@@ -1965,8 +1978,9 @@ function interactionErrorResult(
   code: string,
   message: string,
   retryable = false,
+  requestId?: string,
 ): AttemptToolResultValue {
-  const error = { code, message, retryable };
+  const error = { code, message, retryable, ...(requestId ? { requestId } : {}) };
   return {
     isError: true,
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],

@@ -11,6 +11,7 @@ export type WorkspaceSettingsSection =
   | "general"
   | "access"
   | "models"
+  | "usage"
   | "api-keys"
   | "developer"
   | "learning";
@@ -25,13 +26,13 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
   "general",
   "access",
   "models",
+  "usage",
   "api-keys",
   "developer",
   "learning",
 ];
 
 const WORKSPACE_PAGE_TARGETS = [
-  "/workspaces/$workspaceId/agents",
   "/workspaces/$workspaceId/insights",
   "/workspaces/$workspaceId/variable-sets",
   "/workspaces/$workspaceId/rigs",

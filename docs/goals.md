@@ -170,8 +170,18 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal. Only a new `goal_set` can replace a
-  completed goal.
+- `goal_complete { evidence }` is terminal for the goal, not the current turn.
+  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
+  has an explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The agent must still send the requested final answer (or summary
+  and retained artifact link) in the same turn. The tool receipt reminds it to
+  do so. Late child results remain context to integrate and deliver, not a
+  command to stay silent or restart completed work.
+  If one same-turn reply reminder still produces an empty final, the turn
+  completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
+  The goal is untouched: active goals can continue, and later child results
+  remain deliverable. The marker records missing answer delivery, not success
+  of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
@@ -197,7 +207,13 @@ the session. An active goal remains active while the session waits; use
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
-and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
+and pause rationales to 2 KiB, and progress notes to 8 KiB. Agent schemas expose
+the character upper bound plus the exact UTF-8 byte limit and purpose.
+Progress is a short human-readable status, rationale is a short explanation,
+and objective/criteria describe the intended outcome—not the deliverable.
+Use normal spacing; summarize unnecessary detail instead of squeezing words.
+Evidence remains short ledger proof with an explicit 8192-character cap; the
+requested answer must still appear in the final user-facing reply. Root constraints
 are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
 Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
@@ -404,6 +420,10 @@ recovery of the same turn, not creation or charging of another continuation.
   a goal that the user paused. Only a goal paused by the continuation ceiling
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
+- Terminal sessions skip catalog/model validation entirely. An eligible goal
+  whose inherited model is missing, retired, or disallowed pauses visibly with
+  `limits` and a model-specific rationale. It never silently chooses another
+  model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.

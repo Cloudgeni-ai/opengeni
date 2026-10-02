@@ -28,6 +28,8 @@ import {
   type loadWorkspaceEnvironmentForRunWithCredentials,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
+import type { withFirstPartyTools } from "../goals";
+import { expandMcpAccountRoutes } from "../mcp-account-routes";
 import { startGitCredentialRenewalLoop } from "../git-credential-renewal";
 import {
   RUN_CREDENTIAL_EXPIRY_LEAD_MS,
@@ -63,6 +65,7 @@ import {
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
+import { turnCredentialRestriction } from "./credential-restriction";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type {
@@ -74,6 +77,7 @@ import type {
 
 export type PrepareRunCredentialsDeps = {
   localMcpServerIds?: readonly string[];
+  turnTools: ReturnType<typeof withFirstPartyTools>;
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
@@ -88,6 +92,7 @@ export type PrepareRunCredentialsDeps = {
   sandboxRuntime: SandboxTurnRuntime;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
   workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
@@ -126,6 +131,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     sandboxState,
     turn,
     session,
+    turnExecutionPolicy,
     fileAuthoritySubjectId,
     runSettings,
     workspaceVariableSet,
@@ -153,6 +159,14 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   const platformGitResources = turnResources.filter(
     (resource) => resource.kind !== "repository" || repositoryHasExplicitGitConnection(resource),
   );
+  // Credential targets follow the same accepted-account narrowing as execution.
+  // A canonical connection without an accepted account does not execute, and
+  // account-qualified aliases never inherit an attachment's product headers.
+  const accountRoutes = expandMcpAccountRoutes({
+    settings: runSettings,
+    tools: deps.turnTools,
+    bindings: turn.mcpAccountBindings,
+  });
 
   const runCredentialResolver =
     effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
@@ -160,10 +174,11 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       : await waitForTurnOperation(
           bindRunCredentialResolver({
             db,
-            settings: runSettings,
+            settings: accountRoutes.settings,
             initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
             connectionCredentials: connectionCredentials ?? null,
             localMcpServerIds: deps.localMcpServerIds ?? [],
+            effectiveTools: accountRoutes.tools,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             session,
@@ -214,9 +229,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     : null;
   const runMcpCredentials = new RunMcpCredentials(
     selectedSessionRemoteMcpTargets(
-      runSettings,
+      accountRoutes.settings,
       session.mcpServers ?? [],
-      turn.tools ?? [],
+      accountRoutes.tools,
       (deps.localMcpServerIds ?? []).map((id) => ({ id })),
     ),
     {
@@ -334,11 +349,13 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           turn,
         })
       : undefined;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const codemodeAuthority = {
     sessionId: input.sessionId,
     turnId: turn.id,
     attemptId: input.attemptId,
     executionGeneration: turn.executionGeneration,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
   };
   const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
     settings,

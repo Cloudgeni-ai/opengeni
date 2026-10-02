@@ -3,6 +3,7 @@ import {
   noteSuccessfulLogin,
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -763,7 +764,6 @@ export function RootRouteComponent() {
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
-      pathname === "/dev/agent-topology" ||
       pathname === "/dev/onboarding" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
@@ -1741,6 +1741,8 @@ export function RootRouteComponent() {
       });
       if (attempt.nextAction.type !== "authorize")
         throw new Error("GitHub did not return an authorization link");
+      // The exact-return Connect redirect carries no outcome parameters.
+      await markIntegrationConnectRedirect("github", "oauth", { returnsWithOutcome: false });
       window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {

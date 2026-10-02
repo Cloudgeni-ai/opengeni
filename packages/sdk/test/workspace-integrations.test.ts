@@ -4,6 +4,7 @@ import {
   signOpenGeniPayload,
   verifyCredentialProviderRequest,
   verifyWebhookEvent,
+  type CredentialProviderInitiatorContext,
 } from "../src/index";
 import {
   createOrganizationWebhook,
@@ -20,6 +21,9 @@ import {
   rotateOrganizationWebhookSecret,
   rotateWorkspaceCredentialProviderSecret,
   rotateWorkspaceWebhookSecret,
+  getWorkspaceInheritedIntegrations,
+  testWorkspaceCredentialProvider,
+  testWorkspaceWebhook,
   updateOrganizationWebhook,
 } from "@opengeni/sdk/workspace-integrations";
 
@@ -161,6 +165,11 @@ test("signature helpers retain routing and embedder identity additions", async (
     turnId: "turn",
     attemptId: "attempt",
     initiator: { kind: "subject", subjectId: initiatingHuman.subjectId },
+    initiatorContext: {
+      kind: "human",
+      initiator: { kind: "subject", subjectId: initiatingHuman.subjectId },
+      context: {},
+    } satisfies CredentialProviderInitiatorContext,
     initiatingHumanSubjectId: initiatingHuman.subjectId,
     initiatingHuman,
     sandboxBackend: "modal",
@@ -174,6 +183,57 @@ test("signature helpers retain routing and embedder identity additions", async (
       secret,
     }),
   ).toEqual(request);
+  // An older sender remains compatible; absence never implies human authority.
+  const { initiatorContext: _context, ...legacy } = request;
+  const legacyBody = JSON.stringify(legacy);
+  expect(
+    await verifyCredentialProviderRequest({
+      body: legacyBody,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, legacyBody) },
+      secret,
+    }),
+  ).toEqual(legacy);
+  const tampered = JSON.stringify({
+    ...request,
+    initiatorContext: { ...request.initiatorContext, kind: "service" },
+  });
+  await expect(
+    verifyCredentialProviderRequest({
+      body: tampered,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+      secret,
+    }),
+  ).rejects.toThrow("signature verification failed");
+});
+
+test("verified pre-upgrade session and usage deliveries default their missing lane", async () => {
+  const secret = "legacy-lane-secret";
+  for (const type of ["turn.completed", "usage.exhausted", "usage.period_reset"]) {
+    const event = {
+      id: "event",
+      type,
+      workspaceId: "workspace",
+      ...(type === "turn.completed" ? { sessionId: "session" } : {}),
+      data: {},
+    };
+    const body = JSON.stringify(event);
+    const verified = await verifyWebhookEvent({
+      body,
+      secret,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+    });
+    expect(JSON.stringify(verified.event)).toBe(JSON.stringify({ ...event, lane: "workspace" }));
+    for (const lane of [null, "invalid", ...(type.startsWith("usage.") ? ["organization"] : [])]) {
+      const invalidBody = JSON.stringify({ ...event, lane });
+      await expect(
+        verifyWebhookEvent({
+          body: invalidBody,
+          secret,
+          headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, invalidBody) },
+        }),
+      ).rejects.toThrow();
+    }
+  }
 });
 
 test("secret rotation helpers use exact scoped POSTs and return the new secret once", async () => {
@@ -262,8 +322,60 @@ test("integration administration helpers are absent from the eager client", () =
     "rotateOrganizationWebhookSecret",
     "rotateWorkspaceCredentialProviderSecret",
     "rotateWorkspaceWebhookSecret",
+    "testWorkspaceCredentialProvider",
+    "testWorkspaceWebhook",
+    "getWorkspaceInheritedIntegrations",
     "updateOrganizationWebhook",
   ]) {
     expect(name in new OpenGeniClient({ baseUrl: "https://fixture.invalid" })).toBe(false);
   }
+});
+
+test("a verified webhook.test event names the workspace but no session", async () => {
+  const secret = "whsec_test";
+  const body = JSON.stringify({
+    id: crypto.randomUUID(),
+    type: "webhook.test",
+    lane: "workspace",
+    workspaceId: crypto.randomUUID(),
+    sessionId: null,
+    turnId: null,
+    occurredAt: new Date().toISOString(),
+    data: { webhookId: crypto.randomUUID() },
+  });
+  const { event } = await verifyWebhookEvent({
+    body,
+    headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+    secret,
+  });
+  expect(event.type).toBe("webhook.test");
+  expect(event.sessionId).toBeNull();
+
+  // Only usage and test events may omit the session.
+  const sessionless = body.replace('"webhook.test"', '"turn.completed"');
+  await expect(
+    verifyWebhookEvent({
+      body: sessionless,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, sessionless) },
+      secret,
+    }),
+  ).rejects.toThrow("signature verification failed");
+});
+
+test("test and inherited helpers use exact workspace-scoped routes", async () => {
+  const calls: unknown[][] = [];
+  const client: Pick<OpenGeniClient, "requestJson"> = {
+    async requestJson<T>(...args: unknown[]): Promise<T> {
+      calls.push(args);
+      return {} as T;
+    },
+  };
+  await testWorkspaceWebhook(client, "ws/one", "hook/one");
+  await testWorkspaceCredentialProvider(client, "ws/one");
+  await getWorkspaceInheritedIntegrations(client, "ws/one");
+  expect(calls).toEqual([
+    ["POST", "/v1/workspaces/ws%2Fone/webhooks/hook%2Fone/test"],
+    ["POST", "/v1/workspaces/ws%2Fone/credential-provider/test"],
+    ["GET", "/v1/workspaces/ws%2Fone/inherited-integrations"],
+  ]);
 });

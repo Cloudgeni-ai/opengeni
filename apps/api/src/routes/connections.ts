@@ -1,6 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
 import { verifyDirectModelAccess } from "@opengeni/core";
-import { assertClaudeWorkspaceCredential } from "../claude-workspace-connection";
+import {
+  assertClaudeWorkspaceCredential,
+  prepareClaudeWorkspaceCredential,
+} from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
   upsertWorkspaceProviderApiKeyConnection,
@@ -97,6 +100,7 @@ import {
   withWorkspaceSubjectRls,
   type Database,
   encryptEnvironmentValue,
+  brokeredCredentialBundleProblem,
   getConnectionMetadata,
   listConnectionsMetadata,
   listSlackInstallationBindings,
@@ -282,6 +286,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "Model checks require an OpenAI or Azure OpenAI connection",
       });
     }
+    const directModelKey = payload.metadata?.directModelProvider !== undefined;
     // All writes in this closure must use the caller-owned scoped transaction.
     // eslint-disable-next-line no-shadow
     const persist = async (db: Database) => {
@@ -295,6 +300,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         assertPersonalConnectionOwnerPrincipal(access);
       }
       const providerDomain = canonicalProviderDomain(payload.providerDomain);
+      payload.credential = prepareClaudeWorkspaceCredential(
+        settings,
+        workspaceId,
+        payload.metadata,
+        payload.credential,
+      );
       assertClaudeWorkspaceCredential(settings, {
         subjectId,
         providerDomain,
@@ -313,6 +324,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         kind: payload.kind,
         metadata: payload.metadata,
       });
+      // Validated model keys store `{ apiKey }` for model execution. Generic
+      // integration credentials still require an explicit broker destination.
+      if (!workspaceProviderKind && !directModelKey)
+        assertBrokeredApiKeyCredential(payload.kind, payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -411,7 +426,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       kind: payload.kind,
       metadata: payload.metadata,
     });
-    return modelKey || payload.metadata?.directModelProvider !== undefined
+    return modelKey || directModelKey
       ? commit(db)
       : withOrganizationIntegrationAcquisition(
           db,
@@ -1183,6 +1198,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
               });
             }
+            payload.credential = prepareClaudeWorkspaceCredential(
+              settings,
+              workspaceId,
+              existing.metadata,
+              payload.credential,
+            );
             assertClaudeWorkspaceCredential(settings, {
               subjectId,
               providerDomain,
@@ -1264,6 +1285,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               (payload.status === "active" && existing.status !== "active"))
           ) {
             assertOrganizationIntegrationAllowed(policy, null);
+          }
+          if (payload.credential !== undefined) {
+            assertBrokeredApiKeyCredential(payload.kind ?? existing?.kind, payload.credential);
           }
           const connection = await updateConnection(db, {
             workspaceId,
@@ -1869,6 +1893,20 @@ function workspaceProviderApiKeyConnectionKind(input: {
     return "openrouter";
   }
   return null;
+}
+
+/**
+ * A brokered api_key Connection is usable only through `headers` or
+ * `placements`; anything else was previously accepted and then failed every
+ * tool call with a misleading "connect an account" auth-needed notice.
+ */
+function assertBrokeredApiKeyCredential(
+  kind: string | undefined,
+  credential: Record<string, unknown>,
+): void {
+  if (kind !== "api_key") return;
+  const problem = brokeredCredentialBundleProblem(credential);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {

@@ -282,6 +282,14 @@ every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
+Modal command-start transport safety spans the native router and the pinned SDK
+patch, including internal setup, path/filesystem and archive helpers. Only local
+pre-dispatch proof permits finite same-turn recovery; preserve typed causes
+through SDK wrappers and never replay an uncertain Start. See `docs/run-lifecycle.md`.
+Published runtime consumers use unpatched Modal: do not import patch-added error
+exports. Keep native errors runtime-owned and recognize genuine patched SDK
+boundaries by their own non-enumerable Symbol marker, never names or RPC text.
+
 Lease-owned Modal creation is fenced at `modal-create-boundary.ts`, before the
 physical RPC, and attributed through `modal-create-session.ts` before setup.
 Unknown outcomes retain their epoch/checkpoint. Historical positive discovery

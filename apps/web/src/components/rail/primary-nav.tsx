@@ -4,14 +4,12 @@ import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
-import { ForYouLink } from "@/components/rail/for-you-link";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
 import { Button } from "@/components/ui/button";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
-import { workspacePriorityPath } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
@@ -47,7 +45,6 @@ export function WorkspaceShortcutLinks({
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      <ForYouLink embedded />
       {PRIMARY_WORKSPACE_ITEMS.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
@@ -77,9 +74,7 @@ export function PrimaryNav() {
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
   );
-  const activeWorkspaceSection =
-    activeWorkspaceItem?.label ??
-    (pathname === workspacePriorityPath(rail.workspaceId) ? "For you" : undefined);
+  const activeWorkspaceSection = activeWorkspaceItem?.label;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );

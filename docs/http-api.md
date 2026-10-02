@@ -49,6 +49,23 @@ Expired offboarded personal data and the organization-tenancy parity check are
 explicit operator commands, not API routes; see
 [`organization-tenancy.md`](organization-tenancy.md).
 
+## Usage allowance endpoints
+
+- `GET|PUT|DELETE /v1/workspaces/:workspaceId/allowance`
+- `POST /v1/workspaces/:workspaceId/allowance/grants`
+- `PUT /v1/workspaces/:workspaceId/members/:subjectId/allowance`
+- `PUT /v1/workspaces/:workspaceId/members/external/:source/:externalId/allowance`
+- `GET /v1/workspaces/:workspaceId/usage` (period selection and member pagination)
+- `GET /v1/workspaces/:workspaceId/usage/me` (authenticated subject only)
+
+See [usage allowances](usage-allowances.md) for USD-micro units, CAS,
+organization-only budget authority, workspace-admin member splits, frozen
+attribution, and post-call overshoot. The packaged conversation proxy serves
+only the own-usage read; it never forwards allowance mutations or the roster.
+The same suffixes exist beneath
+`/v1/workspaces/external/:workspaceSource/:workspaceExternalId` for exact,
+existing organization-tenant lookups without provisioning or expanded authority.
+
 ## GitHub endpoints
 
 - `GET /v1/workspaces/:workspaceId/github/app`

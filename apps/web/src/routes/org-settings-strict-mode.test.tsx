@@ -665,9 +665,11 @@ describe("organization billing StrictMode ownership", () => {
         root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
       );
       // Models is hidden outside an organization administrator session, and a
-      // direct link lands on the first page this person can use.
-      expect(container.textContent).not.toContain("Models");
-      expect(container.textContent).toContain("Identity and mission");
+      // direct link says who manages models instead of opening another page.
+      expect(container.textContent).toContain(
+        "Only admins manage models. Ask an admin to add one.",
+      );
+      expect(container.textContent).not.toContain("Identity and mission");
       expect(container.textContent).not.toContain("Connect account");
       expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
       expect(

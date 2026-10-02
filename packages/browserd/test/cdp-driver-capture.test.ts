@@ -151,7 +151,7 @@ test("Lightpanda rejects screenshots before CDP can return placeholder pixels", 
   }
 });
 
-test.each(["Page.enable", "Page.getFrameTree"])(
+test.each(["Page.enable", "Emulation.setFocusEmulationEnabled", "Page.getFrameTree"])(
   "failed target initialization at %s detaches its session and permits a fresh attachment",
   async (method) => {
     const fixture = await captureFixture();
@@ -295,7 +295,7 @@ test("the supervisor preserves target authority when a failed capture has a slow
   }
 });
 
-test("a stalled screenshot releases target and foreground queues for healthy reads", async () => {
+test("a stalled screenshot leaves other targets available and releases its own queue", async () => {
   const fixture = await captureFixture();
   try {
     await fixture.driver.start();
@@ -311,8 +311,9 @@ test("a stalled screenshot releases target and foreground queues for healthy rea
     const otherTarget = fixture.driver.captureScreenshot("target-2", { format: "jpeg" });
     await settle();
     expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
-      1,
+      2,
     );
+    expect(await otherTarget).toMatchObject({ targetId: "target-2", width: 3, height: 2 });
     jest.advanceTimersByTime(10_000);
     await settle();
     const error = await failed;
@@ -324,11 +325,10 @@ test("a stalled screenshot releases target and foreground queues for healthy rea
       cause: { message: "CDP Page.captureScreenshot timed out" },
     });
     expect(await sameTarget).toMatchObject({ targetId: "target-1", width: 3, height: 2 });
-    expect(await otherTarget).toMatchObject({ targetId: "target-2", width: 3, height: 2 });
     expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
       3,
     );
-    expect(fixture.calls.filter((call) => call.method === "Target.activateTarget")).toHaveLength(3);
+    expect(fixture.calls.filter((call) => call.method === "Target.activateTarget")).toHaveLength(0);
     // A delayed reply to the expired command must not contaminate the next capture.
     fixture.replyToStalled();
     await settle();
@@ -578,7 +578,7 @@ async function captureFixture(
     ...reference,
     engine,
     runner,
-    foregroundManagedTabs: true,
+    focusEmulation: engine !== "lightpanda",
     connect: async (endpoint) =>
       await CdpConnection.connect(endpoint, {
         createWebSocket: () => {

@@ -102,6 +102,11 @@ export type ScheduledTaskFormState = {
   /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
   resources: ResourceRef[];
+  /**
+   * What each run's agent can do. Undefined follows the workspace's agent
+   * defaults (nothing is sent); a value is frozen into the schedule.
+   */
+  agentCapabilities?: import("@opengeni/contracts").AgentCapabilities;
 };
 
 /**
@@ -273,6 +278,9 @@ export function formStateFromScheduledTask(
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
     slackBotChannelId: task.agentConfig.slackBotChannelId ?? "",
+    ...(task.agentConfig.agent?.capabilities !== undefined
+      ? { agentCapabilities: task.agentConfig.agent.capabilities }
+      : {}),
   };
 }
 
@@ -381,8 +389,18 @@ export function agentConfigFromFormState(
   if (form.includeOpenGeniTool) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
+  // Keep what the form doesn't edit (identity, renderer, instructions) as saved.
+  const { capabilities: _savedCapabilities, ...savedAgent } = existingTask?.agentConfig.agent ?? {};
+  const agent =
+    form.runMode === "existing_session"
+      ? undefined
+      : {
+          ...savedAgent,
+          ...(form.agentCapabilities !== undefined ? { capabilities: form.agentCapabilities } : {}),
+        };
   return {
     prompt: form.prompt.trim(),
+    ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     ...(existingTask?.agentConfig.knowledgeSource
       ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
       : {}),

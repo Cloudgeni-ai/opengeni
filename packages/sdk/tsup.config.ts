@@ -13,7 +13,10 @@ import { defineConfig } from "tsup";
 // closure guard: a stray server import stays visible in dist.
 export default defineConfig({
   entry: [
+    "src/allowance-refusal.ts",
     "src/chat/index.ts",
+    "src/tenant-workspaces.ts",
+    "src/session-proxy.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",
     "src/adapters/hono.ts",
@@ -27,6 +30,8 @@ export default defineConfig({
     "src/document-authority.ts",
     "src/knowledge.ts",
     "src/workspace-integrations.ts",
+    "src/session-history-import.ts",
+    "src/usage-allowances.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
@@ -49,9 +54,11 @@ export default defineConfig({
   clean: true,
   external: [/^@opengeni\//],
   noExternal: [
+    "@opengeni/contracts/allowance-refusal",
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",
+    "@opengeni/contracts/session-final-reply",
     "@opengeni/contracts/site-session-http",
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",

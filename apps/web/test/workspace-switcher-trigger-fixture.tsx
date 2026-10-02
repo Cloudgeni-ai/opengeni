@@ -121,7 +121,6 @@ function WorkspaceSwitcherFixture() {
                 activeAccountId={activeWorkspace.accountId}
                 canCreate
                 onSelect={setActiveWorkspaceId}
-                onCreateOrganization={() => setLastAction("New organization")}
                 managedSelfContext={selfContext}
                 align="start"
               >
@@ -146,7 +145,6 @@ function WorkspaceSwitcherFixture() {
                     setActiveWorkspaceId(workspaceId);
                     setLastAction(`Opened ${selected.name}`);
                   }}
-                  onCreateOrganization={() => setLastAction("New organization")}
                   managedSelfContext={selfContext}
                   align="start"
                 >

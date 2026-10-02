@@ -2623,7 +2623,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
-  test("opens waiting descendants at every depth from a failed parent in For you", async () => {
+  test("opens waiting descendants at every depth from a failed parent in Needs you", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -2717,19 +2717,27 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         pause: "paused",
       });
       expect(evidence.direct).toEqual([child.id]);
-      await page.getByRole("link", { name: /^For you/ }).click();
-      const row = page
-        .getByRole("listitem")
-        .filter({ has: page.getByRole("link", { name: "Attention failed parent", exact: true }) });
-      await row.getByRole("button", { name: "Show waiting agents", exact: true }).click();
-      const nested = row.getByRole("link", { name: "Attention nested child", exact: true });
+      // The rail's "Needs you" view keeps the failed workstream with its
+      // spawned agents, so every waiting depth stays one click away.
+      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      await page.getByRole("menuitem", { name: /^Status/ }).focus();
+      await page.keyboard.press("ArrowRight");
+      await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
+      await page
+        .getByRole("button", { name: "Session view, showing sessions that need you", exact: true })
+        .waitFor();
+      const rowFor = (id: string) => page.locator(`a[data-session-row][href$="/sessions/${id}"]`);
+      for (const id of [parent.id, child.id]) {
+        await rowFor(id).waitFor();
+        await rowFor(id)
+          .locator("xpath=../..")
+          .getByRole("button", { name: "Expand spawned sessions" })
+          .click();
+      }
+      const nested = rowFor(grandchild.id);
       await nested.waitFor();
-      expect(await nested.getAttribute("href")).toBe(
-        `/workspaces/${workspaceId}/sessions/${grandchild.id}`,
-      );
-      await row.getByText("Paused; request still pending", { exact: true }).waitFor();
-      expect(await row.innerText()).toContain("Failed");
-      await page.screenshot({ path: "/tmp/ux-priority-child-routing.png", fullPage: true });
+      expect(await nested.innerText()).toContain("Attention nested child");
+      await page.screenshot({ path: "/tmp/ux-needs-you-child-routing.png", fullPage: true });
       await nested.click();
       await waitFor(() => page.url().endsWith(`/sessions/${grandchild.id}`));
     } finally {

@@ -78,6 +78,8 @@ export function credentialProviderRequestBody(
     mcpServers: [],
   },
 ): CredentialProviderRequest {
+  const via = input.initiatorContext.via;
+  const latestHop = Array.isArray(via) ? via.at(-1) : null;
   return {
     type: "credentials.request",
     lane: selection.lane,
@@ -92,6 +94,16 @@ export function credentialProviderRequestBody(
     turnId: input.turnId,
     attemptId: input.attemptId,
     initiator: { kind: input.initiator.kind, subjectId: input.initiator.subjectId },
+    initiatorContext: {
+      kind:
+        latestHop?.kind === "agent"
+          ? "agent"
+          : input.initiator.kind === "subject"
+            ? "human"
+            : "service",
+      initiator: input.initiator,
+      context: input.initiatorContext,
+    },
     initiatingHumanSubjectId,
     initiatingHuman,
     sandboxBackend: input.effectiveSandboxBackend,

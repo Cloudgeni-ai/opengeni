@@ -33,7 +33,11 @@ export interface CodeSearchWorkspace {
     path: string,
     options: { signal?: AbortSignal; maxBytes: number },
   ): Promise<{ text: string; truncated: boolean; binary: boolean } | null>;
-  /** Classify workspace-relative paths. */
+  /**
+   * Classify workspace-relative paths. A path that resolves (through symlinks) into a credential directory
+   * (CODE_SEARCH_CREDENTIAL_DIRS) must be reported "missing": ripgrep follows a symlink named as a search
+   * root, so the engine's own path checks cannot see such a link.
+   */
   pathKinds(
     paths: readonly string[],
     options: { signal?: AbortSignal },

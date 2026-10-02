@@ -227,6 +227,8 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (create.status !== 201)
+        throw new Error(`Customer connection failed: ${create.status} ${await create.text()}`);
       expect(create.status).toBe(201);
       const connection = ((await create.json()) as { connection: { id: string } }).connection;
       const replay = await app.request(workspacePath(workspaceId, "/connections"), {

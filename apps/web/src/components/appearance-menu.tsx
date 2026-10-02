@@ -1,10 +1,16 @@
-import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react";
+import { MonitorIcon, MoonIcon, SunIcon, SunMoonIcon } from "lucide-react";
 
 import {
+  DropdownMenuCheck,
+  DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuMeta,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { parseAppearance, useAppearance } from "@/lib/appearance";
 
@@ -40,5 +46,33 @@ export function AppearanceMenu() {
       </DropdownMenuRadioGroup>
       <DropdownMenuSeparator />
     </>
+  );
+}
+
+/**
+ * The account menu's Appearance row: it shows the current choice and opens a
+ * Light / Dark / System list with the chosen option checked on the right.
+ */
+export function AppearanceSubmenu() {
+  const { appearance, setAppearance } = useAppearance();
+  const current = options.find((option) => option.value === appearance);
+
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <SunMoonIcon />
+        Appearance
+        <DropdownMenuMeta>{current?.label}</DropdownMenuMeta>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-40">
+        {options.map(({ value, label, icon: Icon }) => (
+          <DropdownMenuItem key={value} onSelect={() => setAppearance(value)}>
+            <Icon />
+            {label}
+            <DropdownMenuCheck checked={appearance === value} />
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }

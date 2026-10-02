@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Building2Icon, LockIcon, PauseIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -108,51 +108,34 @@ export function useRememberedWorkspaceIds(): Record<string, string> {
 }
 
 /**
- * "New workspace in Acme": the create action always names the organization it
- * creates in, and opens that organization's New workspace page (the one create
- * flow, also reached from Organization settings > Workspaces). Its back link
- * returns here. Without permission there, it says so instead.
+ * "New workspace in Acme", by name, for a session that may create workspaces
+ * but not administer the organization (a configured deployment key or token).
+ * Everyone else creates on Organization settings > Workspaces, the one create
+ * flow, so the picker stays a list of places to go.
  */
-export function CreateWorkspaceMenuItem(props: {
-  organizationLabel: string;
-  canCreate: boolean;
-  /** A workspace of that organization, to open its organization settings through. */
+function CreateWorkspaceHereMenuItem(props: { organizationLabel: string; onCreate: () => void }) {
+  return (
+    <DropdownMenuItem onSelect={props.onCreate}>
+      <PlusIcon />
+      <span
+        className="min-w-0 flex-1 truncate"
+        title={`New workspace in ${props.organizationLabel}`}
+      >
+        New workspace in {props.organizationLabel}
+      </span>
+    </DropdownMenuItem>
+  );
+}
+
+/**
+ * "New workspace": the quick path to the one create flow, the organization's
+ * New workspace page. Shown only to people who can create there; its back link
+ * returns to the page the picker was opened on.
+ */
+function CreateWorkspaceLinkMenuItem(props: {
   workspaceId: string;
-  /** Where the page's back link returns: the page the menu was opened on. */
   returnTo?: ReturnTo | undefined;
-  /**
-   * A session that may create workspaces but not administer the organization
-   * (a configured deployment key or token): create by name, here.
-   */
-  onCreateHere?: (() => void) | undefined;
 }) {
-  if (!props.canCreate && props.onCreateHere) {
-    return (
-      <DropdownMenuItem onSelect={props.onCreateHere}>
-        <PlusIcon />
-        <span
-          className="min-w-0 flex-1 truncate"
-          title={`New workspace in ${props.organizationLabel}`}
-        >
-          New workspace in {props.organizationLabel}
-        </span>
-      </DropdownMenuItem>
-    );
-  }
-  if (!props.canCreate) {
-    return (
-      // Readable, not faded: the reason is the point of showing it.
-      <DropdownMenuItem disabled className="items-start data-[disabled]:opacity-100">
-        <PlusIcon className="mt-0.5" />
-        <span className="grid min-w-0 flex-1">
-          <span className="truncate text-fg-muted">New workspace in {props.organizationLabel}</span>
-          <span className="text-xs leading-4.5 text-fg-muted">
-            Only owners and admins can create workspaces here.
-          </span>
-        </span>
-      </DropdownMenuItem>
-    );
-  }
   return (
     <DropdownMenuItem asChild>
       <Link
@@ -165,12 +148,7 @@ export function CreateWorkspaceMenuItem(props: {
         }}
       >
         <PlusIcon />
-        <span
-          className="min-w-0 flex-1 truncate"
-          title={`New workspace in ${props.organizationLabel}`}
-        >
-          New workspace in {props.organizationLabel}
-        </span>
+        <span className="min-w-0 flex-1 truncate">New workspace</span>
       </Link>
     </DropdownMenuItem>
   );
@@ -206,21 +184,20 @@ export function WorkspaceMenuItems(props: {
 
 /**
  * The workspace picker at the top of the main rail. It shows the workspace and
- * its organization, lists that organization's workspaces with a create action
- * that names the organization, links to organization settings, and lists the
- * other organizations to switch to. Switching organization opens a workspace
- * there. Callers own where a workspace selection lands.
+ * its organization, lists that organization's workspaces, and, when the person
+ * belongs to more than one organization, the others to switch to. Switching
+ * organization opens a workspace there. People who can create workspaces get a
+ * quiet "New workspace" row that opens the organization's create page; new
+ * organizations and organization settings live in the account menu and the
+ * settings rail. Callers own where a workspace selection lands.
  */
 export function WorkspaceSwitcherMenu(props: {
   workspaceId: string;
   collapsed: boolean;
   align: "start" | "end";
   onSelect: (workspaceId: string) => void;
-  onCreateOrganization?: () => void;
   className?: string;
   compact?: boolean;
-  /** What New workspace's back link says; defaults to the workspace name. */
-  createReturnLabel?: string;
 }) {
   const context = useAppContext();
   const activeWorkspace =
@@ -230,14 +207,14 @@ export function WorkspaceSwitcherMenu(props: {
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
-  const canCreate = useCanCreateWorkspaceIn(activeAccountId);
+  const administers = useCanCreateWorkspaceIn(activeAccountId);
   const rememberedWorkspaceIds = useRememberedWorkspaceIds();
   // Owners and admins create on the organization's New workspace page. A
   // session that holds workspace:create without administering the
   // organization (a configured deployment key or token) can't reach that page,
   // so it creates by name here, in the current organization only.
   const createHereAccountId =
-    !canCreate &&
+    !administers &&
     activeAccountId &&
     hasAccountPermission(context.accessContext, activeAccountId, "workspace:create")
       ? activeAccountId
@@ -273,14 +250,11 @@ export function WorkspaceSwitcherMenu(props: {
         workspaces={context.workspaces}
         activeWorkspaceId={props.workspaceId}
         activeAccountId={activeAccountId}
-        canCreate={canCreate}
         onCreateHere={createHereAccountId ? () => setCreateOpen(true) : undefined}
-        createReturnTo={currentPageReturnTo(
-          props.createReturnLabel ?? activeWorkspace?.name ?? "Back",
-        )}
+        canCreate={administers}
+        createReturnTo={currentPageReturnTo(activeWorkspace?.name ?? "Back")}
         rememberedWorkspaceIds={rememberedWorkspaceIds}
         onSelect={props.onSelect}
-        onCreateOrganization={props.onCreateOrganization}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
       >
@@ -373,15 +347,15 @@ export function WorkspaceMenu(props: {
   workspaces: Workspace[];
   activeWorkspaceId: string;
   activeAccountId: string | null;
-  canCreate: boolean;
-  /** Create by name in the current organization; see CreateWorkspaceMenuItem. */
+  /** Create by name in the current organization; see CreateWorkspaceHereMenuItem. */
   onCreateHere?: (() => void) | undefined;
-  /** Where New workspace's back link returns. */
+  /** Show the "New workspace" link to the organization's create page. */
+  canCreate?: boolean;
+  /** Where that page's back link returns. */
   createReturnTo?: ReturnTo | undefined;
   /** The last workspace used in each organization. */
   rememberedWorkspaceIds?: Record<string, string>;
   onSelect: (workspaceId: string) => void;
-  onCreateOrganization?: () => void;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
   children: ReactNode;
@@ -447,36 +421,24 @@ export function WorkspaceMenu(props: {
               managedSelfContext={props.managedSelfContext}
               onSelect={props.onSelect}
             />
-            <CreateWorkspaceMenuItem
-              organizationLabel={currentOrg.label}
-              canCreate={props.canCreate}
-              onCreateHere={props.onCreateHere}
-              workspaceId={props.activeWorkspaceId}
-              returnTo={props.createReturnTo}
-            />
+            {props.canCreate ? (
+              <CreateWorkspaceLinkMenuItem
+                workspaceId={props.activeWorkspaceId}
+                returnTo={props.createReturnTo}
+              />
+            ) : props.onCreateHere ? (
+              <CreateWorkspaceHereMenuItem
+                organizationLabel={currentOrg.label}
+                onCreate={props.onCreateHere}
+              />
+            ) : null}
           </DropdownMenuGroup>
         ) : null}
-        {currentOrg ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId: props.activeWorkspaceId }}
-              >
-                <SettingsIcon />
-                Organization settings
-              </Link>
-            </DropdownMenuItem>
-          </>
-        ) : null}
-        {otherOrgs.length > 0 || props.onCreateOrganization ? (
+        {otherOrgs.length > 0 ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuGroup aria-label="Switch organization">
-              {otherOrgs.length > 0 ? (
-                <DropdownMenuLabel>Switch organization</DropdownMenuLabel>
-              ) : null}
+              <DropdownMenuLabel>Switch organization</DropdownMenuLabel>
               {otherOrgs.map(({ org, landing }) => (
                 <DropdownMenuItem
                   key={org.accountId}
@@ -490,17 +452,6 @@ export function WorkspaceMenu(props: {
                   </span>
                 </DropdownMenuItem>
               ))}
-              {props.onCreateOrganization ? (
-                <DropdownMenuItem
-                  onSelect={(event) => {
-                    event.preventDefault();
-                    props.onCreateOrganization?.();
-                  }}
-                >
-                  <PlusIcon />
-                  New organization
-                </DropdownMenuItem>
-              ) : null}
             </DropdownMenuGroup>
           </>
         ) : null}

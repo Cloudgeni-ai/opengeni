@@ -41,7 +41,7 @@ afterAll(async () => {
 // composer projects the current expansion and submits account selections for
 // it, so a follow-up must freeze accounts against that expansion, resolved the
 // same way the worker resolves it, rather than the stale stored column.
-test("a follow-up on a workspace-default session freezes the selected default connector account", async () => {
+test("initial and follow-up turns freeze accounts for executable workspace defaults", async () => {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Workspace default connector admission') returning id`;
   const accountId = account!.id as string;
@@ -152,6 +152,30 @@ test("a follow-up on a workspace-default session freezes the selected default co
       { canonicalServerId: server.id, connectionId: connection.id },
     ]);
   };
+
+  // Initial turn admission must use the same executable workspace defaults as
+  // follow-ups, even when a configured server is absent from the stored list.
+  const initial = await alice.createSession(workspace.id, {
+    initialMessage: "Read the synthetic connector fixture",
+    connectionAccounts: selection,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const [initialTurn] =
+    await shared.admin`select personal_connection_delegations, mcp_account_bindings
+    from session_turns where session_id = ${initial.id}`;
+  expectFrozen(initialTurn);
+
+  for (const policy of [{ tools: [] }, { excludedMcpServerIds: [server.id] }]) {
+    const narrowed = await alice.createSession(workspace.id, {
+      initialMessage: "Run without the fixture connector",
+      idempotencyKey: crypto.randomUUID(),
+      ...policy,
+    });
+    const [turn] = await shared.admin`select personal_connection_delegations, mcp_account_bindings
+      from session_turns where session_id = ${narrowed.id}`;
+    expect(turn?.personal_connection_delegations).toEqual([]);
+    expect(turn?.mcp_account_bindings).toEqual([]);
+  }
 
   // Without a workspace override every configured runtime connector is a
   // default, so the static connector is effective for this session even though

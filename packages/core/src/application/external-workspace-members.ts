@@ -26,6 +26,7 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
   requireFreshAccessGrant,
   type AccessDeps,
 } from "../access";
@@ -40,6 +41,7 @@ export async function addExternalWorkspaceMemberForRequest(
 ): Promise<ExternalIdentity> {
   const payload = AddExternalWorkspaceMemberRequest.parse(input);
   const context = await requireAccessContext(c, deps);
+  requireApiKeyDelegationContext(context, payload.permissions);
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   if (!authority)
     throw new HTTPException(403, {
@@ -205,6 +207,7 @@ export async function updateExternalWorkspaceMemberForRequest(
         .map((issue) => `${issue.path.map(String).join(".") || "request"}: ${issue.message}`)
         .join("; ")}`,
     });
+  requireApiKeyDelegationContext(await requireAccessContext(c, deps), request.data.permissions);
   try {
     return await updateExternalWorkspaceMemberOperation(
       deps.db,

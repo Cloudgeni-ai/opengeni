@@ -1,6 +1,7 @@
 import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
+  isModelAvailableForNewSelection,
   policyProviderIdForModel,
   resolveModelProvider,
   resolveTurnExecutionPolicyV1,
@@ -13,21 +14,18 @@ import {
 import {
   evaluateWorkspaceModelPolicy,
   mergeToolRefs,
+  readTurnExecutionPolicyV1,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
 import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
-  getBillingBalance,
-  getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
   getSessionGoal,
-  isCodexBilledTurn,
+  getSessionTurn,
   materializeGoalContinuation,
   requireSession,
-  sumUsageQuantity,
-  type Database,
 } from "@opengeni/db";
 import type {
   ControlActivityServices,
@@ -39,6 +37,8 @@ import {
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { turnCredentialRestriction } from "./agent-turn/credential-restriction";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -66,25 +66,25 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
-    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
-    // must preserve the newest policy that actually emitted `turn.started`.
-    // Admission-rejected turns have no such event and cannot poison it.
+    // follows effective defaults: a started turn or a newer explicit settings
+    // boundary. Admission-rejected turns cannot poison that projection.
     // Kept below the goal-less fast path so a non-goal session still skips the
     // reads entirely.
     const session = await requireSession(db, input.workspaceId, input.sessionId);
-    const latestStartedTurn = await getLatestStartedSessionTurn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    const inheritedContinuationModel = latestStartedTurn?.model ?? session.model;
+    // Terminal sessions retain their goal for human recovery, but cannot
+    // continue. Do not validate an obsolete model before the locked guard gets
+    // the chance to reject that work; otherwise a deterministic error retries.
+    if (session.status === "failed" || session.status === "cancelled") {
+      return { action: "none" };
+    }
+    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
+    const inheritedContinuationModel = session.model;
     let continuationModel = inheritedContinuationModel;
-    const continuationReasoningEffort =
-      latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
-    const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
+    const continuationReasoningEffort = session.reasoningEffort;
+    const continuationLatencyMode = session.latencyMode;
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
     if (
       inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
@@ -116,39 +116,27 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
-    // so it must not be budget-paused for zero OpenGeni credits. This file uses
-    // BASE settings (no codex overlay); the predicate does its own credential read.
-    const isCodexRun = await isCodexBilledTurn({
-      db,
-      settings,
-      workspaceId: input.workspaceId,
+    const turnExecutionPolicy = modelPolicyBlocked
+      ? undefined
+      : resolveTurnExecutionPolicyV1(settings, {
+          modelId: continuationModel,
+          requestedModelId: null,
+          modelSource: "continuation",
+          reasoningEffort: continuationReasoningEffort,
+          reasoningSource: "continuation",
+          latencyMode: continuationLatencyMode,
+          latencyModeSource: "continuation",
+        });
+    const continuationPolicy: NonNullable<
+      Parameters<typeof materializeGoalContinuation>[1]["policy"]
+    > = {
       model: continuationModel,
-    });
-    const fundedWithoutCredits = goalContinuationFundedWithoutCredits(
-      settings,
-      continuationModel,
-      isCodexRun,
-    );
-    // Budget exhaustion pauses the goal visibly instead of failing the
-    // session. Computed up front and applied inside the locked decision so a
-    // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(
-      settings,
-      db,
-      input.accountId,
-      input.workspaceId,
-      fundedWithoutCredits,
-    );
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: continuationModel,
-      requestedModelId: null,
-      modelSource: "continuation",
       reasoningEffort: continuationReasoningEffort,
-      reasoningSource: "continuation",
       latencyMode: continuationLatencyMode,
-      latencyModeSource: "continuation",
-    });
+      ...(turnExecutionPolicy ? { turnExecutionPolicy } : {}),
+      tools: withFirstPartyTools(settings, session.tools),
+      sandboxBackend: session.sandboxBackend,
+    };
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -164,15 +152,45 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
-      budgetBlocked: modelPolicyBlocked ?? budgetBlocked,
-      policy: {
-        model: continuationModel,
-        reasoningEffort: continuationReasoningEffort,
-        latencyMode: continuationLatencyMode,
-        turnExecutionPolicy,
-        tools: withFirstPartyTools(settings, session.tools),
-        sandboxBackend: session.sandboxBackend,
+      admission: async (tx, causalTurn) => {
+        // The materializer selects this exact causal row under its session/goal
+        // locks and freezes policy only after admission returns. Never infer
+        // credential authority from the generated continuation's payload.
+        const sourceTurn = causalTurn
+          ? await getSessionTurn(tx, input.workspaceId, causalTurn.id)
+          : null;
+        if (causalTurn && (!sourceTurn || sourceTurn.sessionId !== input.sessionId)) {
+          throw new Error("Goal continuation source turn is unavailable");
+        }
+        const sourcePolicy = readTurnExecutionPolicyV1(sourceTurn?.metadata);
+        if (turnExecutionPolicy) {
+          const credentialRestriction = turnCredentialRestriction(
+            sourcePolicy.kind === "valid" ? sourcePolicy.policy : turnExecutionPolicy,
+            session.metadata,
+          );
+          continuationPolicy.turnExecutionPolicy = credentialRestriction
+            ? { ...turnExecutionPolicy, credentialRestriction }
+            : turnExecutionPolicy;
+        }
+        const budgetBlocked = modelPolicyBlocked
+          ? null
+          : await goalRunBudgetBlocked(
+              { ...service, settings, db: tx },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                model: continuationModel,
+                initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+              },
+            );
+        return {
+          budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
+          budgetPausedReason: modelPolicyBlocked
+            ? "limits"
+            : (budgetBlocked?.pausedReason ?? "limits"),
+        };
       },
+      policy: continuationPolicy,
       // Long-wait guidance is only given when `wait_for_input` is actually in this
       // session's effective first-party selection (the same source the worker
       // signs into the delegated token and the API uses to register tools), so
@@ -222,17 +240,20 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
-  if (
-    resolveModelProvider(catalogSettings, input.inheritedModel) &&
-    !policyBlocks(input.inheritedModel)
-  ) {
-    return { model: input.inheritedModel, blocked: null };
-  }
   if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
     return {
       model: input.inheritedModel,
       blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
     };
+  }
+  if (!isModelAvailableForNewSelection(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is retired from new selection; choose an available model before resuming the goal`,
+    };
+  }
+  if (!policyBlocks(input.inheritedModel)) {
+    return { model: input.inheritedModel, blocked: null };
   }
   return {
     model: input.inheritedModel,
@@ -314,6 +335,8 @@ export function goalContinuationPrompt(
     "- For document report deliverables (a document the user asked for, or a large report meant to be kept or shared), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
+    "Goal evidence is a short proof for the ledger, not the deliverable. After goal_complete succeeds, finish this same turn with the requested user-facing answer, or a concise summary and retained artifact link. Goal completion stops future automatic continuations; it does not send the answer or end this turn. Never compress a report into evidence or omit the final reply.",
+    "Goal progress notes are short human-readable milestone statuses, not raw transcripts or continuation instructions. Keep normal spaces and summarize detail instead of squeezing words into a ledger field. The text and successCriteria fields each allow 8192 UTF-8 bytes, progressNote allows 8192 UTF-8 bytes, rationale allows 2048 UTF-8 bytes, and evidence allows 8192 characters.",
     "",
     ...waitingGuidance,
     ...childNoticeGuidance,
@@ -343,55 +366,22 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
 }
 
 /**
- * Non-throwing variant of the scheduled-run admission check: returns a human
- * readable reason when balance or monthly caps block another agent run.
+ * Goals share scheduled admission and pause visibly without synthesizing work.
  */
-async function goalRunBudgetBlocked(
-  settings: Settings,
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  fundedWithoutCredits: boolean,
-): Promise<string | null> {
-  // Free, subscription, and workspace-funded continuations skip OpenGeni's
-  // credit-balance gate and monthly model-cost cap. The agent-run COUNT cap
-  // below is a volume quota (not a credit/cost gate) and remains enforced.
-  if (
-    !fundedWithoutCredits &&
-    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
-  ) {
-    const balance = await getBillingBalance(db, accountId);
-    if (balance.balanceMicros <= 0) {
-      return "insufficient OpenGeni credits";
-    }
+export async function goalRunBudgetBlocked(
+  services: Parameters<typeof agentRunAdmissionDenial>[0],
+  input: Omit<Parameters<typeof agentRunAdmissionDenial>[1], "requestedAgentRuns">,
+): Promise<{ pausedReason: "limits" | "allowance"; message: string } | null> {
+  const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
+  if (denial === null) return null;
+  if (denial === "allowance_exhausted") {
+    return { pausedReason: "allowance", message: "OpenGeni usage allowance exhausted" };
   }
-  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-    const limits = configuredStaticUsageLimits(settings);
-    if (!fundedWithoutCredits && limits.maxMonthlyCostMicrosPerAccount) {
-      const used = await sumUsageQuantity(db, {
-        accountId,
-        eventType: "model.cost",
-        since: startOfUtcMonth(),
-      });
-      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-        return `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`;
-      }
-    }
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "agent_run.created",
-        since: startOfUtcMonth(),
-      });
-      if (used + 1 > limits.maxMonthlyAgentRunsPerWorkspace) {
-        return `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`;
-      }
-    }
-  }
-  return null;
-}
-
-function startOfUtcMonth(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const limits = configuredStaticUsageLimits(services.settings);
+  const messages = {
+    insufficient_credits: "insufficient OpenGeni credits",
+    monthly_model_cost_limit: `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+    monthly_agent_run_limit: `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
+  };
+  return { pausedReason: "limits", message: messages[denial] };
 }

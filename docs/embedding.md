@@ -14,6 +14,11 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+For a non-React frontend talking to the standalone service, see the runnable
+[Vue conversation recipe](../examples/vue-conversation/README.md): published
+`@opengeni/sdk`, the existing Bun Fetch proxy, and host-rendered Vue components.
+It is not an in-process runtime embed and adds no new core port or API contract.
+
 ### Participant-owned MCP connections
 
 Use ordinary native connections, optionally scoped to the canonical user.
@@ -79,7 +84,17 @@ Agent replies link files, sandbox paths, editable artifacts, and Sites with
 host origin. `SessionConversation` downloads retained files by default;
 sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
 session working directory without following symlinks.
-route artifacts and Sites with its `resolveLink` prop (also on
+`opengeni-site` fences render the console's inline Site preview, and
+`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
+open editable artifacts and Sites in a host container through the proxy's
+opt-in `artifacts: true`. The proxy checks exact session associations on every
+request and refreshes effective workspace grants for the browser cache
+partition. Live source authority is rechecked in the mutation commit transaction;
+lease expiry runs independently of pending authorization. Older APIs omit only
+artifact capability, leaving conversation bootstrap available.
+Its Site HTML delivery streams with cancellation and a 25 MiB
+actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
@@ -197,9 +212,29 @@ still reference the public Agents types, so the Agents packages remain declared
 dependencies, but OpenGeni's executable `dist` contains no external Agents or
 Zod import. The publish-closure guard enforces that boundary.
 
+### Agent configuration
+
+Sessions with an agent configuration (`CreateSessionRequest.agent`, the
+workspace's `settings.sessionAgentDefaults`, a scheduled task's
+`agentConfig.agent`, or a parent's configuration) freeze one resolved
+`sessions.agent_config`: `capabilities` (`"all"`, `"none"`, or a starting point
+plus toggles over thirteen capabilities), `identity`, `renderer`, and the
+instructions alias. Workers gate every tool family and compose a modular prompt
+(identity, base behavior, runtime mechanics, then only the modules of enabled
+capabilities and attached resources) from it; `session.agent` and
+`session.effectiveTools` report the result, and `PUT
+/v1/workspaces/:workspaceId/sessions/:sessionId/agent` changes it from the next
+turn under the tool-policy version. Sessions without a configuration
+(`agent: null`) keep the legacy instruction and tool composition below byte for
+byte. Admission is behind `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`, and
+`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve
+to `"all"`. The product-facing model is in
+[Product integration](product-integration.md#configure-the-agent); the design
+and enforcement details are in [Agent configuration](design/agent-configuration.md).
+
 ### Agent instructions and per-message application context
 
-A host has two system-level instruction scopes, composed as **deployment default
+For sessions without an agent configuration, a host has two system-level instruction scopes, composed as **deployment default
 template → workspace persona → per-session instructions**, with the
 non-bypassable CORE (goal-loop ownership + variable set block) always
 substituted in. Exact-message application context does not enter this prefix.
@@ -833,7 +868,9 @@ standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
-`CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
+`CreateSessionRequest.firstPartyMcpTools`. With an agent configuration it only
+refines inside the enabled capabilities (a name owned by a capability that is
+off is a 422 `agent_config_conflict`); prefer `agent.capabilities`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
 connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent
@@ -1137,7 +1174,8 @@ events in that interval are deliberately not recoverable. Normal deploys must us
 
 Canonical sources: `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES` in
 `packages/contracts/src/product-lifecycle-facts.ts`, the `HostLifecycleFactExport` contract in
-`packages/contracts/src/index.ts`, and migration `0532_product_lifecycle_fact_export.sql`.
+`packages/contracts/src/index.ts`, and migrations `0532_product_lifecycle_fact_export.sql` and
+`0565_usage_analytics_presence_and_facts.sql`.
 
 A third export kind, `lifecycle_fact`, carries one content-free fact per person-level product
 milestone, so a host can answer who signed up, verified, signed in, set up an organization, and
@@ -1152,14 +1190,17 @@ until the first lifecycle consumer registers.
 | `auth.email_verified` | none | the email is verified by link, or a social provider verified it at creation |
 | `auth.sign_in` | method of that session | a live sign-in session is created (discarded session-set provider sessions are not) |
 | `organization.setup` | `created`, `additional` | self-service setup or an additional organization commits |
-| `model.connected` | `codex`, `supergrok`, `vercel_gateway`, `openrouter` | a subscription account or organization model provider is connected |
+| `model.connected` | `codex`, `supergrok`, `vercel_gateway`, `openrouter`, `anthropic`, `claude_subscription` | a subscription account or organization model provider is connected |
 | `credits.purchased` | none | a credit top-up payment is granted |
+| `credits.granted` | grant class: `signup_trial`, `coupon`, `manual`, `other` | a positive `grant` or `manual_credit_grant` ledger row is written (trial: verified-signup trial; coupon: fully discounted Stripe checkout; manual: operator grant) |
 | `connection.created` | provider class, for example `slack`, `github`, `google`, `other` | an integration connection is created |
+| `connection.revoked` | provider class, the same list as `connection.created` | a connection becomes `revoked`, or a live connection is deleted |
 | `scheduled_task.created` | none | a scheduled task is created |
 | `skill.installed` | none | a catalog Skill is installed into a workspace |
 | `slack.user_linked` | none | a Slack user is linked to an OpenGeni user |
 | `machine.enrolled` | none | a new Connected Machine is enrolled |
 | `member.joined` | none | a person becomes an active member of an organization that already had one |
+| `user.active` | none | a managed person is active in an authenticated browser session on a new UTC day (at most one per person per day; no organization) |
 
 Row triggers on the source tables write each fact in the same transaction as the product change,
 so every writer path is covered and a rolled-back change leaves no fact. A capture error rolls back
@@ -1175,6 +1216,64 @@ free text is exported: a connection to a domain outside the fixed provider list 
 `other`. Fact ids are deterministic, so a re-captured fact has the same `idempotencyKey`. Retention
 of delivered facts belongs to the sink; the outbox keeps only undelivered and recently acknowledged
 rows, like the other kinds.
+
+`user.active` comes from server-side presence. A person counts as active when an API request from
+a canonical managed browser session carries `x-opengeni-user-activity: active`, which the web
+console sends only while its tab is visible and the person loaded, focused or interacted with it
+within the last 5 minutes (`OPENGENI_USER_ACTIVITY_*` in `packages/contracts/src/product-analytics.ts`).
+An idle open tab, background polling, and event streams (including their periodic
+reauthorization) never count; each request counts at most once. The API records presence in
+`opengeni_private.user_activity_presence`, at most once per person per minute per process and
+batched off the request path, and the first activity of each UTC day writes the fact. Count
+DAU/WAU/MAU at the sink as distinct `fact.subjectId` per day/week/month. API keys, services,
+agents and embedded hosts never produce it.
+
+Grant classes for `credits.granted`: `signup_trial` is the verified-signup trial grant
+(`source_type = 'verified_signup_trial'`); `coupon` is a fully discounted Stripe checkout
+(`source_type = 'stripe_checkout_coupon'`); `manual` is an operator grant, which the ops
+manual-credit-grant workflow writes as `type = 'manual_credit_grant'` with
+`source_type = 'operator_adjustment'`; anything else is `other`.
+
+Capture starts when the first lifecycle consumer registers, so earlier product history is missing
+until an operator runs the one-time backfill once a consumer is registered:
+
+```bash
+OPENGENI_MIGRATIONS_DATABASE_URL=<migration owner URL> bun run db:backfill-lifecycle-facts
+# optionally limit sources and batch size:
+#   bun run db:backfill-lifecycle-facts auth.sign_up member.joined --batch-size=200
+```
+
+It calls `opengeni_private.backfill_product_lifecycle_facts(source, batch)` until every source
+reports completion; the function refuses any login other than the migration owner (or a member of
+it). Do not run it while a deploy or migration is in progress. The first call for a source reads
+its source tables once into a private queue, taking only ACCESS SHARE locks: FORCE RLS stays on,
+and the owner reads through SELECT-only `lifecycle_backfill_read` policies (one short migration per
+source table, 0568 to 0581, each with a 1 second lock timeout and safe to rerun) that open only
+while a capability row bound to that exact backend transaction exists. Restrictive SELECT policies
+on those tables admit the same capability. If any of them is missing, for example because a later
+migration recreated a restrictive policy without it, the backfill refuses to read that source
+instead of completing with zero rows. Every later call is its own short transaction that enqueues
+one primary-key page of the queue, so total work is linear and no source table is altered or
+locked against writers. The runner sets a statement timeout on every call (default `15min`,
+`--statement-timeout=30min` to change it); a timed-out call rolls back and a rerun starts that
+source's read again. Backfilled facts keep the original source timestamp as `occurredAt` and reuse
+the live trigger's deterministic fact id, so an overlap with live capture or a repeated run never
+produces a second fact, and a completed source is a durable no-op
+(`opengeni_private.product_lifecycle_backfill_progress`). Limits: sign-ins only exist for sessions
+that are still stored; email-password verification time is approximated by the account's last
+update; `user.active` history is approximated from the UTC days on which a stored browser session
+was created or refreshed; `connection.revoked` covers connections still stored as revoked (deleted
+connections are gone). Both new kinds only backfill rows older than the moment their live capture
+began: migration 0565, or the first lifecycle consumer registration when that came later.
+
+Facts are written only by the owner's capture trigger function, which ignores any table outside
+the deployment's own schemas (so a runtime role cannot attach it to a temporary table), and by the
+owner-only backfill; there is no separately callable writer. Runtime roles still hold EXECUTE on
+`capture_product_lifecycle_fact()`, `observe_credit_grant()` and
+`backfill_product_lifecycle_facts(text, integer)` because the runtime posture of pre-0565 binaries
+requires EXECUTE on every private routine. Binaries from this release list them as owner-internal,
+so once no older binary can run, a follow-up migration should revoke runtime EXECUTE on those
+three routines.
 
 ### EventBus
 

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/interaction",
-  "version": "0.4.42",
+  "version": "0.4.45",
   "description": "Provider-neutral browser and computer interaction controller for OpenGeni.",
   "license": "Apache-2.0",
   "repository": {
@@ -19,6 +19,8 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./browser-state-authority": "./src/browser-state-authority.ts",
+    "./browser-controller-authority": "./src/browser-controller-authority.ts",
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

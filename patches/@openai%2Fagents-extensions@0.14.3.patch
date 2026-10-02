@@ -302,7 +302,7 @@ index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec6
      configuredExposedPorts?: number[];
      modalEnvironment?: string;
 diff --git a/dist/sandbox/modal/sandbox.js b/dist/sandbox/modal/sandbox.js
-index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..04c49fdad333abfa96fb936345e1fbc2bc22367f 100644
+index ca96b80..f3cfd04 100644
 --- a/dist/sandbox/modal/sandbox.js
 +++ b/dist/sandbox/modal/sandbox.js
 @@ -525,6 +525,10 @@ class ModalSandboxSession {
@@ -374,8 +374,83 @@ index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..04c49fdad333abfa96fb936345e1fbc2
      ]) {
          if (value !== undefined &&
              (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+@@ -1373,6 +1393,20 @@ function createActiveProcess(process) {
+         done: false,
+         exitCode: null,
+         donePromise: Promise.resolve(),
++        failed: false,
++    };
++    let notifyFailure;
++    activeProcess.failurePromise = new Promise((resolve) => {
++        notifyFailure = resolve;
++    });
++    const errors = [];
++    const recordFailure = (error) => {
++        errors.push(error);
++        activeProcess.failed = true;
++        activeProcess.waitError = errors.length === 1
++            ? error
++            : new AggregateError([...errors], 'Modal process observation failed.');
++        notifyFailure();
+     };
+     const stdoutPump = startTextStreamPump(process.stdout, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stdout');
+@@ -1380,21 +1414,22 @@ function createActiveProcess(process) {
+     const stderrPump = startTextStreamPump(process.stderr, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stderr');
+     });
++    // Observe failures immediately, including while Wait is still pending.
++    // Preserve the actual error graph; output failure is not consumed EOF.
++    const stdoutDone = stdoutPump.promise.catch(recordFailure);
++    const stderrDone = stderrPump.promise.catch(recordFailure);
+     activeProcess.stopOutputPumps = async () => {
+         await Promise.allSettled([stdoutPump.cancel(), stderrPump.cancel()]);
+     };
+     activeProcess.donePromise = (async () => {
+         try {
+             activeProcess.exitCode = await process.wait();
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+         }
+         catch (error) {
+-            activeProcess.waitError = error;
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+-        }
+-        finally {
+-            activeProcess.done = true;
++            recordFailure(error);
+         }
++        await Promise.all([stdoutDone, stderrDone]);
++        activeProcess.done = true;
+     })();
+     return activeProcess;
+ }
+@@ -1449,6 +1484,7 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+     try {
+         await Promise.race([
+             activeProcess.donePromise,
++            activeProcess.failurePromise,
+             new Promise((resolve) => {
+                 timeout = setTimeout(resolve, timeoutMs);
+                 unrefTimer(timeout);
+@@ -1460,13 +1496,13 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+             clearTimeout(timeout);
+         }
+     }
+-    if (activeProcess.waitError) {
++    if (activeProcess.failed) {
+         await activeProcess.stopOutputPumps?.();
+-        throw new sandbox_1.SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
++        throw Object.assign(new sandbox_1.SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
+             provider: 'modal',
+             operation: 'wait process',
+             cause: modalErrorMessage(activeProcess.waitError),
+-        });
++        }), { cause: activeProcess.waitError });
+     }
+ }
+ function modalErrorMessage(error) {
 diff --git a/dist/sandbox/modal/sandbox.mjs b/dist/sandbox/modal/sandbox.mjs
-index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..c6d13f1cafefb99bac4ec6e7a806dbdb7f602d1b 100644
+index da2ef8d..9ad2436 100644
 --- a/dist/sandbox/modal/sandbox.mjs
 +++ b/dist/sandbox/modal/sandbox.mjs
 @@ -487,6 +487,10 @@ export class ModalSandboxSession {
@@ -447,6 +522,81 @@ index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..c6d13f1cafefb99bac4ec6e7a806dbdb
      ]) {
          if (value !== undefined &&
              (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+@@ -1333,6 +1353,20 @@ function createActiveProcess(process) {
+         done: false,
+         exitCode: null,
+         donePromise: Promise.resolve(),
++        failed: false,
++    };
++    let notifyFailure;
++    activeProcess.failurePromise = new Promise((resolve) => {
++        notifyFailure = resolve;
++    });
++    const errors = [];
++    const recordFailure = (error) => {
++        errors.push(error);
++        activeProcess.failed = true;
++        activeProcess.waitError = errors.length === 1
++            ? error
++            : new AggregateError([...errors], 'Modal process observation failed.');
++        notifyFailure();
+     };
+     const stdoutPump = startTextStreamPump(process.stdout, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stdout');
+@@ -1340,21 +1374,22 @@ function createActiveProcess(process) {
+     const stderrPump = startTextStreamPump(process.stderr, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stderr');
+     });
++    // Observe failures immediately, including while Wait is still pending.
++    // Preserve the actual error graph; output failure is not consumed EOF.
++    const stdoutDone = stdoutPump.promise.catch(recordFailure);
++    const stderrDone = stderrPump.promise.catch(recordFailure);
+     activeProcess.stopOutputPumps = async () => {
+         await Promise.allSettled([stdoutPump.cancel(), stderrPump.cancel()]);
+     };
+     activeProcess.donePromise = (async () => {
+         try {
+             activeProcess.exitCode = await process.wait();
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+         }
+         catch (error) {
+-            activeProcess.waitError = error;
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+-        }
+-        finally {
+-            activeProcess.done = true;
++            recordFailure(error);
+         }
++        await Promise.all([stdoutDone, stderrDone]);
++        activeProcess.done = true;
+     })();
+     return activeProcess;
+ }
+@@ -1409,6 +1444,7 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+     try {
+         await Promise.race([
+             activeProcess.donePromise,
++            activeProcess.failurePromise,
+             new Promise((resolve) => {
+                 timeout = setTimeout(resolve, timeoutMs);
+                 unrefTimer(timeout);
+@@ -1420,13 +1456,13 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+             clearTimeout(timeout);
+         }
+     }
+-    if (activeProcess.waitError) {
++    if (activeProcess.failed) {
+         await activeProcess.stopOutputPumps?.();
+-        throw new SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
++        throw Object.assign(new SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
+             provider: 'modal',
+             operation: 'wait process',
+             cause: modalErrorMessage(activeProcess.waitError),
+-        });
++        }), { cause: activeProcess.waitError });
+     }
+ }
+ function modalErrorMessage(error) {
 diff --git a/dist/sandbox/runloop/sandbox.d.ts b/dist/sandbox/runloop/sandbox.d.ts
 index 99e9131d49c18987c997adf493795a648cd8f261..7484dd5d704ca3b22b095eaffdf43b2823258eb1 100644
 --- a/dist/sandbox/runloop/sandbox.d.ts
@@ -528,3 +678,131 @@ index 41969fcc87d854f799f4819442f863ad4b8c4f5a..e067e448504e7d9bb842942d977082f9
  }
  async function createRunloopClient(options) {
      try {
+diff --git a/dist/sandbox/shared/archive.js b/dist/sandbox/shared/archive.js
+index 13a17fcac4b66359e245e14b51512a09a7ef08a0..becf1b0a0458e283bf492a5295005f6f729ffda1 100644
+--- a/dist/sandbox/shared/archive.js
++++ b/dist/sandbox/shared/archive.js
+@@ -70,12 +70,12 @@ async function persistRemoteWorkspaceTar(args) {
+         if (error instanceof sandbox_1.SandboxArchiveError) {
+             throw error;
+         }
+-        throw new sandbox_1.SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
++        throw Object.assign(new sandbox_1.SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+@@ -120,12 +120,12 @@ async function hydrateRemoteWorkspaceTar(args) {
+         if (error instanceof sandbox_1.SandboxArchiveError) {
+             throw error;
+         }
+-        throw new sandbox_1.SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
++        throw Object.assign(new sandbox_1.SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+diff --git a/dist/sandbox/shared/archive.mjs b/dist/sandbox/shared/archive.mjs
+index d462054fd897417c24134de99993db8d31985a00..70f0842ee767254eef6a85314e13f707d4e98454 100644
+--- a/dist/sandbox/shared/archive.mjs
++++ b/dist/sandbox/shared/archive.mjs
+@@ -60,12 +60,12 @@ export async function persistRemoteWorkspaceTar(args) {
+         if (error instanceof SandboxArchiveError) {
+             throw error;
+         }
+-        throw new SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
++        throw Object.assign(new SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+@@ -110,12 +110,12 @@ export async function hydrateRemoteWorkspaceTar(args) {
+         if (error instanceof SandboxArchiveError) {
+             throw error;
+         }
+-        throw new SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
++        throw Object.assign(new SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+diff --git a/dist/sandbox/shared/session.js b/dist/sandbox/shared/session.js
+index d6698518838dcab5f7a4b8843e1da5f6eacbf654..dc9d760fa417f85bb70f6af330a675c6850fd731 100644
+--- a/dist/sandbox/shared/session.js
++++ b/dist/sandbox/shared/session.js
+@@ -20,7 +20,7 @@ async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
+@@ -59,14 +59,14 @@ async function withProviderError(providerName, provider, operation, fn, context
+         }
+         const cause = providerErrorMessage(error);
+         const retryable = providerErrorRetryability(error);
+-        throw new sandbox_1.SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
++        throw Object.assign(new sandbox_1.SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
+             provider,
+             operation,
+             ...context,
+             ...providerErrorDetails(error),
+             retryable,
+             cause,
+-        });
++        }), { cause: error });
+     }
+ }
+ function isProviderSandboxNotFoundError(error) {
+diff --git a/dist/sandbox/shared/session.mjs b/dist/sandbox/shared/session.mjs
+index b3cf905259abeca724c282ebd16b725a7b10e0f9..fe0faaba628d168f6e56f6840f21d35310d9af32 100644
+--- a/dist/sandbox/shared/session.mjs
++++ b/dist/sandbox/shared/session.mjs
+@@ -7,7 +7,7 @@ export async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
+@@ -46,14 +46,14 @@ export async function withProviderError(providerName, provider, operation, fn, c
+         }
+         const cause = providerErrorMessage(error);
+         const retryable = providerErrorRetryability(error);
+-        throw new SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
++        throw Object.assign(new SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
+             provider,
+             operation,
+             ...context,
+             ...providerErrorDetails(error),
+             retryable,
+             cause,
+-        });
++        }), { cause: error });
+     }
+ }
+ export function isProviderSandboxNotFoundError(error) {

@@ -29,7 +29,7 @@ import {
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
-  SquareTerminalIcon,
+  CodeIcon,
   UsersIcon,
   VariableIcon,
   type LucideIcon,
@@ -95,7 +95,7 @@ const ORGANIZATION_SETTINGS: Destination[] = [
   { id: "integrations", label: "Integrations", icon: PlugIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
-  { id: "developer", label: "Developer", icon: SquareTerminalIcon },
+  { id: "developer", label: "Developer", icon: CodeIcon },
   { id: "security", label: "Security & data", icon: ShieldCheckIcon },
 ];
 

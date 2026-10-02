@@ -365,6 +365,14 @@ export function postClaimDatabaseRecoveryDetail(
   const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
   const hasProviderFailureCode = detail.providerFailureCode !== undefined;
   if (
+    (detail.sandboxSetupOutcomeUnknown !== undefined &&
+      detail.sandboxSetupOutcomeUnknown !== true) ||
+    (detail.sandboxSetupRecoveryExhausted !== undefined &&
+      detail.sandboxSetupRecoveryExhausted !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && detail.sandboxSetupRecoveryExhausted === true) ||
+    ((detail.sandboxSetupOutcomeUnknown === true ||
+      detail.sandboxSetupRecoveryExhausted === true) &&
+      hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||

@@ -110,8 +110,10 @@ describe("CreateOrganizationForm", () => {
     });
 
     expect(document.body.textContent).toContain("New organization");
-    expect(document.body.textContent).toContain("Product team");
-    expect(document.body.textContent).toContain("Launch room");
+    expect(Array.from(document.querySelectorAll("input")).map((input) => input.value)).toEqual([
+      "Product team",
+      "Launch room",
+    ]);
     expect(document.body.textContent).toContain("Your login stays the same");
     expect(document.body.textContent).toContain("nothing is copied");
 

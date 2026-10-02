@@ -104,6 +104,7 @@ import {
 } from "@/lib/session-group-window";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { analyticsAction } from "@/lib/analytics-actions";
+import { countNeedsYou, filterNeedsYou } from "@/lib/needs-you";
 import {
   SESSION_TITLE_MAX_LENGTH,
   sessionDisplayTitle,
@@ -346,9 +347,15 @@ export function SessionList() {
   const {
     groupBy: browseGroupBy,
     sortBy: browseSortBy,
-    status: browseStatus,
+    status: browseStatusPreference,
     showEmptyGroups,
   } = browsePreferences;
+  // "Needs you" narrows the Active list on the client, so it pages exactly
+  // like Active; only the rows shown differ.
+  const needsYouOnly = browseStatusPreference === "needs-you";
+  const browseStatus: "active" | "archived" | "all" = needsYouOnly
+    ? "active"
+    : browseStatusPreference;
   useEffect(() => {
     if (previousBrowsePreferenceStorageId.current === browsePreferenceStorageId) return;
     previousBrowsePreferenceStorageId.current = browsePreferenceStorageId;
@@ -1095,9 +1102,10 @@ export function SessionList() {
     [],
   );
   const browseControlsActive = sessionBrowsePreferencesCustomized(browsePreferences);
+  const needsYouCount = useMemo(() => countNeedsYou(allSessions), [allSessions]);
   const browseSessions = useMemo(
     () =>
-      allSessions.filter((session) => {
+      (needsYouOnly ? filterNeedsYou(allSessions) : allSessions).filter((session) => {
         if (archiveTransitions.has(session.rootSessionId)) return false;
         // Child rows inherit their root's archive membership from the
         // lineage query. Only roots carry the personal archive projection.
@@ -1107,7 +1115,7 @@ export function SessionList() {
           Boolean(session.archived) === (browseStatus === "archived")
         );
       }),
-    [allSessions, archiveTransitions, browseStatus],
+    [allSessions, archiveTransitions, browseStatus, needsYouOnly],
   );
 
   // A complete pins-only page makes presence authoritative, but absence does
@@ -2832,11 +2840,24 @@ export function SessionList() {
               type="button"
               variant="ghost"
               size="icon-xs"
-              aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
+              aria-label={
+                needsYouOnly
+                  ? "Session view, showing sessions that need you"
+                  : needsYouCount > 0
+                    ? `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`
+                    : browseControlsActive
+                      ? "Session view, customized"
+                      : "Session view"
+              }
               className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <ListFilterIcon className="size-3.5" />
-              {browseControlsActive ? (
+              {needsYouCount > 0 && !needsYouOnly ? (
+                <span
+                  data-needs-you-dot
+                  className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-status-waiting"
+                />
+              ) : browseControlsActive ? (
                 <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-brand" />
               ) : null}
             </Button>
@@ -2847,7 +2868,8 @@ export function SessionList() {
               onGroupByChange={(groupBy) => updateBrowsePreferences({ groupBy })}
               sortBy={browseSortBy}
               onSortByChange={(sortBy) => updateBrowsePreferences({ sortBy })}
-              status={browseStatus}
+              status={browseStatusPreference}
+              needsYouCount={needsYouCount}
               onStatusChange={(status) => updateBrowsePreferences({ status })}
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
@@ -2902,7 +2924,11 @@ export function SessionList() {
           (search || browseControlsActive) &&
           (search || browseStatus === "active") ? (
           <div className="px-2 py-4 text-center text-xs text-fg-subtle">
-            <p>No sessions match this view.</p>
+            <p>
+              {needsYouOnly && !search
+                ? "Nothing needs you right now."
+                : "No sessions match this view."}
+            </p>
             {matchingResultsPagination ? (
               <SessionGroupPaginationControl {...matchingResultsPagination} className="mt-2" />
             ) : null}
@@ -2914,7 +2940,7 @@ export function SessionList() {
                 clearBrowseControls();
               }}
             >
-              Clear search and filters
+              {needsYouOnly && !search ? "Show all sessions" : "Clear search and filters"}
             </button>
           </div>
         ) : (browseSessions.length === 0 && !hierarchyMode) ||

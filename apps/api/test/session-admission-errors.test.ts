@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import { parseSessionEventAdmission, parseSteerSessionAdmission } from "../src/routes/sessions";
 
@@ -37,6 +38,40 @@ function parserApp() {
 }
 
 describe("session admission error envelope", () => {
+  test("retains allowance scope, subject and reset in a nonretryable HTTP 402", async () => {
+    for (const scope of ["workspace", "member"] as const) {
+      const server = app();
+      server.post(`/v1/test/allowance-${scope}`, () => {
+        throw new HTTPException(402, {
+          message: "Usage allowance exhausted.",
+          cause: {
+            allowed: false,
+            code: "allowance_exhausted",
+            scope,
+            resetsAt: "2026-10-01T00:00:00.000Z",
+            ...(scope === "member" ? { subjectId: "external_user:initiator" } : {}),
+            message: "Usage allowance exhausted.",
+          },
+        });
+      });
+      const response = await server.request(`/v1/test/allowance-${scope}`, { method: "POST" });
+      expect(response.status).toBe(402);
+      expect(await response.json()).toMatchObject({
+        error: {
+          status: 402,
+          code: "allowance_exhausted",
+          message: "Usage allowance exhausted.",
+          retryable: false,
+          details: {
+            scope,
+            resetsAt: "2026-10-01T00:00:00.000Z",
+            ...(scope === "member" ? { subjectId: "external_user:initiator" } : {}),
+          },
+        },
+      });
+    }
+  });
+
   test("returns typed 422 for invalid and malformed user-message events", async () => {
     const server = parserApp();
     const privateValue = "PRIVATE-REMOVED-TOOL-OVERRIDE";
