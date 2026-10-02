@@ -695,7 +695,7 @@ export function ComputerViewer({
             connectionState={frames.state}
             refreshing={registry.refreshing}
             showControls={showControls}
-            controlCount={semanticNodes(computer.observation).length}
+            controlCount={semanticControls(computer.observation).length}
             onToggleControls={() => setShowControls((current) => !current)}
           />
         </>
@@ -1582,7 +1582,7 @@ function ComputerViewportFallback(props: {
     );
   }
   const controlFailure = interactionControlFailureFromError(props.error);
-  const interactive = semanticNodes(props.observation)
+  const interactive = semanticControls(props.observation)
     .filter((node) => semanticAction(node) !== null)
     .slice(0, 10);
   return (
@@ -1648,7 +1648,7 @@ function ComputerSemanticPanel(props: {
   mutating: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
-  const nodes = semanticNodes(props.observation).slice(0, 100);
+  const nodes = semanticControls(props.observation).slice(0, 100);
   return (
     <aside className="box-border max-h-[40%] w-full shrink-0 overflow-y-auto border-t border-og-border bg-og-surface-1 p-2 @xl/computer-viewer:max-h-none @xl/computer-viewer:w-64 @xl/computer-viewer:border-t-0 @xl/computer-viewer:border-l">
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
@@ -1804,11 +1804,37 @@ function ComputerNotice(props: { icon: ReactNode; text: string; className?: stri
   );
 }
 
-function semanticNodes(observation: ComputerObservation | null): InteractionSemanticNode[] {
+const structuralRoles = new Set([
+  "frame",
+  "panel",
+  "section",
+  "document",
+  "document web",
+  "static",
+  "static text",
+  "heading",
+  "paragraph",
+  "notification",
+  "separator",
+  "tool bar",
+  "page tab list",
+]);
+
+function semanticControls(observation: ComputerObservation | null): InteractionSemanticNode[] {
   if (observation?.semantic?.kind !== "snapshot") return [];
   const result: InteractionSemanticNode[] = [];
   const visit = (node: InteractionSemanticNode) => {
-    result.push(node);
+    const role = node.role.trim().toLowerCase();
+    const label = node.name?.trim() || node.identifier?.trim();
+    if (
+      node.actions.includes("set_value") ||
+      (label &&
+        label.toLowerCase() !== role &&
+        !structuralRoles.has(role) &&
+        semanticAction(node) !== null)
+    ) {
+      result.push(node);
+    }
     node.children?.forEach(visit);
   };
   observation.semantic.roots.forEach(visit);
