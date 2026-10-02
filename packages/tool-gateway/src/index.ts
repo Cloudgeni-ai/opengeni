@@ -548,16 +548,20 @@ function inputValidationError(
   args: Record<string, unknown>,
 ): ToolGatewayInputValidationError {
   let errors = definition.validateInput.errors;
+  let diagnosticInput:
+    | { schema: Record<string, unknown>; arguments: Record<string, unknown> }
+    | undefined;
   try {
     const serialized = JSON.stringify(args);
     if (serialized !== undefined && serialized.length <= TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS) {
+      diagnosticInput = { schema: definition.entry.inputSchema, arguments: args };
       const diagnose = definition.diagnoseInput();
       if (!diagnose(args) && diagnose.errors?.length) errors = diagnose.errors;
     }
   } catch {
     // Diagnostics are best effort; the rejection itself is already decided.
   }
-  const { issues, omittedIssueCount } = summarizeToolGatewayInputErrors(errors);
+  const { issues, omittedIssueCount } = summarizeToolGatewayInputErrors(errors, diagnosticInput);
   return new ToolGatewayInputValidationError(issues, omittedIssueCount);
 }
 
