@@ -84,7 +84,7 @@ ${key}
 How to help me:
 1. Read the bundled builtin:opengeni-client Skill with skill_read and follow its flow.
 2. In one short message, ask for the link to my product (or its repository) and what I want AI agents to do for my users. If I don't have a product yet, offer two or three simple ideas.
-3. Suggest connecting GitHub first so you can work in my repository; give me the GitHub connect link.
+3. Suggest connecting GitHub first so you can work in my repository. Show me the GitHub Connect card in this chat: find "GitHub App" (capability ID api:github-app) with capability_catalog_search, then call capability_authorization_request for it. Don't just tell me to look for it. If GitHub is already connected, use it.
 4. Work on a branch and open a pull request. Don't push to my default branch, merge or deploy without asking.`;
 }
 

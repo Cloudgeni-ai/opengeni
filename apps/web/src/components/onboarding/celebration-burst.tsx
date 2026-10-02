@@ -10,6 +10,24 @@ const CENTER_PIECES = 30;
 type Shape = "strip" | "square" | "dot" | "ribbon";
 const SHAPES: Shape[] = ["strip", "square", "strip", "dot", "ribbon"];
 
+/**
+ * Run `start` now when the page is visible, otherwise on the next return to
+ * it. Returns a cleanup that cancels a start that has not happened yet.
+ */
+export function whenPageVisible(start: () => void): () => void {
+  if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+    start();
+    return () => undefined;
+  }
+  const onChange = () => {
+    if (document.visibilityState === "hidden") return;
+    document.removeEventListener("visibilitychange", onChange);
+    start();
+  };
+  document.addEventListener("visibilitychange", onChange);
+  return () => document.removeEventListener("visibilitychange", onChange);
+}
+
 /** Deterministic 0..1 noise, so a burst looks the same on every run and test. */
 function noise(seed: number): number {
   const value = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
@@ -86,6 +104,19 @@ export function CelebrationBurst() {
     const container = ref.current;
     if (!container || typeof container.animate !== "function") return;
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    let animations: Array<Animation | null> = [];
+    // Credits often land while the person is still in the Stripe tab: hold
+    // the burst until this page is visible again, so it is actually seen.
+    const stopWaiting = whenPageVisible(() => {
+      animations = play(container);
+    });
+    return () => {
+      stopWaiting();
+      for (const animation of animations) animation?.cancel();
+    };
+  }, []);
+
+  function play(container: HTMLDivElement): Array<Animation | null> {
     const width = window.innerWidth || 1024;
     const height = window.innerHeight || 768;
     const scale = Math.max(height, Math.min(width, 1200));
@@ -123,10 +154,8 @@ export function CelebrationBurst() {
         fill: "both",
       });
     });
-    return () => {
-      for (const animation of animations) animation?.cancel();
-    };
-  }, []);
+    return animations;
+  }
 
   // A fixed, clipped layer: pieces flying past the card never add a scrollbar.
   return (

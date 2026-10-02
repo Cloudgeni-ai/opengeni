@@ -1,6 +1,7 @@
 import { GiftIcon, SparkleIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { whenPageVisible } from "@/components/onboarding/celebration-burst";
 import { formatCreditAmount } from "@/lib/onboarding-use-case";
 
 const COUNT_UP_MS = 1_100;
@@ -18,15 +19,22 @@ function useCountUp(target: number, from: number): number {
       return;
     }
     let frame = 0;
-    const start = performance.now();
+    let start: number | null = null;
     const tick = (now: number) => {
+      start ??= now;
       const progress = Math.min(1, (now - start) / COUNT_UP_MS);
       const eased = 1 - (1 - progress) ** 3;
       setValue(from + (target - from) * eased);
       if (progress < 1) frame = requestAnimationFrame(tick);
     };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
+    // Start counting when the page is seen (credits can land in a hidden tab).
+    const stopWaiting = whenPageVisible(() => {
+      frame = requestAnimationFrame(tick);
+    });
+    return () => {
+      stopWaiting();
+      cancelAnimationFrame(frame);
+    };
   }, [from, target]);
   return value;
 }
@@ -59,6 +67,14 @@ export function CreditsPrize({
   useEffect(() => {
     if (prefersReducedMotion()) return;
     const animations: Animation[] = [];
+    const stopWaiting = whenPageVisible(() => playAccents(animations));
+    return () => {
+      stopWaiting();
+      for (const animation of animations) animation.cancel();
+    };
+  }, []);
+
+  function playAccents(animations: Animation[]): void {
     const shine = shineRef.current;
     if (shine && typeof shine.animate === "function") {
       animations.push(
@@ -85,10 +101,7 @@ export function CreditsPrize({
         ),
       );
     });
-    return () => {
-      for (const animation of animations) animation.cancel();
-    };
-  }, []);
+  }
 
   const sparkles = [
     "top-3 right-5 size-4",
