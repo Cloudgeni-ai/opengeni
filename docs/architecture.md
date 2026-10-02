@@ -1536,6 +1536,10 @@ exit requires both streams' EOF. Fixed native lease-readiness probes share the
 pre-dispatch guard; uncertain Starts observe their exact invocation within the
 existing readiness budget.
 
+Post-start transport recovery retries exact-ID reads within the original
+wait. Exhaustion preserves uncertainty and writer fences, never replay
+or lease loss.
+
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's

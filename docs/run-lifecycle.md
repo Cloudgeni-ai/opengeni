@@ -2395,6 +2395,26 @@ non-retrying middleware factory: Modal 0.9.0 otherwise drops abort signals for
 streaming and retry-disabled calls. Cancelling observation is not process-exit proof;
 the existing token/PGID cleanup fence still owns physical cancellation.
 
+After a successful Start, native output/poll transport failures retry only the
+same execution UUID and committed byte offsets. One read is bounded by its
+original requested wait and at most five read attempts; it never repeats Start
+or nonempty stdin. Foreground shell observation continues only within the
+original model-facing wait. Exhaustion returns explicit observation-unavailable
+uncertainty, with the exact retained locator and already captured output, rather
+than a fake exit, early background adoption, or a raw transport exception that
+fails the turn. Attempt cancellation aborts in-flight foreground reads while
+the independent physical settlement fence remains closed.
+Fixed supervision helpers use the same observation path within their existing
+five-second budgets. Materialization probes preserve their diagnostics and
+original locator. If an internal lifecycle observer unwinds with typed
+observation uncertainty, exact-attempt settlement parks setup with the existing
+durable no-replay marker, without replenishing the five-replacement recovery
+budget. Database capture, cursor/identity mismatch, missing handles and
+non-transport provider failures do not acquire read-retry or replay authority.
+Numeric and string gRPC transport codes and bounded AggregateError causes
+dominate terminal sandbox hints; transient observation can never retire a live
+lease or authorize command replay.
+
 `modal-control-v1` is an explicit legacy reader for already launched commands;
 new starts never select it. Its batch API does not guarantee full replay, so
 historical missing output cannot be reconstructed or called complete. Never

@@ -8,6 +8,7 @@ import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import {
   CompactionProviderResponseError,
+  ProviderCommandObservationUnavailableError,
   compactionProviderFailureDiagnostics,
 } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
@@ -423,6 +424,55 @@ describe("early accepted-definition mismatch", () => {
     Object.assign(deps.eventing, { publish: undefined });
     return deps;
   }
+
+  test.each([0, 4, 5])(
+    "post-start internal observation uncertainty parks without replenishing recovery count %i",
+    async (count) => {
+      const command = {
+        kind: "modal-router-v1" as const,
+        sandboxId: "sb-test",
+        taskId: "task-test",
+        execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+        streams: {
+          stdout: { byteOffset: 17, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      };
+      const error = new Error("setup observer unwound", {
+        cause: new ProviderCommandObservationUnavailableError(command, { code: 14 }),
+      });
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = count;
+      const settled = mock(async () => true);
+      deps.eventing.settle = settled;
+      try {
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          deferredUntilWake: true,
+        });
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_observation_unavailable",
+          sandboxSetupOutcomeUnknown: true,
+          detail: {
+            code: "sandbox_command_observation_unavailable",
+            retryable: false,
+            replay: "blocked",
+            providerRecoveryCount: count,
+          },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(settled).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
 
   test.each([0, 4, 5])(
     "genuine setup uncertainty parks before eventing without resetting recovery count %i",

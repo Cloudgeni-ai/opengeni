@@ -15,7 +15,9 @@ import {
   markPendingCommandSupervised,
   reserveSupervisedLaunch,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
 } from "../provider-command-session";
+import { isModalCommandObservationTransportError } from "./modal-command-observation-errors";
 import {
   ModalCommandControl as LegacyControl,
   commandControlPlane,
@@ -301,19 +303,7 @@ export class ModalCommandControl {
         },
         signal,
       );
-      let offset = 0;
-      let output = "";
-      let eof = false;
-      let exit: number | null = null;
-      while (!eof || exit === null) {
-        signal.throwIfAborted();
-        const page = await router.read(identity, "stdout", offset, 250, signal);
-        offset += page.bytes.length;
-        if (offset > 128) throw new Error("Modal supervision capability response exceeds bound");
-        output += page.bytes.toString("utf8");
-        eof = page.eof;
-        exit = await router.poll(identity, signal);
-      }
+      const { output, exit } = await this.readControlOutput(identity, 128, signal);
       if (exit !== 0 || output !== "native-subreaper-v1")
         throw new Error(
           "Exact Modal instance lacks compatible native supervision; command not admitted",
@@ -430,21 +420,9 @@ export class ModalCommandControl {
         },
         signal,
       );
-      const buffers: Buffer[] = [];
-      let offset = 0;
-      let eof = false;
-      let exit: number | null = null;
-      while (!eof || exit === null) {
-        signal.throwIfAborted();
-        const page = await router.read(identity, "stdout", offset, 250, signal);
-        offset += page.bytes.length;
-        if (offset > 4096) throw new Error("Supervisor control response exceeds its bound");
-        buffers.push(page.bytes);
-        eof = page.eof;
-        exit = await router.poll(identity, signal);
-      }
+      const { output, exit } = await this.readControlOutput(identity, 4096, signal);
       if (exit !== 0) throw new Error("Supervisor control is unavailable");
-      const result = JSON.parse(Buffer.concat(buffers).toString("utf8"));
+      const result = JSON.parse(output);
       if (!result || !["idle", "running", "quiescent"].includes(result.state))
         throw new Error("Invalid supervisor control response");
       if (result.receipt !== undefined) {
@@ -458,6 +436,47 @@ export class ModalCommandControl {
     });
   }
 
+  /** These fixed helpers already started once. Observe only their original
+   * invocation within the caller's existing five-second budget. */
+  private async readControlOutput(
+    identity: { taskId: string; execId: string },
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<{ output: string; exit: number }> {
+    let command: ModalRouterProviderCommand = {
+      kind: "modal-router-v1",
+      sandboxId: this.sandboxId,
+      ...identity,
+      streams: {
+        stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      },
+    };
+    let output = "";
+    for (;;) {
+      try {
+        signal.throwIfAborted();
+        const page = await this.read(command, 250, signal);
+        command = page.command as ModalRouterProviderCommand;
+        if (command.streams.stdout.byteOffset + command.streams.stderr.byteOffset > limit)
+          throw new Error("Supervisor control response exceeds its bound");
+        output += page.chunks
+          .filter((chunk) => chunk.stream === "stdout")
+          .map((chunk) => chunk.text)
+          .join("");
+        if (page.exitCode !== null) return { output, exit: page.exitCode };
+      } catch (error) {
+        if (signal.aborted) throw new ProviderCommandObservationUnavailableError(command, error);
+        if (!(error instanceof ProviderCommandObservationUnavailableError)) throw error;
+      }
+      try {
+        await delay(100, undefined, { signal });
+      } catch (error) {
+        throw new ProviderCommandObservationUnavailableError(command, error);
+      }
+    }
+  }
+
   async read(
     command: ModalProviderCommand,
     waitMs: number,
@@ -467,6 +486,55 @@ export class ModalCommandControl {
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
     if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
+    if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
+      throw new Error("Invalid Modal output read bounds");
+    const budget = new AbortController();
+    const abort = () => budget.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const deadline = performance.now() + Math.max(1, waitMs);
+    const timeout = setTimeout(
+      () => budget.abort(new Error("Modal command read budget exhausted")),
+      Math.max(1, waitMs),
+    );
+    let lastError: unknown;
+    try {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        signal?.throwIfAborted();
+        try {
+          return await this.readRouterPage(
+            command,
+            Math.max(1, deadline - performance.now()),
+            budget.signal,
+          );
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!budget.signal.aborted && !isModalCommandObservationTransportError(error))
+            throw error;
+          lastError = error;
+          if (budget.signal.aborted || attempt === 4) break;
+          try {
+            await delay(Math.min(100, Math.max(1, deadline - performance.now())), undefined, {
+              signal: budget.signal,
+            });
+          } catch {
+            signal?.throwIfAborted();
+            break;
+          }
+        }
+      }
+      throw new ProviderCommandObservationUnavailableError(structuredClone(command), lastError);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  private async readRouterPage(
+    command: ModalRouterProviderCommand,
+    waitMs: number,
+    signal: AbortSignal,
+  ): Promise<ModalProviderOutputPage> {
     const next = structuredClone(command);
     const cancellation = new AbortController();
     const abort = () => cancellation.abort(signal?.reason);
@@ -497,7 +565,9 @@ export class ModalCommandControl {
           ),
         );
         const failed = results.find((result) => result.status === "rejected");
-        if (failed?.status === "rejected") throw failed.reason;
+        // Abort-induced sibling rejections may sort before the failing poll.
+        // Preserve the first actual provider fault rather than array order.
+        if (failed?.status === "rejected") throw cancellation.signal.reason ?? failed.reason;
         const stdout = (results[0] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
         const stderr = (results[1] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)

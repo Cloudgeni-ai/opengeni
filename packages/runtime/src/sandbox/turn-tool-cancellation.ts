@@ -12,6 +12,8 @@ import {
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
+  ProviderCommandObservationUnavailableError,
+  isProviderCommandObservationUnavailableError,
   type PendingCommandSupervision,
 } from "./provider-command-session";
 
@@ -113,18 +115,21 @@ type CommandCancellationSession = {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessControl?(args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   execCommandForProcessControl?(
     providerSessionId: number,
@@ -609,6 +614,9 @@ function retainedProcessSession(
  * tool's string result, keeping the run alive instead of failing the turn.
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return `Command observation unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. Outcome unknown; the original invocation remains retained. Do not replay the command or resend stdin; observe the existing command.`;
+  }
   try {
     const terminal = error as {
       name?: unknown;
@@ -711,6 +719,7 @@ function wrapComputer<T extends object>(
 
 class TurnToolCancellationControllerImpl implements TurnToolCancellationController {
   private cancelled = false;
+  private readonly observationCancellation = new AbortController();
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
@@ -735,6 +744,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     if (!this.cancelled) {
       this.cancelled = true;
       this.reason = reason;
+      this.observationCancellation.abort(cancellationError(reason));
       this.signal?.removeEventListener("abort", this.onAbort);
     }
     void this.ensureDrain().catch(() => undefined);
@@ -815,6 +825,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               }
               const directArgs = {
                 sessionId: parsed.session_id,
+                signal: this.observationCancellation.signal,
                 ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
                 ...(typeof parsed.yield_time_ms === "number"
                   ? { yieldTimeMs: parsed.yield_time_ms }
@@ -1305,6 +1316,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               (hasTypedExecHandleLoss(cancellationSession, sessionId) ||
                 this.shellSessions.get(sessionId)?.typedHandleLoss === true);
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
+            let initialObservationFailure: ProviderCommandObservationUnavailableError | undefined;
             if (sessionId !== null && directProcessSession?.writeStdinForProcessMutation) {
               // This bypasses the SDK-built tool, whose default errorFunction
               // renders any thrown execute() failure as the tool's string
@@ -1323,7 +1335,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     : {}),
                 });
               } catch (error) {
-                return renderDirectToolFault(error, sessionId);
+                if (!(error instanceof ProviderCommandObservationUnavailableError))
+                  return renderDirectToolFault(error, sessionId);
+                // The mutation already happened once; only its ensuing read
+                // was unavailable. Continue with empty-input reads, never input.
+                initialObservationFailure = error;
+                output = "";
               }
             } else {
               output = await tool.invoke(runContext, cappedInput, details);
@@ -1385,6 +1402,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               ? await this.awaitModelFacingShellResult({
                   state,
                   initialOutput: output,
+                  ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
                   waitMs: modelWaitMs(parsed?.yield_time_ms),
                   maxOutputTokens:
@@ -1407,6 +1425,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private async awaitModelFacingShellResult(input: {
     state: ActiveShellSession;
     initialOutput: string;
+    initialObservationFailure?: ProviderCommandObservationUnavailableError;
     startedAt: number;
     waitMs: number;
     maxOutputTokens: number;
@@ -1423,11 +1442,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
     }
-    if (parseExecBannerSessionId(input.initialOutput) !== state.sessionId) {
+    if (
+      !input.initialObservationFailure &&
+      parseExecBannerSessionId(input.initialOutput) !== state.sessionId
+    ) {
       return input.initialOutput;
     }
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
+    let observationFailure: ProviderCommandObservationUnavailableError | null =
+      input.initialObservationFailure ?? null;
     for (;;) {
       if (performance.now() - startedAt >= waitMs) break;
       if (this.cancelled) throw cancellationError(this.reason);
@@ -1449,23 +1473,36 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const read =
         state.processSession?.writeStdinForProcessRead ??
         state.processSession?.writeStdinForProcessControl;
-      const next = read
-        ? await read.call(state.processSession, {
-            sessionId: state.sessionId,
-            chars: "",
-            yieldTimeMs,
-            maxOutputTokens,
-          })
-        : await state.writeInvoke!(
-            state.runContext,
-            JSON.stringify({
-              session_id: state.sessionId,
+      let next: unknown;
+      try {
+        next = read
+          ? await read.call(state.processSession, {
+              sessionId: state.sessionId,
               chars: "",
-              yield_time_ms: yieldTimeMs,
-              max_output_tokens: maxOutputTokens,
-            }),
-            undefined,
-          );
+              yieldTimeMs,
+              maxOutputTokens,
+              signal: this.observationCancellation.signal,
+            })
+          : await state.writeInvoke!(
+              state.runContext,
+              JSON.stringify({
+                session_id: state.sessionId,
+                chars: "",
+                yield_time_ms: yieldTimeMs,
+                max_output_tokens: maxOutputTokens,
+              }),
+              undefined,
+            );
+      } catch (error) {
+        if (this.cancelled) throw cancellationError(this.reason);
+        if (!(error instanceof ProviderCommandObservationUnavailableError)) throw error;
+        // No terminal proof and no early adoption: spend only the original
+        // foreground wait while preserving the exact turn-owned registration.
+        observationFailure = error;
+        await delay(Math.min(SHELL_POLL_MS, Math.max(0, waitMs - (performance.now() - startedAt))));
+        continue;
+      }
+      observationFailure = null;
       if (this.cancelled) throw cancellationError(this.reason);
       if (typeof next !== "string")
         throw new Error("Retained command read returned no provider status");
@@ -1487,6 +1524,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // A conforming provider blocks for the requested slice. Avoid a hot loop
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
+    }
+    if (observationFailure) {
+      const commandId = state.processSession?.retainedProcessIdentity?.(state.sessionId)?.id;
+      return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
     }
     if (!canAdoptInBackground) {
       // Docker/local handles belong to this exact worker session. Keep the

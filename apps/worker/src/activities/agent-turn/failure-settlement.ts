@@ -20,6 +20,7 @@ import {
   maxTurnsExceededRunState,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -343,8 +344,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // cannot reconstruct setup on a replacement attempt. The exact command and
   // writer remain retained by sandbox-runtime; the logical turn is parked as
   // recovering with a durable no-replay marker, not failed or completed.
+  const observationUnavailable = isProviderCommandObservationUnavailableError(error);
   if (
-    isModalCommandStartOutcomeUnknownError(error) &&
+    (isModalCommandStartOutcomeUnknownError(error) || observationUnavailable) &&
     recoveryTurnId &&
     attempt.triggerEventId &&
     attempt.executionGeneration > 0
@@ -360,10 +362,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId,
         attemptId: input.attemptId,
-        reason: "sandbox_command_start_outcome_unknown",
+        reason: observationUnavailable
+          ? "sandbox_command_observation_unavailable"
+          : "sandbox_command_start_outcome_unknown",
         sandboxSetupOutcomeUnknown: true,
         detail: {
-          code: "sandbox_command_start_outcome_unknown",
+          code: observationUnavailable
+            ? "sandbox_command_observation_unavailable"
+            : "sandbox_command_start_outcome_unknown",
           retryable: false,
           setupOutcome: "unknown",
           replay: "blocked",

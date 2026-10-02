@@ -24,6 +24,9 @@ import {
   waitForSandboxExecReadiness,
   SandboxExecReadinessTimeoutError,
 } from "../../../apps/worker/src/sandbox-resume";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import type { ModalRouterProviderCommand } from "@opengeni/contracts";
+import { isProviderCommandObservationUnavailableError } from "../src/sandbox/provider-command-session";
 
 const service = "/modal.task_command_router.TaskCommandRouter/";
 const definition = (method: string, input: string, output: string, streaming = false) => ({
@@ -56,6 +59,11 @@ let preparations: string[] = [];
 let preparationPending = false;
 let preparationEntered: () => void;
 let completePreparation: () => void;
+let foregroundReadFailures = 0;
+let foregroundPollFailure = false;
+let foregroundPollPending = false;
+let foregroundPollCancelled = 0;
+let foregroundWrites = 0;
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "opengeni-readiness-"));
   const key = join(directory, "server.key"),
@@ -89,6 +97,7 @@ beforeAll(async () => {
       read: definition("TaskExecStdioRead", "Read", "Data", true),
       poll: definition("TaskExecPoll", "Identity", "Poll"),
       preparation: definition("ReadinessPreparation", "Identity", "Empty"),
+      write: definition("TaskExecStdinWrite", "Write", "Empty"),
     } as ServiceDefinition,
     {
       start(call: any, callback: any) {
@@ -113,6 +122,11 @@ beforeAll(async () => {
       },
       read(call: any) {
         observations.push(call.request.execId);
+        if (foregroundReadFailures > 0) {
+          foregroundReadFailures--;
+          call.emit("error", { code: status.UNAVAILABLE, details: "read DNS unavailable" });
+          return;
+        }
         if (mode === "unobservable" || (mode === "lost-read" && !failedRead)) {
           failedRead = true;
           call.emit("error", { code: status.UNAVAILABLE, details: "read connection dropped" });
@@ -120,7 +134,19 @@ beforeAll(async () => {
       },
       poll(call: any, callback: any) {
         observations.push(call.request.execId);
+        if (foregroundPollPending) {
+          call.on("cancelled", () => foregroundPollCancelled++);
+          return;
+        }
+        if (foregroundPollFailure) {
+          callback({ code: status.UNAVAILABLE, details: "poll DNS unavailable" });
+          return;
+        }
         callback(null, { code: mode === "nonzero" ? 127 : 0 });
+      },
+      write(_call: any, callback: any) {
+        foregroundWrites++;
+        callback(null, {});
       },
       preparation(call: any, callback: any) {
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
@@ -158,6 +184,11 @@ function fixture(
   observations = [];
   failedRead = false;
   preparations = [];
+  foregroundReadFailures = 0;
+  foregroundPollFailure = false;
+  foregroundPollPending = false;
+  foregroundPollCancelled = 0;
+  foregroundWrites = 0;
   preparationPending = preparation?.pending ?? false;
   const enteredPreparation = new Promise<void>((resolve) => {
     preparationEntered = resolve;
@@ -245,10 +276,10 @@ function fixture(
     Object.defineProperty(control, "withRouter", {
       value: async (
         _task: string,
-        signal: AbortSignal,
+        signal: AbortSignal | undefined,
         run: (router: ModalCommandRouterWire) => Promise<unknown>,
       ) => {
-        signal.throwIfAborted();
+        signal?.throwIfAborted();
         return await run(wire);
       },
     });
@@ -275,6 +306,200 @@ function fixture(
     },
   };
 }
+
+function foregroundTools(f: ReturnType<typeof fixture>) {
+  let stored: ModalRouterProviderCommand;
+  let adoptions = 0;
+  let retained = true;
+  const fence = createTurnToolCancellationController();
+  const invoke = async (_context: unknown, input: string) => {
+    const args = JSON.parse(input);
+    stored = await f.control.start({ cmd: args.cmd }, AbortSignal.timeout(2_000));
+    f.session.bindProviderCommand!(73, stored, {
+      load: async () => stored,
+      acknowledge: async (command) => command,
+      reserveInput: async () => 0,
+      captureRouterPage: async (page) => {
+        stored = page.command;
+        return { command: stored, captured: true };
+      },
+    });
+    return "Chunk ID: started\nWall time: 0 seconds\nProcess running with session ID 73\nOutput:\ninitial";
+  };
+  const tools = fence.wrapTools(
+    [
+      { type: "function", name: "exec_command", invoke },
+      {
+        type: "function",
+        name: "write_stdin",
+        invoke: async (_context: unknown, input: string) => {
+          const args = JSON.parse(input);
+          return f.session.writeStdin!({
+            sessionId: args.session_id,
+            chars: args.chars,
+            yieldTimeMs: args.yield_time_ms,
+          });
+        },
+      },
+    ],
+    {
+      hasRetainedProcess: () => retained,
+      retainedProcessIdentity: () => ({ id: "6b7df4e1-2f69-4bbd-95ea-0427ad72cd09" }),
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+      writeStdinForProcessRead: (args) => f.session.writeStdin!(args),
+      writeStdinForProcessMutation: (args) => f.session.writeStdin!(args),
+      cancelSupervisedCommand: async () => {
+        foregroundPollPending = false;
+        foregroundPollFailure = false;
+        return true;
+      },
+      writeStdinForProcessControl: async (args) => {
+        const result = await f.session.writeStdin!(args);
+        if (result.includes("Process exited")) retained = false;
+        return result;
+      },
+    },
+  );
+  return {
+    exec: tools[0]!,
+    write: tools[1]!,
+    input: tools[2]!,
+    invoke,
+    fence,
+    adoptions: () => adoptions,
+    stored: () => stored,
+  };
+}
+
+test("post-start real gRPC UNAVAILABLE retries only the exact foreground read", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  foregroundReadFailures = 1;
+  try {
+    const result = await tools.exec.invoke(
+      {},
+      JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+    );
+    expect(result).toContain("Process exited with code 0");
+    expect(result).toContain("initial");
+    expect(starts).toHaveLength(1);
+    expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+    expect(tools.stored().streams.stdout.eof).toBe(true);
+    expect(tools.adoptions()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("foreground stdin read failure does not resend nonempty input", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  try {
+    await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 0 }));
+    foregroundReadFailures = 100;
+    const recovery = setTimeout(() => {
+      foregroundReadFailures = 0;
+    }, 350);
+    const result = await tools.write.invoke(
+      {},
+      JSON.stringify({ session_id: 73, chars: "input", yield_time_ms: 1_000 }),
+    );
+    clearTimeout(recovery);
+    expect(result).toContain("Process exited with code 0");
+    expect(foregroundWrites).toBe(1);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("command_input observation exhaustion contains uncertainty without resending input", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  try {
+    await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 0 }));
+    foregroundPollFailure = true;
+    const result = await tools.input.invoke({}, JSON.stringify({ session_id: 73, chars: "input" }));
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Do not replay");
+    expect(result).not.toContain("Process exited");
+    expect(foregroundWrites).toBe(1);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test.each([false, true])(
+  "lifecycle exact-read uncertainty is typed rather than a fake successful exit (exhausted=%s)",
+  async (exhausted) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    const controller = createTurnToolCancellationController();
+    foregroundReadFailures = exhausted ? 100 : 1;
+    try {
+      const session = {
+        execCommand: async (args: { cmd: string }) => tools.invoke({}, JSON.stringify(args)),
+        writeStdin: (args: Parameters<NonNullable<typeof f.session.writeStdin>>[0]) =>
+          f.session.writeStdin!(args),
+      };
+      const result = await controller
+        .runSandboxCommandStructured(session, { cmd: "work", yieldTimeMs: 1_000 })
+        .catch((error) => error);
+      if (exhausted) expect(isProviderCommandObservationUnavailableError(result)).toBe(true);
+      else expect(result).toMatchObject({ exitCode: 0, stdout: "initial" });
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("foreground cancellation aborts an already-in-flight exact poll", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  foregroundPollPending = true;
+  try {
+    const pending = tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 5_000 }));
+    for (let attempt = 0; !observations.length && attempt < 100; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(observations.length).toBeGreaterThan(0);
+    const began = performance.now();
+    tools.fence.cancel("pause");
+    await expect(pending).rejects.toMatchObject({ name: "TurnSandboxCommandCancelledError" });
+    await tools.fence.waitForQuiescence();
+    expect(performance.now() - began).toBeLessThan(500);
+    expect(foregroundPollCancelled).toBeGreaterThan(0);
+    expect(starts).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("post-start real gRPC poll exhaustion is an unknown tool result after the requested wait", async () => {
+  const f = fixture();
+  const tools = foregroundTools(f);
+  foregroundPollFailure = true;
+  const began = performance.now();
+  try {
+    const result = await tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 500 }));
+    expect(performance.now() - began).toBeGreaterThanOrEqual(450);
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Do not replay");
+    expect(result).not.toContain("Process exited");
+    expect(result).not.toContain("Please try again");
+    expect(starts).toHaveLength(1);
+    expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+    expect(tools.stored().streams.stdout.byteOffset).toBe(0);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+    expect(tools.adoptions()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
 
 test.each(["task", "access"] as const)(
   "genuine %s preparation transport failure proves zero-Start non-dispatch",
