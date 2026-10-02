@@ -268,6 +268,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+import { gzipSync } from "node:zlib";
 
 import { z } from "zod";
 
@@ -11776,6 +11777,7 @@ const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 // Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
 const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
+const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -11917,19 +11919,50 @@ async function stageRigSetupScript(
   const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
   const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
   const encodedPath = `${payloadPath}.b64`;
-  const encoded = Buffer.from(script, "utf8").toString("base64");
-  const commands = [
-    `set -eu\numask 077\nmkdir -p ${shellQuote(payloadRoot)}\n: > ${shellQuote(encodedPath)}`,
-  ];
-  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
-    commands.push(
-      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
-    );
-  }
-  commands.push(
-    `set -eu\nbase64 -d < ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
-  );
+  const bytes = Buffer.from(script, "utf8");
+  const compressed = gzipSync(bytes);
+  const compressionUseful = compressed.length < bytes.length;
   try {
+    // Repeated shell programs compress well. Probe in the existing bootstrap
+    // call, retaining the same bounded transfer on machines without gzip.
+    const bootstrap = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: [
+          "set -eu",
+          "umask 077",
+          `mkdir -p ${shellQuote(payloadRoot)}`,
+          `: > ${shellQuote(encodedPath)}`,
+          ...(compressionUseful
+            ? [
+                `if command -v gzip >/dev/null 2>&1; then printf '%s\\n' ${shellQuote(RIG_SETUP_GZIP_SENTINEL)}; fi`,
+              ]
+            : []),
+        ].join("\n"),
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 4_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(
+      bootstrap,
+      options.label ?? "Sandbox Environment setup payload staging",
+    );
+    const useCompression =
+      compressionUseful &&
+      sandboxCommandOutput(bootstrap).split(/\r?\n/u).includes(RIG_SETUP_GZIP_SENTINEL);
+    const encoded = (useCompression ? compressed : bytes).toString("base64");
+    const commands: string[] = [];
+    for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+      commands.push(
+        `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+      );
+    }
+    commands.push(
+      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+    );
     for (const command of commands) {
       const result = await runSandboxLifecycleCommand(
         session,
