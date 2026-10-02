@@ -6,7 +6,7 @@ OpenGeni freezes a per-session compaction mode at create time
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -141,7 +141,7 @@ The compaction model receives:
 
 Portable checkpoint output is capped at 20,000 tokens or one quarter of the
 model's configured context window, whichever is smaller. The input fitting
-budget reserves that same amount, and the retained real-user-message budget
+budget reserves that same amount, and the retained user/system-message budget
 has the same cap. A Chat completion whose finish reason is
 not `stop` cannot replace active history, even if it contains partial text.
 Provider-specific output ceilings are not in the model catalog; a provider
@@ -207,8 +207,8 @@ never installs a manufactured placeholder as conversation truth.
 
 The replacement history is:
 
-1. the newest real user messages that fit one cumulative budget of at most
-   20,000 tokens (one quarter of the context window on smaller models),
+1. the newest user messages and system-role conversation inputs that fit one
+   cumulative budget of at most 20,000 tokens (one quarter of the context window on smaller models),
    in chronological order;
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
@@ -218,8 +218,14 @@ in retained messages. Retention budgets charge projected image tokens as well
 as text; a message whose non-text content cannot fit is omitted as a whole.
 Existing text truncation preserves the retained image parts. Uploaded images
 are reconstructed before summarization just as for ordinary inference; only
-the compacted archive-reference catalog remains receipt-only. Durable machine inputs participate in the
-history being summarized like every other canonical model item. Assistant
+the compacted archive-reference catalog remains receipt-only. Durable machine
+inputs participate in the
+history being summarized like every other canonical model item. Their recent
+system-role batches share the cleartext retention budget (user/system for
+portable, user/system/developer for remote v2). This preserves frozen goal
+snapshots, timestamps, update identities and direction chronologically, without
+promoting them to user intent, rebuilding mutable goals or replaying updates.
+Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.
 
