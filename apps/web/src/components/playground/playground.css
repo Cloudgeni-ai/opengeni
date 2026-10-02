@@ -1,0 +1,281 @@
+/* ---------------------------------------------------------------------------
+   Playground: Acme, a sample product with the Opengeni chat inside.
+
+   Acme is styled only through --og-* tokens, exactly as an integration would
+   style its own page, so the restyle palette changes Acme and the embedded
+   @opengeni/react components together. The playground's own controls (top
+   bar, coach marks, palette) use the app's Tailwind tokens instead.
+   --------------------------------------------------------------------------- */
+
+/* Dark inside a light app. The tokens' dark palette lives on :root only, so a
+   product that wants dark in a light page sets it on its own subtree. These
+   are the base values from @opengeni/react/styles/tokens.css (:root); derived
+   tokens recompute from them. */
+.og-playground-product[data-og-theme="dark"] {
+  --og-color-bg: #303030;
+  --og-color-canvas: #202020;
+  --og-color-surface-1: #333333;
+  --og-color-surface-2: #383838;
+  --og-color-surface-3: #404040;
+  --og-color-selection: #484848;
+  --og-color-hover: rgb(230 230 230 / 0.08);
+  --og-color-border: #454545;
+  --og-color-border-strong: #555555;
+  --og-color-fg: #e6e6e6;
+  --og-color-fg-label: #d4d4d4;
+  --og-color-fg-muted: #b8b8b8;
+  --og-color-fg-subtle: #a3a3a3;
+  --og-color-switch-track: #454545;
+  --og-color-switch-thumb: #a3a3a3;
+  --og-color-status-queued: #a3a3a3;
+  --og-color-status-running: #d5bd72;
+  --og-color-status-idle: #83cbb0;
+  --og-color-status-waiting: #e9ab77;
+  --og-color-status-failed: oklch(0.77 0.12 22);
+  --og-color-status-cancelled: #a3a3a3;
+  --og-color-danger: oklch(0.76 0.13 22);
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.28);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.32), 0 1px 2px oklch(0 0 0 / 0.24);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.42), 0 2px 8px oklch(0 0 0 / 0.28);
+  --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+  --og-session-chrome-surface-open: var(--og-color-surface-2);
+  --og-session-chrome-border: var(--og-color-border);
+  --og-session-chrome-border-open: var(--og-color-border);
+  --og-session-chrome-highlight: var(--og-color-surface-3);
+  --og-session-chrome-highlight-ring: var(--og-color-fg);
+  --og-session-chrome-shadow: 0 6px 22px -14px oklch(0 0 0 / 0.42);
+  --og-session-chrome-shadow-open: 0 10px 28px -16px oklch(0 0 0 / 0.5);
+  --og-session-chrome-row-hover: var(--og-color-surface-3);
+  color-scheme: dark;
+}
+
+.og-playground-product {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--og-color-bg);
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans);
+  transition:
+    background-color 160ms ease-out,
+    color 160ms ease-out;
+}
+
+.acme-nav {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 24px;
+  border-bottom: 1px solid var(--og-color-border);
+  background: var(--og-color-surface-1);
+  padding: 12px 24px;
+}
+.acme-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.acme-logo b {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: var(--og-radius-sm);
+  background: var(--og-color-accent);
+  color: #fff;
+  font-size: 14px;
+}
+.acme-links {
+  display: inline-flex;
+  gap: 18px;
+  color: var(--og-color-fg-muted);
+  font-size: 14px;
+}
+.acme-links [aria-current="page"] {
+  color: var(--og-color-fg);
+  font-weight: 600;
+}
+.acme-avatar {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--og-color-surface-3);
+  font-size: 11px;
+  font-weight: 700;
+}
+.acme-main {
+  display: flex;
+  min-height: 0;
+  width: min(820px, 100%);
+  flex: 1;
+  flex-direction: column;
+  margin: 0 auto;
+  padding: 22px 20px 16px;
+}
+.acme-hero {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.acme-kicker {
+  margin: 0;
+  color: var(--og-color-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.acme-hero h1 {
+  margin: 2px 0 0;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+.acme-chat {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  border: 1px solid var(--og-color-border);
+  border-radius: var(--og-radius-lg);
+  background: var(--og-color-surface-1);
+  box-shadow: var(--og-shadow-sm);
+  padding: 4px 12px 12px;
+}
+/* The conversation sits on the chat card itself: no second panel inside it. */
+.acme-chat > [data-og-conversation] {
+  padding-top: 8px;
+  background-color: transparent;
+}
+
+.acme-starter {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  padding: 18px 6px 4px;
+}
+.acme-starter-hello {
+  margin: auto 0 0;
+  text-align: center;
+}
+.acme-starter-hello h2 {
+  margin: 0 0 4px;
+  font-size: clamp(22px, 2.6vw, 28px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.acme-starter-hello p {
+  margin: 0;
+  color: var(--og-color-fg-muted);
+  font-size: 14px;
+}
+.acme-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: auto;
+}
+.acme-suggestions button {
+  border: 1px solid var(--og-color-border);
+  border-radius: var(--og-radius-lg);
+  background: var(--og-color-bg);
+  color: var(--og-color-fg);
+  padding: 7px 12px;
+  font-size: 13px;
+  transition: border-color 120ms ease-out;
+}
+.acme-suggestions button:hover:not(:disabled) {
+  border-color: var(--og-color-accent);
+}
+/* The recorded chat: the real timeline, then the questions to pick. */
+.acme-thread {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  padding-top: 8px;
+}
+.acme-thread > * {
+  min-height: 0;
+  flex: 1;
+}
+.acme-ask {
+  padding-top: 10px;
+}
+.acme-thread + .acme-ask .acme-suggestions {
+  justify-content: flex-start;
+  margin-bottom: 0;
+}
+.acme-ask-done {
+  margin: 0;
+  color: var(--og-color-fg-muted);
+  font-size: 13px;
+}
+.acme-demo-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  color: var(--og-color-fg-muted);
+  font-size: 12px;
+}
+.acme-demo-label svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.acme-error {
+  margin: 0;
+  color: var(--og-color-danger);
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .acme-nav {
+    gap: 14px;
+    padding: 10px 14px;
+  }
+  .acme-links {
+    display: none;
+  }
+  .acme-main {
+    padding: 12px 10px 10px;
+  }
+  .acme-hero h1 {
+    font-size: 21px;
+  }
+}
+
+/* Coach marks: a pen-stroke arrow that draws in, and a bubble that fades in. */
+.og-coach-arrow path:not(marker path) {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: og-coach-draw 420ms 100ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes og-coach-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}

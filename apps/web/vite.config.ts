@@ -72,6 +72,45 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // First-run setup, Get started and the playground are lazy pages of
+              // their own. Pin them, and the embeddable conversation only the
+              // playground renders, so entries-aware merging never folds them
+              // into the direct-session graph through shared UI primitives.
+              name: "first-run",
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:onboarding[\\/][\w-]+|ui[\\/]code-block)\.tsx?|routes[\\/](?:get-started|first-agent)\.tsx|lib[\\/](?:get-started|first-tasks|first-agent|coding-agent-setup|coding-agent-install|onboarding-paths)\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Icons only the organization settings navigation (and other
+              // lazy pages) draw. Left floating, entries-aware merging packs
+              // them with icons a direct session needs.
+              name: "settings-nav-icons",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:building-2|calendar|code|container|credit-card|fingerprint-pattern|hash|variable)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // How to pay for models (credits first): the onboarding model
+              // step, Get started, the composer's empty model menu, the credits
+              // page and the out-of-credits prompt share it. Every one of them
+              // is lazy; left floating, its pieces merge into small chunks a
+              // direct session loads.
+              name: "model-payment",
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:model-payment[\\/](?!lazy-)[\w-]+|credit-amount-picker)\.tsx|lib[\\/](?:model-payment|use-organization-credits)\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // The conversation's approval surface and hooks are used by
+              // nothing else in the app; left floating they merge into the
+              // shared chunk every direct session loads.
+              name: "playground",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:components[\\/](?:session-conversation|open-geni-chat|approval-surface)\.tsx|hooks[\\/](?:use-session-control|use-available-models)\.ts))$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",
@@ -288,7 +327,7 @@ export default defineConfig({
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control|workspace-sandbox-image-row)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx)|lib[\\/]organization-settings-access\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -355,6 +394,15 @@ export default defineConfig({
               test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 19,
+            },
+            {
+              // Capability summaries for workspace defaults, API keys and
+              // variable sets. Coalesced with the session's small helpers it
+              // rides into every direct session load.
+              name: "session-capabilities",
+              test: /apps[\\/]web[\\/]src[\\/]lib[\\/]session-capabilities\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
             },
             {
               // The Agent learning editor is reached only from lazy surfaces:

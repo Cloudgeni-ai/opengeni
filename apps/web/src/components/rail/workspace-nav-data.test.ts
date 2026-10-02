@@ -52,8 +52,9 @@ describe("workspace rail destinations", () => {
   test("settings mode swaps the main rail for the settings rail", () => {
     // The footer Settings entry is the way in; the management shell replaces RailShell.
     // Workspace and organization settings share that one management shell.
+    // (The full-screen playground branch comes first; it draws neither rail.)
     const shell = workspaceRouteSource.slice(
-      workspaceRouteSource.indexOf("{managementLocation ? ("),
+      workspaceRouteSource.indexOf("managementLocation ? ("),
     );
     const management = shell.indexOf("<WorkspaceManagementShell");
     expect(management).toBeGreaterThan(0);

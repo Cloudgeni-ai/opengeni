@@ -2086,6 +2086,10 @@ describe("GET /v1/config/client", () => {
     expect(configured.supportEmail).toBe("support@opengeni.ai");
   });
 
+  test("advertises whether coding agents may sign in to MCP with OAuth", async () => {
+    expect((await fetchClientConfig(testSettings())).mcpOAuthEnabled).toBe(false);
+  });
+
   test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,

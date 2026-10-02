@@ -657,6 +657,7 @@ test("billing offers at most one authorized action and never Retry", async () =>
           creditExhausted
           workspaceId="workspace-a"
           canBuyCredits={canBuyCredits}
+          creditsSold
           canConnectModel={canConnectModel}
           actions={actions}
         />,
@@ -665,6 +666,9 @@ test("billing offers at most one authorized action and never Retry", async () =>
     expect(container.querySelectorAll("a")).toHaveLength(expected ? 1 : 0);
     expect(container.querySelector("a")?.textContent ?? null).toBe(expected);
     expect(container.querySelector("button")).toBeNull();
+    // Someone who can't buy is told who can, instead of a dead end.
+    if (canBuyCredits) expect(container.textContent).not.toContain("Ask an organization owner");
+    else expect(container.textContent).toContain("Ask an organization owner to add credits.");
   }
 });
 

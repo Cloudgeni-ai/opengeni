@@ -10238,6 +10238,7 @@
         "$.legal.privacyPolicyUrl": "string?",
         "$.legal.termsOfServiceUrl": "string?",
         "$.managedAuthSessionSetMode": "enum!=[\"\\\"broker\\\"\",\"\\\"dual\\\"\",\"\\\"legacy\\\"\"]",
+        "$.mcpOAuthEnabled": "boolean?",
         "$.mcpServers": "array!",
         "$.mcpServers[]": "object",
         "$.mcpServers[].id": "string!",

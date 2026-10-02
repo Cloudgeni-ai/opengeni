@@ -1257,6 +1257,7 @@ export function createAppComposition(deps: AppDependencies): {
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         documentationUrl: deps.settings.documentationUrl,
+        mcpOAuthEnabled: deps.settings.mcpOauthEnabled,
         analytics: clientAnalyticsConfig(deps.settings),
         legal: clientLegalConfig(deps.settings),
         ...(deps.settings.supportEmail ? { supportEmail: deps.settings.supportEmail } : {}),

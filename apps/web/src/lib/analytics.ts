@@ -14,9 +14,11 @@ import type { AnalyticsConsent } from "@/lib/analytics-consent";
 import type { ClientConfig } from "@/types";
 import {
   journeyMilestone,
+  journeyMilestoneProperties,
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  type JourneyMilestone,
 } from "./analytics-journey";
 import {
   isSignupAttributionValue,
@@ -57,7 +59,14 @@ export type AnalyticsEventName =
   | "turn_failure_action"
   | "onboarding_step_viewed"
   | "onboarding_step_completed"
-  | "onboarding_abandoned";
+  | "onboarding_abandoned"
+  // First-run journey and the Get started checklist.
+  | "onboarding_intent_selected"
+  | "get_started_dismissed"
+  | "playground_step_completed"
+  | "api_key_created"
+  | "first_api_session_created"
+  | "schedule_created";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;
@@ -465,7 +474,7 @@ export function beginAnalyticsRequest(
 ): (status: number | null) => void {
   try {
     const milestone = journeyMilestone(pathname, method);
-    if (milestone) return milestoneFinisher(milestone);
+    if (milestone) return milestoneFinisher(milestone, journeyMilestoneProperties(pathname));
     const operation = journeyOperation(pathname, method);
     if (!operation || !analyticsCollectionAllowed()) return () => {};
     const generation = identityGeneration;
@@ -493,7 +502,8 @@ export function beginAnalyticsRequest(
 
 /** A funnel milestone is reported only when its request was accepted. */
 function milestoneFinisher(
-  name: "checkout_started" | "organization_setup_completed",
+  name: JourneyMilestone,
+  properties: AnalyticsProperties = {},
 ): (status: number | null) => void {
   if (!analyticsCollectionAllowed()) return () => {};
   const generation = identityGeneration;
@@ -503,7 +513,7 @@ function milestoneFinisher(
     if (finished) return;
     finished = true;
     if (generation !== identityGeneration || consentGeneration !== initializationGeneration) return;
-    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name);
+    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name, properties);
   };
 }
 

@@ -285,6 +285,7 @@ export function BrowserAccountMenu({
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}
             supportEmail={context.clientConfig.supportEmail}
+            getStartedWorkspaceId={rail.workspaceId}
             onSendFeedback={onSendFeedback}
           />
           <DropdownMenuSeparator />

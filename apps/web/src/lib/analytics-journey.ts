@@ -25,6 +25,9 @@ const PAGES = new Set([
   "variable-sets",
   "environments",
   "rigs",
+  "get-started",
+  "playground",
+  "first-agent",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
@@ -94,6 +97,15 @@ export function journeyPage(pathname: string, search = ""): JourneyProperties {
   };
 }
 
+/** The organization or workspace a milestone happened in: UUIDs from the path only. */
+export function journeyMilestoneProperties(pathname: string): JourneyProperties {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "v1" || !UUID.test(parts[2] ?? "")) return {};
+  if (parts[1] === "organizations") return { account_id: parts[2]! };
+  if (parts[1] === "workspaces") return { workspace_id: parts[2]! };
+  return {};
+}
+
 export type JourneyOperation = {
   operation: "session_create" | "session_command" | "model_connection";
   properties: JourneyProperties;
@@ -103,13 +115,21 @@ export type JourneyOperation = {
  * Accepted requests that complete a sign-up funnel step. Exact product routes
  * only; request and response bodies are never inspected.
  */
-export function journeyMilestone(
-  pathname: string,
-  method: string,
-): "checkout_started" | "organization_setup_completed" | null {
+export type JourneyMilestone =
+  | "checkout_started"
+  | "organization_setup_completed"
+  | "api_key_created"
+  | "schedule_created";
+
+export function journeyMilestone(pathname: string, method: string): JourneyMilestone | null {
   if (method.toUpperCase() !== "POST") return null;
   if (pathname === "/v1/billing/checkout") return "checkout_started";
   if (pathname === "/v1/auth/organization-onboarding") return "organization_setup_completed";
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts.length === 4 && parts[0] === "v1" && UUID.test(parts[2] ?? "")) {
+    if (parts[1] === "organizations" && parts[3] === "api-keys") return "api_key_created";
+    if (parts[1] === "workspaces" && parts[3] === "scheduled-tasks") return "schedule_created";
+  }
   return null;
 }
 

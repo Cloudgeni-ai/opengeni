@@ -42,6 +42,12 @@ once that lookup has finished.
 | `integration_connect_started` / `integration_connect_finished` | One connect journey for an integration, capability, or model provider. See "Integration connect journey" below. |
 | `turn_failure_viewed` / `turn_failure_action` | The failed-turn banner was shown, and the person's first next step. See "Failed-turn recovery" below. |
 | `onboarding_step_viewed` / `onboarding_step_completed` / `onboarding_abandoned` | Post-sign-in onboarding steps. See "Onboarding steps" below. |
+| `onboarding_intent_selected` | The person answered "What do you want to use Opengeni for?": agents in their product (`build`) or agents for their own work (`cloud`). `intents` lists the chosen value, with one boolean flag per path (`build`, `cloud`, `explore`) and `intent` naming it for single-path charts. `source` is `setup` (the first question, which also creates the organization) or `first_agent` (answered again in the app); `changed` is `true` when it replaced an earlier answer. Older events may carry `build,cloud` and `source` `setup`, `checklist` or `page`. |
+| `get_started_dismissed` | The Get started card was hidden from the new-chat page, with the same `intent`, `intents` and per-path flags (`none` before a choice). Undo and Help bring it back without an event. |
+| `playground_step_completed` | A playground tour step finished: `step` is `send`, `stream`, `workspace`, `style`, `memory`, `tool` or `finish` (a skipped step reports too). |
+| `api_key_created` | An organization API key create request was accepted (any page). Carries the account ID. |
+| `first_api_session_created` | Get started saw the first session an API key created in the Build path's shared workspace: the Build path's success. Carries the workspace and session IDs; deduplicated per workspace. |
+| `schedule_created` | A schedule create request was accepted (any page, including the morning-brief first task). Carries the workspace ID. |
 
 ## Pages and control labels
 
@@ -50,7 +56,7 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, and `files`; a session page also carries `session_id`.
+`organization`, `files`, `get-started` and `playground`; a session page also carries `session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
@@ -82,6 +88,14 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `buy_credits` | Buy or add credits buttons and links |
 | `connect_model` | Connect a model links |
 | `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter` | Provider connect controls in settings and onboarding |
+| `choose_intent` | Continue on "What do you want to use Opengeni for?" |
+| `open_first_agent`, `start_first_agent_chat`, `skip_first_agent` | Open first run from Get started; start a chat from the ready moment (Start building, or a first task); Skip or Go to Opengeni in first run |
+| `open_get_started`, `dismiss_get_started` | See all and Hide on the Get started card; Get an API key at the end of the playground tour |
+| `open_playground` | Open the playground from Get started or the card |
+| `create_api_key` | Create API key on Get started and "Use your own coding agent" |
+| `copy_build_prompt`, `copy_coding_agent_setup` | Copy the prompt that has a coding agent build the demo app, or a coding-agent setup command |
+| `start_first_task` | A first-task card (fix an issue, morning brief, research) |
+| `connect_github` | Connect GitHub on Get started |
 
 Clicks are the only signal: pressing Enter to send or Cmd/Ctrl+Enter to steer
 is not a click. Use `session_command_attempted` for message volume.

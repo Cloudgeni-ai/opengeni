@@ -634,6 +634,13 @@ const effectiveBudgets = {
     // Linux/x64 CI measures 2,575,385 raw on main 6a9731344. Keep the
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
     wholeKibEnvelope(2_575_385, 1.5 * kib),
+    // First run: the new-chat page sends a chat first run asked to start, once
+    // (composer-prefill's send hand-off and its readiness effect). Locally this
+    // head measures 1,874 raw over main 15234d2e1 built the same way
+    // (2,589,747 vs 2,587,873, Bun 1.4 Linux/x64), so the CI graph is about
+    // 2,577,259. Keep the established 1.5 KiB headroom; gzip, file count and
+    // every other cap stay fixed.
+    wholeKibEnvelope(2_577_259, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

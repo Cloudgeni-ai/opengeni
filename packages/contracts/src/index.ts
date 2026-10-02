@@ -18125,6 +18125,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       .url({ protocol: /^https?$/u })
       .nullable()
       .optional(),
+    // Whether a coding agent (Claude Code, Codex) may sign in to a workspace's
+    // MCP endpoint with OAuth (OPENGENI_MCP_OAUTH_ENABLED). The console offers
+    // the keyless "add Opengeni to your coding agent" command only when true.
+    // Absent on servers that predate it, which clients treat as off.
+    mcpOAuthEnabled: z.boolean().optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),

@@ -3,6 +3,7 @@ import { ANALYTICS_ACTIONS } from "./analytics-actions";
 import {
   journeyAction,
   journeyMilestone,
+  journeyMilestoneProperties,
   journeyOperation,
   journeyOutcome,
   journeyPage,
@@ -204,5 +205,39 @@ describe("content-free customer journey", () => {
     expect(journeyMilestone("/v1/auth/organization-onboarding", "GET")).toBeNull();
     expect(journeyMilestone("/v1/billing/checkout/extra", "POST")).toBeNull();
     expect(journeyMilestone("/v1/billing/usage-summary", "POST")).toBeNull();
+  });
+
+  test("first-run success milestones: an organization API key and a schedule, by exact route", () => {
+    const organization = "33333333-3333-4333-8333-333333333333";
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "POST")).toBe(
+      "api_key_created",
+    );
+    expect(journeyMilestone(`/v1/workspaces/${workspace}/scheduled-tasks`, "POST")).toBe(
+      "schedule_created",
+    );
+    expect(journeyMilestoneProperties(`/v1/organizations/${organization}/api-keys`)).toEqual({
+      account_id: organization,
+    });
+    expect(journeyMilestoneProperties(`/v1/workspaces/${workspace}/scheduled-tasks`)).toEqual({
+      workspace_id: workspace,
+    });
+    // Listing, revoking, and running are not creations; ids must be real UUIDs.
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "GET")).toBeNull();
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys/key`, "DELETE")).toBeNull();
+    expect(
+      journeyMilestone(`/v1/workspaces/${workspace}/scheduled-tasks/${session}/trigger`, "POST"),
+    ).toBeNull();
+    expect(journeyMilestone("/v1/organizations/not-a-uuid/api-keys", "POST")).toBeNull();
+  });
+
+  test("labels the Get started page and the playground", () => {
+    expect(journeyPage(`/workspaces/${workspace}/get-started`, "?step=product")).toEqual({
+      page: "get-started",
+      workspace_id: workspace,
+    });
+    expect(journeyPage(`/workspaces/${workspace}/playground`)).toEqual({
+      page: "playground",
+      workspace_id: workspace,
+    });
   });
 });

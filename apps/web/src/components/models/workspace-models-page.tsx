@@ -1,4 +1,5 @@
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import { useNavigate } from "@tanstack/react-router";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -61,7 +62,13 @@ import {
   readyOrganizationKeyModels,
   type ModelsWorkspace,
 } from "@/components/models/organization-models-list";
-import { OpenGeniCreditsRow, useOpenGeniCredits } from "@/components/models/opengeni-credits-row";
+import { OpengeniCreditsPage } from "@/components/models/opengeni-credits-page";
+import { creditsMarginLabel, creditsPriceSentence } from "@/lib/model-payment";
+import {
+  OpengeniCreditsTile,
+  OpenGeniCreditsRow,
+  useOpenGeniCredits,
+} from "@/components/models/opengeni-credits-row";
 import {
   OrgCodexAccessPage,
   OrgCodexAccountPage,
@@ -234,6 +241,7 @@ export function WorkspaceModelsPageBody({
   organizationAccounts: OrganizationModelAccounts;
 }) {
   const { client, clientConfig } = useAppContext();
+  const navigate = useNavigate();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
   const scope = useMemo(
     () => ({ anchorWorkspaceId, workspaceId: workspacePage ? workspaceId : undefined }),
@@ -384,7 +392,25 @@ export function WorkspaceModelsPageBody({
       : workspaceName
     : "Models";
   let page: ReactNode;
-  if (organizationPage && !organizationAdmin) {
+  if (view === "credits" && organizationId) {
+    // Anyone may see what credits cost and the balance; buying needs billing:manage.
+    page = (
+      <OpengeniCreditsPage
+        organizationId={organizationId}
+        organizationName={organizationName}
+        margin={creditsMarginLabel(catalog.models)}
+        backLabel={organizationAdmin ? "Connect account" : listLabel}
+        onBack={() => (organizationAdmin ? nav.openView("connect") : backToList())}
+        onOpenBilling={() =>
+          void navigate({
+            to: "/workspaces/$workspaceId/organization",
+            params: { workspaceId: anchorWorkspaceId },
+            search: { section: "billing" } as never,
+          })
+        }
+      />
+    );
+  } else if (organizationPage && !organizationAdmin) {
     page = (
       <DetailPage
         back={{ label: "Models", onClick: backToList }}
@@ -457,6 +483,12 @@ export function WorkspaceModelsPageBody({
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect-org:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
+        credits={{
+          available: clientConfig.billingMode === "stripe",
+          summary: creditsPriceSentence(creditsMarginLabel(catalog.models)),
+          balanceLabel: credits.balanceLabel,
+          onOpen: () => nav.openView("credits"),
+        }}
       />
     );
   } else if (
@@ -1207,6 +1239,7 @@ export function ConnectPickerPage({
   onClose,
   onPick,
   onOpenConnected,
+  credits,
 }: {
   /** Who what's connected is for: everyone in the organization, or this workspace. */
   target: "organization" | "workspace";
@@ -1229,6 +1262,18 @@ export function ConnectPickerPage({
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
   onOpenConnected?: ((provider: GatewayId) => void) | undefined;
+  /**
+   * Opengeni credits, first: pay as you go with no provider account. Without
+   * Stripe on this server the row stays, disabled, and says why.
+   */
+  credits?:
+    | {
+        available: boolean;
+        summary: string;
+        balanceLabel: string | null;
+        onOpen: () => void;
+      }
+    | undefined;
 }) {
   const keysSkipPersonal = target === "organization" && personal;
   const choices: {
@@ -1294,6 +1339,30 @@ export function ConnectPickerPage({
           />
         ) : (
           <RowList label="Providers" flush>
+            {credits ? (
+              credits.available ? (
+                <ListRow
+                  key="credits"
+                  leading={<OpengeniCreditsTile />}
+                  title="Opengeni credits"
+                  meta={[credits.summary, credits.balanceLabel]}
+                  indicator="open"
+                  onOpen={credits.onOpen}
+                />
+              ) : (
+                <ListRow
+                  key="credits"
+                  disabled
+                  leading={<OpengeniCreditsTile />}
+                  title="Opengeni credits"
+                  meta={["Pay as you go, with no provider account"]}
+                  indicator={{
+                    kind: "unavailable",
+                    label: "Not available on this server. It needs Stripe billing.",
+                  }}
+                />
+              )
+            ) : null}
             {choices.map((choice) =>
               choice.unavailable ? (
                 <ListRow

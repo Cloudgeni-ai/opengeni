@@ -95,7 +95,7 @@ describe("rail footer account menu", () => {
     }
   });
 
-  test("Help & feedback lists Documentation and Send feedback when both apply", async () => {
+  test("Help & feedback lists Get started, Documentation and Send feedback when they apply", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,
       analytics: false,
@@ -104,9 +104,10 @@ describe("rail footer account menu", () => {
     });
     try {
       const rows = await openSubmenu("Help & feedback");
-      expect(rows).toHaveLength(2);
-      expect(rows[0]).toContain("Documentation");
-      expect(rows[1]).toBe("Send feedback");
+      expect(rows).toHaveLength(3);
+      expect(rows[0]).toBe("Get started");
+      expect(rows[1]).toContain("Documentation");
+      expect(rows[2]).toBe("Send feedback");
       const link = document.body.querySelector<HTMLAnchorElement>(`a[href="${docs}"]`);
       expect(link?.target).toBe("_blank");
       expect(link?.rel).toBe("noopener noreferrer");
@@ -125,10 +126,11 @@ describe("rail footer account menu", () => {
     });
     try {
       const rows = await openSubmenu("Help & feedback");
-      expect(rows).toHaveLength(3);
-      expect(rows[0]).toContain("Documentation");
-      expect(rows[1]).toBe("Contact support");
-      expect(rows[2]).toBe("Send feedback");
+      expect(rows).toHaveLength(4);
+      expect(rows[0]).toBe("Get started");
+      expect(rows[1]).toContain("Documentation");
+      expect(rows[2]).toBe("Contact support");
+      expect(rows[3]).toBe("Send feedback");
       const link = document.body.querySelector<HTMLAnchorElement>(
         'a[href="mailto:support@example.test"]',
       );
@@ -145,13 +147,13 @@ describe("rail footer account menu", () => {
       supportEmail: "support@example.test",
     });
     try {
-      expect(await openSubmenu("Help & feedback")).toEqual(["Contact support"]);
+      expect(await openSubmenu("Help & feedback")).toEqual(["Get started", "Contact support"]);
     } finally {
       await supportOnly();
     }
   });
 
-  test("Help & feedback drops the rows that don't apply, and itself when none do", async () => {
+  test("Help & feedback drops the rows that don't apply; Get started stays in a workspace", async () => {
     const docsOnly = await renderOpenAccountMenu({
       managed: false,
       analytics: false,
@@ -159,8 +161,7 @@ describe("rail footer account menu", () => {
     });
     try {
       const rows = await openSubmenu("Help & feedback");
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toContain("Documentation");
+      expect(rows).toEqual(["Get started", expect.stringContaining("Documentation")]);
     } finally {
       await docsOnly();
     }
@@ -173,7 +174,7 @@ describe("rail footer account menu", () => {
     try {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
-      expect(sequence.join("|")).not.toContain("Help");
+      expect(await openSubmenu("Help & feedback")).toEqual(["Get started"]);
     } finally {
       await nothing();
     }

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { ListRow } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import { useAppContext } from "@/context";
 import { formatMoneyMicros } from "@/lib/format";
 import { modelUsesCredits } from "@/lib/model-policy";
@@ -62,6 +62,11 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
     };
   }, [client, accountId, canRead]);
   return { visible, balanceLabel, canOpenBilling: canManage };
+}
+
+/** The Opengeni mark at row-tile size, for credits wherever they are a way to pay. */
+export function OpengeniCreditsTile({ size = "lg" }: { size?: LogoTileSize }) {
+  return <LogoTile size={size} icon={<BrandMark className="text-fg" />} name="Opengeni" />;
 }
 
 export function OpenGeniCreditsRow({

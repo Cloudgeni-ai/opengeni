@@ -43,6 +43,10 @@ const workspaceRouteContracts = {
   workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
   workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
   workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceGetStartedRoute: { kind: "page", source: "routes/get-started.tsx" },
+  // A sample product of its own: full screen, with its own scrolling chat.
+  workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
+  workspaceFirstAgentRoute: { kind: "self-managed", source: "routes/first-agent.tsx" },
   workspaceDocumentsRoute: { kind: "redirect" },
   workspaceMemoryRoute: { kind: "redirect" },
   workspaceStateRoute: {

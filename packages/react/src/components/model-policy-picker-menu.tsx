@@ -200,6 +200,8 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
               </p>
             ) : null}
           </>
+        ) : props.renderConnectPanel ? (
+          props.renderConnectPanel()
         ) : props.connectModelsHref || rows.length > 0 ? (
           <ConnectModelsPanel href={props.connectModelsHref} messages={messages} />
         ) : (

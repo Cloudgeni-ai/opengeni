@@ -72,6 +72,8 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
+import { useGetStartedCardVisible } from "@/lib/get-started-visibility";
+import { takeComposerPrefill, takeComposerSend } from "@/lib/composer-prefill";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import {
@@ -84,6 +86,7 @@ import {
   runsOnSummary,
   visibilitySummary,
 } from "@/components/session/new-session-settings-menu";
+import { renderModelPaymentMenu } from "@/components/model-payment/lazy-model-payment-menu";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
@@ -211,6 +214,11 @@ const CreditTopupPrompt = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.CreditRequiredPrompt,
   })),
+);
+
+// The Get started card shows only during a first-run journey; load it then.
+const LazyGetStartedCard = lazy(() =>
+  import("@/routes/first-run-pages").then((module) => ({ default: module.GetStartedCard })),
 );
 
 export function SessionsIndexRoute({
@@ -1013,6 +1021,24 @@ function SessionsIndexRouteContent({
     // GitHub remains optional and must not keep the composer unsendable.
     resourceHydrationReady: context.workspaceMcpCatalogReady && tenancyCapabilities !== null,
   });
+  const getStartedVisible = useGetStartedCardVisible(workspaceId);
+  // A first task picked on Get started arrives here to be confirmed with Send.
+  // Take it only after the saved draft has loaded, so the draft can't replace it.
+  const prefillComposer = useLatestCallback((text: string) => {
+    setMessage(text);
+    window.requestAnimationFrame(() =>
+      composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true }),
+    );
+  });
+  // First run asked for this chat to start: send what the
+  // composer holds once it can, a single time.
+  const [autoSend, setAutoSend] = useState(false);
+  useEffect(() => {
+    if (newSessionDraft.loading) return;
+    const queued = takeComposerPrefill(workspaceId);
+    if (queued) prefillComposer(queued);
+    if (takeComposerSend(workspaceId)) setAutoSend(true);
+  }, [newSessionDraft.loading, prefillComposer, workspaceId]);
   useEffect(() => {
     if (newSessionDraft.loading || !context.workspaceMcpCatalogReady || toolSelectionExplicit)
       return;
@@ -1495,6 +1521,42 @@ function SessionsIndexRouteContent({
     workspaceId,
   ]);
 
+  useEffect(() => {
+    if (!autoSend) return;
+    if (
+      newSessionDraft.loading ||
+      busy ||
+      !computeReady ||
+      !newSessionPolicyValid ||
+      !context.workspaceMcpCatalogReady ||
+      attachments.hasUnresolved ||
+      privateCreateUnavailable ||
+      personalResourceCatalogRefreshPending ||
+      connectionAccounts.loading ||
+      !fixedResourceSelection.selectionResolved ||
+      !message.trim()
+    )
+      return;
+    // One attempt: a refusal (no model, no credits) shows its own message and
+    // leaves the text in the composer for the person to send.
+    setAutoSend(false);
+    void submitNewSession(null);
+  }, [
+    attachments.hasUnresolved,
+    autoSend,
+    busy,
+    computeReady,
+    connectionAccounts.loading,
+    context.workspaceMcpCatalogReady,
+    fixedResourceSelection.selectionResolved,
+    message,
+    newSessionDraft.loading,
+    newSessionPolicyValid,
+    personalResourceCatalogRefreshPending,
+    privateCreateUnavailable,
+    submitNewSession,
+  ]);
+
   // The session does not exist yet, so this surface cannot use `useComposer`
   // (that hook sends to a session). It still renders the package ChatComposer
   // by implementing the same `ComposerState` contract over session creation.
@@ -1940,13 +2002,21 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
-        <NewSessionStarters
-          disabled={busy || newSessionDraft.loading}
-          onSelect={(prompt) => {
-            setMessage(prompt);
-            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
-          }}
-        />
+        {/* While the Get started checklist shows, its first tasks stand in for
+            the suggestions; hiding it brings them back. */}
+        {getStartedVisible ? (
+          <Suspense fallback={null}>
+            <LazyGetStartedCard workspaceId={workspaceId} onPrefill={prefillComposer} />
+          </Suspense>
+        ) : (
+          <NewSessionStarters
+            disabled={busy || newSessionDraft.loading}
+            onSelect={(prompt) => {
+              setMessage(prompt);
+              composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+            }}
+          />
+        )}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}
@@ -2156,6 +2226,7 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
+      renderConnectPanel={() => renderModelPaymentMenu(workspaceId)}
       onModelChange={(model) => {
         onPolicyChosen();
         context.setModel(model);

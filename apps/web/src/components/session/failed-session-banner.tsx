@@ -10,6 +10,7 @@ import {
   turnFailureClass,
   turnFailureJourney,
 } from "@/lib/turn-failure-analytics";
+import { CREDITS_ASK_OWNER_REASON } from "@/lib/model-payment";
 import type { ConnectableSubscriptions } from "@/lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
 import { FailedSessionActions } from "./failed-session-actions";
@@ -26,6 +27,7 @@ export function FailedSessionBanner({
   creditExhausted,
   workspaceId,
   canBuyCredits = false,
+  creditsSold = false,
   canConnectModel = false,
   modelChanged = false,
   canChooseModel = false,
@@ -42,6 +44,8 @@ export function FailedSessionBanner({
   creditExhausted?: boolean;
   workspaceId?: string;
   canBuyCredits?: boolean;
+  /** This deployment sells Opengeni credits (Stripe billing). */
+  creditsSold?: boolean;
   canConnectModel?: boolean;
   modelChanged?: boolean;
   canChooseModel?: boolean;
@@ -140,9 +144,16 @@ export function FailedSessionBanner({
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
             <BuyCreditsLink workspaceId={workspaceId} primary />
-          ) : workspaceId && canConnectModel ? (
-            <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
-          ) : null
+          ) : (
+            <>
+              {creditsSold ? (
+                <span className="text-xs text-fg-subtle">{CREDITS_ASK_OWNER_REASON}</span>
+              ) : null}
+              {workspaceId && canConnectModel ? (
+                <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
+              ) : null}
+            </>
+          )
         ) : sandboxRecovery ? (
           <SandboxRecoveryActions
             {...sandboxRecovery}
@@ -159,7 +170,10 @@ export function FailedSessionBanner({
   );
 }
 
-/** The banner's one unblocking action is the primary; next to Connect it is the outline. */
+/**
+ * The banner's one unblocking action is the primary; next to Connect it is
+ * the outline. It opens Opengeni credits: the price, the balance and buying.
+ */
 function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
   return (
     <Button asChild size="sm" variant={primary ? "default" : "outline"}>

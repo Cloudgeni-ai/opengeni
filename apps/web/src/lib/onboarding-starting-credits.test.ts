@@ -189,7 +189,12 @@ describe("starting credits in the post-signup model step", () => {
       } as never,
       input,
     );
-    expect(free).toEqual({ includedModel: input.includedCandidate, startingCredits: null });
+    expect(free).toEqual({
+      includedModel: input.includedCandidate,
+      startingCredits: null,
+      offers: { codex: false, supergrok: false, creditsMargin: null },
+      connected: [],
+    });
     expect(getBilling).not.toHaveBeenCalled();
 
     const trial = await loadModelAccessOnboarding(
@@ -239,6 +244,48 @@ describe("starting credits in the post-signup model step", () => {
         } as never,
         input,
       ),
-    ).toEqual({ includedModel: null, startingCredits: null });
+    ).toEqual({ includedModel: null, startingCredits: null, offers: null, connected: [] });
+  });
+
+  test("the catalog says what is offered, what is connected and what is included", async () => {
+    const codexConnected = catalogModel({
+      id: "codex/gpt-6",
+      source: "codex",
+      cost: "subscription",
+      billing: { upstreamPayer: "user", metering: "external" },
+    } as never);
+    const supergrokOffered = catalogModel({
+      id: "supergrok/grok-5",
+      source: "supergrok",
+      cost: "subscription",
+      availability: {
+        status: "unavailable",
+        selectable: false,
+        reason: "missing_credential",
+        checkedAt: null,
+      },
+    } as never);
+    const credits = catalogModel({
+      id: "credits-model",
+      pricing: { default: { marginBps: 500 } },
+    } as never);
+    const loaded = await loadModelAccessOnboarding(
+      {
+        getWorkspaceModelCatalog: async () => ({
+          models: [FREE_DEFAULT, codexConnected, supergrokOffered, credits],
+          defaultSelection: { model: "free-default", reasoningEffort: "low", source: "deployment" },
+        }),
+      } as never,
+      {
+        organizationId: "organization-a",
+        workspaceId: "personal-workspace",
+        billingMode: "stripe",
+        // Before a workspace exists the client config lists no models.
+        includedCandidate: null,
+      },
+    );
+    expect(loaded.offers).toEqual({ codex: true, supergrok: true, creditsMargin: "5%" });
+    expect(loaded.connected).toEqual(["codex"]);
+    expect(loaded.includedModel).toEqual({ id: "free-default", label: "free-default", free: true });
   });
 });

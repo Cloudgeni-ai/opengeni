@@ -673,6 +673,14 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
+Before that step the stock console asks which first-run path the person wants
+(build agents into a product, run agents in the cloud, or look around). The
+choice is browser-local UI state, not an organization fact. The Build path
+creates one shared "Development" workspace through the ordinary owner/admin
+`POST /v1/organizations/:id/workspaces` route (creator gets explicit
+workspace-admin), because organization API keys reach shared workspaces only;
+no setup API changes. Invited members skip the question.
+
 The stock web console may then show a skippable product step to connect a
 model or buy OpenGeni credits. When the deployment bills credits and the new
 Personal workspace's model catalog reports a server-resolved default

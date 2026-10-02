@@ -978,6 +978,42 @@ describe("ModelPolicyPicker", () => {
     expect(container.textContent).toContain("No models available.");
   });
 
+  test("a host's own connect panel replaces the built-in one when no model can run", async () => {
+    const container = await mount(
+      <>
+        <ModelPolicyPicker
+          rows={[]}
+          model="codex/unavailable"
+          effort="low"
+          latencyMode="standard"
+          renderConnectPanel={() => <p data-host-panel="">Buy credits or connect ChatGPT</p>}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+        <ModelPolicyPickerMenu
+          rows={[]}
+          model="codex/unavailable"
+          effort="low"
+          latencyMode="standard"
+          connectModelsHref="/settings/models"
+          renderConnectPanel={() => <p data-host-panel="">Buy credits or connect ChatGPT</p>}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+      </>,
+    );
+    // The trigger asks for a model; the menu shows the host's panel, not the tiles.
+    expect(container.querySelector('button[aria-label="Model and effort"]')?.textContent).toContain(
+      "Connect a model",
+    );
+    expect(container.querySelector("[data-host-panel]")?.textContent).toBe(
+      "Buy credits or connect ChatGPT",
+    );
+    expect(container.querySelector('[data-testid="model-picker-connect"]')).toBeNull();
+  });
+
   test("treats supplied empty catalog rows as authoritative", async () => {
     const container = await mount(
       <ModelPolicyPickerMenu

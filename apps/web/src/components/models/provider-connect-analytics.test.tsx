@@ -391,3 +391,42 @@ test("workspace Claude submits only a setup token and stays off without network 
     label: "Claude Opus 5.5",
   });
 });
+
+test("Connect account leads with Opengeni credits, and says why when the server can't sell them", async () => {
+  const { ConnectPickerPage } = await import("./workspace-models-page");
+  const openCredits = mock(() => {});
+  const picker = (available: boolean) => (
+    <ConnectPickerPage
+      codexAvailable
+      grok="available"
+      target="organization"
+      title="Connect account"
+      subtitle="Connect it once for Acme."
+      onClose={() => {}}
+      onPick={() => {}}
+      credits={{
+        available,
+        summary: "Pay as you go: the model provider's price plus 5%. No provider account needed.",
+        balanceLabel: available ? "$12.40 left" : null,
+        onOpen: openCredits,
+      }}
+    />
+  );
+  await act(async () => root.render(picker(true)));
+  const rows = [...container.querySelectorAll("li")].map((row) => row.textContent ?? "");
+  expect(rows[0]).toContain("Opengeni credits");
+  expect(rows[0]).toContain("the model provider's price plus 5%");
+  expect(rows[0]).toContain("$12.40 left");
+  expect(rows[1]).toContain("Codex");
+  const credits = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.includes("Opengeni credits"),
+  )!;
+  await act(async () => credits.click());
+  expect(openCredits).toHaveBeenCalledTimes(1);
+
+  await act(async () => root.render(picker(false)));
+  const first = container.querySelector("li")!;
+  expect(first.textContent).toContain("Opengeni credits");
+  expect(first.textContent).toContain("Not available on this server. It needs Stripe billing.");
+  expect(first.querySelector("button")).toBeNull();
+});

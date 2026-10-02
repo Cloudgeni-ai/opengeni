@@ -102,6 +102,7 @@ import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
+import { renderModelPaymentMenu } from "@/components/model-payment/lazy-model-payment-menu";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   TerminalSessionArchive,
@@ -2606,6 +2607,7 @@ function SessionChatPane(props: {
                 "billing:manage",
               )
             }
+            creditsSold={context.clientConfig.billingMode === "stripe"}
             canConnectModel={hasWorkspacePermission(
               context.accessContext,
               props.session.workspaceId,
@@ -3150,6 +3152,7 @@ function SessionChatPane(props: {
                   sessionKey={props.session.id}
                   menuSide="top"
                   connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                  renderConnectPanel={() => renderModelPaymentMenu(props.session.workspaceId)}
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}

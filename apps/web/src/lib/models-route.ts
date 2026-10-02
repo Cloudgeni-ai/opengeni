@@ -6,6 +6,7 @@
      ?section=models&account=org:codex:<id>              an organization account's page
      ?section=models&view=connect                        Connect account
      ?section=models&view=connect-org:codex              one provider's step
+     ?section=models&view=credits                        Opengeni credits: balance and buying
      ?section=models&workspace=<id>                      one workspace's model page
      ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
      ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
@@ -30,7 +31,8 @@ export type ModelsView =
   | `connect:${ModelsProvider}`
   | `connect-org:${ModelsProvider}`
   | "allowed-models"
-  | "model-access";
+  | "model-access"
+  | "credits";
 
 const PROVIDERS: readonly ModelsProvider[] = [
   "codex",
@@ -48,6 +50,7 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
   "allowed-models",
   "model-access",
+  "credits",
 ]);
 
 export function parseModelsView(value: unknown): ModelsView | undefined {

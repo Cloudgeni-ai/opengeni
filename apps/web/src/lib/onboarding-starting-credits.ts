@@ -6,7 +6,13 @@ import type {
   WorkspaceModelCatalogResponse,
 } from "@opengeni/sdk";
 
-import { confirmIncludedModel } from "./model-access-onboarding";
+import {
+  confirmIncludedModel,
+  includedDefaultModel,
+  preferredConnectedModelId,
+  type ConnectedModelFamily,
+} from "./model-access-onboarding";
+import { creditsMarginLabel } from "./model-payment";
 
 // Onboarding-only helpers, kept apart from `model-access-onboarding.ts` because
 // the session route imports that module and these must stay out of its graph.
@@ -72,11 +78,64 @@ export function startingCreditsForOnboarding(input: {
 }
 
 /**
+ * What this deployment offers the new workspace, read from its catalog: the
+ * client config's model list is empty before the person has a workspace.
+ */
+export type ModelStepOffers = {
+  codex: boolean;
+  supergrok: boolean;
+  /** "5%": the markup on the provider's price for credits models. */
+  creditsMargin: string | null;
+};
+
+export function modelStepOffers(models: WorkspaceModelCatalogResponse["models"]): ModelStepOffers {
+  return {
+    codex: models.some((model) => model.source === "codex"),
+    supergrok: models.some((model) => model.source === "supergrok"),
+    creditsMargin: creditsMarginLabel(models),
+  };
+}
+
+const CONNECTABLE_FAMILIES: readonly ConnectedModelFamily[] = [
+  "codex",
+  "supergrok",
+  "vercel_gateway",
+  "openrouter",
+];
+
+/** The services already connected here (a person coming back to this step). */
+export function connectedModelFamilies(
+  models: WorkspaceModelCatalogResponse["models"],
+): ConnectedModelFamily[] {
+  return CONNECTABLE_FAMILIES.filter(
+    (family) => preferredConnectedModelId(models, family) !== null,
+  );
+}
+
+/**
+ * The included default from the live catalog: the resolved default for new
+ * chats when it is free, or paid by the deployment on a server that doesn't
+ * bill credits.
+ */
+export function includedModelFromCatalog(
+  catalog: Pick<WorkspaceModelCatalogResponse, "models" | "defaultSelection">,
+  billingMode: "disabled" | "stripe",
+): { id: string; label: string; free: boolean } | null {
+  const selection = catalog.defaultSelection;
+  if (!selection || selection.source === "subscription" || selection.source === "credits")
+    return null;
+  const model = catalog.models.find((candidate) => candidate.id === selection.model);
+  if (!model?.availability.selectable) return null;
+  return includedDefaultModel({ defaultModel: model.id, models: [model], billingMode });
+}
+
+/**
  * Load the post-signup model step for the new Personal workspace: confirm the
- * client-config included model against the live catalog, and, on a
- * deployment that bills credits, describe any credits the organization already
- * holds. The balance is read only when the resolved default is billed in
- * credits, so a workspace on the free default never probes billing. An
+ * client-config included model against the live catalog (or find it there),
+ * say what the deployment offers and what is already connected, and, on a
+ * deployment that bills credits, describe any credits the organization
+ * already holds. The balance is read only when the resolved default is billed
+ * in credits, so a workspace on the free default never probes billing. An
  * unreadable catalog confirms nothing, and the caller shows the ordinary
  * choice screen.
  */
@@ -91,18 +150,22 @@ export async function loadModelAccessOnboarding(
 ): Promise<{
   includedModel: { id: string; label: string; free: boolean } | null;
   startingCredits: StartingCreditsOnboarding | null;
+  offers: ModelStepOffers | null;
+  connected: ConnectedModelFamily[];
 }> {
   let catalog: WorkspaceModelCatalogResponse;
   try {
     catalog = await client.getWorkspaceModelCatalog(input.workspaceId);
   } catch {
-    return { includedModel: null, startingCredits: null };
+    return { includedModel: null, startingCredits: null, offers: null, connected: [] };
   }
   const includedModel = input.includedCandidate
     ? confirmIncludedModel(input.includedCandidate, catalog.models)
-    : null;
+    : includedModelFromCatalog(catalog, input.billingMode);
+  const offers = modelStepOffers(catalog.models);
+  const connected = connectedModelFamilies(catalog.models);
   if (input.billingMode !== "stripe" || !creditsBilledDefaultModel(catalog)) {
-    return { includedModel, startingCredits: null };
+    return { includedModel, startingCredits: null, offers, connected };
   }
   let billing: BillingSummary | null;
   try {
@@ -110,5 +173,10 @@ export async function loadModelAccessOnboarding(
   } catch {
     billing = null;
   }
-  return { includedModel, startingCredits: startingCreditsForOnboarding({ catalog, billing }) };
+  return {
+    includedModel,
+    startingCredits: startingCreditsForOnboarding({ catalog, billing }),
+    offers,
+    connected,
+  };
 }

@@ -139,6 +139,13 @@ export type ModelPolicyPickerProps = {
   allowLatencyMode?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
   connectModelsHref?: string | undefined;
+  /**
+   * Replaces the built-in "Connect a model" panel when no model can run, for
+   * a host that offers its own ways to pay (for example its credits first).
+   * Takes precedence over `connectModelsHref`'s panel; render it at the menu's
+   * final size (no loading text inside an open menu).
+   */
+  renderConnectPanel?: (() => ReactNode) | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
@@ -385,7 +392,8 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
   const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
   const needsModel =
-    !rows.some((row) => row.selectable) && (rows.length > 0 || Boolean(props.connectModelsHref));
+    !rows.some((row) => row.selectable) &&
+    (rows.length > 0 || Boolean(props.connectModelsHref) || Boolean(props.renderConnectPanel));
 
   if (props.loading) {
     return (

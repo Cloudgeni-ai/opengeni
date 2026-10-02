@@ -4248,6 +4248,8 @@ export type ClientConfig = {
    * hides the link; absent means a server that predates the field.
    */
   documentationUrl?: string | null | undefined;
+  /** Coding agents may sign in to a workspace MCP endpoint with OAuth. Absent: off. */
+  mcpOAuthEnabled?: boolean | undefined;
   analytics: {
     consentRequired: boolean;
     providers: {

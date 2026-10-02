@@ -557,7 +557,12 @@ function AuthorizedWorkspaceShell({
       {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-      {managementLocation ? (
+      {/* The playground is a sample product of its own, and "Let's build your
+          first agent" continues first-run setup: full screen, no rail. */}
+      {location.pathname === `/workspaces/${workspaceId}/playground` ||
+      location.pathname === `/workspaces/${workspaceId}/first-agent` ? (
+        children
+      ) : managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
           workspaceName={activeWorkspace?.name}

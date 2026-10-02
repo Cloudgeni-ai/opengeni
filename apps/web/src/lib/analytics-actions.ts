@@ -24,6 +24,19 @@ export const ANALYTICS_ACTIONS = [
   "connect_supergrok",
   "connect_ai_gateway",
   "connect_openrouter",
+  // First-run journey and the Get started checklist.
+  "choose_intent",
+  "open_get_started",
+  "dismiss_get_started",
+  "open_playground",
+  "create_api_key",
+  "copy_build_prompt",
+  "copy_coding_agent_setup",
+  "start_first_task",
+  "connect_github",
+  "open_first_agent",
+  "start_first_agent_chat",
+  "skip_first_agent",
 ] as const;
 
 export type AnalyticsAction = (typeof ANALYTICS_ACTIONS)[number];
