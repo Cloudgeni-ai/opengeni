@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { organizationApiKeyAllowsWorkspace } from "./organization-api-key-access";
 import { and, eq, sql } from "drizzle-orm";
 import {
   AppendArchivedSessionEventsRequest,
@@ -151,20 +152,38 @@ async function revalidateImporter(
 ): Promise<void> {
   if (scope.apiKeyId) {
     const key = await withAccountRls(tx, scope.accountId, async (keyTx) => {
-      const [row] = await rawRows<{ permissions: string[] }>(
+      const [row] = await rawRows<{
+        permissions: string[];
+        permission_mode: "legacy" | "explicit";
+        workspace_id: string | null;
+        workspace_scope: "all" | "selected";
+      }>(
         keyTx,
         sql`
-        select permissions from api_keys where account_id = ${scope.accountId}::uuid
+        select permissions, permission_mode, workspace_id, workspace_scope from api_keys where account_id = ${scope.accountId}::uuid
           and id = ${scope.apiKeyId}::uuid and (workspace_id is null or workspace_id = ${scope.workspaceId}::uuid)
           and revoked_at is null and (expires_at is null or expires_at > clock_timestamp()) for share`,
       );
+      if (
+        row?.workspace_id === null &&
+        !(await organizationApiKeyAllowsWorkspace(
+          keyTx,
+          {
+            id: scope.apiKeyId!,
+            accountId: scope.accountId,
+            workspaceScope: row.workspace_scope,
+          },
+          scope.workspaceId,
+        ))
+      )
+        return undefined;
       return row;
     });
     if (
       !key ||
       (scope.requiredPermission &&
         !key.permissions.includes(scope.requiredPermission) &&
-        !key.permissions.includes("workspace:admin"))
+        !(key.permission_mode === "legacy" && key.permissions.includes("workspace:admin")))
     ) {
       throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
     }

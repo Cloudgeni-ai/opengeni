@@ -66,6 +66,8 @@ export const HostMcpCreateSelections = z
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
+import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
+export * from "./organization-access";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -2842,6 +2844,8 @@ export const AccessGrant = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
+  /** Explicit policies do not expand workspace:admin into unselected permissions. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
   // Trusted principal provenance. Delegated grants copy this from the signed
   // token claim; managed/local grants derive it from their authenticated path.
   principalKind: AccessPrincipalKind.optional(),
@@ -2879,6 +2883,8 @@ export const AccessCredential = z.object({
    * from organization-key authority. Account permissions remain in accountGrants.
    */
   effectiveWorkspacePermissions: z.array(Permission),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
   note: z.string(),
 });
 export type AccessCredential = z.infer<typeof AccessCredential>;
@@ -3485,6 +3491,10 @@ export const ApiKey = z.object({
    * Omitted for workspace-scoped keys, whose permissions are explicit.
    */
   access: OrganizationApiKeyAccess.optional(),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
+  /** Legacy keys retain their historical workspace-admin wildcard. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3517,13 +3527,28 @@ export const CreateOrganizationApiKeyRequest = z
     access: OrganizationApiKeyAccess.default("full"),
     /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
+    policy: OrganizationAccessPolicy.optional(),
   })
   .strict()
   .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
     path: ["access"],
     message: "Developer setup is not read-only organization API key access",
+  })
+  .refine((request) => !request.policy || (!request.preset && request.access === "full"), {
+    path: ["policy"],
+    message: "Choose either a policy or a legacy access tier/preset",
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
+
+export const UpdateOrganizationApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().min(1).max(500).nullable().optional(),
+    policy: OrganizationAccessPolicy.optional(),
+  })
+  .strict()
+  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+export type UpdateOrganizationApiKeyRequest = z.infer<typeof UpdateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People

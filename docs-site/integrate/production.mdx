@@ -9,6 +9,7 @@ icon: "rocket"
 - Keep the organization API key in your secret manager and load it only on the server. Never ship it in a browser bundle, a Skill, a prompt, or `modelContext`.
 - Use a **workspace API key** instead for a component that should reach only one workspace, and a **read-only organization key** for reporting.
 - Rotate by creating a new key, deploying it, and deleting the old one with `deleteOrganizationApiKey`. Keys can also carry an expiry.
+- Narrow permissions or shared-workspace scope with `updateOrganizationApiKey`; the next request uses the edited policy without token rotation. Metadata-only edits preserve legacy grants; supplying a policy switches legacy keys to exact, explicit permissions. Selected scope excludes future workspaces; all scope includes them. Personal workspaces are always excluded.
 
 See [Authentication](/reference/authentication).
 

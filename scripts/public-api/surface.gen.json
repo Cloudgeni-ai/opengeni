@@ -307,6 +307,30 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "sdk": [
+        "OpenGeniClient.getOrganizationApiKey"
+      ],
+      "request": [],
+      "response": [
+        "ApiKey"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationApiKey"
+      ],
+      "request": [
+        "UpdateOrganizationApiKeyRequest"
+      ],
+      "response": [
+        "ApiKey"
+      ]
+    },
+    {
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
@@ -7815,7 +7839,9 @@
         "$.effectiveWorkspacePermissions[]": "ref(Permission)",
         "$.kind": "enum!=[\"\\\"organization_api_key\\\"\",\"\\\"workspace_api_key\\\"\"]",
         "$.note": "string!",
-        "$.workspaceId": "string! null"
+        "$.policy": "unknown?",
+        "$.workspaceId": "string! null",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
       }
     },
     "AccessGrant": {
@@ -7827,6 +7853,7 @@
         "$.accountId": "string!",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
+        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.principalKind": "ref(AccessPrincipalKind)?",
@@ -8414,12 +8441,15 @@
         "$.id": "string!",
         "$.lastUsedAt": "string! null",
         "$.name": "string!",
+        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
+        "$.policy": "unknown?",
         "$.prefix": "string!",
         "$.revokedAt": "string! null",
         "$.updatedAt": "string!",
-        "$.workspaceId": "string! null"
+        "$.workspaceId": "string! null",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
       }
     },
     "AppendArchivedSessionEventsRequest": {
@@ -11741,6 +11771,7 @@
         "$.description": "string?",
         "$.expiresAt": "string?",
         "$.name": "string!",
+        "$.policy": "ref(OrganizationAccessPolicy)?",
         "$.preset": "enum?=[\"\\\"developer_setup\\\"\"]"
       }
     },
@@ -16907,6 +16938,26 @@
         "$.expiresAt": "string!"
       }
     },
+    "OrganizationAccessPolicy": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.permissions": "array!",
+        "$.permissions[]": "ref(Permission)",
+        "$.preset": "ref(OrganizationAccessPreset)!",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)!"
+      }
+    },
+    "OrganizationAccessPreset": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"custom\\\"\",\"\\\"full\\\"\",\"\\\"read_only\\\"\"]"
+      }
+    },
     "OrganizationAdministrationMember": {
       "io": [
         "output"
@@ -17530,6 +17581,21 @@
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.role": "ref(AssignableWorkspaceMemberRole)!"
+      }
+    },
+    "OrganizationWorkspaceScope": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=all\",\"kind=selected\"]",
+        "$|kind=all": "object",
+        "$|kind=all.kind": "const!=[\"\\\"all\\\"\"]",
+        "$|kind=selected": "object",
+        "$|kind=selected.kind": "const!=[\"\\\"selected\\\"\"]",
+        "$|kind=selected.workspaceIds": "array!",
+        "$|kind=selected.workspaceIds[]": "string"
       }
     },
     "Permission": {
@@ -22352,6 +22418,17 @@
         "$.status": "ref(TaskNoteStatus)?"
       }
     },
+    "UpdateOrganizationApiKeyRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.name": "string?",
+        "$.policy": "ref(OrganizationAccessPolicy)?"
+      }
+    },
     "UpdateOrganizationIntegrationPolicyRequest": {
       "io": [
         "input"
@@ -25585,6 +25662,9 @@
       "OpenGeniToolsFacade": "type",
       "OpenGeniToolTransport": "type",
       "OpenGeniWorkspaceTools": "type",
+      "OrganizationAccessPolicy": "type",
+      "OrganizationAccessPreset": "type",
+      "OrganizationActor": "type",
       "OrganizationAdministrationMember": "type",
       "OrganizationAdministrationMemberWorkspaceAccess": "type",
       "OrganizationAdministrationOverview": "type",
@@ -25618,6 +25698,7 @@
       "OrganizationWorkspaceAccess": "type",
       "OrganizationWorkspaceAccessMember": "type",
       "OrganizationWorkspaceRoleDefinition": "type",
+      "OrganizationWorkspaceScope": "type",
       "parseBrowserFrameMetadata": "value",
       "parseCodexRealtimeV3Event": "value",
       "parseComputerFrameMetadata": "value",
@@ -26068,6 +26149,7 @@
       "UpdateMachineOperationPolicyRequest": "type",
       "UpdateMemorySlackPublicationConfigurationRequest": "type",
       "UpdateNetworkRouteRequest": "type",
+      "UpdateOrganizationApiKeyRequest": "type",
       "UpdateOrganizationNameRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationWebhookRequest": "type",
@@ -29175,6 +29257,7 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationApiKey",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
@@ -29503,6 +29586,7 @@
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
+      "updateOrganizationApiKey",
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",

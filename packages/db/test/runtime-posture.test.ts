@@ -272,6 +272,7 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
     "api_keys",
+    "organization_api_key_workspaces",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -514,6 +515,9 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
           name,
         ),
+        ...(name === "revoke_empty_organization_api_key_workspace_scope()"
+          ? { configuration: ["search_path=pg_catalog, public, pg_temp"] }
+          : {}),
       })),
     ],
     privateRoutines: [
@@ -686,6 +690,37 @@ describe("runtime database posture evaluator", () => {
         ),
         expect.stringContaining("helper reverse_video_allowance_refund() owner wrong_owner"),
       ]),
+    );
+  });
+
+  test("organization key scope lifecycle requires same-owner fixed-path trigger-only authority", () => {
+    const signature = "revoke_empty_organization_api_key_workspace_scope()";
+    for (const patch of [
+      { execute: true },
+      { publicExecute: true },
+      { securityDefiner: false },
+      { owner: "another_owner" },
+      { configuration: [] },
+      { configuration: ["search_path=public, pg_catalog"] },
+      { configuration: ["search_path=pg_catalog, public, untrusted, pg_temp"] },
+    ]) {
+      const posture = safePosture();
+      Object.assign(posture.targetRoutines.find((routine) => routine.name === signature)!, patch);
+      expect(evaluateRuntimeDatabasePosture(posture, options).length).toBeGreaterThan(0);
+    }
+    for (const name of ["api_keys", "organization_api_key_workspaces"]) {
+      const posture = safePosture();
+      posture.tables.find((table) => table.name === name)!.owner = "another_owner";
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "organization API key scope lifecycle lacks same-owner fixed-path authority",
+      );
+    }
+    const missing = safePosture();
+    missing.tables = missing.tables.filter(
+      (table) => table.name !== "organization_api_key_workspaces",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "organization API key scope lifecycle lacks same-owner fixed-path authority",
     );
   });
   test("usage allowance capability rejects direct runtime access and split lifecycle ownership", () => {
@@ -1006,6 +1041,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0587 adds the tenant-consistent organization key scope join.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
           (tables === FORCE_RLS_TABLES ||
@@ -1113,6 +1154,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // 0587 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1121,6 +1163,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 0587 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1281,10 +1324,16 @@ describe("runtime database posture evaluator", () => {
       { ...posture.schemas[0]!, name: "Tenant Space" },
     );
     routine.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
+    posture.targetRoutines.find(
+      (item) => item.name === "revoke_empty_organization_api_key_workspace_scope()",
+    )!.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "tenantx" }),
     ).toEqual([]);
     routine.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
+    posture.targetRoutines.find(
+      (item) => item.name === "revoke_empty_organization_api_key_workspace_scope()",
+    )!.configuration = ['search_path=pg_catalog, "Tenant Space", pg_temp'];
     expect(
       evaluateRuntimeDatabasePosture(posture, { ...options, targetSchema: "Tenant Space" }),
     ).toEqual([]);
@@ -1653,6 +1702,9 @@ describe("runtime database posture evaluator", () => {
   test("keeps dedicated-schema same-owner authority accepted", () => {
     const posture = safePosture();
     posture.schemas[0]!.name = "tenantx";
+    posture.targetRoutines.find(
+      (item) => item.name === "revoke_empty_organization_api_key_workspace_scope()",
+    )!.configuration = ["search_path=pg_catalog, tenantx, pg_temp"];
 
     expect(
       evaluateRuntimeDatabasePosture(posture, {

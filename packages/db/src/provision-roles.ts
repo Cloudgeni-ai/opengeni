@@ -707,6 +707,11 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Deferred organization-key scope lifecycle is trigger-only owner
+    -- authority, never a directly callable application capability.
+    IF to_regprocedure(format('%I.revoke_empty_organization_api_key_workspace_scope()', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_empty_organization_api_key_workspace_scope() FROM PUBLIC, %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(format('%I.usage_allowance_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.usage_allowance_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_period(jsonb,timestamptz), %I.count_workspace_allowance_debit() FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});

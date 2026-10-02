@@ -272,25 +272,20 @@ Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 
 ### 3.6 Tenancy and authority are established before resource access
 
-Workspace-scoped access is the ordinary boundary. The API resolves an
-authenticated principal into an access context and a permissioned grant before
-domain code touches workspace data. Postgres FORCE RLS provides a second,
-transaction-local boundary; a resource UUID by itself never authorizes access.
+Workspace operations require API-resolved authenticated access contexts and grants
+before data access. Transaction-local Postgres FORCE RLS adds defense-in-depth;
+resource UUIDs grant nothing.
 
-Organization membership, workspace membership, API keys, delegated grants,
-private-session ownership, and personal-resource grants are distinct facts.
-Organization keys with `workspace:admin` may configure their organization's
-private-session product setting through the normal settings API. The shared
-database administrator fence rechecks the live key even on command replay;
-changing this setting grants no access to private session contents.
-Sharing preserves accepted execution and connection selections while advancing
-the viewer-access epoch. A separate execution epoch floor advances on
-privatization or authority revocation. Privatization still requires quiescence
-and clears staged personal selections; neither path rewrites accepted receipts.
-Do not infer human authority from session creation, current UI identity, a
-worker process, a connection row, or provenance metadata. A turn freezes its
-initiating principal and the authority snapshots needed by later execution and
-recovery.
+Organization/workspace membership, API keys, delegated grants, private-session
+ownership and personal-resource grants remain distinct. Organization keys with
+`workspace:admin` may change private-session product settings; DB fences recheck
+live keys, including replay. This grants no private-content access.
+Sharing advances viewer-access epoch while preserving accepted execution and
+connection selections. Privatization/revocation advance the execution-epoch floor;
+privatization requires quiescence and clears staged personal selections.
+Neither rewrites receipts. Session creation, UI identity, workers, connection rows
+and provenance never imply human authority. Turns freeze initiating principals
+and execution/recovery authority snapshots.
 
 Organization settings owns the cross-workspace roster and roles. A managed
 browser administrator is the ordinary authority. Single-user local deployments
@@ -1731,6 +1726,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
+| Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |

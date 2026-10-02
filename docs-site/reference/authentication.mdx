@@ -20,7 +20,7 @@ Session operations are workspace-scoped; organization routes manage shared works
 
 | Credential             | Transport                       | Lifetime                 | Notes                                                                                                                                                                                                        |
 | ---------------------- | ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Organization API key   | `Authorization: Bearer ogk_...` | Until revoked or expired | Created through organization settings or the organization API-key routes. Shown once, stored hashed. Full or read-only access to organization workspaces; Personal workspaces are excluded. Server-side only |
+| Organization API key   | `Authorization: Bearer ogk_...` | Until revoked or expired | Shown once, stored hashed. Explicit permissions across all or selected shared workspaces, or a legacy access tier. Personal workspaces are excluded. Server-side only |
 | Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                                                       |
 | Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                                                       |
 | Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                                                          |
@@ -55,7 +55,38 @@ access. Manage those connections separately.
 
 ## Organization key access
 
-Choose an access tier when creating an organization key:
+An explicit organization-key policy selects both permissions and workspace scope:
+
+```ts
+const { apiKey, token } = await adminClient.createOrganizationApiKey(organizationId, {
+  name: "Tenant reporting",
+  policy: {
+    preset: "custom",
+    permissions: ["workspace:read", "sessions:read", "files:read"],
+    workspaceScope: { kind: "selected", workspaceIds: [authorizedWorkspaceId] },
+  },
+});
+// Store token on the server; it is returned only at creation.
+```
+
+| Policy preset | Permissions |
+| --- | --- |
+| `read_only` | Every canonical read/list/view/search permission, including `secrets:read` and `variable-sets:read` |
+| `full` | Every canonical, non-deprecated permission |
+| `custom` | Exactly your chosen permissions; no implicit grants or workspace scope |
+
+The preset label never adds permissions. The server canonicalizes the supplied
+list and recomputes the label; even `preset: "full"` grants only the permissions
+you send. Under an explicit policy, every permission—including `workspace:admin`—is
+chosen individually; admin is not a wildcard. `read_only` includes plaintext-secret
+reads, so use a custom list if a reporting backend should not read secrets.
+
+Scope `{ kind: "all" }` includes all current and future shared workspaces in the
+organization. `{ kind: "selected", workspaceIds }` accepts 1..500 unique existing
+shared-workspace IDs from that same organization. Missing, cross-organization,
+and Personal IDs are rejected. Neither scope includes Personal workspaces.
+
+For existing integrations, the legacy creation selectors remain supported:
 
 | `access`            | Use                                                                                                                                                                         |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -63,9 +94,33 @@ Choose an access tier when creating an organization key:
 | `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                                                               |
 | `"developer_setup"` | What the `opengeni-setup` skill creates while you build: workspaces, members, sessions, and usage allowances, but no key management and only limited permissions for agents |
 
-Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for product integrations, which create tenant workspaces and send messages.
+Omitting policy and legacy selectors keeps full legacy semantics. The top-level
+`preset: "developer_setup"` alias also remains available. Do not combine an
+explicit policy with legacy selectors. The legacy `access: "read"` tier reads
+sessions and files, unlike the broader explicit `read_only` preset.
 
-Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` to discover readable sessions across the organization's shared workspaces. Personal workspaces and Only me sessions are excluded. Agent access scopes and end-user filters do not restrict the organization key's authority.
+Use all-shared-workspace scope and full permissions for integrations that
+provision tenant workspaces, onboard members, and create sessions as users.
+
+Keys with session-read authority can use `listOrganizationSessions` or
+`iterateOrganizationSessions` across their authorized shared workspaces. Personal
+workspaces and Only me sessions are excluded. Agent access scopes and end-user
+labels do not replace the key's live policy or workspace scope.
+
+### Inspect and edit a key
+
+`getOrganizationApiKey(organizationId, apiKeyId)` returns its metadata and policy.
+`updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
+accepts at least one change; `description: null` clears the description. Both
+return the raw `ApiKey`, without a wrapper or secret token. Only creation returns
+`{ apiKey, token }`.
+
+A policy edit replaces the complete policy and applies permission or scope
+narrowing on the next request, without rotating the token. Name/description-only
+edits preserve legacy stored permissions and the historical admin wildcard.
+Supplying a policy changes a legacy key to explicit semantics; every permission
+must be selected individually. Inspect optional `apiKey.permissionMode`
+(`legacy` or `explicit`), `apiKey.policy`, and `apiKey.workspaceScope`.
 
 ### Inspect direct API-key authority
 
@@ -73,15 +128,16 @@ Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` t
 for direct organization and workspace API-key requests. Existing `accountGrants`
 and `workspaceGrants` are unchanged; an organization key's `workspaceGrants` may
 be empty even when it can access shared workspaces. Use `listWorkspaces()` for
-the inventory.
+the inventory allowed by the key's live scope.
 
 The credential contains `kind` (`organization_api_key` or `workspace_api_key`),
 organization-only `access` (`full`, `read`, or `developer_setup`), `accountId`, `workspaceId`,
-`effectiveWorkspacePermissions`, and a plain-language `note`. An organization
-key's null `workspaceId` means all shared workspaces in the same organization,
-never Personal workspaces; a workspace key names its one workspace.
-`credential.effectiveWorkspacePermissions` expands `workspace:admin` into
-ordinary workspace permissions, excludes account-only permissions, and includes
+`effectiveWorkspacePermissions`, and a plain-language `note`. Organization keys
+also expose optional `policy` and `workspaceScope`. Their null `workspaceId`
+identifies an organization key, not an all-workspaces grant: consult the scope.
+Personal workspaces are always excluded; a workspace key names its one workspace.
+`credential.effectiveWorkspacePermissions` expands `workspace:admin` only for
+legacy keys, preserves exact explicit-policy grants, excludes account-only permissions, and includes
 `secrets:read` only when explicitly granted. Full organization keys include
 `sessions:create` and `members:manage`: they can provision workspaces, external
 members, and `asUser` sessions. User requests additionally require live membership
@@ -130,7 +186,7 @@ separate from ordinary user chat requests.
 
 ## Rules that hold everywhere
 
-- Organization keys stay on the product server. List, create, and revoke them through the organization control plane; never embed one in a client.
+- Organization keys stay on the product server. List, inspect, create, edit, and revoke them through the organization control plane; never embed one in a client.
 - A delegated token cannot grant more than the host was configured to delegate, and it never receives a managed human's personal-workspace authority.
 - Every request is constrained by normal route authorization after authentication. A valid credential for one workspace does not reach another.
 - Secrets an agent uses at runtime (provider tokens, MCP headers, variable sets) are encrypted at rest, are read only by explicit permissioned operations, and never appear in audit rows.

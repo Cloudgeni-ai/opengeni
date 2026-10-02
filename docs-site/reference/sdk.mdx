@@ -73,7 +73,7 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 
 | Area                         | Highlights                                                                                                                                    |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace`                                  |
+| Organizations and workspaces | Organization API-key create/list/get/update/delete and explicit access policies, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace` |
 | Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                         |
 | Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                |
 | Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools` |

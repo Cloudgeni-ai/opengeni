@@ -40,6 +40,7 @@ import {
 import {
   getManagedSession,
   accountScopedApiKeyWorkspaceAuthority,
+  organizationWorkspaceInScope,
   hasPermission,
   requireAccessContext,
   organizationMembershipHttpStatus,
@@ -109,6 +110,14 @@ async function requirePrivateSessionAdministrator(
       message: "organization administration required",
     });
   }
+  if (
+    key.permissionMode === "explicit" &&
+    !access.accountGrants.some(
+      (grant) => grant.accountId === organizationId && grant.permissions.includes("account:admin"),
+    )
+  ) {
+    throw new HTTPException(403, { message: "organization administration requires account:admin" });
+  }
   return { subjectId: access.subjectId };
 }
 
@@ -139,6 +148,8 @@ async function requireOrganizationKeyWorkspaceDeletion(
       message: "organization API keys cannot delete a Personal workspace",
     });
   }
+  if (!organizationWorkspaceInScope(key.workspaceScope, workspaceId))
+    throw new HTTPException(403, { message: "workspace is outside organization key scope" });
 }
 
 async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {

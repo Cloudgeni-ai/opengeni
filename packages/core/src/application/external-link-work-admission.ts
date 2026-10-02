@@ -22,6 +22,9 @@ function snapshotFor(authorization: AccessGrantAuthorization | undefined) {
     ? ExternalLinkWorkSnapshot.parse({
         ...continuation,
         permissions: [...authorization!.grant.permissions],
+        ...(authorization!.grant.permissionMode === "explicit"
+          ? { permissionMode: "explicit" }
+          : {}),
       })
     : null;
 }

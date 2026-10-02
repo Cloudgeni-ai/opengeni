@@ -7,10 +7,13 @@ import {
 } from "@opengeni/contracts/external-identities";
 import {
   verifyDelegatedAccessToken,
+  DEVELOPER_SETUP_API_KEY_PRESET,
+  organizationAccessPresetPermissions,
   type AccountGrant,
   type AccessContext,
   type AccessGrant,
   type OrganizationApiKeyAccess,
+  type OrganizationWorkspaceScope,
   OPENGENI_USER_ACTIVITY_ACTIVE,
   OPENGENI_USER_ACTIVITY_HEADER,
   Permission,
@@ -45,6 +48,13 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
 const developerSetupGrants = new WeakSet<AccessGrant>();
+// Request-local permission semantics. The durable grant carries permissionMode;
+// callers of the existing array API cannot accidentally expand a policy admin.
+const explicitPermissionSets = new WeakSet<readonly Permission[]>();
+function explicitPermissions(permissions: Permission[]): Permission[] {
+  explicitPermissionSets.add(permissions);
+  return permissions;
+}
 
 /** Only canonical authentication can prove setup-key provenance. */
 export function isDeveloperSetupApiKeyContext(context: AccessContext): boolean {
@@ -90,6 +100,30 @@ export function requireApiKeyDelegationContext(
   context: AccessContext,
   permissions: Permission[],
 ): void {
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  const external = externalActorContexts.get(context);
+  const ceiling = authority ?? external;
+  if (
+    ceiling?.permissionMode === "explicit" &&
+    permissions.some((permission) => !ceiling.permissions.includes(permission))
+  ) {
+    throw new HTTPException(403, {
+      message: "cannot delegate a permission outside the organization key policy",
+    });
+  }
+  if (
+    ceiling?.permissionMode === "explicit" &&
+    permissions.includes("workspace:admin") &&
+    organizationAccessPresetPermissions("full").some(
+      (permission) =>
+        !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
+        !ceiling.permissions.includes(permission),
+    )
+  ) {
+    throw new HTTPException(403, {
+      message: "cannot delegate a legacy workspace-admin wildcard from a custom policy",
+    });
+  }
   if (
     (hasPermission(permissions, "api_keys:manage") ||
       hasPermission(permissions, "members:manage")) &&
@@ -121,6 +155,33 @@ export function requireApiKeyDelegationContext(
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+/** Downstream legacy credentials cannot encode a partially selected admin. */
+export function requireExplicitPermissionDelegation(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+  requested: Permission[],
+): void {
+  if (
+    grant.permissionMode === "explicit" &&
+    requested.some((permission) => !grant.permissions.includes(permission))
+  ) {
+    throw new HTTPException(403, {
+      message: "cannot delegate a permission outside the organization key policy",
+    });
+  }
+  if (
+    grant.permissionMode === "explicit" &&
+    requested.includes("workspace:admin") &&
+    organizationAccessPresetPermissions("full").some(
+      (permission) =>
+        !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
+        !grant.permissions.includes(permission),
+    )
+  ) {
+    throw new HTTPException(403, {
+      message: "cannot delegate a legacy workspace-admin wildcard from a custom policy",
+    });
+  }
+}
 const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
 const externalActorContexts = new WeakMap<
   AccessContext,
@@ -128,6 +189,8 @@ const externalActorContexts = new WeakMap<
     identity: ExternalIdentity;
     keyId: string;
     permissions: Permission[];
+    workspaceScope: OrganizationWorkspaceScope;
+    permissionMode: "legacy" | "explicit";
     linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>>;
   }
 >();
@@ -202,7 +265,12 @@ export function hasVerifiedOwningUserAuthorization(
 }
 const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
-  Readonly<{ accountId: string; permissions: readonly Permission[] }>
+  Readonly<{
+    accountId: string;
+    permissions: readonly Permission[];
+    workspaceScope: OrganizationWorkspaceScope;
+    permissionMode: "legacy" | "explicit";
+  }>
 >();
 const apiKeyServiceContexts = new WeakMap<
   AccessContext,
@@ -244,7 +312,16 @@ const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
 export type AccountScopedApiKeyWorkspaceAuthority = Readonly<{
   accountId: string;
   permissions: Permission[];
+  workspaceScope: OrganizationWorkspaceScope;
+  permissionMode: "legacy" | "explicit";
 }>;
+
+export function organizationWorkspaceInScope(
+  scope: OrganizationWorkspaceScope,
+  workspaceId: string,
+): boolean {
+  return scope.kind === "all" || scope.workspaceIds.includes(workspaceId.toLowerCase());
+}
 
 /**
  * Return account-scoped API-key workspace authority only for the exact
@@ -269,16 +346,22 @@ export function accountScopedApiKeyWorkspaceAuthority(
   }
   return {
     accountId: authority.accountId,
-    permissions: [...authority.permissions],
+    permissions:
+      authority.permissionMode === "explicit"
+        ? explicitPermissions([...authority.permissions])
+        : [...authority.permissions],
+    workspaceScope: authority.workspaceScope,
+    permissionMode: authority.permissionMode,
   };
 }
 
 /** Classify stored scopes without changing the legacy full/read permission sets. */
 export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
   if (
-    permissions.includes("workspace:admin") &&
-    permissions.includes("usage_allowances:manage") &&
-    !permissions.includes("api_keys:manage")
+    permissions.length === DEVELOPER_SETUP_API_KEY_PRESET.permissions.length &&
+    DEVELOPER_SETUP_API_KEY_PRESET.permissions.every((permission) =>
+      permissions.includes(permission),
+    )
   )
     return "developer_setup";
   return permissions.includes("workspace:admin") ? "full" : "read";
@@ -327,10 +410,16 @@ export async function listExternalActorWorkspaces(
   const personal = await withAccountRls(deps.db, actor.identity.accountId, (tx) =>
     requireWorkspace(tx, actor.linked?.personalWorkspaceId ?? actor.identity.personalWorkspaceId),
   );
-  if (personal.accountId === actor.identity.accountId && personal.kind === "personal")
+  if (
+    personal.accountId === actor.identity.accountId &&
+    personal.kind === "personal" &&
+    actor.permissionMode === "legacy" &&
+    organizationWorkspaceInScope(actor.workspaceScope, personal.id)
+  )
     authorized.push(personal);
   for (const workspace of candidates) {
     if (workspace.accountId !== actor.identity.accountId || workspace.kind !== "shared") continue;
+    if (!organizationWorkspaceInScope(actor.workspaceScope, workspace.id)) continue;
     const grant = await withWorkspaceSubjectRls(deps.db, workspace.id, context.subjectId, (tx) =>
       getWorkspaceGrant(tx, context.subjectId, workspace.id),
     );
@@ -590,6 +679,16 @@ async function accessGrantAuthorization(
 ): Promise<AccessGrantAuthorization> {
   const external = externalActorContexts.get(context);
   if (external) {
+    if (!organizationWorkspaceInScope(external.workspaceScope, workspaceId)) {
+      throw new HTTPException(403, { message: "workspace is outside organization key scope" });
+    }
+    if (external.permissionMode === "explicit") {
+      const workspace = await requireWorkspace(deps.db, workspaceId);
+      if (workspace.kind !== "shared" || workspace.accountId !== external.identity.accountId)
+        throw new HTTPException(403, {
+          message: "organization policy requires a shared workspace",
+        });
+    }
     const grant: AccessGrant | null =
       workspaceId ===
       (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId)
@@ -617,11 +716,39 @@ async function accessGrantAuthorization(
         hasPermission(external.permissions, value) &&
         (!external.linked || hasPermission(external.linked.link.permissions, value)),
     );
+    if (external.permissionMode === "explicit") {
+      grant.permissionMode = "explicit";
+      explicitPermissions(grant.permissions);
+    }
     grant.metadata = {
       ...grant.metadata,
       externalActor: attributionForExternalContext(context),
     };
     if (permission) requirePermission(grant, permission);
+    return accessGrantAuthorizationFromContext(context, grant);
+  }
+  const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
+  if (organizationKey) {
+    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    if (!workspace) throw new HTTPException(404, { message: "workspace not found" });
+    if (
+      workspace.accountId !== organizationKey.accountId ||
+      workspace.kind !== "shared" ||
+      !organizationWorkspaceInScope(organizationKey.workspaceScope, workspace.id)
+    ) {
+      throw new HTTPException(403, { message: "workspace is outside organization key scope" });
+    }
+    const grant: AccessGrant = {
+      accountId: workspace.accountId,
+      workspaceId,
+      subjectId: context.subjectId,
+      ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+      principalKind: "api_key",
+      permissions: organizationKey.permissions,
+      permissionMode: organizationKey.permissionMode,
+      ...apiKeyServiceContexts.get(context),
+    };
+    requirePermission(grant, permission ?? "workspace:read");
     return accessGrantAuthorizationFromContext(context, grant);
   }
   const principalKind = hostedHumanSessionPrincipalKind(context);
@@ -751,6 +878,7 @@ function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session
 }
 
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
+  if (grant.permissionMode === "explicit") explicitPermissions(grant.permissions);
   if (!hasPermission(grant.permissions, permission)) {
     if (permission === "variable-sets:use") {
       throw new HTTPException(403, {
@@ -782,13 +910,22 @@ export function requireLiteralPermission(grant: AccessGrant, permission: Permiss
   }
 }
 
-export function hasLiteralPermission(permissions: Permission[], permission: Permission): boolean {
+export function hasLiteralPermission(
+  permissions: readonly Permission[],
+  permission: Permission,
+): boolean {
   if (!Array.isArray(permissions)) return false;
   return permissions.includes(permission);
 }
 
-export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+export function hasPermission(
+  permissions: readonly Permission[],
+  permission: Permission,
+  permissionMode?: AccessGrant["permissionMode"],
+): boolean {
   if (!Array.isArray(permissions)) return false;
+  if (permissionMode === "explicit" || explicitPermissionSets.has(permissions))
+    return permissions.includes(permission);
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
@@ -991,7 +1128,12 @@ async function apiKeyAccessContext(
     externalActorContexts.set(context, {
       identity,
       keyId: apiKey.id,
-      permissions: [...apiKey.permissions],
+      permissions:
+        apiKey.permissionMode === "explicit"
+          ? explicitPermissions([...apiKey.permissions])
+          : [...apiKey.permissions],
+      workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
+      permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
     });
     if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
@@ -1047,6 +1189,8 @@ async function apiKeyAccessContext(
       context,
       Object.freeze({
         accountId: apiKey.accountId,
+        workspaceScope: apiKey.workspaceScope ?? { kind: "all" as const },
+        permissionMode: apiKey.permissionMode ?? "legacy",
         permissions: Object.freeze(
           apiKey.permissions.filter(
             (permission) => !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission),
@@ -1075,8 +1219,9 @@ async function apiKeyAccessContext(
           !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
           hasPermission(workspacePermissions, permission),
       ),
+      ...(authority ? { policy: apiKey.policy, workspaceScope: authority.workspaceScope } : {}),
       note: authority
-        ? "These permissions apply to every shared workspace in this organization, not Personal workspaces. workspaceGrants need not enumerate them; accountGrants report organization-level permissions. asUser requests also require user authority."
+        ? `These permissions apply to ${authority.workspaceScope.kind === "all" ? "every" : "selected"} shared workspace${authority.workspaceScope.kind === "all" ? "" : "s"} in this organization, not Personal workspaces. workspaceGrants need not enumerate them; accountGrants report organization-level permissions. asUser requests also require user authority.`
         : "These permissions apply only to the workspace identified by workspaceId; they grant no organization-wide workspace authority.",
     };
   }

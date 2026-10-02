@@ -4408,6 +4408,8 @@ export type AccessGrant = {
   subjectId: string;
   subjectLabel?: string | undefined;
   permissions: Permission[];
+  /** Explicit policies never expand `workspace:admin` into unselected permissions. */
+  permissionMode?: "legacy" | "explicit" | undefined;
   principalKind?: AccessPrincipalKind | undefined;
   metadata?: Record<string, unknown> | undefined;
   serviceInitiator?: ServiceTurnInitiator | undefined;
@@ -4428,14 +4430,18 @@ export type AccessCredential = {
   access?: OrganizationApiKeyAccess | undefined;
   /** The key's organization id. */
   accountId: string;
-  /** Null for an organization key: all shared workspaces in that organization, never Personal. */
+  /** Null for an organization key; `workspaceScope` selects shared workspaces, never Personal. */
   workspaceId: string | null;
   /**
-   * Workspace permissions after `workspace:admin` expansion. Excludes
+   * Effective workspace permissions, with admin expansion only for legacy keys. Excludes
    * account-only permissions and includes `secrets:read` only when explicitly
-   * granted. Full organization keys include `sessions:create` and `members:manage`.
+   * granted. Explicit policies grant exactly their selected permissions.
    */
   effectiveWorkspacePermissions: Permission[];
+  /** Organization keys only; the preset label never adds permissions. */
+  policy?: OrganizationAccessPolicy | undefined;
+  /** Organization keys only; omitted on older servers. */
+  workspaceScope?: OrganizationWorkspaceScope | undefined;
   /** Plain-language explanation of the key's scope and limits. */
   note: string;
 };
@@ -5068,7 +5074,7 @@ export type UpdateWorkspaceRequest = {
 };
 
 /**
- * Organization API key access tier, derived by the server from the key's
+ * Legacy organization API key access tier, derived by the server from the key's
  * permissions: `full` can provision shared workspaces, external members, and
  * `asUser` sessions (user requests additionally need live membership);
  * `read` only inventories shared workspaces and reads their sessions, events,
@@ -5078,6 +5084,27 @@ export type UpdateWorkspaceRequest = {
  * session visibility nor the explicit `secrets:read` permission requirement.
  */
 export type OrganizationApiKeyAccess = "full" | "read" | "developer_setup";
+
+/** Informational preset label; the server recomputes it from explicit permissions. */
+export type OrganizationAccessPreset = "read_only" | "full" | "custom";
+
+/** Organization-key scope always excludes Personal workspaces. */
+export type OrganizationWorkspaceScope =
+  | { kind: "all" }
+  | {
+      kind: "selected";
+      /** 1..500 unique shared-workspace IDs belonging to the same organization. */
+      workspaceIds: string[];
+    };
+
+export type OrganizationAccessPolicy = {
+  preset: OrganizationAccessPreset;
+  /** Exact grants, including `workspace:admin` individually; no implicit wildcard. */
+  permissions: Permission[];
+  workspaceScope: OrganizationWorkspaceScope;
+};
+
+export type OrganizationActor = "user" | "organization";
 
 export type ApiKey = {
   id: string;
@@ -5089,6 +5116,10 @@ export type ApiKey = {
   permissions: Permission[];
   /** Organization keys only; omitted for workspace-scoped keys. */
   access?: OrganizationApiKeyAccess | undefined;
+  policy?: OrganizationAccessPolicy | undefined;
+  workspaceScope?: OrganizationWorkspaceScope | undefined;
+  /** Legacy keys retain their historical workspace-admin wildcard. */
+  permissionMode?: "legacy" | "explicit" | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -5113,10 +5144,20 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
-  /** Omitted means `full`. */
+  /** With no policy, omitted means legacy `full`. */
   access?: OrganizationApiKeyAccess | undefined;
   /** Optional creation alias for the developer_setup access tier. */
   preset?: "developer_setup" | undefined;
+  /** Explicit grants and shared-workspace scope; do not combine with legacy access/preset. */
+  policy?: OrganizationAccessPolicy | undefined;
+};
+
+/** The server requires at least one change. Omitted fields stay unchanged. */
+export type UpdateOrganizationApiKeyRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  /** Replaces the policy and transitions a legacy key to explicit permission semantics. */
+  policy?: OrganizationAccessPolicy | undefined;
 };
 
 export type ListApiKeysResponse = {

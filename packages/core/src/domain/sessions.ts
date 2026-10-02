@@ -1,4 +1,5 @@
 import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
+import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
@@ -3114,7 +3115,11 @@ async function createSessionForRequestInFileScope(
       ? parentFirstPartyMcpPermissions.filter((permission) =>
           hasPermission(grant.permissions, permission),
         )
-      : null);
+      : grant.permissionMode === "explicit"
+        ? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+            hasPermission(grant.permissions, permission),
+          )
+        : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -3123,6 +3128,7 @@ async function createSessionForRequestInFileScope(
         "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
     });
   }
+  requireExplicitPermissionDelegation(grant, firstPartyMcpPermissions ?? []);
   for (const permission of firstPartyMcpPermissions ?? []) {
     if (!hasPermission(grant.permissions, permission)) {
       throw new HTTPException(403, {

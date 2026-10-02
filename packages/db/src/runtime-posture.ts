@@ -708,6 +708,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "revoke_empty_organization_api_key_workspace_scope()",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
@@ -936,6 +937,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
@@ -1254,6 +1256,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_credential_providers",
   "organization_model_provider_connection_operations",
@@ -2108,6 +2111,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
@@ -2119,7 +2123,8 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            p.prosecdef as security_definer
+            p.prosecdef as security_definer,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = ${targetSchema}
@@ -2143,6 +2148,7 @@ export async function inspectRuntimeDatabasePosture(
           execute: row.can_execute,
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
+          configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
@@ -2447,6 +2453,23 @@ export function evaluateRuntimeDatabasePosture(
     }
     if (routine.publicExecute) {
       violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
+    }
+    if (routine.name === "revoke_empty_organization_api_key_workspace_scope()") {
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const paths = [
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+      ];
+      if (
+        ["api_keys", "organization_api_key_workspaces"].some(
+          (name) => tableByName.get(name)?.owner !== routine.owner,
+        ) ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      ) {
+        violations.push(
+          "organization API key scope lifecycle lacks same-owner fixed-path authority",
+        );
+      }
     }
   }
   for (const expectedRoutine of targetSchemaCapabilityRoutines) {

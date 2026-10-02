@@ -244,6 +244,19 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
     expect(plan.missing).toEqual(["rig_list", "browser_read"]);
     expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   });
+  test("an explicit admin permission cannot widen scheduled task tools on refresh", () => {
+    const plan = planScheduledTaskOpenGeniTools({
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list"],
+        firstPartyMcpPermissions: ["sessions:read", "rigs:use"],
+      },
+      settings,
+      grantPermissions: ["workspace:admin", "sessions:read"],
+      grantPermissionMode: "explicit",
+      permissionsRequiredByTools,
+    });
+    expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+  });
 
   test("a narrowed permission boundary is never lifted when no tool is added", () => {
     // An operator-narrowed session (read-only here) created the task. The
