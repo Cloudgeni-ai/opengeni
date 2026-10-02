@@ -756,14 +756,6 @@ const PREVIEW_GROUPS: ReadonlyArray<{
         "No trial grant and no model: the model step first",
         "view=first-agent&path=cloud&use=work&step=ready&model=none",
       ],
-      [
-        "Your own coding agent: key, prompt, waiting",
-        "view=first-agent&path=build&use=product&product=have&step=own-agent&fill=1&builder=own&mcp=oauth",
-      ],
-      [
-        "Your own coding agent: it worked",
-        "view=first-agent&path=build&use=product&product=have&step=own-agent&fill=1&builder=own&appChat=1",
-      ],
     ],
   },
   {

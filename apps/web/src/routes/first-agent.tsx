@@ -3,12 +3,10 @@ import { Blocks, ChevronLeftIcon, CompassIcon, Loader2Icon } from "lucide-react"
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { apiBaseUrl } from "@/api";
 import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
 import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { Confetti } from "@/components/onboarding/confetti";
 import { OnboardingFrame, OnboardingStep } from "@/components/onboarding/onboarding-frame";
-import { OwnAgentSetup } from "@/components/onboarding/own-agent-setup";
 import { useGetStarted, type GetStartedState } from "@/components/onboarding/use-get-started";
 import { UseQuestion } from "@/components/onboarding/use-question";
 import { Button } from "@/components/ui/button";
@@ -18,11 +16,9 @@ import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { useAppContext } from "@/context";
 import { analyticsAction } from "@/lib/analytics-actions";
 import { userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
-import { apiOriginFor } from "@/lib/coding-agent-setup";
 import { queueComposerPrefill, queueComposerSend } from "@/lib/composer-prefill";
 import {
   buildsProduct,
-  composeCodingAgentPrompt,
   composeOpengeniPrompt,
   EMPTY_FIRST_AGENT,
   FIRST_AGENT_TASKS,
@@ -37,11 +33,11 @@ import {
 import { gitHubRepositoryResource } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 
-export const FIRST_AGENT_STEPS = ["use", "product", "details", "ready", "own-agent"] as const;
+export const FIRST_AGENT_STEPS = ["use", "product", "details", "ready"] as const;
 export type FirstAgentStep = (typeof FIRST_AGENT_STEPS)[number];
 
 /** Steps that belong to a product's agent, and so to the shared Development workspace. */
-const PRODUCT_STEPS: ReadonlySet<FirstAgentStep> = new Set(["details", "own-agent"]);
+const PRODUCT_STEPS: ReadonlySet<FirstAgentStep> = new Set(["details"]);
 
 /**
  * First run inside the app (`/workspaces/:id/first-agent`), after the first
@@ -54,7 +50,6 @@ const PRODUCT_STEPS: ReadonlySet<FirstAgentStep> = new Set(["details", "own-agen
  *   confetti) and starts them off: the building chat for a product, first
  *   chats to pick otherwise. Without credits or a usable model it is the
  *   model step first, so nobody is stuck.
- * - `own-agent`: build it with your own coding agent instead.
  *
  * Every step has Skip, which goes to `ready`; every way out of `ready` lands
  * in a chat or a ready composer with GPT-6 Luna at extra high reasoning when
@@ -185,10 +180,6 @@ export function FirstAgentRoute({
             outcome: "session",
           })
         }
-        onOwnAgent={() => {
-          state.updateFirstAgent({ builder: "own" });
-          go("own-agent", productWorkspaceId);
-        }}
         onOpenApp={() => {
           // Skipping keeps what was entered: a product's prompt waits in the
           // new chat's draft, unsent.
@@ -203,18 +194,6 @@ export function FirstAgentRoute({
             },
           );
         }}
-      />
-    );
-  } else if (step === "own-agent") {
-    content = (
-      <OwnAgentStep
-        state={state}
-        workspaceId={productWorkspaceId}
-        answers={answers}
-        onBack={() => go("ready", productWorkspaceId)}
-        onContinue={() =>
-          void handOff(productWorkspaceId, null, { send: false, outcome: "own_agent" })
-        }
       />
     );
   } else {
@@ -629,7 +608,6 @@ function ReadyStep({
   answers,
   busy,
   onBuild,
-  onOwnAgent,
   onOpenApp,
 }: {
   state: GetStartedState;
@@ -637,7 +615,6 @@ function ReadyStep({
   answers: FirstAgentAnswers;
   busy: boolean;
   onBuild: () => void;
-  onOwnAgent: () => void;
   onOpenApp: () => void;
 }) {
   const context = useAppContext();
@@ -685,26 +662,16 @@ function ReadyStep({
         title={amount ? `You got ${amount} in free credits` : "You're all set"}
       >
         {builds ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              disabled={busy}
-              onClick={onBuild}
-              {...analyticsAction("start_first_agent_chat")}
-            >
-              {busy ? <Loader2Icon className="size-4 animate-spin" aria-hidden="true" /> : null}
-              Start building
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              className="text-fg-muted pointer-coarse:h-11"
-              disabled={busy}
-              onClick={onOwnAgent}
-            >
-              Use your own coding agent instead
-            </Button>
-          </div>
+          <Button
+            type="button"
+            className="w-full"
+            disabled={busy}
+            onClick={onBuild}
+            {...analyticsAction("start_first_agent_chat")}
+          >
+            {busy ? <Loader2Icon className="size-4 animate-spin" aria-hidden="true" /> : null}
+            Start building
+          </Button>
         ) : (
           <Button
             type="button"
@@ -719,47 +686,5 @@ function ReadyStep({
         )}
       </OnboardingStep>
     </>
-  );
-}
-
-function OwnAgentStep({
-  state,
-  workspaceId,
-  answers,
-  onBack,
-  onContinue,
-}: {
-  state: GetStartedState;
-  workspaceId: string;
-  answers: FirstAgentAnswers;
-  onBack: () => void;
-  onContinue: () => void;
-}) {
-  const organizationId = state.organizationId;
-  const apiOrigin = apiOriginFor(apiBaseUrl, window.location.origin);
-  const seen = Boolean(state.journey?.marks.first_api_session);
-  return (
-    <OnboardingStep
-      stepKey="first-agent-own"
-      title="Build it with your coding agent"
-      className="max-w-[640px]"
-    >
-      {organizationId ? (
-        <OwnAgentSetup
-          organizationId={organizationId}
-          workspaceId={workspaceId}
-          canCreateApiKeys={state.canCreateApiKeys}
-          prompt={composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId })}
-          mcpUrl={state.codingAgent.oauth ? state.codingAgent.mcpUrl : null}
-          firstSessionSeen={seen}
-          onMark={state.mark}
-        />
-      ) : null}
-      <StepFooter onBack={onBack}>
-        <Button type="button" variant={seen ? "default" : "outline"} onClick={onContinue}>
-          Continue in Opengeni
-        </Button>
-      </StepFooter>
-    </OnboardingStep>
   );
 }

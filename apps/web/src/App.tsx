@@ -497,7 +497,7 @@ const workspacePlaygroundRoute = createRoute({
   path: "playground",
   component: Playground,
 });
-const FIRST_AGENT_ROUTE_STEPS = new Set(["product", "details", "ready", "own-agent"]);
+const FIRST_AGENT_ROUTE_STEPS = new Set(["product", "details", "ready"]);
 const workspaceFirstAgentRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "first-agent",
@@ -909,7 +909,7 @@ function FirstAgent() {
   return (
     <LazyFirstAgentRoute
       workspaceId={workspaceId}
-      step={(step ?? "use") as "use" | "product" | "details" | "ready" | "own-agent"}
+      step={(step ?? "use") as "use" | "product" | "details" | "ready"}
     />
   );
 }

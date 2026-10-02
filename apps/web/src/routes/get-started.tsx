@@ -34,7 +34,6 @@ import {
 const STEP_ANCHORS: Record<GetStartedItemId, string> = {
   path: "path",
   model: "model",
-  credits: "credits",
   github: "github",
   first_task: "first-task",
   playground: "playground",
@@ -200,45 +199,44 @@ function StepBody({
         </Actions>
       );
     case "model": {
+      // Shown only while nothing pays for models: credits first, then any
+      // subscription or key.
       if (!state.canManageModels || item.done) return null;
-      const intents = state.journey?.intents ?? [];
-      const codexFirst =
-        intents.includes("cloud") && !intents.includes("build") && state.codexEnabled;
       return (
-        <Actions>
-          <Button asChild size="sm">
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              search={
-                {
-                  section: "models",
-                  view: codexFirst ? "connect-org:codex" : "connect",
-                  from: `/workspaces/${workspaceId}/get-started`,
-                  fromLabel: "Get started",
-                } as never
-              }
-              {...analyticsAction(codexFirst ? "connect_codex" : "connect_model")}
-            >
-              {codexFirst ? "Connect ChatGPT" : "Connect a model"}
-            </Link>
-          </Button>
-        </Actions>
+        <div className="mt-4 grid max-w-[400px] gap-3">
+          {state.credits.sold && state.organizationId ? (
+            <OpengeniCreditsPanel
+              credits={state.credits}
+              organizationId={state.organizationId}
+              margin={state.credits.margin}
+              showPrice={false}
+              successUrl={`${window.location.origin}/workspaces/${workspaceId}/get-started?step=model`}
+              cancelUrl={`${window.location.origin}/workspaces/${workspaceId}/get-started?step=model`}
+              beforeCheckout={async () => state.mark("credits_checkout")}
+            />
+          ) : null}
+          <div>
+            <Button asChild size="sm" variant={state.credits.sold ? "outline" : "default"}>
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={
+                  {
+                    section: "models",
+                    view: "connect",
+                    from: `/workspaces/${workspaceId}/get-started`,
+                    fromLabel: "Get started",
+                  } as never
+                }
+                {...analyticsAction("connect_model")}
+              >
+                Connect a model
+              </Link>
+            </Button>
+          </div>
+        </div>
       );
     }
-    case "credits":
-      return item.done || !state.organizationId ? null : (
-        <OpengeniCreditsPanel
-          className="mt-4 max-w-[400px]"
-          credits={state.credits}
-          organizationId={state.organizationId}
-          margin={state.credits.margin}
-          showPrice={false}
-          successUrl={`${window.location.origin}/workspaces/${workspaceId}/get-started?step=credits`}
-          cancelUrl={`${window.location.origin}/workspaces/${workspaceId}/get-started?step=credits`}
-          beforeCheckout={async () => state.mark("credits_checkout")}
-        />
-      );
     case "github":
       return <GitHubStep done={item.done === true} state={state} workspaceId={workspaceId} />;
     case "first_task":

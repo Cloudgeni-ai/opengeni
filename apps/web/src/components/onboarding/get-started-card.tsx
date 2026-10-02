@@ -67,29 +67,9 @@ function GetStartedCardView({
       case "path":
         return { kind: "link", to: "/workspaces/$workspaceId/first-agent" };
       case "model":
-        return state.canManageModels && !item.done
-          ? {
-              kind: "link",
-              to: "/workspaces/$workspaceId/organization",
-              search: {
-                section: "models",
-                view:
-                  journey?.intents.includes("cloud") &&
-                  !journey.intents.includes("build") &&
-                  state.codexEnabled
-                    ? "connect-org:codex"
-                    : "connect",
-                from: `/workspaces/${workspaceId}/sessions`,
-                fromLabel: "New session",
-              },
-            }
+        return state.canManageModels
+          ? { kind: "link", to: "/workspaces/$workspaceId/get-started", search: { step: "model" } }
           : { kind: "none" };
-      case "credits":
-        return {
-          kind: "link",
-          to: "/workspaces/$workspaceId/get-started",
-          search: { step: "credits" },
-        };
       case "first_task":
         return { kind: "expand", open: tasksOpen, onClick: () => setTasksOpen((open) => !open) };
       case "playground":

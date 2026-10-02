@@ -125,80 +125,31 @@ describe("Get started checklist", () => {
     ).toBe(true);
   });
 
-  test("Buy credits appears while nothing pays for models, and only when it is true", () => {
-    const credits = (overrides: Partial<GetStartedFacts>) =>
+  test("no model step while anything pays for models; one fallback item when nothing does", () => {
+    const model = (overrides: Partial<GetStartedFacts>) =>
       getStartedItems(facts({ journey: journey({ intents: ["build"] }), ...overrides })).find(
-        (item) => item.id === "credits",
+        (item) => item.id === "model",
       );
     const empty = { balanceMicros: 0, currency: "USD" };
-    // No model, no balance, credits sold: buy them.
-    expect(credits({ credits: { canBuy: true, balance: empty, margin: "5%" } })).toMatchObject({
-      title: "Buy Opengeni credits",
-      description: "Pay as you go: the model provider's price plus 5%. No provider account needed.",
+    const trial = { balanceMicros: 10_000_000, currency: "USD" };
+    // Nothing pays: one clear item, so nobody is stuck.
+    expect(model({ credits: { canBuy: true, balance: empty, margin: "5%" } })).toMatchObject({
+      title: "Add credits or connect a model",
+      description: "Buy Opengeni credits, or use a subscription or your own key.",
       done: false,
     });
-    // Someone without billing:manage is told who can.
-    expect(credits({ credits: { canBuy: false, balance: empty, margin: "5%" } })?.description).toBe(
-      "Ask an organization owner to add credits.",
+    expect(model({ credits: null })?.description).toBe("Use a subscription or your own key.");
+    expect(model({ canManageModels: false, credits: null })?.description).toBe(
+      "Only organization owners and admins can add models. Ask one to connect a model.",
     );
-    // Not on a server without Stripe, not with a model, not with a balance,
-    // and not when the balance can't be read.
-    expect(credits({ credits: null })).toBeUndefined();
+    // Credits (the trial grant or bought), or any usable model: no item at all.
+    expect(model({ credits: { canBuy: true, balance: trial, margin: null } })).toBeUndefined();
     expect(
-      credits({
-        model: { ready: true, label: "GPT-6 Luna · Your ChatGPT plan" },
-        credits: { canBuy: true, balance: empty, margin: null },
-      }),
+      model({ model: { ready: true, label: "GPT-6 Luna · Opengeni credits" } }),
     ).toBeUndefined();
-    expect(
-      credits({
-        credits: {
-          canBuy: true,
-          balance: { balanceMicros: 5_000_000, currency: "USD" },
-          margin: null,
-        },
-      }),
-    ).toBeUndefined();
-    expect(credits({ credits: { canBuy: true, balance: null, margin: null } })).toBeUndefined();
-    // A checkout started here keeps the step, done once the balance lands.
-    expect(
-      getStartedItems(
-        facts({
-          journey: journey({
-            intents: ["build"],
-            marks: { credits_checkout: "2026-10-01T08:00:00.000Z" },
-          }),
-          model: { ready: true, label: "GPT-6 Luna · Opengeni credits" },
-          credits: {
-            canBuy: true,
-            balance: { balanceMicros: 25_000_000, currency: "USD" },
-            margin: "5%",
-          },
-        }),
-      ).find((item) => item.id === "credits"),
-    ).toMatchObject({
-      title: "You have Opengeni credits",
-      description: "$25.00 left.",
-      done: true,
-    });
-  });
-
-  test("the model step names only what this server offers", () => {
-    const model = (overrides: Partial<GetStartedFacts>) =>
-      getStartedItems(facts(overrides)).find((item) => item.id === "model")!.description;
-    const credits = { canBuy: true, balance: null, margin: null };
-    expect(model({ journey: journey({ intents: ["build"] }), credits })).toBe(
-      "Buy Opengeni credits, or use your ChatGPT plan or your own key.",
-    );
-    expect(model({ journey: journey({ intents: ["cloud"] }), credits })).toBe(
-      "Use your ChatGPT plan, or buy Opengeni credits.",
-    );
-    expect(model({ journey: journey({ intents: ["cloud"] }), credits: null })).toBe(
-      "Use your ChatGPT plan, or another subscription or key.",
-    );
-    expect(model({ credits: null, codexEnabled: false })).toBe(
-      "Connect a subscription or your own key.",
-    );
+    // Still loading: nothing shown rather than a wrong item.
+    expect(model({ model: null })).toBeUndefined();
+    expect(getStartedItems(facts({})).some((item) => item.id === ("credits" as never))).toBe(false);
   });
 
   test("hides what this person or this deployment can't do", () => {
@@ -235,9 +186,9 @@ describe("Get started checklist", () => {
 
   test("done states come from live facts and marks, and unknown is never done", () => {
     const loading = getStartedItems(facts({ model: null, hasSession: null }));
-    expect(loading.find((item) => item.id === "model")!.done).toBeNull();
+    expect(loading.find((item) => item.id === "model")).toBeUndefined();
     expect(loading.find((item) => item.id === "first_task")!.done).toBeNull();
-    expect(getStartedProgress(loading)).toEqual({ done: 1, total: 5 });
+    expect(getStartedProgress(loading)).toEqual({ done: 1, total: 4 });
 
     const ready = getStartedItems(
       facts({
@@ -252,12 +203,8 @@ describe("Get started checklist", () => {
         }),
       }),
     );
-    expect(ready.find((item) => item.id === "model")).toMatchObject({
-      done: true,
-      title: "Your agents have a model",
-      description: "GPT-6 Luna · Your ChatGPT plan",
-    });
-    expect(getStartedProgress(ready)).toEqual({ done: 5, total: 5 });
+    expect(ready.find((item) => item.id === "model")).toBeUndefined();
+    expect(getStartedProgress(ready)).toEqual({ done: 4, total: 4 });
     expect(nextGetStartedItem(ready)).toBeNull();
   });
 

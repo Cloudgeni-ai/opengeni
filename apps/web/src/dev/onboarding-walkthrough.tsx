@@ -16,7 +16,6 @@ import { useKitDocumentTheme, type ResolvedTheme } from "@/dev/ui-kit/theme";
 
 export type WalkthroughPath =
   | "product-opengeni"
-  | "product-own"
   | "product-explore"
   | "work"
   | "skip"
@@ -43,8 +42,7 @@ type ScreenSpec = Readonly<{
 }>;
 
 const PATHS: ReadonlyArray<readonly [WalkthroughPath, string]> = [
-  ["product-opengeni", "My product: Opengeni builds it"],
-  ["product-own", "My product: my own coding agent"],
+  ["product-opengeni", "My product"],
   ["product-explore", "Product, exploring first"],
   ["work", "My own work"],
   ["skip", "Skip everything"],
@@ -52,11 +50,10 @@ const PATHS: ReadonlyArray<readonly [WalkthroughPath, string]> = [
   ["invited", "Invited member"],
 ];
 
-const PRODUCT: readonly WalkthroughPath[] = ["product-opengeni", "product-own", "product-explore"];
-const HAS_PRODUCT: readonly WalkthroughPath[] = ["product-opengeni", "product-own"];
+const PRODUCT: readonly WalkthroughPath[] = ["product-opengeni", "product-explore"];
+const HAS_PRODUCT: readonly WalkthroughPath[] = ["product-opengeni"];
 const NEW_PEOPLE: readonly WalkthroughPath[] = [
   "product-opengeni",
-  "product-own",
   "product-explore",
   "work",
   "skip",
@@ -77,7 +74,6 @@ function answersQuery(path: WalkthroughPath): Record<string, string> {
     use: "product",
     product: "have",
     fill: "1",
-    ...(path === "product-own" ? { builder: "own" } : {}),
   };
 }
 
@@ -174,7 +170,7 @@ const SCREENS: readonly ScreenSpec[] = [
     section: "Ready",
     title: "You got free credits (confetti)",
     view: "first-agent",
-    paths: ["product-opengeni", "product-own", "product-explore", "work", "skip"],
+    paths: ["product-opengeni", "product-explore", "work", "skip"],
     query: (path) => ({
       path: fixturePath(path),
       step: "ready",
@@ -182,33 +178,7 @@ const SCREENS: readonly ScreenSpec[] = [
       ...answersQuery(path),
     }),
   },
-  {
-    id: "own-agent",
-    section: "Ready",
-    title: "Your own coding agent: skills, key and prompt",
-    view: "first-agent",
-    paths: ["product-own"],
-    query: () => ({
-      path: "build",
-      step: "own-agent",
-      mcp: "oauth",
-      ...answersQuery("product-own"),
-    }),
-  },
-  {
-    id: "own-agent-worked",
-    section: "Ready",
-    title: "Your own coding agent: it worked",
-    view: "first-agent",
-    paths: ["product-own"],
-    query: () => ({
-      path: "build",
-      step: "own-agent",
-      marks: "api_key,coding_agent",
-      appChat: "1",
-      ...answersQuery("product-own"),
-    }),
-  },
+
   {
     id: "welcome",
     section: "In the app",
@@ -226,7 +196,7 @@ const SCREENS: readonly ScreenSpec[] = [
     query: (path) => ({
       path: fixturePath(path),
       github: "on",
-      credits: "trial",
+      ...(path === "no-trial" ? { model: "none" } : { credits: "trial" }),
       ...answersQuery(path),
     }),
   },
@@ -239,9 +209,17 @@ const SCREENS: readonly ScreenSpec[] = [
     query: (path) => ({
       path: fixturePath(path),
       github: "on",
-      credits: "trial",
+      ...(path === "no-trial" ? { model: "none" } : { credits: "trial" }),
       ...answersQuery(path),
     }),
+  },
+  {
+    id: "get-started-no-model",
+    section: "In the app",
+    title: "Get started with nothing paying for models (Add credits or connect a model)",
+    view: "get-started",
+    paths: ["no-trial"],
+    query: () => ({ path: "cloud", use: "work", model: "none", step: "model" }),
   },
   {
     id: "playground",

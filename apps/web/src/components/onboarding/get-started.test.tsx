@@ -348,7 +348,7 @@ describe("Get started card", () => {
       expect(container.querySelector("h2")!.textContent).toBe("Get started");
       // Path chosen; no usable model; no chat yet.
       expect(container.textContent).toContain("1 of 5 done");
-      expect(container.textContent).toContain("Connect a model");
+      expect(container.textContent).toContain("Add credits or connect a model");
       await act(async () => button(container, "Run your first task").click());
       expect(button(container, "Run your first task").getAttribute("aria-expanded")).toBe("true");
       await act(async () => button(container, "Research a decision").click());
@@ -506,7 +506,7 @@ describe("Get started page", () => {
       <GetStartedRoute workspaceId={PERSONAL} step={null} />,
     );
     try {
-      expect(container.textContent).toContain("Connect ChatGPT");
+      expect(container.textContent).toContain("Add credits or connect a model");
       expect(container.textContent).not.toContain("Use Opengeni from your coding agent");
       await act(async () => button(container, "Fix an issue in a repo").click());
       const fix = FIRST_TASKS.find((task) => task.id === "fix-issue")!;
@@ -544,60 +544,55 @@ describe("Get started page", () => {
   });
 });
 
-describe("Opengeni credits in Get started", () => {
-  test("Buy credits is a step while nothing pays for models, with the real price and Stripe", async () => {
+describe("Models in Get started", () => {
+  test("with nothing paying for models: one item, credits first, then a subscription or key", async () => {
     billingMode = "stripe";
     context.clientConfig = clientConfig();
     journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["cloud"] }));
     const card = await mount(<GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />);
     try {
-      const row = card.container.querySelector<HTMLAnchorElement>('[data-item="credits"] a');
-      expect(row?.textContent).toContain("Buy Opengeni credits");
-      expect(card.container.textContent).toContain(
-        "Pay as you go: the model provider's price plus 5%. No provider account needed.",
-      );
-      expect(card.container.textContent).toContain(
-        "Use your ChatGPT plan, or buy Opengeni credits.",
-      );
+      const row = card.container.querySelector<HTMLAnchorElement>('[data-item="model"] a');
+      expect(row?.textContent).toContain("Add credits or connect a model");
+      expect(row?.getAttribute("href")).toBe(`/workspaces/${PERSONAL}/get-started`);
+      expect(card.container.querySelector('[data-item="credits"]')).toBeNull();
     } finally {
       await card.unmount();
     }
-    const page = await mount(<GetStartedRoute workspaceId={PERSONAL} step="credits" />);
+    const page = await mount(<GetStartedRoute workspaceId={PERSONAL} step="model" />);
     try {
-      expect(page.container.querySelector("#get-started-credits")).not.toBeNull();
       await act(async () => button(page.container, "Buy $25 in credits").click());
       await flush();
       expect(createBillingCheckout).toHaveBeenCalledTimes(1);
-      expect(
-        (createBillingCheckout.mock.calls[0]![0] as { amountUsd: number; successUrl: string })
-          .amountUsd,
-      ).toBe(25);
-      // The step stays after a checkout started here.
+      expect(page.container.textContent).toContain("Connect a model");
       expect(journeys.readOnboardingJourney(KEY)?.marks.credits_checkout).toBeString();
     } finally {
       await page.unmount();
     }
   });
 
-  test("no Buy credits step on a server without Stripe, or once a model works", async () => {
+  test("no model item once credits (the trial grant or bought) or a model pay for chats", async () => {
     journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["build"] }));
-    const noStripe = await mount(
+    billingMode = "stripe";
+    balanceMicros = 10_000_000;
+    context.clientConfig = clientConfig();
+    const credits = await mount(
       <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
     );
     try {
-      expect(noStripe.container.querySelector('[data-item="credits"]')).toBeNull();
-      expect(getBilling).not.toHaveBeenCalled();
+      await flush();
+      expect(credits.container.querySelector('[data-item="model"]')).toBeNull();
+      expect(credits.container.textContent).not.toContain("model");
     } finally {
-      await noStripe.unmount();
+      await credits.unmount();
     }
-    billingMode = "stripe";
+    balanceMicros = 0;
     modelReady = true;
     context.clientConfig = clientConfig();
     const ready = await mount(
       <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
     );
     try {
-      expect(ready.container.querySelector('[data-item="credits"]')).toBeNull();
+      expect(ready.container.querySelector('[data-item="model"]')).toBeNull();
     } finally {
       await ready.unmount();
     }
@@ -829,10 +824,10 @@ describe("First run in the app", () => {
     );
     try {
       await flush();
-      // One primary and the quiet alternative; nothing else on the card.
+      // Just Start building: the person's own coding agent is set up later, in the app.
       expect(
         Array.from(container.querySelectorAll("section button")).map((b) => b.textContent),
-      ).toEqual(["Start building", "Use your own coding agent instead"]);
+      ).toEqual(["Start building"]);
       await act(async () => button(container, "Start building").click());
       await flush();
       expect(savedDrafts).toEqual([
@@ -903,41 +898,6 @@ describe("First run in the app", () => {
       await flush();
       expect(container.querySelector("h1")!.textContent).toBe("You're all set");
       expect(container.textContent).not.toContain("$");
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("your own coding agent: the skills, a key shown once, one prompt, and the first request", async () => {
-    withDevelopmentWorkspace();
-    withJourney({ use: "product", product: "have", website: "acme.com", builder: "own" });
-    const { container, unmount } = await mount(
-      <FirstAgentRoute workspaceId={DEVELOPMENT} step="own-agent" />,
-    );
-    try {
-      expect(container.textContent).toContain(
-        "claude plugin install opengeni-developer@opengeni-developer-plugins --scope user",
-      );
-      expect(container.textContent).not.toContain("claude mcp add");
-      const prompt = Array.from(container.querySelectorAll("pre")).find((pre) =>
-        pre.textContent?.includes("opengeni-client"),
-      )!.textContent!;
-      expect(prompt).toContain(
-        "Use the opengeni-setup and opengeni-client skills to add an Opengeni agent to my product.",
-      );
-      expect(prompt).toContain(`workspace ${DEVELOPMENT} in organization ${ORG}`);
-      expect(button(container, "Copy prompt")).toBeTruthy();
-      expect(container.textContent).toContain("Waiting for your first request");
-      await act(async () => button(container, "Create API key").click());
-      await flush();
-      expect(container.textContent).toContain("ogk_hello");
-      await act(async () => button(container, "Continue in Opengeni").click());
-      await flush();
-      expect(navigate).toHaveBeenLastCalledWith({
-        to: "/workspaces/$workspaceId/sessions",
-        params: { workspaceId: DEVELOPMENT },
-      });
-      expect(journeys.readOnboardingJourney(KEY)!.firstAgent.outcome).toBe("own_agent");
     } finally {
       await unmount();
     }

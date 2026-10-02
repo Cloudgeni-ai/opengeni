@@ -5,7 +5,6 @@ import { walkthroughScreens, type WalkthroughPath } from "./onboarding-walkthrou
 const ids = (path: WalkthroughPath) => walkthroughScreens(path).map((screen) => screen.id);
 const PATHS: readonly WalkthroughPath[] = [
   "product-opengeni",
-  "product-own",
   "product-explore",
   "work",
   "skip",
@@ -30,8 +29,8 @@ describe("onboarding walkthrough", () => {
         "ready",
       ]),
     );
+    // The person's own coding agent is set up later in the app, not in first run.
     expect(ids("product-opengeni")).not.toContain("own-agent");
-    expect(ids("product-own")).toEqual(expect.arrayContaining(["own-agent", "own-agent-worked"]));
     // Exploring asks nothing about the product.
     expect(ids("product-explore")).toContain("product");
     expect(ids("product-explore")).not.toContain("details");

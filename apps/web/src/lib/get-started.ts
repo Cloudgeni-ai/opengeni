@@ -1,6 +1,4 @@
 import { normalizeWebsite, type FirstAgentAnswers } from "./first-agent";
-import { formatMoneyMicros } from "./format";
-import { creditsPriceSentence, CREDITS_ASK_OWNER_REASON } from "./model-payment";
 import type { OnboardingIntent, OnboardingJourney } from "./onboarding-journey";
 
 /**
@@ -17,7 +15,6 @@ import type { OnboardingIntent, OnboardingJourney } from "./onboarding-journey";
 export type GetStartedItemId =
   | "path"
   | "model"
-  | "credits"
   | "github"
   | "first_task"
   | "playground"
@@ -80,25 +77,6 @@ export function onboardingIntentsLabel(intents: readonly OnboardingIntent[]): st
   return first ? PATH_TITLES[first] : null;
 }
 
-/** What can pay for models here, in the path's order. */
-function modelSourcesSentence({
-  credits,
-  codex,
-  creditsFirst,
-}: {
-  credits: boolean;
-  codex: boolean;
-  creditsFirst: boolean;
-}): string {
-  if (credits && codex)
-    return creditsFirst
-      ? "Buy Opengeni credits, or use your ChatGPT plan or your own key."
-      : "Use your ChatGPT plan, or buy Opengeni credits.";
-  if (credits) return "Buy Opengeni credits, or use a subscription or your own key.";
-  if (codex) return "Use your ChatGPT plan, or another subscription or key.";
-  return "Connect a subscription or your own key.";
-}
-
 function item(
   id: GetStartedItemId,
   title: string,
@@ -122,20 +100,6 @@ export function getStartedItems(facts: GetStartedFacts): GetStartedItem[] {
       pathLabel ??
       "Tell us about your product, or explore what agents can do.",
     intents.length > 0,
-  );
-  const model = item(
-    "model",
-    facts.model?.ready ? "Your agents have a model" : "Connect a model",
-    facts.model?.ready
-      ? (facts.model.label ?? "New chats are ready to run.")
-      : facts.canManageModels
-        ? modelSourcesSentence({
-            credits: facts.credits != null,
-            codex: facts.codexEnabled !== false,
-            creditsFirst: has("build") || !has("cloud"),
-          })
-        : "Only organization owners and admins can add models. Ask one to connect a model.",
-    facts.model ? facts.model.ready : null,
   );
   const github = item(
     "github",
@@ -179,28 +143,26 @@ export function getStartedItems(facts: GetStartedFacts): GetStartedItem[] {
     true,
   );
 
-  // Buying credits is its own step while nothing pays for models yet: no
-  // usable default and no balance. Once someone started a checkout from here
-  // it stays, so the list doesn't shrink when the purchase lands.
+  // Nothing about models while anything pays for them: credits (the trial
+  // grant or bought) or any usable default. Only with neither is there one
+  // item, so nobody is stuck. Unknown (still loading) shows nothing.
   const balance = facts.credits?.balance ?? null;
-  const showCredits =
-    facts.credits != null &&
-    balance !== null &&
-    ((facts.model?.ready === false && balance.balanceMicros <= 0) ||
-      Boolean(marks.credits_checkout));
-  const credits = showCredits
-    ? item(
-        "credits",
-        balance.balanceMicros > 0 ? "You have Opengeni credits" : "Buy Opengeni credits",
-        balance.balanceMicros > 0
-          ? `${formatMoneyMicros(balance.balanceMicros, balance.currency)} left.`
-          : facts.credits?.canBuy
-            ? creditsPriceSentence(facts.credits.margin ?? null)
-            : CREDITS_ASK_OWNER_REASON,
-        balance.balanceMicros > 0,
-      )
-    : null;
-  const modelSteps = credits ? [model, credits] : [model];
+  const hasCredits = Boolean(balance && balance.balanceMicros > 0);
+  const modelSteps =
+    facts.model?.ready === false && !hasCredits
+      ? [
+          item(
+            "model",
+            "Add credits or connect a model",
+            facts.canManageModels
+              ? facts.credits != null
+                ? "Buy Opengeni credits, or use a subscription or your own key."
+                : "Use a subscription or your own key."
+              : "Only organization owners and admins can add models. Ask one to connect a model.",
+            false,
+          ),
+        ]
+      : [];
 
   const canBuild = facts.canCreateApiKeys;
   // The product step first; the recorded playground is optional now.
