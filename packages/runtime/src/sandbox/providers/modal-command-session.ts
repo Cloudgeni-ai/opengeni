@@ -333,12 +333,13 @@ export function installModalCommandSession(
     const receipt = receipts.get(result);
     if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
     if (
-      receipt.page.command.supervision &&
       !receipt.page.expected &&
       receipt.page.exitCode === null &&
       receipt.page.chunks.length === 0
     ) {
-      // Idle-launch receipt carries identity only; there are no bytes to ACK.
+      // Both a supervised idle launch and an unavailable first observation
+      // carry identity only. Retention already owns this command; there are
+      // no observed bytes or terminal evidence to ACK.
       receipts.delete(result);
       return true;
     }

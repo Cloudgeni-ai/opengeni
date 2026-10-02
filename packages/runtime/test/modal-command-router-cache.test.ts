@@ -217,3 +217,45 @@ test("same-invocation read retry never retires a concurrent active router", asyn
     await f.control.close();
   }
 });
+
+test("a quiet stream's read deadline returns a partial page before outer containment", async () => {
+  const f = fixture();
+  const original = {
+    kind: "modal-router-v1",
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+    execId: "79c723cd-ce29-4614-9424-d3171d24d55f",
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  } satisfies ModalRouterProviderCommand;
+  const router = {
+    close: () => {},
+    read: async (
+      _command: unknown,
+      stream: string,
+      _offset: number,
+      waitMs: number,
+      signal: AbortSignal,
+    ) => {
+      if (stream === "stdout") return { bytes: Buffer.from("partial"), eof: false };
+      await Bun.sleep(waitMs + 10);
+      signal.throwIfAborted();
+      return { bytes: Buffer.alloc(0), eof: false };
+    },
+    poll: async () => null,
+  } as unknown as ModalCommandRouterWire;
+  f.cache.routers.set(
+    "task-original",
+    Promise.resolve({ router, users: 0, refreshAt: Date.now() + 60_000 }),
+  );
+  try {
+    const page = await f.control.read(original, 20);
+    expect(page.chunks.map((chunk) => chunk.text)).toEqual(["partial"]);
+    expect(page.command.streams.stdout).toMatchObject({ byteOffset: 7, eof: false });
+    expect(page.exitCode).toBeNull();
+  } finally {
+    await f.control.close();
+  }
+});

@@ -642,10 +642,14 @@ export class ModalCommandControl {
     const abort = () => budget.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
-    const deadline = performance.now() + Math.max(1, waitMs);
+    // The router deliberately ends a quiet stream at its read deadline with
+    // a partial page. Let that deadline settle before outer containment aborts
+    // the whole page, including bytes already read from the other stream.
+    // Caller cancellation still bounds this allowance independently.
+    const deadline = performance.now() + Math.max(1, waitMs) + 5_000;
     const timeout = setTimeout(
       () => budget.abort(new Error("Modal command read budget exhausted")),
-      Math.max(1, waitMs),
+      Math.max(1, waitMs) + 5_000,
     );
     let lastError: unknown;
     try {
@@ -654,7 +658,7 @@ export class ModalCommandControl {
         try {
           return await this.readRouterPage(
             command,
-            Math.max(1, deadline - performance.now()),
+            Math.min(Math.max(1, waitMs), Math.max(1, deadline - performance.now())),
             budget.signal,
           );
         } catch (error) {
