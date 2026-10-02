@@ -56,6 +56,14 @@ export const HUMAN_GATE_FUNCTIONS = new Set([
   "importArchivedSessionForRequest",
   "appendArchivedSessionEventsForRequest",
   "requireConnectOwnerAuthority",
+  "requireManagedHumanRouteIdentity",
+  "requireOrganizationRouteAdministrator",
+  "requireOrganizationCodexAdministrator",
+  "requireNonCookieOrSameOriginMutation",
+  "requirePersonPresentRouteAuthorization",
+  "requireDelegableHumanRouteAuthorization",
+  "requireUserOrOrganizationRouteAuthorization",
+  "requireLegacyOAuthActor",
 ]);
 const HUMAN_GATE_PROPERTIES = new Set([
   "canonicalManagedHumanSession",

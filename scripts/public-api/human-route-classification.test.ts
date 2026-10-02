@@ -57,7 +57,7 @@ describe("reviewed human-route classification", () => {
         .every((entry) => entry.class === "person_present"),
     ).toBe(true);
     expect(snapshot.routes.find((entry) => entry.path.endsWith("/tools/approvals"))?.class).toBe(
-      "person_present",
+      "delegable_to_user",
     );
   });
 
@@ -80,7 +80,12 @@ describe("reviewed human-route classification", () => {
       ).toBe("person_present");
     expect(
       entries.get("POST /v1/workspaces/:workspaceId/connections/github/oauth/start")?.class,
-    ).toBe("person_present");
+    ).toBe("delegable_to_user");
+    expect(entries.get("GET /v1/identity")?.class).toBe("delegable_to_user");
+    expect(entries.get("GET /v1/auth/sign-in-methods")?.class).toBe("delegable_to_user");
+    expect(entries.get("GET /v1/organizations/:organizationId/recovery")?.class).toBe(
+      "delegable_to_user",
+    );
     expect(entries.get("POST /v1/workspaces/:workspaceId/connect/attempts")?.class).toBe(
       "organization_allowed",
     );

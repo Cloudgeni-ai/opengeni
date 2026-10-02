@@ -19,25 +19,30 @@ The class describes the gated behavior, not a replacement for permission,
 resource ownership, live membership, or provider commit-time checks. Shared
 session lists still exclude another person's private sessions and Personal
 workspace. `conditionalRestrictions` records stricter variants of mixed
-transports: in particular `/sessions/:sessionId/events` must not let service or
-delegated grants answer human tool approvals. Generic human-input answers are
-not tool approval; credential/Skill-removal confirmation retains its canonical
-person-present proof. Model policy and SuperGrok routes separately fence user
+transports: `/sessions/:sessionId/events` approvals and user decisions require
+verified owning-user authority, including consenting native user delegation;
+service identities and live agent attempts cannot manufacture that authority.
+Skill decisions and filesystem-recovery acknowledgements are not browser-auth
+ceremonies. Model policy and SuperGrok routes separately fence user
 and shared subscription scopes. A route accepting one shared variant does not
 authorize its private or consent variants.
 
 The external identity-link `:operation` registration only implements preview,
 confirm and revoke. Its native confirmation is independent consent, not an
 opportunity for the external product to consent on the person's behalf.
-Provider device-code start/poll, OAuth callbacks, login/session-set changes,
-canonical identity recovery, reset-credit preparation/redemption, browser
-identity linking and sandbox discontinuity consent remain browser handoffs.
+Provider flow initiation/polling can delegate to the exact verified user; actual
+provider consent or credential entry completes at the returned browser URL.
+Provider callbacks/code redemption, browser login/session changes, canonical
+identity recovery, reset-credit payment confirmation and new native identity
+binding consent remain independent browser ceremonies. Merely returning a
+configuration or handoff link is not provider consent.
 Checkout/portal link creation is not payment confirmation; the hosted payment
 page still needs the person.
 
-## Delegation proof boundary
+## Phase 2 delegation proof contract
 
-Phase 2 adds a separate request-local proof in `packages/core/src/access` for
+The audit-only PR does not activate enforcement. Phase 2 provides a separate
+request-local proof in `packages/core/src/access` for
 the trusted OAuth dispatcher to stamp **after** grant verification. Never infer
 that proof from headers, metadata, `principalKind`, service attribution or a
 caller-supplied grant-shaped object. Never set `canonicalManagedHumanSession`
@@ -45,6 +50,33 @@ for delegation. `hasVerifiedOwningUserAuthorization` remains the single
 owner-only predicate; resource/session checks still compare the exact owner.
 Live organization membership, workspace scope and both permission ceilings
 must be rechecked; an organization admin/key never inherits personal ownership.
+
+The trusted OAuth verifier/dispatcher calls this exported API before resolving
+access or dispatching the **same raw Request**:
+
+```ts
+stampDelegatedHumanAuthorization(request, {
+  organizationId,
+  subjectId: `user:${nativeUserId}`,
+  permissions, // verified OAuth grant ceiling, not caller metadata
+  workspaceScope: { kind: "selected", workspaceIds }, // or { kind: "all" }
+});
+```
+
+The resolver reloads native access, intersects both ceilings and scope, and
+stamps exact resolved authorization objects separately. Restamping, late
+stamping, cloned requests and cloned grant/context objects fail closed.
+Account permissions intersect literally; `workspace:admin` never confers
+organization ownership, billing or key control. Personal settings additionally
+need the proof's literal `workspace:admin` ceiling and the live exact owner;
+this does not add the wildcard to a closed Personal grant. Tool gateway calls
+recheck the same raw request's current native authority before provider use.
+
+`requireVerifiedDelegatedHumanContext` exposes the native profile, subject and
+live constrained context without a fabricated session or browser hash. Missing
+native email verification remains unverified. No token issuance is implemented
+here. The future OAuth verifier owns grant authenticity/revocation; the stamp
+function is a trusted server capability, never a public HTTP handler.
 
 ## Coverage, findings and limits
 
@@ -57,8 +89,10 @@ multi-operation registrations retain their source path, rather than inventing
 individual provider endpoints. The snapshot includes route patterns outside
 the SDK public surface because browser-only routes still need classification.
 
-`missingGateCandidates` flags ungated/shape-only risks for focused follow-up,
-including mixed event approvals and cookie CSRF on billing link creation.
+`missingGateCandidates` retains baseline ungated/shape-only findings, with
+Phase 2 resolution status: mixed event approvals and hosted login initiation
+require verified owning-user proof, billing link creation gets cookie-only CSRF admission,
+and the Personal settings exception enforces a separate mutation ceiling.
 An `organization_allowed` classification does not activate a database lifecycle
 that currently only accepts native membership actors: retain its fail-closed
 denial until the organization-key foundation supplies the corresponding live
@@ -67,5 +101,6 @@ authority seam. Do not impersonate an owner to work around it.
 Out of scope: OAuth token issuance, organization-key policy migrations, the MCP
 action catalog and browser UI. Consumers must use browser destinations for
 person-present outcomes; raw API callback URLs are not safe handoff URLs.
-Cross-organization creation/invitation acceptance cannot be performed with a
-single-organization connection unless separately authorized by its grant model.
+Cross-organization creation and the global invitation cursor fail closed for a
+single-organization delegation. Invitation acceptance checks its organization
+before mutation and never auto-binds invitations across organizations.

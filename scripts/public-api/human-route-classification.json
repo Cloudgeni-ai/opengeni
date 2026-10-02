@@ -24,7 +24,7 @@
       "source": "apps/api/src/app.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthProviderRouteAllowed"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -32,7 +32,7 @@
       "source": "apps/api/src/app.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthProviderRouteAllowed"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "GET",
@@ -40,7 +40,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedSession"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "GET",
@@ -64,7 +64,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedAuthSessionSetSnapshot"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -72,7 +72,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -80,7 +80,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -88,7 +88,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -96,7 +96,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -104,7 +104,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -112,7 +112,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "DELETE",
@@ -120,7 +120,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -128,7 +128,7 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["getManagedAuthSessionSetSnapshot", "requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -136,15 +136,15 @@
       "source": "apps/api/src/routes/managed-auth-session-sets.ts",
       "gates": ["requireManagedAuthMutationAdmission"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "GET",
       "path": "/v1/auth/sign-in-methods",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
       "gates": ["requireCanonicalHumanRequestIdentity"],
-      "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "class": "delegable_to_user",
+      "reason": "Read-only identity/sign-in metadata follows the exact verified native person and confers no fresh authentication or credential mutation proof."
     },
     {
       "method": "POST",
@@ -152,7 +152,7 @@
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
       "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -160,7 +160,7 @@
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
       "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -168,7 +168,7 @@
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
       "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "GET",
@@ -198,33 +198,45 @@
       "method": "GET",
       "path": "/v1/github/install/callback",
       "source": "apps/api/src/routes/github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
     },
     {
       "method": "GET",
       "path": "/v1/github/oauth/callback",
       "source": "apps/api/src/routes/github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "GET",
       "path": "/v1/github/setup",
       "source": "apps/api/src/routes/github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
     },
     {
       "method": "GET",
       "path": "/v1/identity",
       "source": "apps/api/src/routes/canonical-human-identities.ts",
       "gates": ["requireCanonicalHumanRequestIdentity"],
-      "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "class": "delegable_to_user",
+      "reason": "Read-only identity/sign-in metadata follows the exact verified native person and confers no fresh authentication or credential mutation proof."
     },
     {
       "method": "POST",
@@ -232,7 +244,7 @@
       "source": "apps/api/src/routes/canonical-human-identities.ts",
       "gates": ["requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "DELETE",
@@ -240,7 +252,7 @@
       "source": "apps/api/src/routes/canonical-human-identities.ts",
       "gates": ["requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -248,7 +260,7 @@
       "source": "apps/api/src/routes/canonical-human-identities.ts",
       "gates": ["requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "POST",
@@ -256,7 +268,7 @@
       "source": "apps/api/src/routes/canonical-human-identities.ts",
       "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
       "class": "person_present",
-      "reason": "Login identity and browser-session ceremonies require the person and fresh native authentication."
+      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
     },
     {
       "method": "GET",
@@ -280,7 +292,7 @@
       "source": "apps/api/src/routes/personal-github.ts",
       "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "GET",
@@ -296,7 +308,7 @@
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "GET",
@@ -391,16 +403,16 @@
       "path": "/v1/organizations/:organizationId/codex/connect/poll",
       "source": "apps/api/src/routes/codex.ts",
       "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
       "path": "/v1/organizations/:organizationId/codex/connect/start",
       "source": "apps/api/src/routes/codex.ts",
       "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "PATCH",
@@ -620,7 +632,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "POST",
@@ -631,8 +643,8 @@
         "requireOrganizationCodexHuman",
         "requireSameOriginBrowserMutation"
       ],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "GET",
@@ -663,8 +675,8 @@
       "path": "/v1/organizations/:organizationId/recovery",
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
-      "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "class": "delegable_to_user",
+      "reason": "The person's same-organization recovery status is read-only; no browser session, recent-auth proof or recovery mutation capability is delegated."
     },
     {
       "method": "POST",
@@ -672,7 +684,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "POST",
@@ -680,7 +692,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "POST",
@@ -688,7 +700,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "POST",
@@ -696,7 +708,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "PUT",
@@ -704,7 +716,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "POST",
@@ -712,7 +724,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "POST",
@@ -720,7 +732,7 @@
       "source": "apps/api/src/routes/organization-recovery.ts",
       "gates": ["requireRecoveryIdentity"],
       "class": "person_present",
-      "reason": "Recovery changes canonical ownership and requires fresh identity and browser actor fencing."
+      "reason": "Canonical account-recovery custody and takeover require fresh native authentication and independent quorum; delegated apps cannot supply that recovery proof."
     },
     {
       "method": "GET",
@@ -791,16 +803,16 @@
       "path": "/v1/organizations/:organizationId/supergrok/connect/poll",
       "source": "apps/api/src/routes/supergrok.ts",
       "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
       "path": "/v1/organizations/:organizationId/supergrok/connect/start",
       "source": "apps/api/src/routes/supergrok.ts",
       "gates": ["requireOrganizationCodexHuman", "requireSameOriginBrowserMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "PATCH",
@@ -1000,25 +1012,37 @@
       "method": "GET",
       "path": "/v1/pr-review/github/install/callback",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
     },
     {
       "method": "GET",
       "path": "/v1/pr-review/github/oauth/callback",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "GET",
       "path": "/v1/pr-review/github/setup",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
       "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
     },
     {
       "method": "GET",
@@ -1026,7 +1050,7 @@
       "source": "apps/api/src/routes/social.ts",
       "gates": ["requireConnectOwnerAuthority"],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "GET",
@@ -1147,8 +1171,8 @@
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
       "source": "apps/api/src/routes/browser-sessions.ts",
       "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Opening a hosted login ceremony requires canonical interactive-person proof, not human-shaped grants."
+      "class": "delegable_to_user",
+      "reason": "The verified owning user may request a hosted login handoff; entering credentials and completing provider consent still happens in the browser."
     },
     {
       "method": "GET",
@@ -1211,8 +1235,8 @@
       "path": "/v1/workspaces/:workspaceId/codex/connect/poll",
       "source": "apps/api/src/routes/codex.ts",
       "gates": ["managedCookieHuman"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "GET",
@@ -1334,9 +1358,13 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
       "source": "apps/api/src/routes/personal-github.ts",
-      "gates": ["canonicalManagedHumanSession", "principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "principalKind=human_session",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "GET",
@@ -1374,9 +1402,9 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
@@ -1388,27 +1416,47 @@
     },
     {
       "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/connections/fiken/oauth/start",
+      "source": "apps/api/src/routes/connections.ts",
+      "gates": ["requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
+    },
+    {
+      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/github/oauth/start",
       "source": "apps/api/src/routes/personal-github.ts",
-      "gates": ["canonicalManagedHumanSession", "principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "principalKind=human_session",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/google-drive/install",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
+      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/oauth/start",
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/connections/slack-bot/install",
+      "source": "apps/api/src/routes/connections.ts",
+      "gates": ["requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "DELETE",
@@ -1555,20 +1603,36 @@
       "reason": "Repository action policy is shared workspace administration, not provider OAuth consent."
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/github/app-manifest",
+      "source": "apps/api/src/routes/github.ts",
+      "gates": ["requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",
       "source": "apps/api/src/routes/github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "organization_allowed",
+      "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/installations/select",
       "source": "apps/api/src/routes/github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "organization_allowed",
+      "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
     },
     {
       "method": "GET",
@@ -1591,16 +1655,16 @@
       "path": "/v1/workspaces/:workspaceId/identity-links/:linkId",
       "source": "apps/api/src/routes/external-identity-links.ts",
       "gates": ["nativeConfirmation"],
-      "class": "person_present",
-      "reason": "Native identity-link consent cannot be bootstrapped by an agent or the external identity being linked."
+      "class": "organization_allowed",
+      "reason": "This unsupported method/operation registration returns 404 before authorization; it is not a callable MCP action or identity consent variant."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
       "source": "apps/api/src/routes/external-identity-links.ts",
       "gates": ["nativeConfirmation"],
-      "class": "delegable_to_user",
-      "reason": "Identity-link discovery exposes only the exact verified native/external user's links and does not grant consent."
+      "class": "organization_allowed",
+      "reason": "This unsupported method/operation registration returns 404 before authorization; it is not a callable MCP action or identity consent variant."
     },
     {
       "method": "POST",
@@ -1631,8 +1695,8 @@
       "path": "/v1/workspaces/:workspaceId/integrations/oauth/start",
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
@@ -1640,31 +1704,31 @@
       "source": "apps/api/src/integrations/slack-interactions.ts",
       "gates": ["requireManagedSlackLinkHuman"],
       "class": "person_present",
-      "reason": "Linking a Slack identity requires the verified person and explicit native/Slack consent."
+      "reason": "Establishing a new Slack/native identity binding requires independent native consent; an application must not link an attacker-controlled identity on the person's behalf."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
       "source": "apps/api/src/integrations/slack-interactions.ts",
       "gates": ["requireManagedSlackLinkHuman"],
-      "class": "person_present",
-      "reason": "Linking a Slack identity requires the verified person and explicit native/Slack consent."
+      "class": "delegable_to_user",
+      "reason": "Reading, cancelling or requesting access for the person's Slack link intent does not establish a new identity binding."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/cancel",
       "source": "apps/api/src/integrations/slack-interactions.ts",
       "gates": ["requireManagedSlackLinkHuman"],
-      "class": "person_present",
-      "reason": "Linking a Slack identity requires the verified person and explicit native/Slack consent."
+      "class": "delegable_to_user",
+      "reason": "Reading, cancelling or requesting access for the person's Slack link intent does not establish a new identity binding."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/request-access",
       "source": "apps/api/src/integrations/slack-interactions.ts",
       "gates": ["requireManagedSlackLinkHuman"],
-      "class": "person_present",
-      "reason": "Linking a Slack identity requires the verified person and explicit native/Slack consent."
+      "class": "delegable_to_user",
+      "reason": "Reading, cancelling or requesting access for the person's Slack link intent does not establish a new identity binding."
     },
     {
       "method": "GET",
@@ -1900,7 +1964,7 @@
         "requireSameOriginBrowserMutation"
       ],
       "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
     {
       "method": "POST",
@@ -1911,8 +1975,8 @@
         "requireOrganizationCodexHuman",
         "requireSameOriginBrowserMutation"
       ],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "PUT",
@@ -1966,25 +2030,37 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/github/connect",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/github/installations/:installationId/configure",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "organization_allowed",
+      "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/github/installations/select",
       "source": "apps/api/src/routes/pr-review-github.ts",
-      "gates": ["canonicalManagedHumanSession", "requireConnectOwnerAuthority"],
-      "class": "person_present",
-      "reason": "GitHub connect/install configuration is a browser-bound provider ownership and consent flow."
+      "gates": [
+        "canonicalManagedHumanSession",
+        "requireConnectOwnerAuthority",
+        "requireLegacyOAuthActor"
+      ],
+      "class": "organization_allowed",
+      "reason": "Selecting an already-authorized shared installation or returning its configuration link is administration, not provider consent or credential redemption."
     },
     {
       "method": "POST",
@@ -2135,16 +2211,16 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery",
       "source": "apps/api/src/routes/sessions.ts",
       "gates": ["getManagedHumanSandboxRecovery"],
-      "class": "person_present",
-      "reason": "Recovery preview/consent is a browser-owned acknowledgement of filesystem discontinuity."
+      "class": "delegable_to_user",
+      "reason": "Filesystem-discontinuity acknowledgement is an exact owning-user decision, not an authentication or payment ceremony."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery",
       "source": "apps/api/src/routes/sessions.ts",
       "gates": ["consentManagedHumanSandboxRecovery", "getManagedHumanSandboxRecovery"],
-      "class": "person_present",
-      "reason": "Recovery preview/consent is a browser-owned acknowledgement of filesystem discontinuity."
+      "class": "delegable_to_user",
+      "reason": "Filesystem-discontinuity acknowledgement is an exact owning-user decision, not an authentication or payment ceremony."
     },
     {
       "method": "PUT",
@@ -2238,9 +2314,9 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/social/oauth/start",
       "source": "apps/api/src/routes/social.ts",
-      "gates": ["principalKind=human_session"],
-      "class": "person_present",
-      "reason": "Provider OAuth and reconnect require independent browser-owned authorization and credential handoff."
+      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "GET",
@@ -2287,16 +2363,16 @@
       "path": "/v1/workspaces/:workspaceId/supergrok/connect/poll",
       "source": "apps/api/src/routes/supergrok.ts",
       "gates": ["requireConnectOwnerAuthority", "requireScopeMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/supergrok/connect/start",
       "source": "apps/api/src/routes/supergrok.ts",
       "gates": ["requireScopeMutation"],
-      "class": "person_present",
-      "reason": "Provider authorization transfers credentials through an interactive consent/device/OAuth flow."
+      "class": "delegable_to_user",
+      "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
     {
       "method": "PATCH",
@@ -2319,8 +2395,8 @@
       "path": "/v1/workspaces/:workspaceId/tools/approvals",
       "source": "apps/api/src/app.ts",
       "gates": ["requireWorkspaceToolGatewayAuthorization"],
-      "class": "person_present",
-      "reason": "Human tool approval cannot be delegated to the tool-calling agent or an organization service."
+      "class": "delegable_to_user",
+      "reason": "The consenting person may approve their exact tool operation through verified user authority; services and live agent attempts cannot borrow that authority."
     },
     {
       "method": "POST",
@@ -2575,16 +2651,16 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connect/attempts",
-      "when": "selected provider/action begins an interactive OAuth/device-code/login ceremony",
-      "class": "person_present",
-      "reason": "Generic connection setup also supports noninteractive shared API-key installs; only consent ceremonies hand off to a browser."
+      "when": "selected provider/action initiates a personal OAuth/device-code/login flow",
+      "class": "delegable_to_user",
+      "reason": "Initiation may delegate to the exact user; actual credential entry and provider consent finish at the returned browser destination."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
-      "when": "action starts/finishes an interactive OAuth/device-code/login ceremony",
-      "class": "person_present",
-      "reason": "Stored connection attempt identity does not replace fresh person-present provider consent."
+      "when": "action starts or reads the outcome of a personal OAuth/device-code/login flow",
+      "class": "delegable_to_user",
+      "reason": "The verified user may drive flow orchestration; provider credentials and independent consent are not fabricated by the delegation proof."
     },
     {
       "method": "POST|DELETE",
@@ -2603,16 +2679,16 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
-      "when": "type=user.approvalDecision or a humanInputResponse confirming credential/Skill removal consent",
-      "class": "person_present",
-      "reason": "A mixed event transport is not authority to approve an agent's own tool or credential consent."
+      "when": "type=user.approvalDecision or an owning-user humanInputResponse",
+      "class": "delegable_to_user",
+      "reason": "Only the exact verified user's authority permits this decision; a service or live agent attempt cannot manufacture user approval."
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
-      "when": "operation=preview|confirm",
+      "when": "operation=confirm",
       "class": "person_present",
-      "reason": "Granting external access to a native identity requires independent consent."
+      "reason": "Creating an external/native identity access binding requires independent consent; a delegated application must not grant itself that identity link."
     },
     {
       "method": "GET",
@@ -2640,32 +2716,37 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",
-      "requiredGate": "canonical person-present proof for user.approvalDecision",
-      "reason": "Session authorization rejects agent_attempt but a service/human-shaped delegated bearer can still reach the human approval writer."
+      "requiredGate": "verified owning-user proof for user.approvalDecision",
+      "reason": "Session authorization rejects agent_attempt but service/human-shaped unverified grants must not manufacture the consenting person's approval.",
+      "status": "pending_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
-      "requiredGate": "canonical person-present authorization",
-      "reason": "The existing principalKind=human_session shape check alone also matches human-shaped delegated bearers."
+      "requiredGate": "verified owning-user authorization",
+      "reason": "The existing principalKind=human_session shape check alone does not prove the owning user requesting the browser handoff.",
+      "status": "pending_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/billing/checkout",
       "requiredGate": "cookie-only CSRF admission (not a person-present gate)",
-      "reason": "This creates a payment link, not payment confirmation; verified bearer may call it, cookie mutations need explicit CSRF protection."
+      "reason": "This creates a payment link, not payment confirmation; verified bearer may call it, cookie mutations need explicit CSRF protection.",
+      "status": "pending_phase_2"
     },
     {
       "method": "POST",
       "path": "/v1/billing/portal",
       "requiredGate": "cookie-only CSRF admission (not a person-present gate)",
-      "reason": "This creates a browser link; payment method/charge confirmation belongs at the hosted browser destination."
+      "reason": "This creates a browser link; payment method/charge confirmation belongs at the hosted browser destination.",
+      "status": "pending_phase_2"
     },
     {
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/settings",
       "requiredGate": "explicit delegated settings-write ceiling on the Personal owner exception",
-      "reason": "A workspace:read-only delegation must not gain mutation authority solely because it proves the owning person."
+      "reason": "A workspace:read-only delegation must not gain mutation authority solely because it proves the owning person.",
+      "status": "pending_phase_2"
     }
   ]
 }
