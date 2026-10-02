@@ -174,14 +174,28 @@ function modelAmount(row: Totals): string {
 }
 
 const PAYER_COLUMNS: RowListColumn[] = [
-  // Amount first: on a phone the row folds to its first fact.
-  { id: "amount", label: "Amount", width: 120, align: "end" },
+  // On a phone the amount leads the folded meta line.
+  {
+    id: "amount",
+    label: "Amount",
+    width: 120,
+    align: "end",
+    hideLabel: true,
+    leadsWhenFolded: true,
+  },
   { id: "calls", label: "Calls", width: 96, align: "end" },
   { id: "tokens", label: "Tokens", width: 96, align: "end" },
 ];
 
 const MODEL_COLUMNS: RowListColumn[] = [
-  { id: "amount", label: "Amount", width: 112, align: "end" },
+  {
+    id: "amount",
+    label: "Amount",
+    width: 112,
+    align: "end",
+    hideLabel: true,
+    leadsWhenFolded: true,
+  },
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
   { id: "calls", label: "Calls", width: 88, align: "end" },
   { id: "cache", label: "Cache hit", width: 80, align: "end" },
@@ -260,7 +274,7 @@ export function OrganizationModelUsagePanel(props: {
     <>
       <Section
         title="Paid with"
-        description="Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is the provider's list price."
+        description="Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is a list-price estimate."
       >
         {coverage ? (
           <Notice tone="waiting" title="Some charges aren't broken down yet">
@@ -272,7 +286,6 @@ export function OrganizationModelUsagePanel(props: {
           label="Spend by who pays"
           nameLabel="Paid with"
           columns={PAYER_COLUMNS}
-          flush
         >
           {payers.map((row) => (
             <ListRow
@@ -282,7 +295,7 @@ export function OrganizationModelUsagePanel(props: {
               }
               title={payerLabel(row.payer)}
               meta={[
-                row.payer === "opengeni_credits" ? "Charged" : "At list price, not charged",
+                row.payer === "opengeni_credits" ? "Charged" : "List-price estimate, not charged",
                 ...(row.payer !== "opengeni_credits" && row.pricedCalls < row.calls
                   ? [
                       `${row.pricedCalls.toLocaleString("en-US")} of ${row.calls.toLocaleString("en-US")} calls priced`,
@@ -306,13 +319,7 @@ export function OrganizationModelUsagePanel(props: {
             : "Every workspace, private chats included."
         }
       >
-        <RowList
-          variant="table"
-          label="Spend by model"
-          nameLabel="Model"
-          columns={MODEL_COLUMNS}
-          flush
-        >
+        <RowList variant="table" label="Spend by model" nameLabel="Model" columns={MODEL_COLUMNS}>
           {data.models.map((row) => (
             <ListRow
               key={`${row.provider}:${row.model}:${row.totals.billingPath}`}

@@ -12,7 +12,7 @@ import { OrganizationModelUsagePanel } from "@/components/organization-model-usa
 import { useOptionalOrganizationDirectory } from "@/components/organization/organization-directory";
 import { memberName } from "@/components/organization/organization-people-model";
 import { RowButton } from "@/components/ui/page-actions";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LockGlyph } from "@/components/insights/lock-glyph";
@@ -22,6 +22,7 @@ import { formatDate } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
 import { inAppClick } from "@/lib/in-app-click";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -38,7 +39,7 @@ const periods: Array<{ value: OrganizationUsagePeriod; label: string }> = [
   { value: "ytd", label: "This year" },
 ];
 const WORKSPACE_COLUMNS: RowListColumn[] = [
-  { id: "total", label: "Total", width: 132, align: "end", hideLabel: true },
+  { id: "total", label: "Total", width: 132, align: "end", hideLabel: true, leadsWhenFolded: true },
 ];
 const metricKey = (total: Pick<Total, "eventType" | "unit">) =>
   JSON.stringify([total.eventType, total.unit]);
@@ -221,6 +222,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
   const directory = useOptionalOrganizationDirectory();
   const navigate = useNavigate();
   const [period, setPeriod] = useState<OrganizationUsagePeriod>("month");
+  const longerPeriod = periods[periods.findIndex((option) => option.value === period) + 1];
   const [revision, setRevision] = useState(0);
   const [metric, setMetric] = useState("");
   const [state, setState] = useState<{
@@ -379,14 +381,25 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 {apiErrorAdvice(error)}
               </ErrorMessage>
             ) : !data ? (
-              <p role="status" className="text-xs leading-[18px] text-fg-muted">
-                Loading period usage
-              </p>
+              <div role="status" aria-label="Loading period usage" className="flex flex-col gap-4">
+                <div aria-hidden="true" className="flex min-w-0 flex-col gap-1">
+                  <Skeleton className="h-7 w-28 rounded-md" />
+                  <Skeleton className="h-[18px] w-56 max-w-full rounded-full" />
+                </div>
+                <Skeleton aria-hidden="true" className="h-[220px] rounded-lg" />
+              </div>
             ) : data.totals.length === 0 ? (
               <EmptyState
                 variant="inline"
                 title="No usage recorded in this period."
                 description={range ?? undefined}
+                action={
+                  longerPeriod ? (
+                    <EmptyStateLink onClick={() => setPeriod(longerPeriod.value)}>
+                      Show {longerPeriod.label.toLowerCase()}
+                    </EmptyStateLink>
+                  ) : undefined
+                }
               />
             ) : (
               <>
@@ -552,7 +565,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
         {props.enabled && data && selected && privateRows.length > 0 ? (
           <Section
             title="Private chats"
-            description="Other people's Only me chats, already counted above. Amounts only: the chats stay private."
+            description="Other people's Only me chats, already counted above. Amounts only."
           >
             <RowList
               label="Private chats by person"
@@ -560,12 +573,13 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               nameLabel="Person"
               flush
             >
+              {/* Plain rows: no link, button or drilldown. The workspace sits in
+                  the title so on a phone the amount leads the second line. */}
               {privateRows.map((row) => (
                 <ListRow
                   key={row.key}
                   leading={<LogoTile icon={<LockGlyph />} name={row.person} />}
-                  title={row.person}
-                  meta={[`Private chats in ${row.workspace}`]}
+                  title={`${row.person} in ${row.workspace}`}
                   cells={{
                     total: (
                       <span
@@ -580,9 +594,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               ))}
             </RowList>
             {privateTruncated ? (
-              <p className="pt-2 text-xs leading-[18px] text-fg-muted">
-                Showing the people who spent the most.
-              </p>
+              <p className="pt-2 text-xs leading-[18px] text-fg-muted">Showing the largest 200.</p>
             ) : null}
           </Section>
         ) : null}
