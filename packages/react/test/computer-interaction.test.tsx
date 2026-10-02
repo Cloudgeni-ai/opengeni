@@ -1725,6 +1725,76 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
+  test("sends only committed desktop composition text", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      await actRun(() => fixture.keyboard.focus());
+      await actRun(() =>
+        fixture.keyboard.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })),
+      );
+      for (const text of ["n", "ni"]) {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(
+            new InputEvent("input", { bubbles: true, data: text, isComposing: true }),
+          );
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              bubbles: true,
+              key: "ArrowDown",
+              isComposing: true,
+            }),
+          );
+        });
+        await flush(25);
+      }
+      expect(fixture.actions).toEqual([]);
+      await actRun(() => {
+        fixture.keyboard.value = "你";
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "你" }),
+        );
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "你" }));
+      });
+      await flush(25);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "keyboard", action: "type", value: "你" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
+  test("keeps native composing keys and uncommitted desktop input local", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      await actRun(() => fixture.keyboard.focus());
+      await actRun(() => {
+        fixture.keyboard.value = "uncommitted";
+        fixture.keyboard.dispatchEvent(
+          new InputEvent("input", { bubbles: true, isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 229 }),
+        );
+        fixture.keyboard.value = "";
+        fixture.keyboard.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "" }),
+        );
+      });
+      await flush(25);
+      expect(fixture.actions).toEqual([]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
   test("retains keyboard focus after a canvas click and types after that click", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();

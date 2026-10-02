@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   type ClipboardEvent,
+  type CompositionEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
@@ -1039,6 +1040,7 @@ function ComputerViewport(props: {
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<{
@@ -1088,6 +1090,7 @@ function ComputerViewport(props: {
     pendingTextRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
+    composingRef.current = false;
     if (inputRef.current) inputRef.current.value = "";
   }, []);
 
@@ -1403,6 +1406,13 @@ function ComputerViewport(props: {
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (!keyboardInputEnabled) return;
+    if (
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -1456,7 +1466,8 @@ function ComputerViewport(props: {
     });
   };
 
-  const input = (value: string) => {
+  const input = (value: string, nativeComposing = false) => {
+    if (composingRef.current || nativeComposing) return;
     if (!value || !keyboardInputEnabled) return;
     flushPendingWheel();
     flushPendingClick();
@@ -1472,6 +1483,11 @@ function ComputerViewport(props: {
       };
     }
     if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const compositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    input(event.currentTarget.value || event.data);
   };
 
   const showCanvas =
@@ -1501,7 +1517,13 @@ function ComputerViewport(props: {
       <textarea
         ref={inputRef}
         defaultValue=""
-        onInput={(event) => input(event.currentTarget.value)}
+        onInput={(event) =>
+          input(event.currentTarget.value, (event.nativeEvent as InputEvent).isComposing)
+        }
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={compositionEnd}
         onKeyDown={keyDown}
         onCopy={copy}
         onPaste={paste}
