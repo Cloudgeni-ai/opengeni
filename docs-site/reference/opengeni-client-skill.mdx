@@ -77,14 +77,15 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
-  [Discovery and autonomy](references/discovery-and-autonomy.md).
+- Some choices belong to the user: who shares what (`chats`: private, shared
+  or isolated) and whether the agent may change data. Only when the integration
+  runs work in the background or on a schedule, also: when it runs (schedule and
+  time zone) and where its results should appear (a page in the app, a note on
+  a record, or a Slack/email message). A chat assistant's answers simply appear
+  in the chat; never ask about that. If the request or repository does not
+  settle a relevant choice, ask ONE short, plain-language question with a
+  recommended answer for each, before building. Never ask what the repository
+  answers. See [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
 - Match the requested delivery autonomy. Repository or cloud access is
@@ -1696,11 +1697,13 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-The four user-owned choices (who shares what, when things run and in which time
-zone, where outputs land, whether the agent may write) are never defaulted
-silently: if the request or repository does not settle one, send the single
-bundled question before building the parts that depend on it, and continue only
-independent discovery while waiting. Skip this only when the user explicitly
+The user-owned choices (who shares what, whether the agent may change data,
+and, only for background or scheduled work, when it runs and where its results
+should appear) are never defaulted silently: if the request or repository does
+not settle a relevant one, send a single short question in plain product terms
+before building the parts that depend on it, and continue only independent
+discovery while waiting. A chat assistant's replies appear in the chat; that is
+not a question to ask. Skip this only when the user explicitly
 said not to ask; then state the defaults you chose in the handoff. For other
 choices, first use facts already available from the product, repository, live
 service, or prior direction, and use a reversible recommendation instead of a
