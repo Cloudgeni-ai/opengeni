@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
+import { sessionAttemptPendingWritersSql } from "../../../packages/db/src/session-attempt-writers";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
   createProviderCommandRetainer,
@@ -21,6 +23,9 @@ import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,
   getSessionTurn,
+  getActiveSessionHistoryItems,
+  registerPendingSessionToolCall,
+  readWorkspaceArchiveCapturePreflight,
   peekSessionWork,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
@@ -575,6 +580,160 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  for (const operation of ["execCommand", "writeFile"] as const) {
+    test(`locator-less legacy recovery preserves unknown truth (${operation})`, async () => {
+      if (!available) throw new Error("PostgreSQL is required for recovery admission proof");
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { leaseId, instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      const callId = crypto.randomUUID();
+      expect(
+        await registerPendingSessionToolCall(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          callId,
+          callType: "function_call",
+          callItem: { type: "function_call", callId, name: operation, arguments: "{}" },
+        }),
+      ).toMatchObject({ accepted: true, registered: true });
+      expect(
+        await recoverSessionDispatch(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          attemptId: attempt.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "recovering" });
+      const claim = () =>
+        claimSessionWorkForAttempt(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          workflowId: `session-${attempt.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      if (operation === "execCommand") {
+        for (const [name, admissionOverride, attemptOverride, inferencePending] of [
+          ["exact legacy owner", {}, {}, false],
+          ["live owner", {}, { state: "running" }, true],
+          ["completed owner", {}, { outcome: "completed" }, true],
+          ["other provider", { provider_backend: "local" }, {}, true],
+          [
+            "active route",
+            { route_kind: "active", route_target_id: crypto.randomUUID() },
+            {},
+            true,
+          ],
+          ["non-exec", { operation: "writeFile" }, {}, true],
+          ["wrong actor", { actor_id: crypto.randomUUID() }, {}, true],
+          ["wrong turn", { turn_id: crypto.randomUUID() }, {}, true],
+          ["wrong generation", { execution_generation: attempt.executionGeneration + 1 }, {}, true],
+          ["known provider outcome", { provider_outcome: "retained" }, {}, true],
+        ] as const) {
+          const [predicate] = await withWorkspaceSessionActivityRls(
+            db,
+            ids.workspaceId,
+            (scopedDb) =>
+              scopedDb.execute<{ physical: boolean; inference: boolean }>(sql`
+            with sandbox_workspace_mutation_admissions as (
+              select (jsonb_populate_record(null::sandbox_workspace_mutation_admissions,
+                to_jsonb(source) || ${JSON.stringify(admissionOverride)}::jsonb)).*
+              from public.sandbox_workspace_mutation_admissions source where id=${admission.id}
+            ), owner as (
+              select (jsonb_populate_record(null::session_turn_attempts,
+                to_jsonb(source) || ${JSON.stringify(attemptOverride)}::jsonb)).*
+              from session_turn_attempts source where id=${attempt.attemptId}
+            )
+            select ${sessionAttemptPendingWritersSql(sql`owner`)} as physical,
+              ${sessionAttemptPendingWritersSql(sql`owner`, "inference")} as inference from owner
+          `),
+          );
+          expect(predicate, name).toEqual({ physical: true, inference: inferencePending });
+        }
+        const operationId = crypto.randomUUID();
+        await admin`insert into session_command_receipts (id,account_id,workspace_id,actor_type,actor_subject_id,
+          action,target_session_id,operation_key,canonical_request_hash)
+          values (${operationId},${ids.accountId},${ids.workspaceId},'human','user:test-owner',
+          'prompt.steer',${attempt.sessionId},${crypto.randomUUID()},${"a".repeat(64)})`;
+        await admin`insert into session_attempt_interruptions (account_id,workspace_id,session_id,operation_id,
+          attempt_id,kind,control_revision,state,settled_at)
+          values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${operationId},
+          ${attempt.attemptId},'steer',0,'settled',now())`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+        await admin`delete from session_attempt_interruptions where operation_id=${operationId}`;
+        await admin`delete from session_command_receipts where id=${operationId}`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "runnable",
+        });
+        expect(await claim()).toMatchObject({ action: "claimed", turn: { id: attempt.turnId } });
+        const history = await getActiveSessionHistoryItems(db, ids.workspaceId, attempt.sessionId);
+        const result = history.find(
+          ({ item }) => item.type === "function_call_result" && item.callId === callId,
+        );
+        expect(result?.item).toMatchObject({
+          type: "function_call_result",
+          output: { type: "text" },
+        });
+        expect(JSON.stringify(result?.item)).toContain(
+          "side-effect outcome is unknown; inspect actual state before repeating the call",
+        );
+      } else {
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+      }
+      const [unchanged] =
+        await admin`select admission.provider_outcome, admission.settled_at, attempt.quiesced_at
+        from sandbox_workspace_mutation_admissions admission join session_turn_attempts attempt on attempt.id=admission.attempt_id
+        where admission.id=${admission.id}`;
+      expect(unchanged).toMatchObject({
+        provider_outcome: null,
+        settled_at: null,
+        quiesced_at: null,
+      });
+      expect(
+        await readWorkspaceArchiveCapturePreflight(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 7,
+          expectedInstanceId: instanceId,
+          liveness: "warm",
+        }),
+      ).toBeNull();
+      const [lease] = await admin`select instance_id from sandbox_leases where id=${leaseId}`;
+      expect(lease!.instance_id).toBe(instanceId);
+    }, 60_000);
+  }
+
   test.skipIf(process.platform !== "linux")(
     "SIGKILL after native launch preserves the pre-dispatch DB reservation and cancels the original idle invocation",
     async () => {

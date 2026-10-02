@@ -145,7 +145,12 @@ original turn, history, authority and selected model policy—never synthetic in
 
 Active-run writes require the current exact attempt/generation; stale workers
 cannot write or settle replacements. Temporal cancellation is intent, not
-quiescence: unresolved writers, even on closed attempts, fence replacements.
+quiescence: unresolved writers fence capture, rotation and physical settlement.
+Inference can resume on the same machine after a lease-lost closed attempt's
+legacy Modal exec observation is unknown and has no retained locator. Exact
+actor/turn/generation and home-route checks bound this exception; the original
+admission and quiescence remain unresolved. Recovery tool results warn the model
+to inspect actual state before repeating a call. Pause/Steer fences stay strict.
 Finalization contains each stage with heartbeat/metric evidence
 (`agent-turn/finalization-monitor.ts`).
 
