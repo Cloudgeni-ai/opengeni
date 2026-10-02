@@ -160,6 +160,23 @@ or rotation through the authorized owner.
 
 Tool selection is not data authorization. The customer API must validate the presented credential on every operation and derive or verify the allowed tenant, user, report, and row scope. Do not trust model-supplied tenant IDs. Prefer endpoints whose server derives scope from token claims; when an ID is accepted, verify it belongs to those claims.
 
+An agent bridge needs an independently scoped provider credential, not an
+ordinary host login JWT with fewer tools listed. A token signed with the host's
+normal login secret and user ID may still authorize its account/password APIs;
+an OpenAPI/MCP allowlist does not restrict that bearer outside the tool surface.
+Prefer a separate signing key/token namespace plus a distinct issuer/audience,
+short expiry and explicit operation/record scope. Verify those claims on the
+bridge, and make ordinary host endpoints reject this credential entirely. Adding
+an audience claim is ineffective if the ordinary host verifier never checks it.
+Reuse authorized business logic, not the ordinary login credential or middleware.
+
+Before launch, test the actual middleware in both directions: the provider token
+can perform only its allowed read/title-only operation on an owned record; it
+cannot call the ordinary account/password/admin APIs, another user's record or
+an extra body field; an ordinary login token is not a bridge credential. Check
+expiry, issuer/audience and operation scope with negative tests. These are host
+authorization tests, not proof supplied by OpenGeni's tool selection or approval.
+
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.

@@ -29,6 +29,7 @@ import {
 import {
   isModalCommandStartOutcomeUnknownError,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
   RoutingMutationOutcomeUnknownError,
 } from "@opengeni/runtime";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
@@ -219,11 +220,24 @@ function unknownCommand(instanceId: string) {
   };
 }
 
-test.each(["exited", "lost"] as const)(
-  "the real retained SDK writer parks its owning turn even after exact %s proof",
-  async (terminal) => {
+test.each([
+  ["start", "exited"],
+  ["start", "lost"],
+  ["observation", "exited"],
+  ["observation", "lost"],
+] as const)(
+  "the real retained %s writer parks its owning turn even after exact %s proof",
+  async (boundary, terminal) => {
     const fixture = await admittedInternalMutation();
-    const { error: original, command } = unknownCommand(fixture.instanceId);
+    const { error: startUnknown, command } = unknownCommand(fixture.instanceId);
+    if (boundary === "observation") command.streams.stdout.byteOffset = 17;
+    const original =
+      boundary === "start"
+        ? startUnknown
+        : new ProviderCommandObservationUnavailableError(
+            command,
+            Object.assign(new Error("Read unavailable after Start acknowledgement"), { code: 14 }),
+          );
     let starts = 0;
     const failure = await fixture.runtime
       .runWorkspaceMutationForSandbox(

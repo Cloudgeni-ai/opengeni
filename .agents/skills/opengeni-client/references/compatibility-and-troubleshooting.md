@@ -47,6 +47,50 @@ module.exports = { createOpenGeniClient };
 
 Keep this initialization on the server: never send the API key to a browser.
 
+## Host errors and uncertain actions
+
+Keep SDK/provider details server-only and return friendly host-branded notices,
+not `error.message`, `error.body`, raw stack traces or a provider's product name.
+Put configuration, dynamic SDK import/initialization, identity resolution,
+upstream calls and local persistence inside the route's error boundary, not only
+the final call. Log a redacted diagnostic with a non-secret correlation ID on
+the server; never copy an SDK exception into the browser response or DOM.
+
+For an approval route, distinguish an accepted decision from completed tool
+execution. If the call returns a decision event and local mapping/receipt save
+then fails, the decision may already be durable. `outcomeUnknown: true` also
+means acceptance may have occurred. Neither case justifies "the article is
+unchanged", a fresh approval ID or a blind replay. Keep the original session,
+approval ID and persisted `clientEventId`; reread ordered events and the
+authorized provider record to reconcile. Only retry the exact original request
+under the installed endpoint's supported idempotency contract after reconciliation.
+For stale/no-pending approval conflicts, refresh current state instead of
+recreating a pending card or exposing the raw upstream error.
+
+```js
+function assistantFailureNotice(error, { decisionAccepted = false } = {}) {
+  if (decisionAccepted || error?.outcomeUnknown === true) {
+    return {
+      state: "reconciling",
+      message: "The action may have been accepted. Check its status before trying again.",
+    };
+  }
+  if (error?.status === 409) {
+    return { state: "refresh", message: "This request has changed. Refresh before deciding." };
+  }
+  return { state: "failed", message: "The assistant is unavailable. Please try again later." };
+}
+```
+
+This helper is for the host's approval-action error boundary, not a replacement
+for authentication/authorization responses. Set `decisionAccepted = true`
+immediately after `await sendApprovalDecision(...)`, before any local save.
+Disable repeat actions while `state === "reconciling"`; render only this safe
+notice and use the existing host status/error conventions. Apply the same
+safe-copy boundary to polling, configuration and generic SDK failures. Test
+stale approval, an unknown mutation outcome, accepted-decision/local-save failure,
+SDK initialization failure and late errors after an identity switch.
+
 ## Decide what is being replaced
 
 | Customer dependency | Evidence needed |

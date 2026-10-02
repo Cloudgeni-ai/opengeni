@@ -473,21 +473,18 @@ missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
 Modal `TaskExecStart` recovery requires read-only task/router lookup or local
-channel-readiness failure before any Start RPC. Native and pinned-SDK
-setup/filesystem/archive commands share this rule. Typed proof and preserved SDK
-causes permit finite five-replacement same-turn recovery, including pre-eventing
-setup. Server DNS text and post-dispatch errors never prove non-execution.
-Uncertain Starts return typed outcome-unknown results, never transport retries.
-Supervised retries settle the exact never-started reservation first; retained or
-outcome-unknown causes block replay. Internal SDK ambiguity retains the exact
-authenticated command or unresolved admission. An unwound setup parks its exact
-turn as recovering with `sandboxSetupOutcomeUnknown`; DB work peek and claim
-both refuse redispatch. Physical exit/loss or an observation deadline cannot
-prove completion of the remaining helper. This is neither setup success nor a
-fabricated model tool/capacity/approval wait, and does not reset the five-budget.
-Published consumers use unpatched Modal:
-runtime owns its native error class and recognizes SDK boundaries by a local
-own-Symbol data marker, never patch-only imports, names, codes or diagnostic text.
+channel-readiness failure before any Start RPC, for native and pinned-SDK
+setup/filesystem/archive commands alike. Typed proof permits finite
+five-replacement same-turn recovery. Exhaustion parks proven non-dispatch as
+`sandboxSetupRecoveryExhausted`, retaining count five; peek and claim refuse
+automatic replay. Server DNS text and post-dispatch errors
+never prove non-execution. Uncertain Starts return typed outcome-unknown
+results, never transport retries, and block replay. An unwound setup parks its
+turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse
+redispatch, and exit/loss or deadlines never prove completion. Published
+consumers use unpatched Modal: the runtime owns its error class and recognizes
+SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
+codes or text.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
@@ -1257,29 +1254,21 @@ skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
-Codemode adds only attempt scope, active-attempt fencing, its durable operation
-journal, sandbox delivery, and recovery semantics. Input and authorization
-preflight finish before its execution-start marker. The API exposes a stable
-pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
-and path/identity re-resolution without retrying an existing or ambiguous
-operation. Deterministic submission conflicts are never reconciled to an
-existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison.
-Admitted-operation recovery never replays the tool; see
-[run lifecycle](run-lifecycle.md#codemode-recovery). The current-human gateway
-rebuilds live authority for each request. Browser callers use
-`client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
-parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
-credentials nor workspace routing context. The active immutable Site version's
-retained tool identities are its direct-call allowlist: the parent intersects
-them with the current viewer's live gateway, and the API revalidates the exact
-active version and identity on every call. Publishing grants no tool authority:
-requested identities are only a maximum allowlist, and ordinary live gateway
-approval still applies at execution. An agent-authored version may retain any
-identity present in its exact attempt catalog. The host
-injects a pre-application bootstrap receiver into the exact iframe document so
-a Site client constructed after `load` can use the retained document port; the
-port and every derived tool-call port are revoked on document navigation or replacement.
+Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
+sandbox delivery and recovery. Preflight finishes before the execution-start
+marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
+never a retry of an existing or ambiguous operation. Submission conflicts never
+reconcile to an existing row; ambiguous failures adopt one only after exact
+scope, catalog, identity and argument comparison. Recovery never replays the
+tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
+gateway rebuilds live authority per request. Browsers use
+`client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
+`@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
+A Site version's retained tool identities are only a maximum allowlist: the
+parent intersects them with the viewer's live gateway, the API revalidates every
+call, and live approval still applies. Agent-authored versions may retain any
+identity in their exact attempt catalog. Ports are revoked on document
+navigation or replacement.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
@@ -1364,6 +1353,8 @@ full observations; Code Mode receives local image handles. Human computer contro
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
+
+Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
 
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
@@ -1538,6 +1529,10 @@ locators as offsets. The reaper drains progressing output within bounded claims;
 exit requires both streams' EOF. Fixed native lease-readiness probes share the
 pre-dispatch guard; uncertain Starts observe their exact invocation within the
 existing readiness budget.
+
+Post-start recovery preserves IDs/cursors, budgets and writer fences.
+Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
+helper UUID/cursors.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;

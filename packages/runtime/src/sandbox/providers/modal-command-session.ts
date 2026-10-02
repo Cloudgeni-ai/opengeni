@@ -408,6 +408,6 @@ export function installModalCommandSession(
       const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
       await control.write(retained, args.chars, index);
     }
-    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens);
+    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens, args.signal);
   };
 }

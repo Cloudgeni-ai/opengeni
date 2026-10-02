@@ -145,6 +145,65 @@ For live sessions, preserve event sequence, reconnect, replay, and duplicate sup
 
 Uploads may send bytes directly to a short-lived signed storage URL returned by the trusted flow. That URL is narrow transfer authority, not the OpenGeni API key. Verify storage CORS for every intended browser origin.
 
+### Bind asynchronous UI work to the current identity and session
+
+In a custom polling/static UI, backend authorization does not stop an already
+authorized response for account A arriving after account B signs in. On logout,
+login, tenant switch or session switch, invalidate the UI epoch, abort outstanding
+requests, stop polling, and clear private messages, approval cards, session IDs,
+cursors and local caches. Do not reuse A's session ID for B. Abort alone is not
+enough: a completed request or a transport that ignores abort can still resolve.
+Guard both success and failure rendering by the captured identity/session epoch.
+
+These framework-neutral helpers belong in the host's existing frontend module:
+
+```js
+function createIdentityBoundView(clearPrivateState) {
+  let epoch = 0;
+  let identityKey = null;
+  const requests = new Set();
+  return {
+    reset(nextIdentityKey) {
+      epoch += 1; // also fences A -> B -> A and a new session for the same user
+      identityKey = nextIdentityKey;
+      for (const controller of requests) controller.abort();
+      requests.clear();
+      clearPrivateState(); // include polling timers, cached IDs and decisions
+    },
+    begin() {
+      if (identityKey === null) throw new Error("No authenticated view");
+      const capturedEpoch = epoch;
+      const controller = new AbortController();
+      requests.add(controller);
+      return {
+        signal: controller.signal,
+        isCurrent: () => capturedEpoch === epoch && !controller.signal.aborted,
+        finish: () => requests.delete(controller),
+      };
+    },
+  };
+}
+
+async function readForCurrentView(view, load, render, showFailure) {
+  const request = view.begin();
+  try {
+    const result = await load(request.signal);
+    if (request.isCurrent()) render(result);
+  } catch {
+    if (request.isCurrent()) showFailure("The assistant could not refresh.");
+  } finally {
+    request.finish();
+  }
+}
+```
+
+Call `view.reset(null)` before clearing host authentication; after authenticated
+mapping, reset with a key for the tenant/user/session tuple before loading its
+view. `load(signal)` calls the host's authenticated same-origin route and passes
+the signal to `fetch`. The epoch is a presentation fence, not authorization:
+the backend must still check every request's user and session ownership. Do not
+run these browser helpers with an organization key or put that key in storage.
+
 ## Decide what the user sees
 
 OpenGeni's durable event stream can support different product projections:
@@ -158,6 +217,79 @@ OpenGeni's durable event stream can support different product projections:
 The customer frontend chooses which event types and fields to render. Hiding an event from the chat view does not remove it from OpenGeni's durable history or from authorized audit readers. Do not promise data erasure or secrecy from presentation filtering.
 
 Each `session.requiresAction` event replaces the pending approval set. Read only `payload.approvals[].id`, `.name`, and `.arguments` (SDK type `SessionApprovalRequest`); other fields differ between a turn's first pause and later ones and exist for compatibility. Send `sendApprovalDecision({ approvalId: approval.id, decision })`: `id` is the pending tool call id, not the event id. `approvalsFromRequiresAction` / `projectPendingApprovals` from `@opengeni/react` already normalize older events.
+
+For a custom non-React projection, fold ordered, deduplicated events rather than
+appending every historical approval as a new pending card. Keep the original
+approval ID and the durable decision event ID. A decision is terminal for that
+approval; a replay/reload must not restore its Approve button. Turn settlement
+clears that turn's undecided approvals, not approvals owned by a different turn.
+The following minimal projection uses current stable fields; use the packaged
+normalizer for older events, not generated IDs or guessed compatibility fields:
+
+```js
+function projectApprovalState(events) {
+  let pending = new Map();
+  let owningTurnId = null;
+  const decisions = new Map();
+  const settledTurns = new Set();
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    if (event.type === "session.requiresAction") {
+      owningTurnId = event.turnId ?? null;
+      pending = new Map();
+      if (owningTurnId !== null && settledTurns.has(owningTurnId)) continue;
+      for (const approval of Array.isArray(payload.approvals) ? payload.approvals : []) {
+        if (!approval || typeof approval.id !== "string" || !approval.id ||
+            typeof approval.name !== "string" || !approval.name || decisions.has(approval.id)) continue;
+        pending.set(approval.id, approval);
+      }
+    } else if (event.type === "user.approvalDecision") {
+      if (typeof payload.approvalId !== "string" || !payload.approvalId ||
+          !["approve", "reject"].includes(payload.decision) || decisions.has(payload.approvalId)) continue;
+      decisions.set(payload.approvalId, {
+        approvalId: payload.approvalId,
+        decision: payload.decision,
+        decisionEventId: event.id,
+      });
+      pending.delete(payload.approvalId);
+    } else if (["turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
+      if (event.turnId != null) settledTurns.add(event.turnId);
+      if (owningTurnId === null || event.turnId == null || event.turnId === owningTurnId) {
+        pending.clear();
+        owningTurnId = null;
+      }
+    }
+  }
+  return { pending: [...pending.values()], decisions: [...decisions.values()] };
+}
+
+// Example for a known title-only operation, not a generic approval formatter.
+function exactTitleProposal(approval) {
+  try {
+    const args = typeof approval.arguments === "string"
+      ? JSON.parse(approval.arguments) : approval.arguments;
+    const body = args?.body;
+    if (!body || Array.isArray(body) || Object.keys(body).some((key) => key !== "title")) return null;
+    return typeof body.title === "string" && body.title.trim() ? body.title : null;
+  } catch {
+    return null;
+  }
+}
+```
+
+Render arguments using the selected operation's schema: for this example the
+title is `arguments.body.title`, not `arguments.title`. Use escaped text, retain
+the exact string (do not silently trim/change it), and also display the target
+record and operation. Enable Approve only for a currently pending, authorized
+request whose exact proposal and target can be shown. Missing/malformed proposal
+means disabled Approve, not a placeholder beside an enabled button; Reject or
+refresh can remain available. The provider still enforces record ownership,
+allowed fields and any expected-version/CAS precondition on the actual write.
+
+Persist a stable `clientEventId` before `sendApprovalDecision`, retain the
+returned decision event, and reconcile after an uncertain response or a local
+save failure. Accepted approval means a decision was accepted, not that its
+provider write completed. See [Failure and reconciliation](compatibility-and-troubleshooting.md#host-errors-and-uncertain-actions).
 
 Even a final-answer-only UI should surface states the user must act on: failure, cancellation, credit or policy denial, approval requests, human-input requests, reconnect status, and a way to retry safely. Avoid presenting tool failures as ordinary assistant prose when product state can represent them more clearly.
 

@@ -15,6 +15,8 @@ import { Notice } from "@/components/ui/notice";
 import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
 import { userErrorText } from "@/lib/api-error";
 import { analyticsAction } from "@/lib/analytics-actions";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
@@ -144,6 +146,11 @@ export function ModelAccessOnboardingPanel({
     operationId: string;
   } | null>(null);
 
+  const variant = startingCredits ? "credits" : includedModel ? "included" : "choose";
+  useEffect(() => {
+    onboardingJourney().viewed("model_access", variant);
+  }, [variant]);
+
   useEffect(() => {
     cancelled.current = false;
     return () => {
@@ -169,6 +176,10 @@ export function ModelAccessOnboardingPanel({
     // Leaving mid-save would complete twice or drop the connected selection.
     if (finishing.current) return;
     stopDeviceLogin();
+    onboardingJourney().completed(
+      "model_access",
+      variant === "choose" ? "skipped" : "start_chatting",
+    );
     onComplete();
   }
 
@@ -195,6 +206,7 @@ export function ModelAccessOnboardingPanel({
         finishing.current = false;
       }
     }
+    onboardingJourney().completed("model_access", "connected_model");
     onComplete();
     return true;
   }
@@ -212,6 +224,7 @@ export function ModelAccessOnboardingPanel({
   async function startDeviceLogin(kind: DevicePending["kind"]): Promise<void> {
     if (!client || busy || pending) return;
     const label = kind === "codex" ? "Codex" : "xAI";
+    const recordOutcome = beginModelConnectJourney(kind, "device_code");
     setBusy(true);
     let begin: () => Promise<{ status: string; plan?: string | null } | null>;
     let verificationUri: string;
@@ -254,6 +267,7 @@ export function ModelAccessOnboardingPanel({
           });
       }
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
       toast.error(`Couldn't start the ${label} sign-in`, { description: userErrorText(error) });
       return;
@@ -270,6 +284,7 @@ export function ModelAccessOnboardingPanel({
       pollAbort.current = null;
       setPending(null);
       if (result.status === "connected") {
+        recordOutcome("connected");
         toast.success(
           kind === "codex"
             ? `Codex connected for ${organizationName || "your organization"}${result.plan ? ` (${result.plan} plan)` : ""}`
@@ -284,12 +299,14 @@ export function ModelAccessOnboardingPanel({
         }
         return;
       }
+      recordOutcome(result.status === "denied" ? "denied" : "expired");
       toast.error(
         result.status === "denied"
           ? `${label} login was denied`
           : "The code expired before it was authorized. Try again.",
       );
     } catch (error) {
+      recordOutcome(controller.signal.aborted ? "expired" : "outcome_unknown");
       if (controller.signal.aborted || cancelled.current) return;
       pollAbort.current = null;
       setPending(null);
@@ -311,6 +328,7 @@ export function ModelAccessOnboardingPanel({
         ? priorOperation.operationId
         : crypto.randomUUID();
     providerKeyOperation.current = { provider: keyProvider, credential: value, operationId };
+    const recordOutcome = beginModelConnectJourney(config.family, "api_key");
     setBusy(true);
     try {
       await client.createConnection(workspaceId, {
@@ -325,9 +343,11 @@ export function ModelAccessOnboardingPanel({
         },
         operationId,
       });
+      recordOutcome("connected");
       toast.success(`${config.label} connected`);
       if (await finishWithConnectedModel(config.family)) providerKeyOperation.current = null;
     } catch (error) {
+      recordOutcome("outcome_unknown");
       toast.error(`Couldn't connect ${config.label}`, { description: userErrorText(error) });
     } finally {
       setBusy(false);
@@ -350,6 +370,7 @@ export function ModelAccessOnboardingPanel({
         successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
         cancelUrl: window.location.href,
       });
+      onboardingJourney().completed("model_access", "checkout");
       window.location.assign(session.url);
     } catch (error) {
       toast.error("Checkout failed", { description: userErrorText(error) });

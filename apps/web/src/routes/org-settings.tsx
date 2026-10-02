@@ -66,6 +66,15 @@ const LazyOrganizationApiKeysSection = lazy(async () => {
   return { default: module.OrganizationApiKeysSection };
 });
 
+// A Stripe return is a full page load, so one report per outcome per document
+// is one report per return, even when an effect runs twice.
+const reportedCheckoutReturns = new Set<string>();
+function takeCheckoutReturn(outcome: string): boolean {
+  if (reportedCheckoutReturns.has(outcome)) return false;
+  reportedCheckoutReturns.add(outcome);
+  return true;
+}
+
 export function OrgSettingsRoute({
   workspaceId,
   checkout,
@@ -159,10 +168,16 @@ export function OrgSettingsRoute({
   // the analytics module instead of the not-yet-installed observer shim.
   useEffect(() => {
     if (!checkout) return;
-    if (checkout === "success") {
+    if (takeCheckoutReturn(checkout)) {
       void import("@/lib/analytics")
-        .then(({ captureAnalyticsEvent }) => captureAnalyticsEvent("checkout_completed"))
+        .then(({ captureAnalyticsEvent }) =>
+          captureAnalyticsEvent(
+            checkout === "success" ? "checkout_completed" : "checkout_cancelled",
+          ),
+        )
         .catch(() => undefined);
+    }
+    if (checkout === "success") {
       toast.success("Payment received", {
         description: "Your credits will appear shortly.",
       });

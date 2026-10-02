@@ -41,6 +41,8 @@ exports[`agent configuration reaches the production model request api creator re
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -74,6 +76,8 @@ exports[`agent configuration reaches the production model request api creator re
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -234,7 +238,7 @@ exports[`agent configuration reaches the production model request api creator re
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -279,6 +283,8 @@ exports[`agent configuration reaches the production model request slack creator 
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -312,6 +318,8 @@ exports[`agent configuration reaches the production model request slack creator 
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -472,7 +480,7 @@ exports[`agent configuration reaches the production model request slack creator 
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -517,6 +525,8 @@ exports[`agent configuration reaches the production model request scheduled crea
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -550,6 +560,8 @@ exports[`agent configuration reaches the production model request scheduled crea
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -710,7 +722,7 @@ exports[`agent configuration reaches the production model request scheduled crea
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -755,6 +767,8 @@ exports[`agent configuration reaches the production model request automation cre
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -788,6 +802,8 @@ exports[`agent configuration reaches the production model request automation cre
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -948,7 +964,7 @@ exports[`agent configuration reaches the production model request automation cre
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -993,6 +1009,8 @@ exports[`agent configuration reaches the production model request site_auth_main
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -1026,6 +1044,8 @@ exports[`agent configuration reaches the production model request site_auth_main
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -1186,7 +1206,7 @@ exports[`agent configuration reaches the production model request site_auth_main
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -1231,6 +1251,8 @@ exports[`agent configuration reaches the production model request omitted and nu
     "interaction__browser_auth",
     "interaction__browser_clipboard",
     "interaction__browser_debug",
+    "interaction__browser_download_save",
+    "interaction__browser_downloads",
     "interaction__browser_identity",
     "interaction__browser_lifecycle",
     "interaction__browser_observe",
@@ -1264,6 +1286,8 @@ exports[`agent configuration reaches the production model request omitted and nu
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
     "opengeni__browser_debug",
+    "opengeni__browser_download_save",
+    "opengeni__browser_downloads",
     "opengeni__browser_identity",
     "opengeni__browser_lifecycle",
     "opengeni__browser_observe",
@@ -1424,6 +1448,6 @@ exports[`agent configuration reaches the production model request omitted and nu
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "fb427197eb3f81b714bde48f070afae35fc51d2bb3c96425083282068e8b4db9",
+  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;

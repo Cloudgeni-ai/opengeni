@@ -1,4 +1,9 @@
 import { reserveBrowserConnectNavigation } from "@opengeni/connect";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  type IntegrationConnectTracker,
+} from "@/lib/integration-connect-analytics";
 import { OpenGeniApiError, type ClaudeSubscriptionOAuthStartResponse } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { ProviderConnectionView } from "../ai-gateway-connection";
@@ -61,6 +66,8 @@ export function ClaudeSignInPage({
   const [pending, setPending] = useState(false);
   const active = useRef(true);
   const popup = useRef<{ close(): void } | null>(null);
+  // Consent-gated connect journey for the Claude subscription sign-in.
+  const journey = useRef<IntegrationConnectTracker | null>(null);
   const codeInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     active.current = true;
@@ -142,6 +149,8 @@ export function ClaudeSignInPage({
               return false;
             }
             remember(started);
+            journey.current?.finish("abandoned");
+            journey.current = beginIntegrationConnect("claude_subscription", "oauth");
             popup.current = navigation.navigation.openPopup(started.authorizationUrl);
             return false;
           } catch (error) {
@@ -161,8 +170,12 @@ export function ClaudeSignInPage({
         } catch (error) {
           if (error instanceof OpenGeniApiError && [403, 409, 410, 502].includes(error.status))
             reset();
+          journey.current?.finish(integrationConnectErrorOutcome(error));
+          journey.current = null;
           throw error;
         }
+        journey.current?.finish("connected");
+        journey.current = null;
         reset();
         if (!active.current) return false;
         await state.refreshConnection();

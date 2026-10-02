@@ -73,6 +73,11 @@ const SECTIONS = new Set([
   "capabilities",
 ]);
 
+/** Every `page` value `journeyPage` can report. */
+export function journeyPageLabels(): ReadonlySet<string> {
+  return new Set([...PAGES, ...TOP_LEVEL_PAGES.map(([, page]) => page), "other"]);
+}
+
 export function journeyPage(pathname: string, search = ""): JourneyProperties {
   const parts = pathname.split("/").filter(Boolean);
   const workspace = parts[0] === "workspaces" && UUID.test(parts[1] ?? "");
