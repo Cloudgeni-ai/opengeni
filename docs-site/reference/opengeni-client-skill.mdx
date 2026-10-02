@@ -77,15 +77,16 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Some choices belong to the user: who shares what (`chats`: private, shared
-  or isolated) and whether the agent may change data. Only when the integration
-  runs work in the background or on a schedule, also: when it runs (schedule and
-  time zone) and where its results should appear (a page in the app, a note on
-  a record, or a Slack/email message). A chat assistant's answers simply appear
-  in the chat; never ask about that. If the request or repository does not
-  settle a relevant choice, ask ONE short, plain-language question with a
-  recommended answer for each, before building. Never ask what the repository
-  answers. See [Discovery and autonomy](references/discovery-and-autonomy.md).
+- Two choices belong to the user: who can see a chat (`chats`: private, shared
+  or isolated) and whether the agent may change data. If the request or
+  repository does not settle one, ask ONE short, plain-language question with a
+  recommended answer, before building. Never ask what the repository answers.
+- Do not ask about background work, schedules, session length or credential
+  lifetime up front. Long agent sessions just work. Only when the requested
+  feature itself is scheduled or runs in the background (for example "email me
+  a weekly report"), ask for the missing details (day, time, time zone, where
+  results appear) and say in one sentence why you need them. See
+  [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
 - Match the requested delivery autonomy. Repository or cloud access is
@@ -555,7 +556,7 @@ session a short-lived per-user bearer and rotate it on every message:
    never send credential updates itself.
 4. The MCP server validates the token and enforces the user's own permissions.
 
-Make the token outlive one turn (agents can work for many minutes). Header
+Make the token outlive long agent work by default (hours, refreshed on every message); this is a default, never a question for the user. Header
 rotation cannot change the server's URL or tools. Scheduled tasks cannot carry
 inline `mcpServers`; background agents use a workspace MCP connection or
 OpenAPI Integration instead.
@@ -1740,10 +1741,11 @@ use internal terms such as "on-demand", "learning across chats", "shape",
   the requested product.
 - **What data it uses:** only what's on the current page, or it can look up
   more on its own. State the meaningful limitation of the recommendation.
-- **Only for background or scheduled work:** when it runs ("every Monday at
-  9:00, Oslo time") and where results should appear (a page in the app, a note
-  on a record, a Slack or email message). A chat assistant just answers in the
-  chat; never ask about timing or where answers appear for it.
+- **Only when the requested feature is itself scheduled or runs in the
+  background** (for example "email me a weekly report"): the missing details
+  (when it runs, "every Monday at 9:00, Oslo time", and where results should
+  appear) with one sentence on why. Never ask about this up front, and never
+  for a chat assistant: long sessions work without any user decision.
 - **Memory:** don't ask by default. Use no lasting memory between chats unless
   the product clearly needs the assistant to remember things ("remember my
   preferences"). If it does, ask in those words. Chat history is kept either way.

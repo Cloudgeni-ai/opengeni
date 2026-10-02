@@ -80,10 +80,11 @@ use internal terms such as "on-demand", "learning across chats", "shape",
   the requested product.
 - **What data it uses:** only what's on the current page, or it can look up
   more on its own. State the meaningful limitation of the recommendation.
-- **Only for background or scheduled work:** when it runs ("every Monday at
-  9:00, Oslo time") and where results should appear (a page in the app, a note
-  on a record, a Slack or email message). A chat assistant just answers in the
-  chat; never ask about timing or where answers appear for it.
+- **Only when the requested feature is itself scheduled or runs in the
+  background** (for example "email me a weekly report"): the missing details
+  (when it runs, "every Monday at 9:00, Oslo time", and where results should
+  appear) with one sentence on why. Never ask about this up front, and never
+  for a chat assistant: long sessions work without any user decision.
 - **Memory:** don't ask by default. Use no lasting memory between chats unless
   the product clearly needs the assistant to remember things ("remember my
   preferences"). If it does, ask in those words. Chat history is kept either way.
