@@ -1,19 +1,11 @@
 import { useNavigate } from "@tanstack/react-router";
-import {
-  ArrowRightIcon,
-  Blocks,
-  ChevronLeftIcon,
-  CompassIcon,
-  Loader2Icon,
-  MessageSquareTextIcon,
-} from "lucide-react";
+import { Blocks, ChevronLeftIcon, CompassIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
 import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
 import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
-import { NEW_SESSION_STARTERS } from "@/components/new-session-starters";
 import { Confetti } from "@/components/onboarding/confetti";
 import { OnboardingFrame, OnboardingStep } from "@/components/onboarding/onboarding-frame";
 import { OwnAgentSetup } from "@/components/onboarding/own-agent-setup";
@@ -21,7 +13,6 @@ import { useGetStarted, type GetStartedState } from "@/components/onboarding/use
 import { UseQuestion } from "@/components/onboarding/use-question";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Disclosure } from "@/components/ui/disclosure";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { useAppContext } from "@/context";
@@ -34,11 +25,8 @@ import {
   composeCodingAgentPrompt,
   composeOpengeniPrompt,
   EMPTY_FIRST_AGENT,
-  EXPLORE_SUGGESTIONS,
   FIRST_AGENT_TASKS,
   hasAnyProductAnswer,
-  hasProductDetails,
-  normalizeWebsite,
   useForIntents,
   writeFirstChatDraft,
   type FirstAgentAnswers,
@@ -46,7 +34,6 @@ import {
   type FirstAgentProductAnswer,
   type FirstAgentRepository,
 } from "@/lib/first-agent";
-import { formatMoneyMicros } from "@/lib/format";
 import { gitHubRepositoryResource } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 
@@ -202,9 +189,6 @@ export function FirstAgentRoute({
           state.updateFirstAgent({ builder: "own" });
           go("own-agent", productWorkspaceId);
         }}
-        onSuggestion={(prompt) =>
-          void handOff(homeWorkspaceId, prompt, { send: true, outcome: "chat" })
-        }
         onOpenApp={() => {
           // Skipping keeps what was entered: a product's prompt waits in the
           // new chat's draft, unsent.
@@ -235,11 +219,7 @@ export function FirstAgentRoute({
     );
   } else {
     content = (
-      <OnboardingStep
-        stepKey="first-agent-use"
-        title="What do you want to use Opengeni for?"
-        description="We'll set up the rest around your answer. You can do both later."
-      >
+      <OnboardingStep stepKey="first-agent-use" title="What do you want to use Opengeni for?">
         <UseQuestion
           initialUse={answers.use ?? useForIntents(state.journey?.intents ?? [])}
           onChoose={(use, { submit }) => {
@@ -305,19 +285,16 @@ function StepFooter({
 const PRODUCT_ANSWERS: ReadonlyArray<{
   value: FirstAgentProductAnswer;
   title: string;
-  description: string;
   icon: ReactNode;
 }> = [
   {
     value: "have",
-    title: "I have a product",
-    description: "Tell us about it, and an agent starts building it in right away.",
+    title: "I already have a product",
     icon: <Blocks />,
   },
   {
     value: "explore",
     title: "I want to explore first",
-    description: "No questions. Pick a first chat and see what an agent can do.",
     icon: <CompassIcon />,
   },
 ];
@@ -340,11 +317,11 @@ function ProductQuestionStep({
   const [answer, setAnswer] = useState<FirstAgentProductAnswer | null>(answers.product);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
   const submit = async () => {
     if (busy) return;
+    // Nothing is required: no answer goes straight to the ready moment.
     if (!answer) {
-      setMissing(true);
+      onExplore();
       return;
     }
     if (answer === "explore") {
@@ -364,11 +341,7 @@ function ProductQuestionStep({
     }
   };
   return (
-    <OnboardingStep
-      stepKey="first-agent-product"
-      title="Do you already have a product?"
-      description="Or explore what agents can do first. Either way, you can start right away."
-    >
+    <OnboardingStep stepKey="first-agent-product" title="Do you already have a product?">
       <form
         noValidate
         onSubmit={(event) => {
@@ -381,11 +354,10 @@ function ProductQuestionStep({
           value={answer ?? ""}
           onValueChange={(value) => {
             const next = value as FirstAgentProductAnswer;
-            setMissing(false);
             setAnswer(next);
             state.updateFirstAgent({ product: next });
           }}
-          error={missing ? "Choose one to continue, or skip." : (error ?? undefined)}
+          error={error ?? undefined}
           disabled={busy}
         >
           {PRODUCT_ANSWERS.map((option) => (
@@ -393,7 +365,6 @@ function ProductQuestionStep({
               key={option.value}
               value={option.value}
               title={option.title}
-              description={option.description}
               icon={option.icon}
             />
           ))}
@@ -424,70 +395,30 @@ function ProductStep({
   onBack: () => void;
   onContinue: () => void;
 }) {
-  const [websiteError, setWebsiteError] = useState<string | null>(null);
-  const [missing, setMissing] = useState(false);
-  const website = answers.website;
-
-  const submit = () => {
-    if (website.trim() && !normalizeWebsite(website)) {
-      setWebsiteError("Enter a web address, like acme.com.");
-      return;
-    }
-    if (!hasProductDetails(answers)) {
-      setMissing(true);
-      return;
-    }
-    onContinue();
-  };
-
   return (
-    <OnboardingStep
-      stepKey="first-agent-product"
-      title="Tell us about your product"
-      description="The agent uses this to learn what your product does. You can change it in the chat later."
-    >
+    <OnboardingStep stepKey="first-agent-product" title="Tell us about your product">
       <form
         noValidate
         onSubmit={(event) => {
           event.preventDefault();
-          submit();
+          onContinue();
         }}
       >
         <FieldStack>
-          <Field
-            label="Website"
-            hint={
-              missing
-                ? undefined
-                : "Your product's website or app. The agent reads it to understand what you do."
-            }
-            error={
-              websiteError ??
-              (missing ? "Add your website, or connect a repository below." : undefined)
-            }
-          >
+          <Field label="Website or app">
             <TextInput
-              type="url"
-              inputMode="url"
               autoComplete="url"
               placeholder="acme.com"
-              value={website}
+              value={answers.website}
               autoFocus
-              onChange={(event) => {
-                setWebsiteError(null);
-                setMissing(false);
-                state.updateFirstAgent({ website: event.target.value });
-              }}
+              onChange={(event) => state.updateFirstAgent({ website: event.target.value })}
             />
           </Field>
           <RepositoryField
             state={state}
             workspaceId={workspaceId}
             repository={answers.repository}
-            onChange={(repository) => {
-              setMissing(false);
-              state.updateFirstAgent({ repository });
-            }}
+            onChange={(repository) => state.updateFirstAgent({ repository })}
           />
           <TaskField task={answers.task} onChange={(task) => state.updateFirstAgent({ task })} />
         </FieldStack>
@@ -521,7 +452,6 @@ function RepositoryField({
   const launcher = useGitHubAppConnectLauncher(workspaceId);
   const [connecting, setConnecting] = useState(false);
   const { github } = state;
-  const hint = "Lets the agent read your code and open a pull request with the integration.";
 
   const connect = () => {
     if (github.mode === "workspace") {
@@ -579,10 +509,7 @@ function RepositoryField({
   let control: ReactNode;
   if (!github.available) {
     control = (
-      <p className="text-sm leading-5 text-fg-muted">
-        GitHub isn't set up on this Opengeni server. Ask your admin to set it up, or continue with
-        your website; you can add code in the chat later.
-      </p>
+      <p className="text-sm leading-5 text-fg-muted">GitHub isn't set up on this server.</p>
     );
   } else if (github.connected === null) {
     control = (
@@ -633,12 +560,7 @@ function RepositoryField({
   }
 
   return (
-    <Field
-      label="GitHub repository"
-      optional
-      group={!github.connected}
-      hint={github.available ? hint : undefined}
-    >
+    <Field label="GitHub repository" group={!github.connected}>
       {control}
     </Field>
   );
@@ -646,11 +568,7 @@ function RepositoryField({
 
 function TaskField({ task, onChange }: { task: string; onChange: (task: string) => void }) {
   return (
-    <Field
-      label="What should the agent do in your product?"
-      optional
-      hint="Not sure yet? Leave it empty and the agent suggests options."
-    >
+    <Field label="What should the agent do?">
       <TextArea
         rows={3}
         value={task}
@@ -682,6 +600,23 @@ function TaskField({ task, onChange }: { task: string; onChange: (task: string) 
   );
 }
 
+/** "$10", or "$10.50": the currency sign is enough, and whole amounts need no cents. */
+export function creditAmount(balanceMicros: number, currency: string): string {
+  const amount = balanceMicros / 1_000_000;
+  const whole = Number.isInteger(amount);
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency.toUpperCase(),
+      currencyDisplay: "narrowSymbol",
+      minimumFractionDigits: whole ? 0 : 2,
+      maximumFractionDigits: whole ? 0 : 2,
+    }).format(amount);
+  } catch {
+    return `${whole ? amount : amount.toFixed(2)} ${currency.toUpperCase()}`;
+  }
+}
+
 /**
  * The ready moment: what the person got and a way straight in. With trial
  * credits it celebrates the real balance and never asks about models (GPT-6
@@ -695,7 +630,6 @@ function ReadyStep({
   busy,
   onBuild,
   onOwnAgent,
-  onSuggestion,
   onOpenApp,
 }: {
   state: GetStartedState;
@@ -704,7 +638,6 @@ function ReadyStep({
   busy: boolean;
   onBuild: () => void;
   onOwnAgent: () => void;
-  onSuggestion: (prompt: string) => void;
   onOpenApp: () => void;
 }) {
   const context = useAppContext();
@@ -743,119 +676,47 @@ function ReadyStep({
     );
 
   const builds = buildsProduct(answers) && answers.outcome !== "skipped";
-  const suggestions =
-    answers.use === "product" && answers.product === "explore"
-      ? EXPLORE_SUGGESTIONS.map((suggestion) => ({
-          id: suggestion.id,
-          title: suggestion.title,
-          description: null as string | null,
-          prompt: suggestion.prompt,
-        }))
-      : NEW_SESSION_STARTERS.map((starter) => ({
-          id: starter.id,
-          title: starter.title,
-          description: starter.description as string | null,
-          prompt: starter.prompt,
-        }));
-  const amount = credits ? formatMoneyMicros(credits.balanceMicros, credits.currency) : null;
-  const runsOn = state.firstChatModel
-    ? "Your agents run on GPT-6 Luna with extra high reasoning, paid from your credits."
-    : null;
+  const amount = credits ? creditAmount(credits.balanceMicros, credits.currency) : null;
   return (
     <>
       <Confetti play={!celebrated} />
       <OnboardingStep
         stepKey="first-agent-ready"
         title={amount ? `You got ${amount} in free credits` : "You're all set"}
-        description={[runsOn, "You can use it now and test your first agent."]
-          .filter(Boolean)
-          .join(" ")}
       >
         {builds ? (
-          <div className="grid gap-4">
-            <p className="text-sm leading-5 text-fg">
-              An Opengeni agent looks at{" "}
-              {answers.repository && normalizeWebsite(answers.website)
-                ? "your website and repository"
-                : answers.repository
-                  ? "your repository"
-                  : "your website"}
-              , suggests where an agent fits
-              {answers.repository?.resource ? ", then builds it and opens a pull request" : ""}. You
-              follow along in the chat.
-            </p>
-            <Disclosure title="The first message" summary="What the chat starts with.">
-              <p className="text-xs leading-4.5 whitespace-pre-wrap text-fg-muted">
-                {composeOpengeniPrompt(answers)}
-              </p>
-            </Disclosure>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                disabled={busy}
-                onClick={onBuild}
-                {...analyticsAction("start_first_agent_chat")}
-              >
-                {busy ? <Loader2Icon className="size-4 animate-spin" aria-hidden="true" /> : null}
-                Start building
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className="text-fg-muted pointer-coarse:h-11"
-                disabled={busy}
-                onClick={onOwnAgent}
-              >
-                Use your own coding agent instead
-              </Button>
-            </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              disabled={busy}
+              onClick={onBuild}
+              {...analyticsAction("start_first_agent_chat")}
+            >
+              {busy ? <Loader2Icon className="size-4 animate-spin" aria-hidden="true" /> : null}
+              Start building
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="text-fg-muted pointer-coarse:h-11"
+              disabled={busy}
+              onClick={onOwnAgent}
+            >
+              Use your own coding agent instead
+            </Button>
           </div>
         ) : (
-          <section aria-labelledby="first-agent-suggestions">
-            <h2 id="first-agent-suggestions" className="text-sm font-medium text-fg">
-              Pick a first task and it starts right away
-            </h2>
-            <ul className="mt-3 grid gap-2">
-              {suggestions.map((suggestion) => (
-                <li key={suggestion.id}>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy}
-                    className="h-auto min-h-14 w-full justify-start gap-3 rounded-[14px] px-4 py-3 text-left whitespace-normal hover:bg-surface hover:hover-layer"
-                    onClick={() => onSuggestion(suggestion.prompt)}
-                    {...analyticsAction("start_first_agent_chat")}
-                  >
-                    <MessageSquareTextIcon
-                      aria-hidden="true"
-                      className="size-4 shrink-0 text-fg-muted"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-medium text-fg">{suggestion.title}</span>
-                      {suggestion.description ? (
-                        <span className="mt-0.5 block text-xs font-normal text-fg-muted">
-                          {suggestion.description}
-                        </span>
-                      ) : null}
-                    </span>
-                    <ArrowRightIcon aria-hidden="true" className="size-4 shrink-0 text-fg-subtle" />
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        <div className="mt-6 flex flex-wrap items-center justify-end gap-2">
           <Button
             type="button"
-            variant="outline"
+            className="w-full"
             disabled={busy}
             onClick={onOpenApp}
             {...analyticsAction("skip_first_agent")}
           >
-            Go to Opengeni
+            {busy ? <Loader2Icon className="size-4 animate-spin" aria-hidden="true" /> : null}
+            Start
           </Button>
-        </div>
+        )}
       </OnboardingStep>
     </>
   );
@@ -881,7 +742,6 @@ function OwnAgentStep({
     <OnboardingStep
       stepKey="first-agent-own"
       title="Build it with your coding agent"
-      description="You can use it now and test your first agent: three steps, then send one message from your product."
       className="max-w-[640px]"
     >
       {organizationId ? (
@@ -890,7 +750,6 @@ function OwnAgentStep({
           workspaceId={workspaceId}
           canCreateApiKeys={state.canCreateApiKeys}
           prompt={composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId })}
-          promptDescription="It has what you told us about your product and this workspace's IDs. Your agent asks before it changes anything."
           mcpUrl={state.codingAgent.oauth ? state.codingAgent.mcpUrl : null}
           firstSessionSeen={seen}
           onMark={state.mark}

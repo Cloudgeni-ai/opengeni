@@ -101,9 +101,6 @@ export function OwnAgentSetup({
           />
         ) : canCreateApiKeys ? (
           <>
-            <p className="mt-1 text-xs leading-4.5 text-fg-muted">
-              Your product's server uses this key to run agents. You see it once.
-            </p>
             <Button
               type="button"
               size="sm"
@@ -126,9 +123,9 @@ export function OwnAgentSetup({
         <h3 id="own-agent-prompt" className="text-sm font-medium text-fg">
           3. Paste this prompt into your coding agent
         </h3>
-        <p className="mt-1 text-xs leading-4.5 text-fg-muted">
-          {promptDescription ?? `Each chat your product starts shows up in ${workspaceName}.`}
-        </p>
+        {promptDescription ? (
+          <p className="mt-1 text-xs leading-4.5 text-fg-muted">{promptDescription}</p>
+        ) : null}
         <CodeBlock
           className="mt-3"
           label="For your coding agent"

@@ -129,7 +129,7 @@ export function useForIntents(intents: readonly OnboardingIntent[]): FirstAgentU
 
 /** The product's answers are what the first chat builds from. */
 export function buildsProduct(answers: FirstAgentAnswers): boolean {
-  return answers.use === "product" && answers.product === "have" && hasProductDetails(answers);
+  return answers.use === "product" && answers.product === "have" && hasAnyProductAnswer(answers);
 }
 
 /**
@@ -181,41 +181,13 @@ export const FIRST_AGENT_TASKS: ReadonlyArray<Readonly<{ label: string; task: st
   },
 ];
 
-/** Ready-to-send first chats for someone exploring what agents can do. */
-export const EXPLORE_SUGGESTIONS: ReadonlyArray<
-  Readonly<{ id: string; title: string; prompt: string }>
-> = [
-  {
-    id: "explain",
-    title: "Explain simply how an AI agent could help my business",
-    prompt:
-      "Explain simply how an AI agent could help my business. Ask me two or three short questions about what we do first, then give me three concrete ideas, starting with the easiest one to try.",
-  },
-  {
-    id: "routine",
-    title: "Find a repetitive task an agent could take off my plate",
-    prompt:
-      "Help me find one repetitive task in my week that an agent could take over. Ask what my typical week looks like, pick the best candidate, and show me how the agent would do it step by step.",
-  },
-  {
-    id: "research",
-    title: "Research how companies like mine use AI agents",
-    prompt:
-      "Research how companies in my industry use AI agents today. Ask what industry I'm in, then summarize what they do, what it costs them and what I could try first, with sources.",
-  },
-  {
-    id: "demo",
-    title: "Show me what you can do in five minutes",
-    prompt:
-      "Show me what you can do in five minutes. Pick a small, useful task you can finish right here (for example researching a topic, writing and running a short script, or drafting a document), do it, and explain what you did.",
-  },
-];
-
 function productFacts(answers: FirstAgentAnswers, repositoryLine: string | null): string[] {
   const website = normalizeWebsite(answers.website);
+  // A product isn't always a website: anything else entered is named as is.
+  const product = answers.website.trim();
   const task = answers.task.trim();
   return [
-    website ? `- Website: ${website}` : null,
+    website ? `- Website: ${website}` : product ? `- Product: ${product}` : null,
     repositoryLine,
     task ? `- What the agent should do: ${task}` : "- What the agent should do: not decided yet",
   ].filter((line): line is string => line !== null);
@@ -249,7 +221,9 @@ export function composeOpengeniPrompt(answers: FirstAgentAnswers): string {
           ? "the website and the repository"
           : repository
             ? "the repository"
-            : "the website"
+            : normalizeWebsite(answers.website)
+              ? "the website"
+              : "what I told you"
       } to understand what the product does and who uses it.`,
       task
         ? "Then propose two or three ways the agent could work in the product and recommend one."

@@ -422,19 +422,14 @@ describe("organization onboarding UI", () => {
           (radio) => radio.textContent?.split(/(?<=product|work)/u)[0],
         ),
       ).toEqual(["Add AI agents to my product", "Use agents for my own work"]);
-      // Naming the organization is not a decision of its own.
-      expect(container.textContent).toContain("We'll set up Ada's organization for you.");
-      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
-      expect(container.textContent).not.toContain("How do you want to pay for models?");
-      expect(container.textContent).not.toContain("Choose how to power your chats");
-      await act(async () =>
-        Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent === "Rename")!
-          .click(),
-      );
+      // The organization's name is prefilled in place: no step, no explanation.
       expect(
         container.querySelector<HTMLInputElement>("#organization-onboarding-name")!.value,
       ).toBe("Ada's organization");
+      expect(container.textContent).not.toContain("We'll set up");
+      expect(container.textContent).not.toContain("Rename");
+      expect(container.textContent).not.toContain("How do you want to pay for models?");
+      expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(onComplete).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());

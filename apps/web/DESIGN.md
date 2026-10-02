@@ -534,27 +534,22 @@ Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 back link, title and rows start where the section header does. Page actions use `RowButton` and
 `MoreMenu` from `components/ui/page-actions.tsx`.
 
-**First run.** No model question opens it. The first screen asks "What do you want to use
-Opengeni for?" (agents in my product, or agents for my own work), with the organization's
-suggested name folded in as one quiet line ("We'll set up Ada's organization for you. Rename"), so
-naming it is never a step of its own; answering or Skip creates it. A product then asks whether one
-exists: exploring asks nothing more, having one asks for its website, an optional GitHub repository
-(the deployment's own connect flow, or a plain line when GitHub isn't set up) and what the agent
-should do. Every path, Skip included, ends on one ready moment (`/workspaces/:id/first-agent?step=ready`):
-confetti and the real trial balance ("You got $10.00 in free credits"), never an invented amount.
-With the trial grant there is no model choice anywhere in first run: GPT-6 Luna at extra high
-reasoning is preselected, and subscriptions and keys stay in settings and the model picker. Only
-without a grant and without a model that runs does the model step appear first, so nobody is
-stuck. From the ready moment a product's composed prompt starts a building chat at once (its own
-coding agent is the quiet alternative), other paths pick a first task that starts at once, and "Go
-to Opengeni" lands in a ready composer holding what was entered. Answers are kept as they are
-typed. Each first-run step is a card on the signed-out page's glow. In the app, Get started is a
-page (one section per step, each with its one action) and a card on the new-chat page that stands
-in for the starter suggestions until it is hidden (Undo; Help & feedback reopens it); its first
-step links back to the first question. The playground is optional and, like first run, has no
-rail. Its chat is a recorded demo (the real timeline replaying a script, picked from suggested
-questions and labelled as a recording), so it needs no model and creates no session. Its coach
-marks are popover-styled, fade in, and never cover what they point at.
+**First run.** Minimal: short titles, option labels with no descriptions, no sentence that
+explains what a button does, and nothing required anywhere. The first screen asks "What do you
+want to use Opengeni for?" (agents in my product, or for my own work) with the organization's
+name prefilled in an editable field under it; Continue or Skip creates the organization. A product
+then asks "Do you already have a product?"; having one asks for its website or app, an optional
+GitHub repository and what the agent should do, all optional. Every path, Skip included, ends on
+the ready moment: confetti and "You got $10 in free credits" (the real balance, no cents for whole
+amounts, never invented), then one action. A product with answers gets "Start building" (its
+composed prompt starts a chat at once) and the quiet "Use your own coding agent instead"; every
+other path gets "Start" into a ready composer, where the new-chat starters are the place to pick a
+first chat. GPT-6 Luna at extra high reasoning is the silent default when credits pay for it; first
+run never mentions models. Only without a trial grant and without a model that runs does the model
+step appear first, so nobody is stuck. Answers are kept as they are typed. In the app, Get started
+is a page (one section per step) and a card under the starters on the new-chat page until it is
+hidden (Undo; Help & feedback reopens it). The playground is optional and, like first run, has no
+rail; its chat is a recorded demo that needs no model and creates no session.
 
 **Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New

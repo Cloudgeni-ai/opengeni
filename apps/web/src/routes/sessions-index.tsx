@@ -2002,21 +2002,20 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
-        {/* While the Get started checklist shows, its first tasks stand in for
-            the suggestions; hiding it brings them back. */}
+        {/* The starters are where a first chat is picked; the Get started
+            checklist sits under them during first run, until it is hidden. */}
+        <NewSessionStarters
+          disabled={busy || newSessionDraft.loading}
+          onSelect={(prompt) => {
+            setMessage(prompt);
+            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+          }}
+        />
         {getStartedVisible ? (
           <Suspense fallback={null}>
             <LazyGetStartedCard workspaceId={workspaceId} onPrefill={prefillComposer} />
           </Suspense>
-        ) : (
-          <NewSessionStarters
-            disabled={busy || newSessionDraft.loading}
-            onSelect={(prompt) => {
-              setMessage(prompt);
-              composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
-            }}
-          />
-        )}
+        ) : null}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}

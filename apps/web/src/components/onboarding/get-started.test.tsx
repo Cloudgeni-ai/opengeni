@@ -697,9 +697,9 @@ describe("First run in the app", () => {
       expect(have.container.querySelector("h1")!.textContent).toBe(
         "Do you already have a product?",
       );
-      await submit(have.container);
-      expect(have.container.textContent).toContain("Choose one to continue, or skip.");
-      await act(async () => radio(have.container, "I have a product").click());
+      // Option labels only; nothing explains them.
+      expect(have.container.querySelectorAll("section p")).toHaveLength(0);
+      await act(async () => radio(have.container, "I already have a product").click());
       expect(journeys.readOnboardingJourney(KEY)!.firstAgent.product).toBe("have");
       await submit(have.container);
       expect(createOrganizationWorkspace).toHaveBeenCalledTimes(1);
@@ -732,27 +732,26 @@ describe("First run in the app", () => {
     withJourney({ use: "product", product: "have" });
     const first = await mount(<FirstAgentRoute workspaceId={DEVELOPMENT} step="details" />);
     try {
+      // Nothing is required: Continue goes on with every field empty.
       await submit(first.container);
-      expect(first.container.textContent).toContain(
-        "Add your website, or connect a repository below.",
-      );
-      await type(
-        first.container.querySelector<HTMLInputElement>('input[type="url"]')!,
-        "not a site",
-      );
-      await submit(first.container);
-      expect(first.container.textContent).toContain("Enter a web address, like acme.com.");
-      await type(first.container.querySelector<HTMLInputElement>('input[type="url"]')!, "acme.com");
+      expect(navigate).toHaveBeenLastCalledWith({
+        to: "/workspaces/$workspaceId/first-agent",
+        params: { workspaceId: DEVELOPMENT },
+        search: { step: "ready" },
+      });
+      expect(first.container.textContent).not.toContain("Optional");
+      // A product isn't always a website: any text is kept.
+      await type(first.container.querySelector<HTMLInputElement>("input")!, "Acme for iOS");
+      expect(journeys.readOnboardingJourney(KEY)!.firstAgent.website).toBe("Acme for iOS");
+      await type(first.container.querySelector<HTMLInputElement>("input")!, "acme.com");
       await act(async () => button(first.container, "Support agent").click());
-      expect(first.container.textContent).toContain("GitHub isn't set up on this Opengeni server.");
+      expect(first.container.textContent).toContain("GitHub isn't set up on this server.");
     } finally {
       await first.unmount();
     }
     const second = await mount(<FirstAgentRoute workspaceId={DEVELOPMENT} step="details" />);
     try {
-      expect(second.container.querySelector<HTMLInputElement>('input[type="url"]')!.value).toBe(
-        "acme.com",
-      );
+      expect(second.container.querySelector<HTMLInputElement>("input")!.value).toBe("acme.com");
       expect(second.container.querySelector("textarea")!.value).toBe(
         firstAgent.FIRST_AGENT_TASKS[0]!.task,
       );
@@ -780,16 +779,16 @@ describe("First run in the app", () => {
     );
     try {
       await flush();
-      expect(container.querySelector("h1")!.textContent).toBe("You got $10.00 in free credits");
-      expect(container.textContent).toContain(
-        "Your agents run on GPT-6 Luna with extra high reasoning, paid from your credits.",
-      );
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      // No model talk in first run: Luna at xhigh is the silent default.
+      expect(container.textContent).not.toContain("Luna");
+      expect(container.textContent).not.toContain("USD");
       expect(container.querySelector("[data-confetti]")).not.toBeNull();
       // With the trial grant there is no model choice at all.
       expect(container.textContent).not.toContain("subscription or key");
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.textContent).not.toContain("Start building");
-      await act(async () => button(container, "Go to Opengeni").click());
+      await act(async () => button(container, "Start").click());
       await flush();
       expect(savedDrafts).toHaveLength(1);
       expect(savedDrafts[0]).toMatchObject({
@@ -830,7 +829,10 @@ describe("First run in the app", () => {
     );
     try {
       await flush();
-      expect(container.textContent).toContain("Use your own coding agent instead");
+      // One primary and the quiet alternative; nothing else on the card.
+      expect(
+        Array.from(container.querySelectorAll("section button")).map((b) => b.textContent),
+      ).toEqual(["Start building", "Use your own coding agent instead"]);
       await act(async () => button(container, "Start building").click());
       await flush();
       expect(savedDrafts).toEqual([
@@ -849,22 +851,42 @@ describe("First run in the app", () => {
     }
   });
 
-  test("own work: a suggestion starts its chat right away", async () => {
+  test("own work and exploring: the credits, then one Start into a ready composer", async () => {
     trialGrant();
-    withJourney({ use: "work" });
-    const { container, unmount } = await mount(
-      <FirstAgentRoute workspaceId={PERSONAL} step="ready" />,
-    );
-    try {
-      await flush();
-      expect(container.textContent).toContain("Pick a first task and it starts right away");
-      await act(async () => button(container, "Research a decision").click());
-      await flush();
-      expect(savedDrafts[0]).toMatchObject({ workspaceId: PERSONAL, model: "openai/gpt-6-luna" });
-      expect(savedDrafts[0]!.text).toContain("research");
-      expect(takeComposerSend(PERSONAL)).toBe(true);
-    } finally {
-      await unmount();
+    for (const firstRun of [
+      { use: "work" as const },
+      { use: "product" as const, product: "explore" as const },
+    ]) {
+      savedDrafts.length = 0;
+      journeys.resetOnboardingJourneysForTests();
+      localStorage.clear();
+      withJourney(firstRun);
+      const { container, unmount } = await mount(
+        <FirstAgentRoute workspaceId={PERSONAL} step="ready" />,
+      );
+      try {
+        await flush();
+        expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+        // Just the moment and one way in: the new-chat page has the starters.
+        expect(
+          Array.from(container.querySelectorAll("section button")).map((b) => b.textContent),
+        ).toEqual(["Start"]);
+        await act(async () => button(container, "Start").click());
+        await flush();
+        expect(savedDrafts[0]).toMatchObject({
+          workspaceId: PERSONAL,
+          text: "",
+          model: "openai/gpt-6-luna",
+          reasoningEffort: "xhigh",
+        });
+        expect(takeComposerSend(PERSONAL)).toBe(false);
+        expect(navigate).toHaveBeenLastCalledWith({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId: PERSONAL },
+        });
+      } finally {
+        await unmount();
+      }
     }
   });
 

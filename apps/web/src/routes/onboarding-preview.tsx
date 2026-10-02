@@ -736,15 +736,15 @@ const PREVIEW_GROUPS: ReadonlyArray<{
         "view=first-agent&path=build&use=product&product=have&step=details&github=off&fill=site",
       ],
       [
-        "Ready: free credits, start building",
+        "Ready: free credits, Start building",
         "view=first-agent&path=build&use=product&product=have&step=ready&fill=1&credits=trial",
       ],
       [
-        "Ready: free credits, explore suggestions",
+        "Ready: free credits (exploring)",
         "view=first-agent&path=build&use=product&product=explore&step=ready&credits=trial",
       ],
       [
-        "Ready: free credits, own-work suggestions",
+        "Ready: free credits (own work)",
         "view=first-agent&path=cloud&use=work&step=ready&credits=trial",
       ],
       ["Ready after Skip", "view=first-agent&path=cloud&step=ready&skipped=1&credits=trial"],

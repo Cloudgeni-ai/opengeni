@@ -218,8 +218,12 @@ export function OrganizationOnboardingPanel({
    * first run's next page: a product's questions, or the ready moment.
    */
   async function createOrganization(chosen: FirstAgentUse | null) {
-    const normalizedName = organizationName.trim();
-    if (!normalizedName || busy) return;
+    // Nothing is required: an emptied name falls back to the suggestion.
+    const normalizedName =
+      organizationName.trim() ||
+      defaultOrganizationName(activeName, activeEmail) ||
+      "My organization";
+    if (busy) return;
     setBusy(true);
     try {
       const setup = previewState
@@ -432,11 +436,7 @@ export function OrganizationOnboardingPanel({
     );
 
   return frame(
-    <OnboardingStep
-      stepKey="organization"
-      title="What do you want to use Opengeni for?"
-      description="We'll set up the rest around your answer. You can do both later."
-    >
+    <OnboardingStep stepKey="organization" title="What do you want to use Opengeni for?">
       <UseQuestion
         initialUse={use}
         organizationName={organizationName}
