@@ -152,7 +152,13 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
           successUrl: body.successUrl,
           cancelUrl: body.cancelUrl,
           idempotencyKey,
-          ...(promotion ? { promotionCodeId: promotion.id } : {}),
+          ...(promotion
+            ? {
+                promotionCodeId: promotion.id,
+                fullyDiscounted:
+                  promotion.percentOff === 100 || (promotion.amountOffCents ?? 0) >= amountCents,
+              }
+            : {}),
         }),
         { idempotencyKey },
       );
@@ -319,6 +325,12 @@ export function stripeCheckoutSessionCreateParams(input: {
   idempotencyKey: string;
   /** Apply this promotion code up front instead of letting Stripe ask for one. */
   promotionCodeId?: string | undefined;
+  /**
+   * The applied code covers the whole package, so the total is $0. Nothing is
+   * taxable, so Checkout skips tax and with it the billing address: the
+   * customer only confirms.
+   */
+  fullyDiscounted?: boolean | undefined;
 }): Stripe.Checkout.SessionCreateParams {
   const successUrl = checkoutReturnUrl(
     input.publicBaseUrl,
@@ -347,7 +359,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
-    automatic_tax: { enabled: true },
+    automatic_tax: { enabled: !(input.promotionCodeId && input.fullyDiscounted) },
     billing_address_collection: "auto",
     line_items: [
       {
@@ -638,7 +650,7 @@ async function grantCheckoutSessionCredits(
 async function resolveCheckoutPromotionCode(
   stripe: Stripe,
   code: string,
-): Promise<{ id: string; amountOffCents: number | null }> {
+): Promise<{ id: string; amountOffCents: number | null; percentOff: number | null }> {
   const listed = await stripe.promotionCodes.list({
     code,
     active: true,
@@ -657,7 +669,7 @@ async function resolveCheckoutPromotionCode(
     coupon.amount_off && coupon.currency === "usd"
       ? coupon.amount_off
       : (coupon.currency_options?.usd?.amount_off ?? null);
-  return { id: promotionCode.id, amountOffCents };
+  return { id: promotionCode.id, amountOffCents, percentOff: coupon.percent_off ?? null };
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {

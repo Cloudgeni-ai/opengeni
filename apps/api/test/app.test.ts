@@ -1155,10 +1155,25 @@ describe("API helpers", () => {
         "https://app.opengeni.ai/workspaces/w/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}",
       idempotencyKey: "checkout:test",
       promotionCodeId: "promo_test",
+      fullyDiscounted: true,
     });
 
     expect(params.discounts).toEqual([{ promotion_code: "promo_test" }]);
     expect(params.allow_promotion_codes).toBeUndefined();
+    // A $0 checkout has nothing to tax, so Checkout asks for no billing address.
+    expect(params.automatic_tax).toEqual({ enabled: false });
+    expect(
+      stripeCheckoutSessionCreateParams({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        customerId: "cus_test",
+        amountCents: 10_000,
+        amountMicros: 100_000_000,
+        publicBaseUrl: "https://app.opengeni.ai",
+        idempotencyKey: "checkout:test",
+        promotionCodeId: "promo_half",
+        fullyDiscounted: false,
+      }).automatic_tax,
+    ).toEqual({ enabled: true });
     expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(10_000);
     expect(params.metadata?.opengeni_credit_micros).toBe("100000000");
     // Stripe fills in the session id; the placeholder must survive validation.
