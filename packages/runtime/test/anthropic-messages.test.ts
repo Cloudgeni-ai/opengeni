@@ -51,7 +51,7 @@ const response = (content: unknown[], stop = "end_turn") => ({
   },
 });
 
-test("initial instructions move to top-level and later systems retain their input phase", () => {
+test("initial system and developer instructions move to top-level while later policy stays in place", () => {
   const input: ModelRequest["input"] = [
     { role: "system", content: "Skill catalog" },
     { role: "developer", content: "Initial policy" },
@@ -625,76 +625,6 @@ test("HTTP context overflow exposes a typed recovery signal without echoing inpu
   }
 });
 
-test("HTTP and SSE provider type/message reach turn.failed detail without retaining the body or request", async () => {
-  const { agentRunFailurePayload } =
-    await import("../../../apps/worker/src/activities/agent-turn/errors");
-  for (const streamed of [false, true]) {
-    const envelope = {
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "messages.2: system must precede assistant",
-        request: "private echoed content",
-      },
-      request: "private body field",
-    };
-    const model = new AnthropicMessagesModel(provider, "claude", (async () =>
-      streamed
-        ? new Response(stream([envelope]).body, { headers: { "request-id": "req_invalid" } })
-        : Response.json(envelope, {
-            status: 400,
-            headers: { "request-id": "req_invalid" },
-          })) as typeof fetch);
-    let error: any;
-    try {
-      if (streamed) await collect(model, request("private outgoing request"));
-      else await model.getResponse(request("private outgoing request"));
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error.status).toBe(400);
-    const failure = agentRunFailurePayload(error);
-    expect(failure).toMatchObject({
-      detail: "invalid_request_error: messages.2: system must precede assistant",
-      requestId: "req_invalid",
-      retryable: false,
-    });
-    expect(JSON.stringify(failure)).not.toContain("private");
-    expect(error.message).not.toContain("system must precede");
-    expect(JSON.stringify(error)).not.toContain("system must precede");
-  }
-});
-
-test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retain status only", async () => {
-  const { agentRunFailurePayload } =
-    await import("../../../apps/worker/src/activities/agent-turn/errors");
-  for (const body of [
-    JSON.stringify({ error: { type: "invalid_request_error", message: "💥".repeat(4000) } }),
-    "private HTML error",
-    '{"error":',
-  ]) {
-    const model = new AnthropicMessagesModel(
-      provider,
-      "claude",
-      (async () => new Response(body, { status: 400 })) as typeof fetch,
-    );
-    let error: any;
-    try {
-      await model.getResponse(request());
-    } catch (caught) {
-      error = caught;
-    }
-    const failure = agentRunFailurePayload(error);
-    expect(failure.code).toBe("anthropic_http_error");
-    expect(failure.retryable).toBe(false);
-    if (body.startsWith('{"error":{"')) {
-      expect(Buffer.byteLength(failure.detail!)).toBeLessThanOrEqual(4096);
-      expect(failure.detail).toEndWith("… [truncated]");
-      expect(failure.detail).not.toContain("\ufffd");
-    } else expect(failure.detail).toBeUndefined();
-  }
-});
-
 test("stream idle timeout cancels the body without accepting a partial response", async () => {
   let cancelled = false;
   const model = new AnthropicMessagesModel(
@@ -946,4 +876,74 @@ test("stream authentication failures remain permanent rather than becoming retry
   }
   expect(error.status).toBe(401);
   expect(String(error)).not.toContain("do not persist");
+});
+
+test("HTTP and SSE provider type/message reach turn.failed detail without retaining the body or request", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const streamed of [false, true]) {
+    const envelope = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "messages.2: system must precede assistant",
+        request: "private echoed content",
+      },
+      request: "private body field",
+    };
+    const model = new AnthropicMessagesModel(provider, "claude", (async () =>
+      streamed
+        ? new Response(stream([envelope]).body, { headers: { "request-id": "req_invalid" } })
+        : Response.json(envelope, {
+            status: 400,
+            headers: { "request-id": "req_invalid" },
+          })) as typeof fetch);
+    let error: any;
+    try {
+      if (streamed) await collect(model, request("private outgoing request"));
+      else await model.getResponse(request("private outgoing request"));
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error.status).toBe(400);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toMatchObject({
+      detail: "invalid_request_error: messages.2: system must precede assistant",
+      requestId: "req_invalid",
+      retryable: false,
+    });
+    expect(JSON.stringify(failure)).not.toContain("private");
+    expect(error.message).not.toContain("system must precede");
+    expect(JSON.stringify(error)).not.toContain("system must precede");
+  }
+});
+
+test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retain status only", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const body of [
+    JSON.stringify({ error: { type: "invalid_request_error", message: "💥".repeat(4000) } }),
+    "private HTML error",
+    '{"error":',
+  ]) {
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude",
+      (async () => new Response(body, { status: 400 })) as typeof fetch,
+    );
+    let error: any;
+    try {
+      await model.getResponse(request());
+    } catch (caught) {
+      error = caught;
+    }
+    const failure = agentRunFailurePayload(error);
+    expect(failure.code).toBe("anthropic_http_error");
+    expect(failure.retryable).toBe(false);
+    if (body.startsWith('{"error":{"')) {
+      expect(Buffer.byteLength(failure.detail!)).toBeLessThanOrEqual(4096);
+      expect(failure.detail).toEndWith("… [truncated]");
+      expect(failure.detail).not.toContain("\ufffd");
+    } else expect(failure.detail).toBeUndefined();
+  }
 });

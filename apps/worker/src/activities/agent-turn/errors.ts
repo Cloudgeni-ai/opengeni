@@ -12,6 +12,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   AnthropicRequestError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
@@ -1140,6 +1141,14 @@ function baseAgentRunFailurePayload(
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
