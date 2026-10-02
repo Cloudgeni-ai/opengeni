@@ -4,6 +4,7 @@ import type postgres from "postgres";
 import {
   activationScope,
   activateSessionTenancyTransaction,
+  assertSessionTenancyApplicationRolesDrained,
   FLEET_MIGRATION,
   FLEET_PREPARATION_MIGRATION,
   requiredActivationMigrations,
@@ -79,6 +80,9 @@ describe("session tenancy fleet activation admission", () => {
       queryLog.push(query);
       if (query.includes("schema_migrations"))
         return requiredActivationMigrations(true).map((name) => ({ name }));
+      if (query.includes("pg_catalog.pg_roles")) return [{ name: "opengeni_app" }];
+      if (query.includes("pg_catalog.pg_stat_clear_snapshot")) return [];
+      if (query.includes("pg_catalog.pg_stat_activity")) return [{ connected: false }];
       if (query.includes("select id from managed_accounts"))
         return [{ id }, { id: secondId }, { id: missingSettingId }];
       if (
@@ -117,6 +121,9 @@ describe("session tenancy fleet activation admission", () => {
       const query = strings.join("?");
       if (query.includes("schema_migrations"))
         return requiredActivationMigrations(true).map((name) => ({ name }));
+      if (query.includes("pg_catalog.pg_roles")) return [{ name: "opengeni_app" }];
+      if (query.includes("pg_catalog.pg_stat_clear_snapshot")) return [];
+      if (query.includes("pg_catalog.pg_stat_activity")) return [{ connected: false }];
       if (query.includes("select id from managed_accounts")) return [{ id }];
       if (query.includes("session_tenancy_product_activated"))
         return [{ activated: ++checks === 1 }];
@@ -130,5 +137,79 @@ describe("session tenancy fleet activation admission", () => {
         roles: ["opengeni_app"],
       }),
     ).rejects.toThrow("coverage missing");
+  });
+
+  test("rejects nonexistent or privileged application login roles before sampling activity", async () => {
+    const transaction = (async (strings: TemplateStringsArray) => {
+      if (strings.join("?").includes("pg_catalog.pg_roles")) return [];
+      throw new Error("must reject invalid roles before sampling activity");
+    }) as unknown as postgres.TransactionSql;
+    await expect(
+      assertSessionTenancyApplicationRolesDrained(transaction, ["opengeni_app"]),
+    ).rejects.toThrow("restricted application login roles");
+  });
+
+  test("a live application blocks even a replay-only fleet before organization admission", async () => {
+    const transaction = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("schema_migrations"))
+        return requiredActivationMigrations(true).map((name) => ({ name }));
+      if (query.includes("pg_catalog.pg_roles")) return [{ name: "opengeni_app" }];
+      if (query.includes("pg_catalog.pg_stat_clear_snapshot") || query.includes("lock table"))
+        return [];
+      if (query.includes("pg_catalog.pg_stat_activity")) return [{ connected: true }];
+      throw new Error("must reject the live application before organization admission");
+    }) as unknown as postgres.TransactionSql;
+    await expect(
+      activateSessionTenancyTransaction(transaction, {
+        organizationId: null,
+        allOrganizations: true,
+        activatedBy: "test",
+        roles: ["opengeni_app"],
+      }),
+    ).rejects.toThrow("every application role session to be stopped");
+  });
+
+  test("the final fresh snapshot rejects a late reconnect hidden by the initial activity snapshot", async () => {
+    let connected = false;
+    let cachedActivity: boolean | null = null;
+    let snapshotsCleared = 0;
+    let receiptChecks = 0;
+    const transaction = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("schema_migrations"))
+        return requiredActivationMigrations(true).map((name) => ({ name }));
+      if (query.includes("pg_catalog.pg_roles")) return [{ name: "opengeni_app" }];
+      if (query.includes("pg_catalog.pg_stat_clear_snapshot")) {
+        cachedActivity = null;
+        snapshotsCleared += 1;
+        return [];
+      }
+      if (query.includes("pg_catalog.pg_stat_activity")) {
+        cachedActivity ??= connected;
+        return [{ connected: cachedActivity }];
+      }
+      if (query.includes("select id from managed_accounts")) return [{ id }];
+      if (query.includes("session_tenancy_product_activated")) {
+        if (++receiptChecks === 2) connected = true;
+        return [{ activated: true }];
+      }
+      if (
+        query.includes("enable_organization_private_sessions") ||
+        query.includes("organization_private_session_settings")
+      )
+        throw new Error("must not change organization preferences");
+      if (query.includes("lock table") || query.includes("set_config")) return [];
+      throw new Error(`Unexpected query: ${query}`);
+    }) as unknown as postgres.TransactionSql;
+    await expect(
+      activateSessionTenancyTransaction(transaction, {
+        organizationId: null,
+        allOrganizations: true,
+        activatedBy: "test",
+        roles: ["opengeni_app"],
+      }),
+    ).rejects.toThrow("every application role session to be stopped");
+    expect(snapshotsCleared).toBe(2);
   });
 });

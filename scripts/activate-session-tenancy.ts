@@ -218,6 +218,44 @@ function applicationRoles(): string[] {
   return roles;
 }
 
+export async function assertSessionTenancyApplicationRolesDrained(
+  transaction: postgres.TransactionSql,
+  roles: readonly string[],
+): Promise<void> {
+  if (
+    roles.length < 1 ||
+    roles.length > 16 ||
+    new Set(roles).size !== roles.length ||
+    roles.some((role) => !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(role))
+  ) {
+    throw new Error("Session tenancy activation application roles are invalid");
+  }
+  const validRoles = await transaction<{ name: string }[]>`
+    select rolname as name from pg_catalog.pg_roles
+    where rolname = any(${[...roles]}::text[])
+      and rolcanlogin and not rolsuper and not rolbypassrls
+  `;
+  if (validRoles.length !== roles.length) {
+    throw new Error("Session tenancy activation requires exact restricted application login roles");
+  }
+  // Activity is cached for the transaction; every admission/final check must
+  // discard that snapshot so an application reconnect cannot hide behind it.
+  await transaction`select pg_catalog.pg_stat_clear_snapshot()`;
+  const [activity] = await transaction<{ connected: boolean }[]>`
+    select exists (
+      select 1 from pg_catalog.pg_stat_activity activity
+      where activity.datname = pg_catalog.current_database()
+        and activity.usename = any(${[...roles]}::text[])
+        and activity.pid <> pg_catalog.pg_backend_pid()
+    ) as connected
+  `;
+  if (activity?.connected !== false) {
+    throw new Error(
+      "Session tenancy activation requires every application role session to be stopped",
+    );
+  }
+}
+
 export async function activateSessionTenancyTransaction(
   transaction: postgres.TransactionSql,
   options: {
@@ -240,6 +278,7 @@ export async function activateSessionTenancyTransaction(
   if (missing.length > 0) {
     throw new Error(`Session tenancy activation migrations are missing: ${missing.join(", ")}`);
   }
+  await assertSessionTenancyApplicationRolesDrained(transaction, roles);
   const organizations = allOrganizations
     ? await transaction<{ id: string }[]>`select id from managed_accounts order by id`
     : [{ id: organizationId! }];
@@ -289,6 +328,7 @@ export async function activateSessionTenancyTransaction(
   const activations = [];
   for (const { id, inventoryDigest, parityDigest, backfillEvidence } of pending) {
     await transaction`select set_config('opengeni.account_id', ${id}, true)`;
+    await transaction`select pg_catalog.pg_stat_clear_snapshot()`;
     const [activation] = await transaction<
       Array<{
         accountId: string;
@@ -306,7 +346,10 @@ export async function activateSessionTenancyTransaction(
     if (!activation) throw new Error(`Session tenancy activation returned no receipt for ${id}`);
     activations.push({ ...activation, inventoryDigest, parityDigest, backfillEvidence });
   }
-  if (!allOrganizations) return activations[0];
+  if (!allOrganizations) {
+    await assertSessionTenancyApplicationRolesDrained(transaction, roles);
+    return activations[0];
+  }
   // Activation is platform readiness, not consent. Preserve every existing
   // preference (including explicit opt-outs) without invoking the enable helper.
   for (const { id } of organizations) {
@@ -318,6 +361,10 @@ export async function activateSessionTenancyTransaction(
       throw new Error(`Session tenancy activation coverage missing for ${id}`);
     }
   }
+  // Source-table locks from every new activation are still held. A live late
+  // reconnect aborts this caller's transaction and rolls back all its receipts.
+  // The replay-only fleet must prove the same drain even without new receipts.
+  await assertSessionTenancyApplicationRolesDrained(transaction, roles);
   return {
     organizationCount: organizations.length,
     alreadyActivated,

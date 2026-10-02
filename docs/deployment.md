@@ -1433,6 +1433,15 @@ default, credential owner, or authority is changed. Marker ordinal references
 must follow the project renumber command
 if newer main migrations claim these ordinals.
 
+The CLI validates every supplied runtime identity as an existing restricted
+database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
+activity snapshot before its initial drain check and each guarded activation,
+then clears and checks again after receipt coverage while source locks remain
+held, before commit. A late application reconnect rejects and rolls back the
+entire transaction. The already-activated replay-only fleet must pass the same
+fresh initial and final drain checks; it never uses preference enablement as a
+drain mechanism.
+
 For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,
