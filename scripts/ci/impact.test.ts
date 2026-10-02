@@ -302,6 +302,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -567,6 +568,19 @@ describe("fail-closed change impact", () => {
     expect(plan.e2eTests).toEqual([]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
+  });
+
+  test("error presentation coverage follows its fixture and shared client dependencies", () => {
+    const fixture = "test/e2e/error-branding.browser.e2e.ts";
+    for (const path of [
+      fixture,
+      "packages/react/demo/error-branding-test-harness.tsx",
+      "packages/react/src/lib/error-message.ts",
+      "packages/sdk/src/errors.ts",
+    ]) {
+      expect(createImpactPlan([path]).e2eTests, path).toContain(fixture);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(fixture);
   });
 
   test("compact session view follows its web fixture dependencies without widening leaf plans", () => {
@@ -846,6 +860,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
