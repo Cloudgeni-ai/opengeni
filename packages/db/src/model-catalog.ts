@@ -1,4 +1,5 @@
 import { and, count, eq, isNull, sql } from "drizzle-orm";
+import { unionAll } from "drizzle-orm/pg-core";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
@@ -223,6 +224,29 @@ export async function getDeploymentModelCatalog(
   return row ?? null;
 }
 
+function workspaceProviderCustomModelsQuery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: WorkspaceCustomModelProviderKind;
+  },
+) {
+  return db
+    .select()
+    .from(schema.workspaceGatewayCustomModels)
+    .where(
+      and(
+        eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+        eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+        eq(schema.workspaceGatewayCustomModels.providerKind, input.providerKind),
+        isNull(schema.workspaceGatewayCustomModels.retiredAt),
+      ),
+    )
+    .orderBy(schema.workspaceGatewayCustomModels.createdAt, schema.workspaceGatewayCustomModels.id)
+    .limit(MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1);
+}
+
 export async function listWorkspaceProviderCustomModels(
   db: Database,
   input: {
@@ -232,26 +256,50 @@ export async function listWorkspaceProviderCustomModels(
   },
 ): Promise<WorkspaceProviderCustomModel[]> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceGatewayCustomModels)
-      .where(
-        and(
-          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
-          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
-          eq(schema.workspaceGatewayCustomModels.providerKind, input.providerKind),
-          isNull(schema.workspaceGatewayCustomModels.retiredAt),
-        ),
-      )
-      .orderBy(
-        schema.workspaceGatewayCustomModels.createdAt,
-        schema.workspaceGatewayCustomModels.id,
-      )
-      .limit(MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1);
+    const rows = await workspaceProviderCustomModelsQuery(scopedDb, input);
     if (rows.length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
       throw customModelLimitError(input.providerKind);
     }
     return rows.map(mapCustomModel);
+  });
+}
+
+/** One scoped query with the existing ordering and bound applied to each provider. */
+export async function listWorkspaceProviderCustomModelsByKind(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly WorkspaceCustomModelProviderKind[];
+  },
+): Promise<Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>> {
+  const models: Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]> = {
+    vercel_gateway: [],
+    openrouter: [],
+    anthropic: [],
+    claude_subscription: [],
+  };
+  const providerKinds = [...new Set(input.providerKinds)];
+  if (providerKinds.length === 0) return models;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const queries = providerKinds.map((providerKind) =>
+      workspaceProviderCustomModelsQuery(scopedDb, { ...input, providerKind }),
+    );
+    const [first, second, ...remaining] = queries;
+    // The nonempty provider list guarantees the first query exists. Each branch
+    // keeps its own LIMIT; a global limit could hide another provider's overflow.
+    const bounded = (second ? unionAll(first!, second, ...remaining) : first!).as("models");
+    const rows = await scopedDb
+      .select()
+      .from(bounded)
+      .orderBy(bounded.providerKind, bounded.createdAt, bounded.id);
+    for (const row of rows) models[row.providerKind].push(mapCustomModel(row));
+    for (const providerKind of providerKinds) {
+      if (models[providerKind].length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
+        throw customModelLimitError(providerKind);
+      }
+    }
+    return models;
   });
 }
 

@@ -1,4 +1,6 @@
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
+import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
 import {
   CreditDebitAttribution,
@@ -50,7 +52,6 @@ import {
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
-  meaningfulSessionSequenceSql,
 } from "./session-meaningful-events";
 import {
   boundedChildLifecycleEvidence,
@@ -295,6 +296,7 @@ import type {
   SessionScopeSubjectId,
   SessionMemoryScope,
   SessionListResponse,
+  SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
   SessionEventPayloadMode,
@@ -15048,8 +15050,19 @@ export async function getWorkspaceProviderApiKeyConnectionMetadata(
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): Promise<{ connectionId: string; version: number } | null> {
+  return workspaceProviderApiKeyConnectionMetadataFromConnections(
+    await listConnectionsMetadata(db, workspaceId, null),
+    providerKind,
+  );
+}
+
+/** Select readiness from an already authorized, newest-first metadata read. */
+export function workspaceProviderApiKeyConnectionMetadataFromConnections(
+  connections: readonly ConnectionMetadata[],
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): { connectionId: string; version: number } | null {
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
-  const connection = (await listConnectionsMetadata(db, workspaceId, null)).find(
+  const connection = connections.find(
     (candidate) =>
       candidate.subjectId === null &&
       candidate.providerDomain.toLowerCase() === spec.providerDomain &&
@@ -35629,6 +35642,8 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     search?: string | undefined;
     /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
     pinsOnly?: boolean | undefined;
+    /** Skip pin hydration when the caller reads the pinned section separately. */
+    includePinned?: boolean | undefined;
     /** List personally archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
     sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
@@ -36004,6 +36019,7 @@ async function canonicalSessionRowsFromEventCursors(
   db: Database,
   workspaceId: string,
   rows: readonly SessionRow[],
+  includeEffectivePolicy = true,
 ): Promise<SessionRow[]> {
   if (rows.length === 0) return [];
   const sessionIds = [...new Set(rows.map((row) => row.id))];
@@ -36013,10 +36029,7 @@ async function canonicalSessionRowsFromEventCursors(
       workspaceId: schema.sessionEventCursors.workspaceId,
       sessionId: schema.sessionEventCursors.sessionId,
       lastSequence: schema.sessionEventCursors.lastSequence,
-      meaningfulSequence: meaningfulSessionSequenceSql(
-        schema.sessionEventCursors.workspaceId,
-        schema.sessionEventCursors.sessionId,
-      ),
+      meaningfulSequence: schema.sessionEventCursors.lastMeaningfulSequence,
     })
     .from(schema.sessionEventCursors)
     .where(
@@ -36026,26 +36039,25 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return withEffectiveSessionPolicy(
-    db,
-    workspaceId,
-    (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
-      const cursor = cursorBySessionId.get(row.id);
-      if (
-        !cursor ||
-        cursor.accountId !== row.accountId ||
-        cursor.workspaceId !== row.workspaceId ||
-        cursor.lastSequence < row.lastSequence
-      ) {
-        throw new Error(`Session event cursor invariant failed for session ${row.id}`);
-      }
-      return {
-        ...row,
-        lastSequence: cursor.lastSequence,
-        meaningfulSequence: cursor.meaningfulSequence,
-      };
-    }),
-  );
+  const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
+    const cursor = cursorBySessionId.get(row.id);
+    if (
+      !cursor ||
+      cursor.accountId !== row.accountId ||
+      cursor.workspaceId !== row.workspaceId ||
+      cursor.lastSequence < row.lastSequence
+    ) {
+      throw new Error(`Session event cursor invariant failed for session ${row.id}`);
+    }
+    return {
+      ...row,
+      lastSequence: cursor.lastSequence,
+      meaningfulSequence: cursor.meaningfulSequence,
+    };
+  });
+  return includeEffectivePolicy
+    ? withEffectiveSessionPolicy(db, workspaceId, canonical)
+    : canonical;
 }
 
 function mapSessionAttention(
@@ -36270,7 +36282,7 @@ export async function sessionTreeStatsForSessions(
           select
             root.id,
             root.status,
-            ${meaningfulSessionSequenceSql(sql`root.workspace_id`, sql`root.id`)},
+            root_cursor.last_meaningful_sequence,
             greatest(
               case
                 when workspace_control.workspace_state = 'paused'
@@ -36295,7 +36307,7 @@ export async function sessionTreeStatsForSessions(
           select
             child.id,
             child.status,
-            ${meaningfulSessionSequenceSql(sql`child.workspace_id`, sql`child.id`)},
+            child_cursor.last_meaningful_sequence,
             greatest(
               case
                 -- A subtree resume defeats every inherited pause older than it.
@@ -37030,11 +37042,33 @@ export async function listSessionsForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, false);
+  if ("projection" in page) throw new Error("Unexpected compact session projection");
+  return page;
+}
+
+/** Same subject, paging and authorization fences, without execution configuration. */
+export async function listSessionEntriesForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+): Promise<SessionListEntryResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, true);
+  if (!("projection" in page)) throw new Error("Missing compact session projection");
+  return page;
+}
+
+async function readSessionListForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  summary: boolean,
+): Promise<SessionListResponse | SessionListEntryResponse> {
   const requestedLimit = options.limit ?? 50;
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
     : 50;
-  const listInTransaction = async (): Promise<SessionListResponse> => {
+  const listInTransaction = async (): Promise<SessionListResponse | SessionListEntryResponse> => {
     return await withWorkspaceSubjectRls(
       db,
       workspaceId,
@@ -37152,6 +37186,9 @@ export async function listSessionsForSubject(
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
         }
+        if (options.pinsOnly && options.includePinned === false) {
+          throw new SessionListCursorError("pins-only session lists require pin hydration");
+        }
         // Never reinterpret a boundary from a different ordering domain.
         // v4 envelopes retain the reserved snapshot id so older replicas also
         // take the typed expiry/rebase path instead of mixing sort domains.
@@ -37164,13 +37201,41 @@ export async function listSessionsForSubject(
           throw new SessionListCursorExpiredError();
         }
 
+        // Configuration is never exposed by the summary branch. SQL substitutes
+        // typed placeholders before transfer, so large JSON/prompt fields do not
+        // become process allocations. Full reads select every original column.
+        const fullColumns = getTableColumns(schema.sessions);
+        const listColumns = summary
+          ? {
+              ...fullColumns,
+              resources: sql<SessionRow["resources"]>`'[]'::jsonb`,
+              skills: sql<SessionRow["skills"]>`'[]'::jsonb`,
+              tools: sql<SessionRow["tools"]>`'[]'::jsonb`,
+              instructions: sql<SessionRow["instructions"]>`null::text`,
+              initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
+              agentConfig: sql<SessionRow["agentConfig"]>`null::jsonb`,
+              mcpApprovalPolicies: sql<SessionRow["mcpApprovalPolicies"]>`null::jsonb`,
+              metadata: sql<SessionRow["metadata"]>`jsonb_build_object(
+            'scheduledTaskId', ${schema.sessions.metadata}->'scheduledTaskId',
+            '_opengeniSiteOrigin', ${schema.sessions.metadata}->'_opengeniSiteOrigin')`,
+              createdByContext: sql<
+                SessionRow["createdByContext"]
+              >`jsonb_build_object('label', ${schema.sessions.createdByContext}->'label')`,
+              // Each tagged code unit may expand in storage. Derive the worst-case
+              // prefix from the codec, then apply the exact shared logical scan bound.
+              initialMessage: sql<string>`left(${schema.sessions.initialMessage},
+            case when ${schema.sessions.initialMessageCodecVersion} = 1
+              then ${PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS * toPostgresLosslessText("\0").length}::integer
+              else ${PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS}::integer end)`,
+            }
+          : fullColumns;
         let pageIds: string[];
         // Keep each selected row in the same MVCC statement as its filters and
         // keyset boundary. A second READ COMMITTED hydration can observe a move
         // or activity change and return content that no longer matches the page.
         let selectedOrdinaryRows:
           | Array<{
-              session: typeof schema.sessions.$inferSelect;
+              session: SessionRow;
               pin: typeof schema.sessionPins.$inferSelect | null;
             }>
           | undefined;
@@ -37280,7 +37345,7 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
-              session: schema.sessions,
+              session: listColumns,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
               archiveAt: exactArchiveSortAt,
@@ -37339,7 +37404,7 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
-              session: schema.sessions,
+              session: listColumns,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
               archiveAt: exactArchiveSortAt,
@@ -37389,10 +37454,10 @@ export async function listSessionsForSubject(
           }
         }
         const pinnedLookaheadRows =
-          archiveMode === "archived"
+          archiveMode === "archived" || options.includePinned === false
             ? []
             : await tx
-                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .select({ session: listColumns, pin: schema.sessionPins })
                 .from(schema.sessionPins)
                 .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
                 .where(
@@ -37412,7 +37477,7 @@ export async function listSessionsForSubject(
           (pageIds.length === 0
             ? []
             : await tx
-                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .select({ session: listColumns, pin: schema.sessionPins })
                 .from(schema.sessions)
                 .leftJoin(
                   schema.sessionPins,
@@ -37445,11 +37510,14 @@ export async function listSessionsForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
+          !summary,
         );
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
-        const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
+        const mcpServers = summary
+          ? new Map<string, SessionMcpServerMetadata[]>()
+          : await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
         const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
           tx,
           workspaceId,
@@ -37473,9 +37541,19 @@ export async function listSessionsForSubject(
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
-          const session = canonicalSessionById.get(row.session.id);
-          if (!session)
+          const canonical = canonicalSessionById.get(row.session.id);
+          if (!canonical)
             throw new Error(`Session event cursor missing for session ${row.session.id}`);
+          const session = summary
+            ? {
+                ...canonical,
+                initialMessage: fromPostgresLosslessText(
+                  canonical.initialMessage,
+                  canonical.initialMessageCodecVersion,
+                ).slice(0, PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS),
+                initialMessageCodecVersion: 0,
+              }
+            : canonical;
           const control = controls.get(session.id);
           if (!control) throw new Error(`Effective control missing for session ${session.id}`);
           return projectSessionForRelatedAccess(
@@ -37508,6 +37586,16 @@ export async function listSessionsForSubject(
             rootRelatedIds.has(session.id) ? "root" : "target",
           );
         };
+        if (summary)
+          return {
+            projection: "summary",
+            pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
+            pinnedTruncated,
+            sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
+            nextCursor,
+            sortBy,
+            archiveStatus: archiveMode,
+          };
         return {
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
@@ -37677,10 +37765,6 @@ export async function getSessionForSubject(
         session: schema.sessions,
         pin: schema.sessionPins,
         cursor: schema.sessionEventCursors,
-        meaningfulSequence: meaningfulSessionSequenceSql(
-          schema.sessions.workspaceId,
-          schema.sessions.id,
-        ),
       })
       .from(schema.sessions)
       // Status and replay cursor must share one statement snapshot. Otherwise a
@@ -37731,7 +37815,7 @@ export async function getSessionForSubject(
         {
           ...row.session,
           lastSequence: row.cursor.lastSequence,
-          meaningfulSequence: row.meaningfulSequence,
+          meaningfulSequence: row.cursor.lastMeaningfulSequence,
         },
       ]),
     );

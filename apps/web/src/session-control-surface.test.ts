@@ -432,7 +432,10 @@ describe("session control surface architecture", () => {
   test("loads the first page and older sessions independently in each project", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
-    expect(list).toContain("limit: 50");
+    expect(list).toContain(
+      'const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;',
+    );
+    expect(list).toContain("includePinned: false");
     expect(list).toContain('if (!channelMode || search || browseStatus === "archived") return;');
     expect(list).toContain("void loadMoreInGroup(group);");
     expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");

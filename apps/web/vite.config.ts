@@ -210,6 +210,12 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // Isolate list title helpers so older-server fallbacks can load
+              // them without promoting the shared chat route graph to startup.
+              name: "session-list-titles",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.ts$/,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as

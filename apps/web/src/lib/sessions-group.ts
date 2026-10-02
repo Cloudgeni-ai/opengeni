@@ -5,7 +5,8 @@
 import { formatWaitingSince } from "@/lib/format";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
-import type { Session, SessionStatus } from "@/types";
+import type { SessionStatus } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
 
@@ -74,12 +75,14 @@ export function compareSessionPins(left: Session, right: Session): number {
 }
 
 /** Split explicit personal pins from ordinary rows without changing the input. */
-export function partitionPinnedSessions(sessions: Session[]): {
-  pinned: Session[];
-  ordinary: Session[];
+export function partitionPinnedSessions<T extends Session>(
+  sessions: T[],
+): {
+  pinned: T[];
+  ordinary: T[];
 } {
-  const pinned: Session[] = [];
-  const ordinary: Session[] = [];
+  const pinned: T[] = [];
+  const ordinary: T[] = [];
   for (const session of sessions) {
     (session.pinned ? pinned : ordinary).push(session);
   }
@@ -107,17 +110,17 @@ export function recencyGroupFor(timestampMs: number, now: Date = new Date()): Se
   return "older";
 }
 
-export type SessionRecencyBucket = {
+export type SessionRecencyBucket<T extends Session = Session> = {
   group: SessionRecencyGroup;
   label: string;
-  sessions: Session[];
+  sessions: T[];
 };
 
-export type GroupedSessions = {
+export type GroupedSessions<T extends Session = Session> = {
   /** Running sessions, pinned above every recency group, most-recent first. */
-  running: Session[];
+  running: T[];
   /** Non-running sessions bucketed by recency (empty buckets dropped). */
-  grouped: SessionRecencyBucket[];
+  grouped: SessionRecencyBucket<T>[];
 };
 
 /**
@@ -126,13 +129,16 @@ export type GroupedSessions = {
  * "running" marker); the remainder are bucketed by recency, most-recent first
  * within each bucket. Empty groups are dropped.
  */
-export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
+export function groupSessionsForRail<T extends Session>(
+  sessions: T[],
+  now: Date = new Date(),
+): GroupedSessions<T> {
   const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
   const rest = sessions
     .filter((session) => !isEffectivelyRunning(session))
     .sort(compareSessionActivity);
 
-  const buckets = new Map<SessionRecencyGroup, Session[]>();
+  const buckets = new Map<SessionRecencyGroup, T[]>();
   for (const session of rest) {
     const group = recencyGroupFor(sessionActivityTime(session), now);
     const list = buckets.get(group) ?? [];
@@ -140,7 +146,7 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
     buckets.set(group, list);
   }
 
-  const grouped: SessionRecencyBucket[] = [];
+  const grouped: SessionRecencyBucket<T>[] = [];
   for (const group of SESSION_GROUP_ORDER) {
     const list = buckets.get(group);
     if (list && list.length > 0) {
@@ -429,7 +435,7 @@ export function summarizeRailNodes(
  * An omitted list-only field must not make the selected row forget its loaded
  * hierarchy summary (and therefore lose its disclosure control).
  */
-export function mergeSessionForRail(current: Session, incoming: Session): Session {
+export function mergeSessionForRail<T extends Session>(current: Session, incoming: T): T {
   if (incoming.treeStats !== undefined || current.treeStats === undefined) {
     return incoming;
   }
@@ -590,8 +596,8 @@ function browseTimestamp(session: Session, field: SessionBrowseDateField): numbe
   return Number.isNaN(created) ? 0 : created;
 }
 
-export function filterSessionsForBrowse(
-  sessions: Session[],
+export function filterSessionsForBrowse<T extends Session>(
+  sessions: T[],
   options: {
     creator: string | null;
     dateField: SessionBrowseDateField;
@@ -600,7 +606,7 @@ export function filterSessionsForBrowse(
     hierarchical?: boolean;
     now?: Date;
   },
-): Session[] {
+): T[] {
   const now = options.now ?? new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const threshold =
@@ -611,18 +617,18 @@ export function filterSessionsForBrowse(
         : options.dateRange === "month"
           ? startOfToday - 29 * 24 * 60 * 60 * 1000
           : null;
-  const matches = (session: Session): boolean =>
+  const matches = (session: T): boolean =>
     (!options.creator || sessionCreatorKey(session) === options.creator) &&
     (threshold === null || browseTimestamp(session, options.dateField) >= threshold);
   if (!options.hierarchical) return sessions.filter(matches);
 
   const byId = new Map(sessions.map((session) => [session.id, session]));
-  const rootById = new Map<string, Session>();
-  const hierarchyRoot = (session: Session): Session => {
+  const rootById = new Map<string, T>();
+  const hierarchyRoot = (session: T): T => {
     const cached = rootById.get(session.id);
     if (cached) return cached;
 
-    const path: Session[] = [];
+    const path: T[] = [];
     const seen = new Set<string>();
     let current = session;
     while (current.parentSessionId) {
@@ -769,6 +775,7 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
  * A session a human started never carries the key, so it never groups.
  */
 export function scheduledTaskIdOf(session: Session): string | null {
+  if ("scheduledTaskId" in session) return session.scheduledTaskId;
   const value = (session.metadata as Record<string, unknown> | undefined)?.scheduledTaskId;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -1122,7 +1129,7 @@ function forestRoots(forest: SessionForest): SessionTreeNode[] {
  * tree, so every result there IS top-level and must say so. A row that renders
  * at the top level while still naming an absent parent is the bug this prevents.
  */
-export function projectRailSessions(sessions: Session[], hierarchyMode: boolean): Session[] {
+export function projectRailSessions<T extends Session>(sessions: T[], hierarchyMode: boolean): T[] {
   return hierarchyMode
     ? sessions
     : sessions.map((session) => ({ ...session, parentSessionId: null }));
