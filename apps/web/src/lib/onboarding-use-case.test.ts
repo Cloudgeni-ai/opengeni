@@ -14,13 +14,14 @@ const facts = {
 };
 
 describe("onboarding use case text", () => {
-  test("the coding-agent prompt carries the key once, with how to keep it safe", () => {
-    const prompt = codingAgentSetupPrompt({ ...facts, apiKey: "ogk_secret_value" });
-    expect(prompt.split("ogk_secret_value")).toHaveLength(2);
+  test("the coding-agent prompt names where the key goes, never a key", () => {
+    const prompt = codingAgentSetupPrompt(facts);
+    expect(prompt).not.toMatch(/ogk_/);
+    expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
+    expect(prompt).toContain("never ask me to paste it into this chat");
     expect(prompt).toContain("Opengeni API: https://app.opengeni.ai");
     expect(prompt).toContain("Organization: Acme (ID 22222222-2222-4222-8222-222222222222)");
-    expect(prompt).toContain("server-only .env");
-    expect(prompt).toContain("Never print, log, commit or repeat it");
+    expect(prompt).toContain("Never print, log or commit the key");
     for (const host of ["Claude Code:", "Codex:", "Cursor:", "Anything else:"]) {
       expect(prompt).toContain(host);
     }

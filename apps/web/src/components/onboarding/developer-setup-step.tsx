@@ -18,6 +18,7 @@ import {
   DEVELOPER_SETUP_KEY_VARIABLE,
   DEVELOPER_SETUP_VARIABLE_SET_NAME,
   DEVELOPER_SETUP_WORKSPACE_NAME,
+  CODING_AGENT_KEY_VARIABLE,
   codingAgentSetupPrompt,
   deploymentApiOrigin,
   developerSetupModelContext,
@@ -41,10 +42,12 @@ type KeyState =
  * signed-in owner's click on that path is what creates the organization's
  * scoped Developer setup key, once, and shows it only here. From there the
  * person either lets Opengeni implement the integration in a new "Opengeni
- * setup" workspace, or copies a ready prompt for their own coding agent.
+ * setup" workspace, or uses their own coding agent: copy the key into the
+ * product's server-only env, then copy a prompt that names that variable.
  *
- * The key never enters chat history: the setup chat reads it from a write-only
- * variable set in its sandbox, and its model context names only where it is.
+ * The key never enters a chat: the setup chat reads it from a write-only
+ * variable set in its sandbox, its model context names only where it is, and
+ * the coding-agent prompt carries the variable name, never the key.
  */
 export function DeveloperSetupStep({
   client,
@@ -160,12 +163,11 @@ export function DeveloperSetupStep({
   }
 
   async function copyPrompt(): Promise<void> {
-    if (key.status !== "ready") return;
-    if (await promptCopy.copy(codingAgentSetupPrompt({ ...facts, apiKey: key.token }))) {
+    if (await promptCopy.copy(codingAgentSetupPrompt(facts))) {
       setPromptCopied(true);
     } else {
       toast.error("Couldn't copy the prompt", {
-        description: "Copy the key above, then try again.",
+        description: "Open Preview the prompt and copy it by hand.",
       });
     }
   }
@@ -177,25 +179,18 @@ export function DeveloperSetupStep({
         <LogoTile icon={<KeyRoundIcon />} tone="brand" />
         <h1 className="mt-4 text-xl font-semibold tracking-tight">Add AI agents to your product</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          Your API key is ready. Choose who builds the integration.
+          {ready
+            ? "Your API key is ready. Choose who builds the integration."
+            : "Getting your API key ready. Then choose who builds the integration."}
         </p>
 
-        <div className="mt-6 grid gap-2" aria-live="polite" aria-busy={key.status === "creating"}>
-          <h2 className="text-sm font-medium text-fg">API key</h2>
-          {key.status === "ready" ? (
-            <>
-              <CopyField variant="field" wrap value={key.token} label="new API key" />
-              <p className="text-xs leading-[18px] text-fg-muted">
-                Shown only here. Both options below use it for you. It expires in 24 hours, can set
-                up workspaces and tools, and can't create other keys.
-              </p>
-            </>
-          ) : key.status === "creating" ? (
-            <div role="status" className="flex items-center gap-2">
-              <Skeleton className="h-10 flex-1 rounded-[10px]" />
-              <span className="sr-only">Creating your API key</span>
-            </div>
-          ) : (
+        {key.status === "creating" ? (
+          <div role="status" className="mt-6">
+            <Skeleton className="h-10 w-full rounded-[10px]" />
+            <span className="sr-only">Creating your API key</span>
+          </div>
+        ) : key.status === "failed" ? (
+          <div className="mt-6">
             <ErrorMessage
               variant="block"
               title="Couldn't create your API key."
@@ -216,8 +211,8 @@ export function DeveloperSetupStep({
             >
               {userErrorTextWithoutReference(key.error)}
             </ErrorMessage>
-          )}
-        </div>
+          </div>
+        ) : null}
 
         <div className="mt-6 grid gap-2">
           <Button
@@ -235,45 +230,68 @@ export function DeveloperSetupStep({
             {opening ? "Opening your setup chat…" : "Let Opengeni implement it"}
           </Button>
           <p className="text-xs leading-[18px] text-fg-muted">
-            Opens a chat in a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace. The agent asks about
-            your product, suggests connecting GitHub, and builds it with you.
+            Opens a chat in a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your
+            key. The agent asks about your product, suggests connecting GitHub, and builds it with
+            you.
           </p>
         </div>
 
-        <div className="mt-5 grid gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            className="w-full"
-            disabled={!ready || opening}
-            onClick={() => void copyPrompt()}
-          >
-            {promptCopy.state === "copied" ? (
-              <CheckIcon className="size-4" />
-            ) : (
-              <CopyIcon className="size-4" />
-            )}
-            {promptCopy.state === "copied" ? "Prompt copied" : "Copy prompt for your coding agent"}
-          </Button>
-          <p className="text-xs leading-[18px] text-fg-muted" role="status">
-            {promptCopied
-              ? "Paste it into your coding agent, in your product's repository. It tells the agent to save the key to your server's .env and never repeat it."
-              : "For Claude Code, Codex, Cursor or ChatGPT. Includes your key and how to get the Opengeni plugin."}
-          </p>
-          {ready ? (
-            <Disclosure title="Preview the prompt" summary="Your key is hidden here">
-              <pre
-                tabIndex={0}
-                className="max-h-64 max-w-full overflow-auto overscroll-contain rounded-[10px] border border-border bg-surface-2 p-3 text-xs leading-[18px] whitespace-pre-wrap text-fg"
-              >
-                <code translate="no" className="font-mono">
-                  {codingAgentSetupPrompt({ ...facts, apiKey: `${key.prefix}…` })}
-                </code>
-              </pre>
-            </Disclosure>
-          ) : null}
-        </div>
+        {ready ? (
+          <div className="mt-6 grid gap-4 border-t border-border pt-6">
+            <div>
+              <h2 className="text-sm font-medium text-fg">Or use your own coding agent</h2>
+              <p className="mt-1 text-xs leading-[18px] text-fg-muted">
+                Claude Code, Codex, Cursor or ChatGPT, in your product's repository.
+              </p>
+            </div>
+            <ol className="m-0 grid list-none gap-4 p-0">
+              <li className="grid gap-2">
+                <h3 className="text-sm font-medium text-fg">1. Copy your key</h3>
+                <CopyField variant="field" wrap value={key.token} label="API key" />
+                <p className="text-xs leading-[18px] text-fg-muted">
+                  Add it to your product's server-only .env as{" "}
+                  <code translate="no" className="font-mono text-fg">
+                    {CODING_AGENT_KEY_VARIABLE}
+                  </code>
+                  . Shown only here. It expires in 24 hours and can't create other keys.
+                </p>
+              </li>
+              <li className="grid gap-2">
+                <h3 className="text-sm font-medium text-fg">2. Copy the prompt</h3>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full"
+                  disabled={opening}
+                  onClick={() => void copyPrompt()}
+                >
+                  {promptCopy.state === "copied" ? (
+                    <CheckIcon className="size-4" />
+                  ) : (
+                    <CopyIcon className="size-4" />
+                  )}
+                  {promptCopy.state === "copied" ? "Prompt copied" : "Copy prompt"}
+                </Button>
+                <p className="text-xs leading-[18px] text-fg-muted" role="status">
+                  {promptCopied
+                    ? "Paste it into your coding agent. It reads the key from your .env, never from the chat."
+                    : `It doesn't include your key. It tells the agent to read ${CODING_AGENT_KEY_VARIABLE} from your server's .env and how to get the Opengeni plugin.`}
+                </p>
+                <Disclosure title="Preview the prompt">
+                  <pre
+                    tabIndex={0}
+                    className="max-h-64 max-w-full overflow-auto overscroll-contain rounded-[10px] border border-border bg-surface-2 p-3 text-xs leading-[18px] whitespace-pre-wrap text-fg"
+                  >
+                    <code translate="no" className="font-mono">
+                      {codingAgentSetupPrompt(facts)}
+                    </code>
+                  </pre>
+                </Disclosure>
+              </li>
+            </ol>
+          </div>
+        ) : null}
 
         <Button
           type="button"

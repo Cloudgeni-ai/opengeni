@@ -38,12 +38,15 @@ function organizationLine(facts: DeveloperSetupFacts): string {
     : `ID ${facts.organizationId}`;
 }
 
+/** Where the person stores the key for their own coding agent's integration. */
+export const CODING_AGENT_KEY_VARIABLE = "OPENGENI_API_KEY";
+
 /**
  * The prompt a person pastes into their own coding agent (Claude Code, Codex,
- * Cursor, ChatGPT). It is the only place the key leaves this page: the agent is
- * told to store it server-side and never repeat it.
+ * Cursor, ChatGPT). It never contains the key: the person copies the key in a
+ * separate step into their server-only env, and the prompt names that variable.
  */
-export function codingAgentSetupPrompt(facts: DeveloperSetupFacts & { apiKey: string }): string {
+export function codingAgentSetupPrompt(facts: DeveloperSetupFacts): string {
   return `Add AI agents to my product with Opengeni (https://opengeni.ai).
 
 First get the Opengeni skills, if you don't have them:
@@ -56,9 +59,9 @@ Then follow the build-with-opengeni skill and its opengeni-client guide.
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- Developer setup API key (expires in 24 hours, can't create other keys): ${facts.apiKey}
+- My Developer setup API key (expires in 24 hours, can't create other keys) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
 
-Handle the key safely: save it right away in this project's server-only .env (git-ignored, file mode 0600) as OPENGENI_API_KEY, with OPENGENI_API_BASE_URL and OPENGENI_ORGANIZATION_ID. Never print, log, commit or repeat it, and never put it in browser code. When the integration needs a long-lived key, ask me to create one in Opengeni under Organization settings > Developer.
+Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE}, and set OPENGENI_API_BASE_URL and OPENGENI_ORGANIZATION_ID beside it in that .env (git-ignored, file mode 0600). Never print, log or commit the key, and never put it in browser code. When the integration needs a long-lived key, ask me to create one in Opengeni under Organization settings > Developer.
 
 Start by looking at this repository. Then ask me, in one short message, what I want AI agents to do for my users. If there's no product yet, suggest two or three simple ideas.`;
 }

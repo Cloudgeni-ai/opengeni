@@ -18,6 +18,7 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
+  ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
@@ -902,6 +903,49 @@ describe("runtime database posture evaluator", () => {
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+    );
+  });
+
+  test("organization signup use cases stay behind their record capability", () => {
+    const posture = safePosture();
+    const table = {
+      name: "organization_signup_use_cases",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("organization_signup_use_cases");
+    table.select = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct organization signup use case authority",
+    );
+    table.select = false;
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case relation lacks active FORCE-RLS isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case capability record_organization_signup_use_case(uuid, text, text) is missing or unsafe",
     );
   });
 

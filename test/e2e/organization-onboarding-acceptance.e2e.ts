@@ -1415,7 +1415,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await registeredContext.close();
   }, 240_000);
 
-  test("adding agents to a product creates a scoped setup key and opens a setup chat without the key in history", async () => {
+  test("adding agents to a product records the choice, creates a scoped setup key, and opens a setup chat without the key in history", async () => {
     if (!browser || !owned) throw new Error("acceptance harness unavailable");
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
@@ -1435,14 +1435,18 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     await page.getByRole("button", { name: /^(Continue|Skip for now)$/ }).click();
     await page.getByRole("heading", { name: "Add AI agents to your product" }).waitFor();
-    await page.getByRole("button", { name: "Copy prompt for your coding agent" }).click();
+    // Shown once in its own copy step; the coding-agent prompt never carries it.
+    const keyField = page.locator("textarea").first();
+    await keyField.waitFor();
+    const token = await keyField.inputValue();
+    expect(token).toStartWith("ogk_");
+    await page.getByRole("button", { name: "Copy API key" }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
+    await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
     await page.getByRole("button", { name: "Prompt copied" }).waitFor();
     const prompt = await page.evaluate(() => navigator.clipboard.readText());
-    const token = /can't create other keys\): (\S+)/u.exec(prompt)?.[1] ?? "";
-    expect(token).toStartWith("ogk_");
-    expect(prompt.split(token)).toHaveLength(2);
-    // Shown once on the page, in its copy field.
-    expect(await page.locator("textarea").first().inputValue()).toBe(token);
+    expect(prompt).not.toContain(token);
+    expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
     expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
     await expectNoAxeViolations(page, "body");
 

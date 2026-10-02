@@ -4,7 +4,8 @@ import { chromium, type Page } from "playwright";
 
 // Drives the production post-signup onboarding (signup-onboarding-fixture.tsx)
 // through both paths at 1440 and 390 wide, light and dark: accessibility,
-// no horizontal overflow, no browser errors, and the exact requests sent.
+// no horizontal overflow, no browser errors, the exact requests sent, and a
+// coding-agent prompt that never carries the key.
 // Start `apps/web/node_modules/.bin/vite --config apps/web/test/signup-onboarding.vite.config.ts`
 // first. OPENGENI_SIGNUP_ONBOARDING_OUTPUT saves a screenshot of every step,
 // and OPENGENI_SIGNUP_ONBOARDING_VIDEO a desktop recording of the embed path.
@@ -137,10 +138,20 @@ try {
         await page.waitForTimeout(400);
         await check(page, "4-developer-setup", theme, width);
         await pace(page, 1_500);
-        await page.getByRole("button", { name: "Copy prompt for your coding agent" }).click();
+        // Step 1 copies the key alone; step 2 copies a prompt without it.
+        await page.getByRole("button", { name: "Copy API key" }).click();
+        if ((await page.evaluate(() => navigator.clipboard.readText())) !== KEY) {
+          throw new Error("Copy key did not copy exactly the key");
+        }
+        await pace(page, 800);
+        await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
         await page.getByRole("button", { name: "Prompt copied" }).waitFor();
         const prompt = await page.evaluate(() => navigator.clipboard.readText());
-        if (prompt.split(KEY).length !== 2 || !prompt.includes("opengeni@opengeni")) {
+        if (
+          prompt.includes(KEY) ||
+          !prompt.includes("server-only .env as OPENGENI_API_KEY") ||
+          !prompt.includes("opengeni@opengeni")
+        ) {
           throw new Error(`Unexpected prompt: ${prompt}`);
         }
         await page.getByRole("button", { name: /^Preview the prompt/ }).click();
@@ -190,7 +201,7 @@ try {
     }
   }
   console.log(
-    "Signup onboarding passed both paths at 1440/390, light/dark: accessibility, no overflow or browser errors, exact requests, and the key only in the copied prompt.",
+    "Signup onboarding passed both paths at 1440/390, light/dark: accessibility, no overflow or browser errors, exact requests, the key only in its own copy step, never in the prompt.",
   );
 } finally {
   await browser.close();

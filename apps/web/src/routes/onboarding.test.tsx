@@ -1358,25 +1358,25 @@ describe("organization onboarding UI", () => {
           access: "developer_setup",
         },
       ]);
-      expect(container.textContent).toContain(token);
-      // The prompt preview never shows the key.
+      // Shown once, in its own copy step; the prompt never carries it.
+      expect(container.querySelector("textarea")!.value).toBe(token);
+      expect(container.textContent).toContain("1. Copy your key");
       expect(container.querySelector("pre")!.textContent).not.toContain(token);
-      expect(container.querySelector("pre")!.textContent).toContain("ogk_setup12…");
+      expect(container.querySelector("pre")!.textContent).toContain(
+        "server-only .env as OPENGENI_API_KEY",
+      );
 
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.includes("Copy prompt for your coding agent"))!
+          .find((button) => button.textContent?.trim() === "Copy prompt")!
           .click(),
       );
       await flush();
       expect(writeText).toHaveBeenCalledTimes(1);
       const prompt = writeText.mock.calls[0]![0];
-      expect(prompt).toContain(
-        `Developer setup API key (expires in 24 hours, can't create other keys): ${token}`,
-      );
+      expect(prompt).not.toContain(token);
+      expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
       expect(prompt).toContain("claude plugin install opengeni@opengeni");
-      expect(prompt).toContain("Never print, log, commit or repeat it");
-      expect(prompt.split(token)).toHaveLength(2);
 
       await act(async () =>
         Array.from(container.querySelectorAll("button"))

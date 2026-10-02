@@ -58,6 +58,10 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
+  "record_organization_signup_use_case(uuid, text, text)",
+] as const;
+const ORGANIZATION_SIGNUP_USE_CASES_TABLE = "organization_signup_use_cases";
 export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
@@ -2066,6 +2070,7 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
@@ -3831,6 +3836,49 @@ export function evaluateRuntimeDatabasePosture(
         !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
         violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
+  const signupUseCaseTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  );
+  if (signupUseCaseTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization signup use case private relation is missing or ambiguous");
+  } else {
+    const table = signupUseCaseTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("organization signup use case relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct organization signup use case authority");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("organization signup use case owner does not match session authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`organization signup use case capability ${name} is missing or unsafe`);
       }
     }
   }
