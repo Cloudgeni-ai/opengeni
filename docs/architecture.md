@@ -374,6 +374,9 @@ both catalog projection and request shaping consume it.
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.
+Accepted execution-policy digests tolerate only provably additive latency-mode
+and input-modality declarations, retaining the frozen mode and request tier;
+provider identity and all other executable fields remain exact.
 `packages/core/src/codex-model-availability.ts` requires exact live support on every
 permitted serving account for browser/default/agent choices. It rechecks authority,
 refreshes tokens, and caches support by workspace/credential/revision.

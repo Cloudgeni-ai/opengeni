@@ -5231,6 +5231,48 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
 }
 
+function matchesAdditiveCapabilityDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { latencyModes, inputModalities } = model.capabilities;
+  // V1 has only three unique latency ids and three unique input modalities:
+  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // exact historical declaration; never ignore the digest or alter existing
+  // mode support, runnable state, billing multiplier, or request-tier routing.
+  // Every other executable field remains in the digest. Do not compose this
+  // with the pre-wire-profile or implicit-caching migration exceptions.
+  for (let latencyMask = 1; latencyMask < 1 << latencyModes.length; latencyMask += 1) {
+    const retainedModes = latencyModes.filter((_mode, index) => latencyMask & (1 << index));
+    if (!retainedModes.some((mode) => mode.id === policy.latencyMode && mode.runnable)) {
+      continue;
+    }
+    for (let inputMask = 1; inputMask < 1 << inputModalities.length; inputMask += 1) {
+      const retainedInputs = inputModalities.filter((_modality, index) => inputMask & (1 << index));
+      if (
+        retainedModes.length === latencyModes.length &&
+        retainedInputs.length === inputModalities.length
+      ) {
+        continue;
+      }
+      const capabilities = {
+        ...model.capabilities,
+        latencyModes: retainedModes,
+        inputModalities: retainedInputs,
+      };
+      if (
+        policy.definitionVersion ===
+        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5947,7 +5989,7 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
- * Any deployment/provider drift fails before a provider or compaction call.
+ * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(
   settings: Settings,
@@ -5999,7 +6041,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === resolved.model.definitionVersion ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
