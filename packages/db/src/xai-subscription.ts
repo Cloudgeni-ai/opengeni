@@ -1,4 +1,6 @@
+import { subscriptionAccountShardIndex, selectSubscriptionAccount } from "@opengeni/config";
 import { assignedConnectionDefault, connectionModelAllowed } from "./model-connection-access";
+import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -64,17 +66,7 @@ export type XaiCredentialLeaseResult = {
 export const XAI_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
 
 /** Stable session sharding, matching Codex's cache-affinity contract. */
-export function xaiCredentialShardIndex(sessionId: string, candidateCount: number): number {
-  if (!Number.isSafeInteger(candidateCount) || candidateCount <= 0) {
-    throw new Error("xAI shard candidate count must be positive");
-  }
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < sessionId.length; index += 1) {
-    hash ^= sessionId.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0) % candidateCount;
-}
+export const xaiCredentialShardIndex = subscriptionAccountShardIndex;
 
 type XaiCredentialMetadataRow = Pick<
   typeof schema.xaiSubscriptionCredentials.$inferSelect,
@@ -1165,24 +1157,17 @@ export async function acquireXaiCredentialLease(
             candidate.allocatorEnabled &&
             (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
         );
-        const pinned = input.pinnedCredentialId
-          ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
-          : undefined;
-        const pinIsManual = input.pinnedCredentialId && input.pinSource !== "policy";
-        const selected = pinIsManual
-          ? pinned
-          : settings.rotationEnabled
-            ? (pinned ??
-              (eligible.length > 0
-                ? eligible[xaiCredentialShardIndex(input.sessionId, eligible.length)]
-                : undefined))
-            : eligible.find(
-                (candidate) =>
-                  candidate.id ===
-                  (snapshot.scope === "organization"
-                    ? assignedConnectionDefault(settings.activeCredentialId, candidates)
-                    : settings.activeCredentialId),
-              );
+        const selected = selectSubscriptionAccount({
+          sessionId: input.sessionId,
+          eligible,
+          rotationEnabled: settings.rotationEnabled,
+          activeCredentialId:
+            snapshot.scope === "organization"
+              ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+              : settings.activeCredentialId,
+          pinnedCredentialId: input.pinnedCredentialId ?? null,
+          pinSource: input.pinSource ?? null,
+        });
         if (!selected) {
           return {
             credentialId: null,
@@ -1330,24 +1315,17 @@ export async function selectXaiCredentialForUse(
             candidate.allocatorEnabled &&
             (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
         );
-        const pinned = input.pinnedCredentialId
-          ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
-          : undefined;
-        const selected =
-          input.pinnedCredentialId && input.pinSource !== "policy"
-            ? pinned
-            : settings.rotationEnabled
-              ? (pinned ??
-                (eligible.length > 0
-                  ? eligible[xaiCredentialShardIndex(input.shardKey, eligible.length)]
-                  : undefined))
-              : eligible.find(
-                  (candidate) =>
-                    candidate.id ===
-                    (snapshot.scope === "organization"
-                      ? assignedConnectionDefault(settings.activeCredentialId, candidates)
-                      : settings.activeCredentialId),
-                );
+        const selected = selectSubscriptionAccount({
+          sessionId: input.shardKey,
+          eligible,
+          rotationEnabled: settings.rotationEnabled,
+          activeCredentialId:
+            snapshot.scope === "organization"
+              ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+              : settings.activeCredentialId,
+          pinnedCredentialId: input.pinnedCredentialId ?? null,
+          pinSource: input.pinSource ?? null,
+        });
         return {
           credentialId: selected?.id ?? null,
           rotationEnabled: settings.rotationEnabled,
@@ -1395,27 +1373,11 @@ export async function heartbeatXaiCredentialLeaseUntil(
     now?: Date;
   },
 ): Promise<Date | null> {
-  const now = input.now ?? new Date();
-  const leaseTtlMs = input.leaseTtlMs ?? XAI_CREDENTIAL_LEASE_TTL_MS;
-  if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
-    throw new Error("xAI credential lease TTL must be positive");
-  }
-  const leasedUntil = new Date(now.getTime() + leaseTtlMs);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.xaiCredentialLeases)
-      .set({ leasedUntil, updatedAt: now })
-      .where(
-        and(
-          eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-          eq(schema.xaiCredentialLeases.turnId, input.turnId),
-          eq(schema.xaiCredentialLeases.holderId, input.holderId),
-          eq(schema.xaiCredentialLeases.generation, input.generation),
-          gt(schema.xaiCredentialLeases.leasedUntil, now),
-        ),
-      )
-      .returning({ leasedUntil: schema.xaiCredentialLeases.leasedUntil });
-    return row?.leasedUntil ?? null;
+    return heartbeatSubscriptionCredentialLeaseUntil(scopedDb, "xai_credential_leases", {
+      ...input,
+      ttlMs: input.leaseTtlMs ?? XAI_CREDENTIAL_LEASE_TTL_MS,
+    });
   });
 }
 

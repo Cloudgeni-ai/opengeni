@@ -3722,6 +3722,17 @@ export type ClaudeUsageWindow = {
   resetsAt: string | null;
   status: "allowed" | "allowed_warning" | "rejected" | null;
   observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
+};
+export type ClaudeUsageRequestStatus = {
+  status: ClaudeUsageWindow["status"];
+  resetsAt: string | null;
+  representativeClaim: ClaudeUsageWindow["id"] | null;
+  overageStatus: ClaudeUsageWindow["status"];
+  overageResetsAt: string | null;
+  upstreamModelId: string | null;
+  observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
 };
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -3731,6 +3742,8 @@ export type ClaudeSubscriptionUsage = {
   source: "response_headers" | "provider" | null;
   refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
   refreshCheckedAt: string | null;
+  requestStatus?: ClaudeUsageRequestStatus | null | undefined;
+  requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
 };
 
 export type OrganizationModelProviderConnection = {

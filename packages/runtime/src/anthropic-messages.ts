@@ -10,6 +10,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
@@ -633,12 +634,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();

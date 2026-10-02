@@ -499,6 +499,10 @@ const effectiveBudgets = {
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
     wholeKibEnvelope(2_585_890, 1.5 * kib),
+    // Current-main model recovery and the subscription merge tree emit the
+    // same browser graph: 2,592,768 raw bytes on Bun 1.4 macOS/arm64.
+    // Restore the established 1.5 KiB allowance; unrelated caps stay fixed.
+    wholeKibEnvelope(2_592_768, 1.5 * kib),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
@@ -656,6 +660,9 @@ const effectiveBudgets = {
     // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
     // main aa5661dec. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(727_806, 1.5 * kib),
+    // The same unchanged current-main graph measures 730,608 gzip bytes.
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(730_608, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
@@ -833,7 +840,11 @@ const cssMetrics = await metrics(
 const largestCss = largest(cssMetrics, "gzip");
 
 const report = {
-  initial: { ...initialTotal, files: initialMetrics.length, largestGzip: largestInitial },
+  initial: {
+    ...initialTotal,
+    files: initialMetrics.length,
+    largestGzip: largestInitial,
+  },
   directSession: { ...directSessionTotal, files: directSessionMetrics.length },
   lazy: {
     files: lazyMetrics.length,
