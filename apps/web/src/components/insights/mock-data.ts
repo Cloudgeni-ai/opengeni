@@ -33,11 +33,6 @@ export type InsightsFilters = {
 
 export type InsightsMeasure = "tokens" | "money";
 
-export type TraceTarget = {
-  driverId: string;
-  label: string;
-};
-
 export const RANGE_OPTIONS: ReadonlyArray<{
   id: InsightsRange;
   label: string;
@@ -53,12 +48,20 @@ const PROVIDER_LABEL: Record<string, string> = {
   openai: "OpenAI",
   "azure-openai": "Azure OpenAI",
   anthropic: "Anthropic",
-  "codex-subscription": "Codex",
   google: "Google",
+  xai: "xAI",
+  openrouter: "OpenRouter",
+  "codex-subscription": "Codex",
+  "supergrok-subscription": "SuperGrok",
+  "opengeni-gateway": "Opengeni gateway",
+  "workspace-gateway": "Workspace gateway",
+  "organization-gateway": "Organization gateway",
+  "workspace-openrouter": "Workspace OpenRouter",
+  "organization-openrouter": "Organization OpenRouter",
 };
 
 export function providerLabel(provider: string | null | undefined): string {
-  if (!provider) return "—";
+  if (!provider) return "Unknown";
   return PROVIDER_LABEL[provider] ?? provider;
 }
 

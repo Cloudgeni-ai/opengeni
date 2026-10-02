@@ -37,7 +37,6 @@ mock.module("@/components/insights/charts", () => ({
 mock.module("@/components/insights/count-up", () => ({
   CountUp: ({ value }: { value: number }) => <span>{value}</span>,
 }));
-mock.module("@/components/insights/causal-sheet", () => ({ CausalSheet: () => null }));
 const navigate = mock(async (_options: unknown) => undefined);
 const RouterPackage = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: () => navigate }));
@@ -193,8 +192,28 @@ async function click(button: HTMLButtonElement | null) {
   });
 }
 
+function tableRows(container: HTMLElement, label: string): string[][] {
+  const table = container.querySelector(`[role="table"][aria-label="${label}"]`);
+  return [...(table?.querySelectorAll('[role="rowgroup"]:last-child > [role="row"]') ?? [])].map(
+    (row) =>
+      [
+        row.querySelector('[role="rowheader"] [id]')?.textContent ?? "",
+        ...[...row.querySelectorAll('[role="cell"]')].map((cell) => cell.textContent ?? ""),
+      ].filter((cell, index, all) => !(index === all.length - 1 && cell === "")),
+  );
+}
+
+function rowButton(container: HTMLElement, label: string, title: string): HTMLButtonElement | null {
+  const table = container.querySelector(`[role="table"][aria-label="${label}"]`);
+  return (
+    [...(table?.querySelectorAll<HTMLButtonElement>("button[data-row-action]") ?? [])].find(
+      (button) => button.textContent === title,
+    ) ?? null
+  );
+}
+
 describe("Insights route presentation", () => {
-  test("shows a skeleton during the initial request", async () => {
+  test("shows loading tiles during the initial request", async () => {
     pendingResponse = new Promise<never>(() => undefined);
     const rendered = await renderRoute();
     try {
@@ -203,7 +222,9 @@ describe("Insights route presentation", () => {
           '[role="status"][aria-label="Loading workspace insights"]',
         ),
       ).not.toBeNull();
-      expect(rendered.container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(4);
+      expect(
+        rendered.container.querySelectorAll('[data-slot="stat-tile"][aria-busy]'),
+      ).toHaveLength(4);
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
@@ -231,13 +252,14 @@ describe("Insights route presentation", () => {
     }
   });
 
-  test("shows a permission message without requesting usage", async () => {
+  test("shows a calm permission line without requesting usage", async () => {
     canRead = false;
     const rendered = await renderRoute();
     try {
       expect(rendered.container.querySelector('[role="alert"]')?.textContent).toContain(
-        "Workspace access required",
+        "Only workspace admins can see Insights",
       );
+      expect(rendered.container.querySelector("button")).toBeNull();
       expect(getWorkspaceInsights).not.toHaveBeenCalled();
     } finally {
       await rendered.unmount();
@@ -253,9 +275,12 @@ describe("Insights route presentation", () => {
       );
       expect(rendered.container.textContent).not.toContain("Service unavailable");
       nextError = null;
-      await click(rendered.container.querySelector<HTMLButtonElement>("button"));
+      const retry = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Try again",
+      );
+      await click(retry ?? null);
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(2);
-      expect(rendered.container.textContent).toContain("Credits spent");
+      expect(rendered.container.textContent).toContain("Paid with");
     } finally {
       await rendered.unmount();
     }
@@ -269,38 +294,115 @@ describe("Insights route presentation", () => {
     const rendered = await renderRoute();
     try {
       const alert = rendered.container.querySelector('[role="alert"]')?.textContent ?? "";
-      expect(alert).toContain("Workspace access required");
+      expect(alert).toContain("Only workspace admins can see Insights");
       expect(alert).not.toContain("Insights couldn't load");
       expect(rendered.container.textContent).not.toContain("OpenGeni API");
       expect(rendered.container.textContent).not.toContain("req_403");
-      expect(rendered.container.querySelector("button")).toBeNull();
+      expect(
+        Array.from(rendered.container.querySelectorAll("button")).some(
+          (button) => button.textContent === "Try again",
+        ),
+      ).toBe(false);
     } finally {
       nextError = null;
       await rendered.unmount();
     }
   });
 
-  test("keeps filters, measure, and range available when usage is empty", async () => {
+  test("an empty period keeps the period control and says why nothing shows", async () => {
     nextSnapshot = snapshot({ models: [], modelCalls: 0 });
     const rendered = await renderRoute();
     try {
-      expect(rendered.container.textContent).toContain("No model calls in this window");
-      expect(rendered.container.querySelectorAll("select")).toHaveLength(2);
+      expect(rendered.container.textContent).toContain("No model calls in this period");
       expect(
-        rendered.container.querySelector('[role="group"][aria-label="Usage measure"]'),
+        rendered.container.querySelector(
+          '[role="radiogroup"][aria-label="Period"], [aria-label="Period"]',
+        ),
       ).not.toBeNull();
-      expect(
-        rendered.container.querySelector('[role="group"][aria-label="Time range"]'),
-      ).not.toBeNull();
-      expect(
-        rendered.container.querySelector('[role="region"][aria-label="Usage by model"]'),
-      ).not.toBeNull();
+      expect(rendered.container.textContent).not.toContain("Paid with");
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("scopes to a root session through a keyboard-reachable driver action", async () => {
+  test("splits spend by who pays: credits charged, plans and own keys at list price", async () => {
+    const base = snapshot().models[0]!;
+    nextSnapshot = snapshot({
+      models: [
+        base,
+        {
+          ...base,
+          id: "codex-subscription:gpt-6:external",
+          provider: "codex-subscription",
+          model: "gpt-6",
+          billing: "external",
+          creditUsd: 0,
+          estimatedProviderUsd: 4,
+          estimatedProviderCostKnownCalls: 10,
+        },
+        {
+          ...base,
+          id: "workspace-gateway:claude:external",
+          provider: "workspace-gateway",
+          model: "claude",
+          billing: "external",
+          creditUsd: 0,
+          estimatedProviderUsd: 1,
+          estimatedProviderCostKnownCalls: 4,
+        },
+      ],
+    });
+    const rendered = await renderRoute();
+    try {
+      expect(tableRows(rendered.container, "Spend by who pays")).toEqual([
+        ["Opengeni credits", "10", "1.1K", "$2.50"],
+        ["Subscriptions", "10", "1.1K", "~$4.00"],
+        ["Your API keys", "10", "1.1K", "~$1.00"],
+      ]);
+      expect(rendered.container.textContent).toContain("4 of 10 calls priced");
+      const models = tableRows(rendered.container, "Usage by model");
+      expect(models.map((row) => [row[0], row[1]])).toEqual([
+        ["gpt-5", "Opengeni credits"],
+        ["gpt-6", "ChatGPT plan"],
+        ["claude", "Your API key"],
+      ]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("shows other people's private chats as amounts per person, never as sessions", async () => {
+    nextSnapshot = {
+      ...snapshot(),
+      privateChats: [
+        {
+          ownerKey: "owner-1",
+          name: "Ola Nordmann",
+          you: false,
+          calls: 3,
+          tokens: 900,
+          creditUsd: 12.4,
+          estimatedProviderUsd: 6,
+          estimatedProviderCostKnownCalls: 3,
+        },
+      ],
+    } as WorkspaceInsightsSnapshot;
+    const rendered = await renderRoute();
+    try {
+      const rows = tableRows(rendered.container, "Usage by session");
+      expect(rows).toEqual([
+        ["Ola Nordmann: private chats", "900", "82%", "-", "$12.40", "~$6.00"],
+      ]);
+      expect(
+        rowButton(rendered.container, "Usage by session", "Ola Nordmann: private chats"),
+      ).toBeNull();
+      expect(rendered.container.textContent).not.toContain("isn't included");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("scopes to a root session from its row", async () => {
     const rootSessionId = "33333333-3333-4333-8333-333333333333";
     nextSnapshot = snapshot({
       drivers: [
@@ -324,16 +426,12 @@ describe("Insights route presentation", () => {
     });
     const rendered = await renderRoute();
     try {
-      await click(
-        rendered.container.querySelector<HTMLButtonElement>(
-          'button[aria-label="Scope to root session Refactor billing ledger"]',
-        ),
-      );
+      await click(rowButton(rendered.container, "Usage by session", "Refactor billing ledger"));
       expect(getWorkspaceInsights).toHaveBeenLastCalledWith(
         workspaceId,
         expect.objectContaining({ range: "week", rootSessionId }),
       );
-      expect(rendered.container.textContent).toContain("Root session");
+      expect(rendered.container.textContent).toContain("SessionRefactor billing ledger");
     } finally {
       await rendered.unmount();
     }
@@ -343,14 +441,14 @@ describe("Insights route presentation", () => {
     const rendered = await renderRoute();
     try {
       expect(rendered.container.querySelector("[data-insights-ledger-gap]")?.textContent).toContain(
-        "Per-model breakdowns cover $2.50 of the $3.00 charged. $0.50 has no per-call record yet",
+        "$0.50 of the $3.00 charged has no per-call record yet",
       );
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("lists project usage with an explicit unfiled row and unknown provider estimates", async () => {
+  test("lists project usage with an explicit unfiled row and unknown list prices", async () => {
     const row = {
       projects: 1,
       rootSessions: 1,
@@ -372,17 +470,16 @@ describe("Insights route presentation", () => {
           estimatedProviderCostKnownCalls: 1,
         },
         { ...row, id: "unfiled", kind: "unfiled", label: "No project", tokens: 250 },
+        { ...row, id: "unavailable", kind: "unavailable", label: "Unavailable", tokens: 0 },
       ],
     });
     const rendered = await renderRoute();
     try {
-      const table = rendered.container.querySelector('[aria-label="Usage by project"]');
-      const rows = [...(table?.querySelectorAll("tbody tr") ?? [])].map((tr) =>
-        [...tr.querySelectorAll("td")].map((td) => td.textContent),
-      );
-      expect(rows.map((cells) => [cells[0], cells[4], cells[7]])).toEqual([
-        ["Billing", "75%", "~$1.25 · 1/2 priced"],
+      const rows = tableRows(rendered.container, "Usage by project");
+      expect(rows.map((cells) => [cells[0], cells[3], cells[5]])).toEqual([
+        ["Billing", "75%", "~$1.25"],
         ["No project", "25%", "Unknown"],
+        ["Private chats", "0%", "Unknown"],
       ]);
     } finally {
       await rendered.unmount();
@@ -398,11 +495,7 @@ describe("Insights route presentation", () => {
     try {
       expect(onSearchChange).toHaveBeenCalledWith({ provider: "openai" }, { replace: true });
       onSearchChange.mockClear();
-      await click(
-        rendered.container.querySelector<HTMLButtonElement>(
-          'button[aria-label="Filter by gpt-5 from OpenAI"]',
-        ),
-      );
+      await click(rowButton(rendered.container, "Usage by model", "gpt-5"));
       expect(onSearchChange).toHaveBeenCalledTimes(1);
       expect(onSearchChange.mock.calls[0]).toEqual([{ provider: "openai", model: "gpt-5" }]);
     } finally {
@@ -410,7 +503,7 @@ describe("Insights route presentation", () => {
     }
   });
 
-  test("shows unknown token and cache columns instead of zero", async () => {
+  test("shows unknown token and cache values instead of zero", async () => {
     nextSnapshot = snapshot({
       models: [
         {
@@ -425,25 +518,18 @@ describe("Insights route presentation", () => {
     });
     const rendered = await renderRoute();
     try {
-      const cells = [
-        ...(rendered.container
-          .querySelector('[aria-label="Usage by model"]')
-          ?.querySelectorAll("tbody tr:first-child td") ?? []),
-      ].map((td) => td.textContent ?? "");
-      expect(cells.filter((text) => text.includes("Unknown")).length).toBeGreaterThanOrEqual(5);
-      expect(cells.some((text) => /^0(%)?$/.test(text.trim()))).toBe(false);
+      const [cells] = tableRows(rendered.container, "Usage by model");
+      expect(cells?.[3]).toBe("Unknown");
+      expect(cells?.[4]).toBe("Unknown");
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("filters through a keyboard-reachable model action and preserves request shape", async () => {
+  test("filters by a model from its row and preserves the request shape", async () => {
     const rendered = await renderRoute();
     try {
-      const button = rendered.container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Filter by gpt-5 from OpenAI"]',
-      );
-      await click(button);
+      await click(rowButton(rendered.container, "Usage by model", "gpt-5"));
       expect(getWorkspaceInsights).toHaveBeenLastCalledWith(
         workspaceId,
         expect.objectContaining({
@@ -453,9 +539,22 @@ describe("Insights route presentation", () => {
           signal: expect.any(AbortSignal),
         }),
       );
-      expect(
-        rendered.container.querySelector<HTMLButtonElement>('button[aria-pressed="true"]'),
-      ).not.toBeNull();
+      expect(rowButton(rendered.container, "Usage by model", "gpt-5")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the Activity tab holds the workspace-wide sections", async () => {
+    const rendered = await renderRoute();
+    try {
+      const activity = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Activity",
+      );
+      await click(activity ?? null);
+      expect(rendered.container.textContent).toContain("Live now");
+      expect(rendered.container.textContent).toContain("Sandbox time");
+      expect(rendered.container.textContent).not.toContain("Paid with");
     } finally {
       await rendered.unmount();
     }

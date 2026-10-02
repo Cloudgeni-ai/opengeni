@@ -6,6 +6,8 @@ const RANGE_IDS: readonly InsightsRange[] = ["today", "week", "month", "ytd"];
 
 /** Insights selection as it appears in the URL; omitted keys mean the default. */
 export type InsightsSearch = {
+  /** The Activity tab; omitted means Usage. */
+  view?: "activity";
   range?: InsightsRange;
   chart?: "spend";
   provider?: string;
@@ -37,6 +39,7 @@ export function parseInsightsSearch(search: Record<string, unknown>): InsightsSe
   const root = uuid(search.root);
   const session = uuid(search.session);
   return {
+    ...(search.view === "activity" ? { view: "activity" as const } : {}),
     ...(range && range !== "week" ? { range } : {}),
     ...(search.chart === "spend" ? { chart: "spend" as const } : {}),
     ...(provider ? { provider } : {}),
@@ -44,6 +47,12 @@ export function parseInsightsSearch(search: Record<string, unknown>): InsightsSe
     ...(root ? { root } : {}),
     ...(session ? { session } : {}),
   };
+}
+
+export type InsightsView = "usage" | "activity";
+
+export function insightsView(search: InsightsSearch): InsightsView {
+  return search.view ?? "usage";
 }
 
 export function insightsRange(search: InsightsSearch): InsightsRange {
@@ -67,6 +76,7 @@ export function insightsFilters(search: InsightsSearch): InsightsFilters {
 export function nextInsightsSearch(
   current: InsightsSearch,
   change: {
+    view?: InsightsView;
     range?: InsightsRange;
     measure?: InsightsMeasure;
     provider?: string | "all";
@@ -76,6 +86,7 @@ export function nextInsightsSearch(
   },
 ): InsightsSearch {
   const merged: Record<string, unknown> = { ...current };
+  if (change.view !== undefined) merged.view = change.view === "activity" ? "activity" : undefined;
   if (change.range !== undefined) merged.range = change.range;
   if (change.measure !== undefined) merged.chart = change.measure === "money" ? "spend" : undefined;
   if (change.provider !== undefined) merged.provider = change.provider;

@@ -3,6 +3,7 @@ import type { OrganizationUsageSummary } from "@opengeni/contracts";
 import {
   formatExactUsage,
   formatUsageAmount,
+  organizationPrivateRows,
   organizationUsageChart,
   organizationUsageRows,
 } from "./organization-usage-dashboard";
@@ -124,5 +125,38 @@ describe("organization usage presentation", () => {
     ).toEqual([null, null, null]);
     // Personal rows are keyed by membership; no Personal workspace id reaches the page.
     expect(JSON.stringify(rows)).not.toContain(ownPersonal);
+  });
+  test("other people's private chats are a name, a workspace and an amount, largest first", () => {
+    const cost = (quantity: string) => [
+      { eventType: "model.cost", unit: "usd_micros", quantity, eventCount: "1" },
+    ];
+    const summary = {
+      privateChats: [
+        { workspaceId: "w1", membershipId: "m1", name: "Server name", totals: cost("3020000") },
+        { workspaceId: "w2", membershipId: null, name: null, totals: cost("12400000") },
+        { workspaceId: "w1", membershipId: "m2", name: "Idle", totals: cost("0") },
+      ],
+      privateChatsTruncated: true,
+    } as unknown as OrganizationUsageSummary;
+    const { rows, truncated } = organizationPrivateRows({
+      summary,
+      selected: { eventType: "model.cost", unit: "usd_micros" },
+      members: [{ id: "m1", name: "Ola Nordmann", email: "ola@example.com" }],
+      workspaceNames: new Map([["w1", "Product"]]),
+    });
+    expect(truncated).toBe(true);
+    expect(rows.map((row) => [row.person, row.workspace, row.quantity])).toEqual([
+      ["Organization member", "a workspace", "12400000"],
+      ["Ola Nordmann", "Product", "3020000"],
+    ]);
+    expect(JSON.stringify(rows)).not.toContain("session");
+    expect(
+      organizationPrivateRows({
+        summary: {} as OrganizationUsageSummary,
+        selected: { eventType: "model.cost", unit: "usd_micros" },
+        members: [],
+        workspaceNames: new Map(),
+      }).rows,
+    ).toEqual([]);
   });
 });

@@ -5,8 +5,21 @@ import type {
 } from "@opengeni/contracts/organization-model-usage";
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
-import { LoadErrorState } from "@/components/common";
-import { Button } from "@/components/ui/button";
+import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { Notice } from "@/components/ui/notice";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { RowButton } from "@/components/ui/page-actions";
+import { Section } from "@/components/ui/section";
+import { providerLabel } from "@/components/insights/mock-data";
+import {
+  payerLabel,
+  PAYER_ORDER,
+  rowPayerLabel,
+  usagePayer,
+  type UsagePayer,
+} from "@/components/insights/payer";
+import { apiErrorAdvice, apiErrorDetails } from "@/lib/api-error";
 
 type Totals = OrganizationModelUsageTotals;
 type Summary = {
@@ -101,48 +114,89 @@ export function ledgerCoverageNote(
   const gap = ledger - breakdownCreditMicros;
   if (gap > -10_000n && gap < 10_000n) return null;
   return gap > 0n
-    ? `Per-call records cover ${formatMicrosUsd(breakdownCreditMicros)} of the ${formatMicrosUsd(ledger)} charged. ${formatMicrosUsd(gap)} has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.`
-    : `Per-call records exceed the ${formatMicrosUsd(ledger)} charged in this period by ${formatMicrosUsd(-gap)}.`;
+    ? `${formatMicrosUsd(gap)} of the ${formatMicrosUsd(ledger)} charged has no per-call record yet, so the lists below add up to ${formatMicrosUsd(breakdownCreditMicros)}. Missing records are rebuilt from each call's usage automatically.`
+    : `The per-call records add up to ${formatMicrosUsd(-gap)} more than the ${formatMicrosUsd(ledger)} charged in this period.`;
 }
 
-function costLabel(row: Totals): string {
+type PayerRow = {
+  payer: UsagePayer;
+  calls: bigint;
+  tokens: bigint;
+  /** Credits charged, or the list-price estimate for a plan or own key. */
+  micros: bigint;
+  pricedCalls: bigint;
+};
+
+type PayerTotals = Omit<Totals, "billingPath"> & { payer: UsagePayer };
+
+/**
+ * Spend by who pays. Uses the server's per-payer totals; an older API replica
+ * without them falls back to the listed models, which may be capped.
+ */
+export function organizationPayerRows(data: {
+  payers?: readonly PayerTotals[] | undefined;
+  models: OrganizationModelUsage["models"];
+}): PayerRow[] {
+  const rows = new Map<UsagePayer, PayerRow>();
+  const add = (payer: UsagePayer, totals: Omit<Totals, "billingPath">) => {
+    const row = rows.get(payer) ?? { payer, calls: 0n, tokens: 0n, micros: 0n, pricedCalls: 0n };
+    row.calls += BigInt(totals.calls);
+    row.tokens += BigInt(totals.totalTokens);
+    if (payer === "opengeni_credits") {
+      row.micros += BigInt(totals.creditMicros);
+      row.pricedCalls += BigInt(totals.calls);
+    } else {
+      row.micros += BigInt(totals.estimatedProviderMicros);
+      row.pricedCalls += BigInt(totals.estimatedProviderKnownCalls);
+    }
+    rows.set(payer, row);
+  };
+  if (data.payers) for (const row of data.payers) add(row.payer, row);
+  else
+    for (const row of data.models)
+      add(usagePayer(row.totals.billingPath, row.provider), row.totals);
+  return PAYER_ORDER.flatMap((payer) => {
+    const row = rows.get(payer);
+    return row && row.calls > 0n ? [row] : [];
+  });
+}
+
+function payerAmount(row: PayerRow): string {
+  if (row.payer === "opengeni_credits") return formatMicrosUsd(row.micros);
+  if (row.pricedCalls === 0n) return "Unknown";
+  return `~${formatMicrosUsd(row.micros)}`;
+}
+
+function modelAmount(row: Totals): string {
   if (row.billingPath === "opengeni_credits") return formatMicrosUsd(BigInt(row.creditMicros));
   if (row.estimatedProviderKnownCalls === "0") return "Unknown";
-  const estimate = `~${formatMicrosUsd(BigInt(row.estimatedProviderMicros))} est.`;
-  return row.estimatedProviderKnownCalls === row.calls
-    ? estimate
-    : `${estimate} · ${BigInt(row.estimatedProviderKnownCalls).toLocaleString("en-US")}/${BigInt(row.calls).toLocaleString("en-US")} priced`;
+  return `~${formatMicrosUsd(BigInt(row.estimatedProviderMicros))}`;
 }
 
-function Kpi(props: { label: string; value: string; detail: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-surface/40 px-3.5 py-3">
-      <p className="text-2xs font-medium text-fg-subtle">{props.label}</p>
-      <p className="mt-1.5 text-xl font-semibold tracking-[-0.03em] tabular-nums text-fg">
-        {props.value}
-      </p>
-      <p className="mt-1 text-2xs tabular-nums text-fg-muted">{props.detail}</p>
-    </div>
-  );
+const PAYER_COLUMNS: RowListColumn[] = [
+  { id: "calls", label: "Calls", width: 96, align: "end" },
+  { id: "tokens", label: "Tokens", width: 96, align: "end" },
+  { id: "amount", label: "Amount", width: 120, align: "end" },
+];
+
+const MODEL_COLUMNS: RowListColumn[] = [
+  { id: "payer", label: "Paid with", width: 128 },
+  { id: "calls", label: "Calls", width: 88, align: "end" },
+  { id: "tokens", label: "Tokens", width: 88, align: "end" },
+  { id: "cache", label: "Cache hit", width: 80, align: "end" },
+  { id: "amount", label: "Amount", width: 112, align: "end" },
+];
+
+const PAYER_MONOGRAM = { opengeni_credits: "C", subscription: "S", own_key: "K" } as const;
+
+function Quiet(props: { children: string }) {
+  return <span className="text-fg-muted tabular-nums">{props.children}</span>;
 }
 
-function WorkspaceRow(props: { name: string; detail?: string; billing: readonly Totals[] }) {
-  const summary = summarizeModelUsage(props.billing);
-  return (
-    <tr className="border-b border-border">
-      <td className="py-3 pr-4">
-        <span className="text-fg">{props.name}</span>
-        {props.detail ? <span className="mt-1 block text-fg-subtle">{props.detail}</span> : null}
-      </td>
-      <td className="py-3 text-right tabular-nums">{summary.calls.toLocaleString("en-US")}</td>
-      <td className="py-3 text-right tabular-nums">{formatTokenCount(summary.totalTokens)}</td>
-      <td className="py-3 text-right tabular-nums">{cacheHitLabel(summary)}</td>
-      <td className="py-3 text-right tabular-nums">{formatMicrosUsd(summary.creditMicros)}</td>
-      <td className="py-3 text-right tabular-nums">{externalSpendCellLabel(summary)}</td>
-    </tr>
-  );
-}
-
+/**
+ * Organization model spend from per-call records: who paid, and on which
+ * models. Every workspace counts, other people's private chats included.
+ */
 export function OrganizationModelUsagePanel(props: {
   accountId: string;
   period: OrganizationUsagePeriod;
@@ -151,13 +205,11 @@ export function OrganizationModelUsagePanel(props: {
   ledgerCreditMicros?: string | undefined;
 }) {
   const { client } = useAppContext();
-  const [cursor, setCursor] = useState<string | undefined>();
   const [attempt, setAttempt] = useState(0);
-  const key = JSON.stringify([props.accountId, props.period, props.revision, cursor, attempt]);
+  const key = JSON.stringify([props.accountId, props.period, props.revision, attempt]);
   const [state, setState] = useState<{ key: string; data?: OrganizationModelUsage; error?: Error }>(
     { key: "" },
   );
-  useEffect(() => setCursor(undefined), [props.accountId, props.period, props.revision]);
   useEffect(() => {
     let active = true;
     const controller = new AbortController();
@@ -165,11 +217,7 @@ export function OrganizationModelUsagePanel(props: {
     void (async () => {
       try {
         const data = await client.getOrganizationModelUsage(
-          {
-            accountId: props.accountId,
-            period: props.period,
-            ...(cursor ? { afterWorkspaceId: cursor } : {}),
-          },
+          { accountId: props.accountId, period: props.period },
           { signal: controller.signal },
         );
         if (active) setState({ key, data });
@@ -182,195 +230,117 @@ export function OrganizationModelUsagePanel(props: {
       active = false;
       controller.abort();
     };
-  }, [client, key, props.accountId, props.period, cursor]);
+  }, [client, key, props.accountId, props.period]);
   const data = state.key === key ? state.data : undefined;
   const error = state.key === key ? state.error : undefined;
 
-  return (
-    <section
-      className="space-y-4 border-t border-border pt-5"
-      aria-label="Organization model usage"
-    >
-      <div>
-        <h2 className="text-sm font-semibold text-fg">Model spend</h2>
-        <p className="mt-1 text-xs text-fg-muted">
-          From per-call records. Credits are what OpenGeni charged; external spend is billed by
-          another provider and estimated at list rates.
-        </p>
-      </div>
-      {error ? (
-        <LoadErrorState
-          title="Couldn't load model usage"
-          error={error}
-          onRetry={() => setAttempt((value) => value + 1)}
-        />
-      ) : !data ? (
-        <p role="status" className="text-xs text-fg-muted">
-          Loading model usage
-        </p>
-      ) : data.billing.length === 0 ? (
-        <p className="text-xs text-fg-muted">No visible model calls in this period.</p>
-      ) : (
-        <ModelUsageBody
-          data={data}
-          cursor={cursor}
-          onCursor={setCursor}
-          ledgerCreditMicros={props.ledgerCreditMicros}
-        />
-      )}
-    </section>
-  );
-}
-
-function ModelUsageBody(props: {
-  data: OrganizationModelUsage;
-  cursor: string | undefined;
-  onCursor: (cursor: string | undefined) => void;
-  ledgerCreditMicros: string | undefined;
-}) {
-  const { data } = props;
+  if (error) {
+    return (
+      <Section title="Paid with">
+        <ErrorMessage
+          variant="block"
+          title="Couldn't load model spend"
+          announce
+          action={<RowButton onClick={() => setAttempt((value) => value + 1)}>Try again</RowButton>}
+          {...apiErrorDetails(error)}
+        >
+          {apiErrorAdvice(error)}
+        </ErrorMessage>
+      </Section>
+    );
+  }
+  // The usage section above already says when a period is loading or empty.
+  if (!data || data.billing.length === 0) return null;
   const total = summarizeModelUsage(data.billing);
   const coverage = ledgerCoverageNote(props.ledgerCreditMicros, total.creditMicros);
-  const personalCount = BigInt(data.personal.workspacesWithUsage);
+  const payers = organizationPayerRows(
+    data as OrganizationModelUsage & { payers?: readonly PayerTotals[] },
+  );
   return (
     <>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Kpi
-          label="Credits spent"
-          value={formatMicrosUsd(total.creditMicros)}
-          detail={`${total.creditCalls.toLocaleString("en-US")} credit-paid calls`}
-        />
-        <Kpi
-          label="External spend · estimate"
-          value={externalSpendLabel(total)}
-          detail={
-            total.externalCalls === 0n
-              ? "No externally paid calls"
-              : `${total.externalPricedCalls.toLocaleString("en-US")}/${total.externalCalls.toLocaleString("en-US")} calls priced`
-          }
-        />
-        <Kpi
-          label="Tokens"
-          value={formatTokenCount(total.totalTokens)}
-          detail={`${total.calls.toLocaleString("en-US")} calls`}
-        />
-        <Kpi
-          label="Cache hit"
-          value={cacheHitLabel(total)}
-          detail="Share of reported input served from cache"
-        />
-      </div>
-
-      {coverage ? (
-        <p className="rounded-md border border-status-waiting/30 bg-status-waiting/5 px-3 py-2 text-2xs leading-5 text-fg-muted">
-          {coverage}
-        </p>
-      ) : null}
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <caption className="pb-3 text-left text-sm font-semibold text-fg">By model</caption>
-          <thead>
-            <tr className="border-b border-border text-fg-muted">
-              <th className="py-2 font-medium">Model</th>
-              <th className="py-2 font-medium">Billing</th>
-              <th className="py-2 text-right font-medium">Calls</th>
-              <th className="py-2 text-right font-medium">Tokens</th>
-              <th className="py-2 text-right font-medium">Cache hit</th>
-              <th className="py-2 text-right font-medium">Cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.models.map((row) => (
-              <tr
-                key={`${row.provider}:${row.model}:${row.totals.billingPath}`}
-                className="border-b border-border"
-              >
-                <td className="py-3 pr-4">
-                  <span className="text-fg">{row.model}</span>
-                  <span className="mt-1 block text-fg-subtle">{row.provider}</span>
-                </td>
-                <td className="py-3 pr-4 text-fg-muted">
-                  {row.totals.billingPath === "opengeni_credits" ? "OpenGeni credits" : "External"}
-                </td>
-                <td className="py-3 text-right tabular-nums">
-                  {BigInt(row.totals.calls).toLocaleString("en-US")}
-                </td>
-                <td className="py-3 text-right tabular-nums">
-                  {formatTokenCount(BigInt(row.totals.totalTokens))}
-                </td>
-                <td className="py-3 text-right tabular-nums">
-                  {cacheHitLabel({
-                    cachedTokens: BigInt(row.totals.cachedTokens),
-                    cacheInputTokens: BigInt(row.totals.cacheInputTokens),
-                  })}
-                </td>
-                <td className="py-3 text-right tabular-nums">{costLabel(row.totals)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {data.modelsTruncated ? (
-          <p className="pt-2 text-xs text-fg-subtle">
-            Top 50 model and billing rows by tokens; more exist.
-          </p>
+      <Section
+        title="Paid with"
+        description="Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is the provider's list price."
+      >
+        {coverage ? (
+          <Notice tone="waiting" title="Some charges aren't broken down yet">
+            {coverage}
+          </Notice>
         ) : null}
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <caption className="pb-3 text-left text-sm font-semibold text-fg">By workspace</caption>
-          <thead>
-            <tr className="border-b border-border text-fg-muted">
-              <th className="py-2 font-medium">Workspace</th>
-              <th className="py-2 text-right font-medium">Calls</th>
-              <th className="py-2 text-right font-medium">Tokens</th>
-              <th className="py-2 text-right font-medium">Cache hit</th>
-              <th className="py-2 text-right font-medium">Credits</th>
-              <th className="py-2 text-right font-medium">External est.</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.workspaces.map((workspace) => (
-              <WorkspaceRow
-                key={workspace.workspaceId}
-                name={workspace.name ?? "Workspace"}
-                detail={workspace.workspaceId}
-                billing={workspace.billing}
-              />
-            ))}
-            {personalCount > 0n ? (
-              <WorkspaceRow
-                name={`Personal workspaces (${personalCount.toLocaleString("en-US")})`}
-                detail="Combined; individual Personal workspaces are not listed"
-                billing={data.personal.billing}
-              />
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-      <p className="text-xs text-fg-subtle">
-        Shared workspace rows plus the Personal workspaces row add up to the totals above when every
-        shared workspace fits on this page.
-      </p>
-      {(props.cursor || data.nextWorkspaceCursor) && (
-        <div className="flex gap-2">
-          {props.cursor && (
-            <Button variant="outline" size="sm" onClick={() => props.onCursor(undefined)}>
-              First workspaces
-            </Button>
-          )}
-          {data.nextWorkspaceCursor && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => props.onCursor(data.nextWorkspaceCursor!)}
-            >
-              Next workspaces
-            </Button>
-          )}
-        </div>
-      )}
+        <RowList
+          variant="table"
+          label="Spend by who pays"
+          nameLabel="Paid with"
+          columns={PAYER_COLUMNS}
+          flush
+        >
+          {payers.map((row) => (
+            <ListRow
+              key={row.payer}
+              leading={
+                <LogoTile monogram={PAYER_MONOGRAM[row.payer]} name={payerLabel(row.payer)} />
+              }
+              title={payerLabel(row.payer)}
+              meta={[
+                row.payer === "opengeni_credits" ? "Charged" : "At list price, not charged",
+                ...(row.payer !== "opengeni_credits" && row.pricedCalls < row.calls
+                  ? [
+                      `${row.pricedCalls.toLocaleString("en-US")} of ${row.calls.toLocaleString("en-US")} calls priced`,
+                    ]
+                  : []),
+              ]}
+              cells={{
+                calls: <Quiet>{row.calls.toLocaleString("en-US")}</Quiet>,
+                tokens: <Quiet>{formatTokenCount(row.tokens)}</Quiet>,
+                amount: <span className="text-fg tabular-nums">{payerAmount(row)}</span>,
+              }}
+            />
+          ))}
+        </RowList>
+      </Section>
+      <Section
+        title="By model"
+        description={
+          data.modelsTruncated
+            ? "The 50 models that used the most tokens in every workspace."
+            : "Every workspace, private chats included."
+        }
+      >
+        <RowList
+          variant="table"
+          label="Spend by model"
+          nameLabel="Model"
+          columns={MODEL_COLUMNS}
+          flush
+        >
+          {data.models.map((row) => (
+            <ListRow
+              key={`${row.provider}:${row.model}:${row.totals.billingPath}`}
+              leading={<LogoTile name={row.model} />}
+              title={row.model}
+              meta={[providerLabel(row.provider)]}
+              cells={{
+                payer: <Quiet>{rowPayerLabel(row.totals.billingPath, row.provider)}</Quiet>,
+                calls: <Quiet>{BigInt(row.totals.calls).toLocaleString("en-US")}</Quiet>,
+                tokens: (
+                  <span className="text-fg tabular-nums">
+                    {formatTokenCount(BigInt(row.totals.totalTokens))}
+                  </span>
+                ),
+                cache: (
+                  <Quiet>
+                    {cacheHitLabel({
+                      cachedTokens: BigInt(row.totals.cachedTokens),
+                      cacheInputTokens: BigInt(row.totals.cacheInputTokens),
+                    })}
+                  </Quiet>
+                ),
+                amount: <span className="text-fg tabular-nums">{modelAmount(row.totals)}</span>,
+              }}
+            />
+          ))}
+        </RowList>
+      </Section>
     </>
   );
 }

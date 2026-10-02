@@ -380,7 +380,15 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
-const INSIGHTS_SEARCH_KEYS = ["range", "chart", "provider", "model", "root", "session"] as const;
+const INSIGHTS_SEARCH_KEYS = [
+  "view",
+  "range",
+  "chart",
+  "provider",
+  "model",
+  "root",
+  "session",
+] as const;
 type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,

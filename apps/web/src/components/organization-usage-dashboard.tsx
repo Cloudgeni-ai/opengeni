@@ -15,6 +15,7 @@ import { RowButton } from "@/components/ui/page-actions";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { LockGlyph } from "@/components/insights/lock-glyph";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { formatDate } from "@/components/ui/relative-time";
@@ -146,6 +147,57 @@ export function organizationUsageRows(input: {
   });
 }
 
+type PrivateChatsTotals = {
+  workspaceId: string;
+  membershipId: string | null;
+  name: string | null;
+  totals: Total[];
+};
+
+/** One person's private-chat spend in one shared workspace: a name and an amount, nothing else. */
+export interface OrganizationPrivateRow {
+  key: string;
+  person: string;
+  workspace: string;
+  quantity: string;
+}
+
+/**
+ * Other people's Only me chats as amounts for the selected metric, largest
+ * first. An older API replica omits them; the list is then empty.
+ */
+export function organizationPrivateRows(input: {
+  summary: OrganizationUsageSummary;
+  selected: Pick<Total, "eventType" | "unit">;
+  members: readonly Member[];
+  workspaceNames: ReadonlyMap<string, string>;
+}): { rows: OrganizationPrivateRow[]; truncated: boolean } {
+  const summary = input.summary as OrganizationUsageSummary & {
+    privateChats?: PrivateChatsTotals[];
+    privateChatsTruncated?: boolean;
+  };
+  const members = new Map(input.members.map((member) => [member.id, member]));
+  const rows = (summary.privateChats ?? [])
+    .map((entry) => {
+      const member = entry.membershipId ? members.get(entry.membershipId) : undefined;
+      return {
+        key: `private:${entry.workspaceId}:${entry.membershipId ?? entry.name ?? "unknown"}`,
+        person: member ? memberName(member) : (entry.name ?? "Organization member"),
+        workspace: input.workspaceNames.get(entry.workspaceId) ?? "a workspace",
+        quantity:
+          entry.totals.find((total) => metricKey(total) === metricKey(input.selected))?.quantity ??
+          "0",
+      };
+    })
+    .filter((row) => row.quantity !== "0")
+    .sort((a, b) => {
+      const difference = BigInt(b.quantity) - BigInt(a.quantity);
+      if (difference !== 0n) return difference > 0n ? 1 : -1;
+      return a.person.localeCompare(b.person);
+    });
+  return { rows, truncated: summary.privateChatsTruncated ?? false };
+}
+
 /** Says only what the rows can back: a link hint when one opens, the Personal rule when one shows. */
 function breakdownDescription(rows: readonly OrganizationUsageRow[]): string | undefined {
   const parts = [
@@ -262,6 +314,20 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           accessContext,
         })
       : [];
+  const { rows: privateRows, truncated: privateTruncated } =
+    data && selected
+      ? organizationPrivateRows({
+          summary: data,
+          selected,
+          members: directory?.members.value ?? [],
+          workspaceNames: new Map(
+            [...data.workspaces, ...pages.flatMap((page) => page.workspaces)].map((workspace) => [
+              workspace.workspaceId,
+              workspace.name ?? "a workspace",
+            ]),
+          ),
+        })
+      : { rows: [], truncated: false };
   const unlistedPersonal = data
     ? Math.max(0, (data.personalWorkspaceCount ?? 0) - (data.personalWorkspaces?.length ?? 0))
     : 0;
@@ -283,7 +349,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
       <SectionStack>
         <Section
           title="Usage"
-          description="Every workspace, Personal workspaces included. Not an invoice."
+          description="Every workspace, private chats included. Not an invoice."
           action={
             <SegmentedControl<OrganizationUsagePeriod>
               size="sm"
@@ -389,6 +455,20 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
             )}
           </div>
         </Section>
+        {props.enabled ? (
+          <OrganizationModelUsagePanel
+            accountId={props.accountId}
+            period={period}
+            revision={revision}
+            ledgerCreditMicros={
+              data
+                ? (data.totals.find(
+                    (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
+                  )?.quantity ?? "0")
+                : undefined
+            }
+          />
+        ) : null}
         {props.enabled && data && data.totals.length > 0 && selected ? (
           <div className="flex min-w-0 flex-col gap-3">
             <Section title="By workspace" description={breakdownDescription(rows)}>
@@ -467,26 +547,46 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 {data.personalWorkspaces.length} that spent the most.
               </p>
             ) : null}
-            <p className="text-xs leading-[18px] text-fg-muted">
-              Usage from other people's Only me chats isn't included.
-            </p>
           </div>
         ) : null}
+        {props.enabled && data && selected && privateRows.length > 0 ? (
+          <Section
+            title="Private chats"
+            description="Other people's Only me chats, already counted above. Amounts only: the chats stay private."
+          >
+            <RowList
+              label="Private chats by person"
+              columns={WORKSPACE_COLUMNS}
+              nameLabel="Person"
+              flush
+            >
+              {privateRows.map((row) => (
+                <ListRow
+                  key={row.key}
+                  leading={<LogoTile icon={<LockGlyph />} name={row.person} />}
+                  title={row.person}
+                  meta={[`Private chats in ${row.workspace}`]}
+                  cells={{
+                    total: (
+                      <span
+                        className="text-fg tabular-nums"
+                        title={formatExactUsage(row.quantity, selected.unit)}
+                      >
+                        {formatUsageAmount(row.quantity, selected.unit)}
+                      </span>
+                    ),
+                  }}
+                />
+              ))}
+            </RowList>
+            {privateTruncated ? (
+              <p className="pt-2 text-xs leading-[18px] text-fg-muted">
+                Showing the people who spent the most.
+              </p>
+            ) : null}
+          </Section>
+        ) : null}
       </SectionStack>
-      {props.enabled ? (
-        <OrganizationModelUsagePanel
-          accountId={props.accountId}
-          period={period}
-          revision={revision}
-          ledgerCreditMicros={
-            data
-              ? (data.totals.find(
-                  (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
-                )?.quantity ?? "0")
-              : undefined
-          }
-        />
-      ) : null}
     </section>
   );
 }

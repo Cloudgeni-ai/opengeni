@@ -8,6 +8,7 @@ import {
   formatMicrosUsd,
   formatTokenCount,
   ledgerCoverageNote,
+  organizationPayerRows,
   summarizeModelUsage,
 } from "./organization-model-usage";
 
@@ -73,11 +74,43 @@ describe("organization model usage view", () => {
     expect(ledgerCoverageNote(undefined, 5_000_000n)).toBeNull();
     expect(ledgerCoverageNote("5009999", 5_000_000n)).toBeNull();
     expect(ledgerCoverageNote("7500000", 5_000_000n)).toBe(
-      "Per-call records cover $5.00 of the $7.50 charged. $2.50 has no per-call record yet; recent gaps are rebuilt automatically from each call's usage event.",
+      "$2.50 of the $7.50 charged has no per-call record yet, so the lists below add up to $5.00. Missing records are rebuilt from each call's usage automatically.",
     );
     expect(ledgerCoverageNote("4000000", 5_000_000n)).toBe(
-      "Per-call records exceed the $4.00 charged in this period by $1.00.",
+      "The per-call records add up to $1.00 more than the $4.00 charged in this period.",
     );
     expect(formatTokenCount(22_059_000_000n)).toBe("22.1B");
+  });
+
+  test("splits spend by who pays from the server's payer totals, else from the models", () => {
+    const credit = totals({ calls: "2", totalTokens: "100", creditMicros: "1500000" });
+    const plan = totals({
+      billingPath: "external",
+      calls: "3",
+      totalTokens: "300",
+      estimatedProviderMicros: "2000000",
+      estimatedProviderKnownCalls: "2",
+    });
+    const strip = ({ billingPath: _path, ...rest }: OrganizationModelUsageTotals) => rest;
+    expect(
+      organizationPayerRows({
+        payers: [
+          { payer: "own_key", ...strip(plan) },
+          { payer: "opengeni_credits", ...strip(credit) },
+        ],
+        models: [],
+      }).map((row) => [row.payer, row.calls, row.micros, row.pricedCalls]),
+    ).toEqual([
+      ["opengeni_credits", 2n, 1_500_000n, 2n],
+      ["own_key", 3n, 2_000_000n, 2n],
+    ]);
+    expect(
+      organizationPayerRows({
+        models: [
+          { provider: "codex-subscription", model: "gpt-6", totals: plan },
+          { provider: "openai", model: "gpt-5", totals: credit },
+        ],
+      }).map((row) => row.payer),
+    ).toEqual(["opengeni_credits", "subscription"]);
   });
 });
