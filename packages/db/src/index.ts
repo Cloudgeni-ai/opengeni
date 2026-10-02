@@ -40201,62 +40201,62 @@ export async function listSessionEventPage(
           requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX &&
           options.batchSize === undefined
         ) {
-          const candidateRows = scopedDb.$with("session_event_page_candidates").as(
-            scopedDb
-              .select({
-                ...sessionEventProjectionSelect("full"),
-                transferBytes:
-                  sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`.as(
-                    "transfer_bytes",
-                  ),
-              })
-              .from(schema.sessionEvents)
-              .where(and(...filters))
-              .orderBy(ordering)
-              .limit(queryLimit),
-          );
-          const candidateOrdering =
-            options.authoritativeLatest || direction === "before"
-              ? sql`${candidateRows.sequence} desc`
-              : sql`${candidateRows.sequence} asc`;
-          const rankedRows = scopedDb.$with("session_event_page_ranked").as(
-            scopedDb
-              .select({
-                ...sessionEventProjectionSelect("full", candidateRows),
-                transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
-                rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
-                  "row_number",
-                ),
-                sourceRowCount: sql<number>`count(*) over ()::int`.as("source_row_count"),
-                cumulativeTransferBytes:
-                  sql<number>`sum(${candidateRows.transferBytes} + 1) over (order by ${candidateOrdering})`.as(
-                    "cumulative_transfer_bytes",
-                  ),
-              })
-              .from(candidateRows),
-          );
           const remainingCount = Math.max(1, requestedLimit - events.length);
           const availableTransferBytes = Math.max(
             1,
             maxBytes - bytes + (events.length === 0 ? 1 : 0),
           );
-          const selectedRows = await scopedDb
-            .with(candidateRows, rankedRows)
-            .select({
-              ...sessionEventProjectionSelect("full", rankedRows),
-              sourceRowCount: rankedRows.sourceRowCount,
-            })
-            .from(rankedRows)
-            .where(
-              and(
-                lte(rankedRows.rowNumber, remainingCount),
-                or(
-                  lte(rankedRows.cumulativeTransferBytes, availableTransferBytes),
-                  eq(rankedRows.rowNumber, 1),
-                ),
-              ),
+          const candidateOrdering =
+            options.authoritativeLatest || direction === "before"
+              ? sql`sequence desc`
+              : sql`sequence asc`;
+          // Plan from IDs first, then size only the prefix that can reach this page.
+          // A window over payload sizes would detoast every lookahead row
+          // and repeat that work for each oversized event delivered alone.
+          // The recursive guard stops before reading the next payload once the
+          // count/byte target is reached. IDs still provide exact continuation.
+          const selection = sql`(
+            with recursive
+            candidates as materialized (
+              select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence}
+              from ${schema.sessionEvents}
+              where ${and(...filters)}
+              order by ${ordering}
+              limit ${queryLimit}
+            ),
+            ordered as materialized (
+              select id, row_number() over (order by ${candidateOrdering})::int as row_number
+              from candidates
+            ),
+            bounded as (
+              select ordered.id, ordered.row_number,
+                octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                  as cumulative_transfer_bytes
+              from ordered
+              join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
+              where ordered.row_number = 1
+              union all
+              select ordered.id, ordered.row_number,
+                bounded.cumulative_transfer_bytes
+                  + octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+              from bounded
+              join ordered on ordered.row_number = bounded.row_number + 1
+              join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
+              where bounded.cumulative_transfer_bytes <= ${availableTransferBytes}
+                and bounded.row_number < ${remainingCount}
             )
-            .orderBy(asc(rankedRows.rowNumber));
+            select id, row_number, (select count(*)::int from ordered) as source_row_count
+            from bounded
+            where row_number = 1 or cumulative_transfer_bytes <= ${availableTransferBytes}
+          ) as session_event_page_selected`;
+          const selectedRows = await scopedDb
+            .select({
+              ...sessionEventProjectionSelect("full"),
+              sourceRowCount: sql<number>`session_event_page_selected.source_row_count`,
+            })
+            .from(schema.sessionEvents)
+            .innerJoin(selection, sql`${schema.sessionEvents.id} = session_event_page_selected.id`)
+            .orderBy(sql`session_event_page_selected.row_number`);
           sourceRowCount = Number(selectedRows[0]?.sourceRowCount ?? 0);
           rows = selectedRows.map(({ sourceRowCount: _sourceRowCount, ...row }) => row);
           sourceRowsFullyConsumed = rows.length >= sourceRowCount;
