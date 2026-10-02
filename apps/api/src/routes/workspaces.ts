@@ -97,6 +97,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
+  isDeveloperSetupApiKeyContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
@@ -394,14 +396,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
-      await grantWorkspaceAccess(deps.db, {
-        accountId,
-        workspaceId: workspace.id,
-        subjectId: context.subjectId,
-        role: "owner",
-        permissions: allWorkspacePermissions,
-        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-      });
+      // Setup keys already have canonical same-organization workspace access.
+      // Do not widen that ceiling with an all-permissions creator membership.
+      if (!isDeveloperSetupApiKeyContext(context)) {
+        await grantWorkspaceAccess(deps.db, {
+          accountId,
+          workspaceId: workspace.id,
+          subjectId: context.subjectId,
+          role: "owner",
+          permissions: allWorkspacePermissions,
+          ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        });
+      }
       return c.json(Workspace.parse(workspace), 201);
     } catch (error) {
       if (error instanceof WorkspaceLimitExceededError) {
@@ -1172,6 +1178,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1224,6 +1231,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

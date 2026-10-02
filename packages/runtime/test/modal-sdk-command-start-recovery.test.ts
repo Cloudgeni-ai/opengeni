@@ -14,7 +14,15 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { Sandbox, CommandStartPreDispatchUnavailableError } from "modal";
 import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
-import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
+import {
+  ModalCommandStartOutcomeUnknownError,
+  getModalCommandStartInvocation,
+  installModalCommandStartContext,
+  installModalCommandStartRetention,
+  withModalCommandStartSignal,
+} from "../src/sandbox/providers/modal-command-start-errors";
+import { ProviderCommandStartOutcomeUnknownError } from "../src/sandbox/provider-command-session";
+import { releaseModalCreateFailure } from "../src/sandbox/providers/modal-create-session";
 import {
   ModalCommandRouterWire,
   modalRouterWire,
@@ -47,10 +55,31 @@ const definition = (method: string, input: string, output: string, streaming = f
   responseDeserialize: (bytes: Buffer) => modalRouterWire.lookupType(output).decode(bytes),
 });
 
-async function routerFixture(ambiguous = true, allowPathValidation = false) {
+async function routerFixture(
+  ambiguous = true,
+  allowPathValidation = false,
+  observation: "unknown" | "terminal" | "running" | "hanging" | "not-found" = "unknown",
+  hangingStart = false,
+  hangingWait = false,
+  hangingRead = false,
+  hangingWrite = false,
+  waitDelayMs = 0,
+) {
   const server = new Server();
   const starts: Array<{ taskId: string; execId: string; commandArgs: string[] }> = [];
   const closes: unknown[] = [];
+  const polls: Array<{ taskId: string; execId: string }> = [];
+  const waits: Array<{ taskId: string; execId: string }> = [];
+  const reads: Array<{ taskId: string; execId: string; fileDescriptor: number }> = [];
+  const writes: Array<{ taskId: string; execId: string; offset: unknown }> = [];
+  let startedWait: () => void = () => {};
+  const waitStarted = new Promise<void>((resolve) => {
+    startedWait = resolve;
+  });
+  let startedRead: () => void = () => {};
+  const readStarted = new Promise<void>((resolve) => {
+    startedRead = resolve;
+  });
   server.addService(
     {
       start: definition("TaskExecStart", "Start", "Empty"),
@@ -64,6 +93,7 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
       start(call: any, callback: any) {
         starts.push(call.request);
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (hangingStart) return;
         const validating =
           allowPathValidation &&
           call.request.commandArgs.some((arg: string) => arg.includes("resolve-workspace-path.sh"));
@@ -71,7 +101,15 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
         else callback(null, {});
       },
       read(call: any) {
+        reads.push(call.request);
+        startedRead();
+        if (hangingRead) return;
         const start = starts.find((candidate) => candidate.execId === call.request.execId);
+        if (
+          call.request.fileDescriptor === 0 &&
+          start?.commandArgs.includes("accepted-with-output")
+        )
+          call.write({ data: Buffer.from("original output\n") });
         if (
           allowPathValidation &&
           call.request.fileDescriptor === 0 &&
@@ -80,13 +118,28 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
           call.write({ data: Buffer.from("/workspace\n") });
         call.end();
       },
-      poll(_call: any, callback: any) {
-        callback(null, { code: 0 });
+      poll(call: any, callback: any) {
+        polls.push(call.request);
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (ambiguous && observation === "hanging") return;
+        if (ambiguous && (observation === "unknown" || observation === "not-found"))
+          callback({
+            code: observation === "not-found" ? status.NOT_FOUND : status.UNAVAILABLE,
+            details: "original invocation not observable",
+          });
+        else callback(null, observation === "running" ? {} : { code: 0 });
       },
-      wait(_call: any, callback: any) {
-        callback(null, { code: 0 });
+      wait(call: any, callback: any) {
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        waits.push(call.request);
+        startedWait();
+        if (hangingWait) return;
+        if (waitDelayMs) setTimeout(() => callback(null, { code: 0 }), waitDelayMs);
+        else callback(null, { code: 0 });
       },
-      write(_call: any, callback: any) {
+      write(call: any, callback: any) {
+        writes.push(call.request);
+        if (hangingWrite) return;
         callback(null, {});
       },
       close(call: any, callback: any) {
@@ -104,7 +157,18 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
       error ? reject(error) : resolve(boundPort),
     ),
   );
-  return { server, starts, closes, url: `https://127.0.0.1:${port}` };
+  return {
+    server,
+    starts,
+    closes,
+    polls,
+    waits,
+    reads,
+    writes,
+    waitStarted,
+    readStarted,
+    url: `https://127.0.0.1:${port}`,
+  };
 }
 
 function sdkSession(url: string, sdkModule: typeof import("modal") = { Sandbox } as never) {
@@ -117,6 +181,7 @@ function sdkSession(url: string, sdkModule: typeof import("modal") = { Sandbox }
     },
   };
   const sandbox = new sdkModule.Sandbox(modal as never, "sb-resumed", { taskId: "task-setup" });
+  installModalCommandStartContext(modal);
   // Same constructor/state used by SDK resume and the lease-owned creation
   // receipt before its manifest is applied. No OpenGeni wrapper can intercept
   // the SDK's private direct sandbox.exec calls here.
@@ -242,6 +307,531 @@ test("SDK-internal reprovision/setup/materialization paths never replay server-o
   }
 });
 
+test("both SDK distributions adopt the exact accepted Start before setup unwinds", async () => {
+  const f = await routerFixture(true, true, "terminal");
+  const tar = spawnSync("tar", ["-cf", "-", "--files-from", "/dev/null"]);
+  expect(tar.status).toBe(0);
+  try {
+    for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+      const { session, sandbox } = sdkSession(f.url, sdk);
+      try {
+        const before = f.starts.length;
+        await session.execCommand({ cmd: "setup-accepted-once", yieldTimeMs: 0 });
+        await session.applyManifest(
+          new Manifest({ root: "/workspace", entries: { setup: { type: "dir" } } }),
+        );
+        await session.materializeEntry({ path: "materialized", entry: { type: "dir" } });
+        await session.hydrateWorkspace(tar.stdout);
+        const starts = f.starts.slice(before);
+        expect(starts.length).toBeGreaterThanOrEqual(4);
+        expect(new Set(starts.map((start) => start.execId)).size).toBe(starts.length);
+        for (const start of starts)
+          if (!start.commandArgs.some((arg) => arg.includes("resolve-workspace-path.sh")))
+            expect(
+              f.polls.filter(
+                (poll) => poll.taskId === start.taskId && poll.execId === start.execId,
+              ),
+            ).toHaveLength(1);
+      } finally {
+        sandbox.detach();
+      }
+    }
+  } finally {
+    f.server.forceShutdown();
+  }
+});
+
+test("still-running exact-ID Poll adopts one original ContainerProcess, never a new Start", async () => {
+  const f = await routerFixture(true, false, "running");
+  try {
+    for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+      const { sandbox } = sdkSession(f.url, sdk);
+      try {
+        const process = await sandbox.exec(["accepted-and-running"]);
+        expect(await process.wait()).toBe(0);
+        expect(f.starts).toHaveLength(f.polls.length);
+        expect(f.starts.at(-1)!.taskId).toBe(f.polls.at(-1)!.taskId);
+        expect(f.starts.at(-1)!.execId).toBe(f.polls.at(-1)!.execId);
+      } finally {
+        sandbox.detach();
+      }
+    }
+    expect(f.starts).toHaveLength(2);
+  } finally {
+    f.server.forceShutdown();
+  }
+});
+
+test("lost acknowledgement retains the original output and exit code", async () => {
+  const f = await routerFixture(true, false, "terminal");
+  const { sandbox } = sdkSession(f.url);
+  try {
+    const process = await sandbox.exec(["accepted-with-output"]);
+    expect(await process.stdout.readText()).toBe("original output\n");
+    expect(await process.wait()).toBe(0);
+    expect(f.starts).toHaveLength(1);
+    expect(f.polls[0]!.execId).toBe(f.starts[0]!.execId);
+  } finally {
+    sandbox.detach();
+    f.server.forceShutdown();
+  }
+});
+
+test("SDK adapter exhaustion exposes the complete durable command without fake supervision", async () => {
+  const f = await routerFixture();
+  const { sandbox, session } = sdkSession(f.url);
+  installModalCommandStartRetention(session);
+  try {
+    const error = await session
+      .applyManifest(new Manifest({ root: "/workspace", entries: { once: { type: "dir" } } }))
+      .catch((failure) => failure);
+    expect(error).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+    expect(error.command).toMatchObject({
+      kind: "modal-router-v1",
+      sandboxId: "sb-resumed",
+      taskId: "task-setup",
+      execId: f.starts[0]!.execId,
+      streams: { stdout: { byteOffset: 0, eof: false }, stderr: { byteOffset: 0, eof: false } },
+    });
+    expect(error.command.supervision).toBeUndefined();
+    expect(getModalCommandStartInvocation(error)).toMatchObject({ execId: f.starts[0]!.execId });
+    expect(f.starts).toHaveLength(1);
+    let physicalCloses = 0;
+    let transportCloses = 0;
+    const released = await releaseModalCreateFailure(
+      {
+        close: async () => {
+          physicalCloses++;
+        },
+      },
+      {
+        close: () => {
+          transportCloses++;
+        },
+      },
+      error,
+    ).catch((failure) => failure);
+    expect(released).toBe(error);
+    expect(physicalCloses).toBe(0);
+    expect(transportCloses).toBe(1);
+    expect(f.starts).toHaveLength(1);
+  } finally {
+    sandbox.detach();
+    f.server.forceShutdown();
+  }
+});
+
+test("owning cancellation of a dispatched hanging Start retains IDs and cannot launch late", async () => {
+  const f = await routerFixture(true, false, "terminal", true);
+  const { sandbox, session } = sdkSession(f.url);
+  const controller = new AbortController();
+  const started = Date.now();
+  const pending = withModalCommandStartSignal(controller.signal, () =>
+    session
+      .materializeEntry({ path: "cancelled-once", entry: { type: "dir" } })
+      .catch((error) => error),
+  );
+  const timer = setTimeout(() => controller.abort(new Error("owning turn cancelled")), 100);
+  try {
+    const error = await pending;
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(getModalCommandStartInvocation(error)).toMatchObject({ execId: f.starts[0]!.execId });
+    expect(f.starts).toHaveLength(1);
+    expect(f.polls).toHaveLength(0);
+  } finally {
+    clearTimeout(timer);
+    sandbox.detach();
+    f.server.forceShutdown();
+  }
+});
+
+test("a hanging Start acknowledgement is transport-bounded and adopts the original accepted IDs", async () => {
+  const f = await routerFixture(true, false, "terminal", true);
+  const { sandbox } = sdkSession(f.url);
+  const started = Date.now();
+  try {
+    const process = await sandbox.exec(["accepted-with-output"]);
+    expect(Date.now() - started).toBeLessThan(7500);
+    expect(await process.stdout.readText()).toBe("original output\n");
+    expect(await process.wait()).toBe(0);
+    expect(f.starts).toHaveLength(1);
+    expect(f.polls).toHaveLength(1);
+    expect(f.polls[0]!.execId).toBe(f.starts[0]!.execId);
+  } finally {
+    sandbox.detach();
+    f.server.forceShutdown();
+  }
+}, 10_000);
+
+test("owning cancellation during read-only router lookup prevents a late Start", async () => {
+  const f = await routerFixture(true, false, "terminal");
+  const { sandbox, session, modal } = sdkSession(f.url);
+  const controller = new AbortController();
+  let release: (access: { url: string; jwt: string }) => void = () => {};
+  modal.cpClient.taskGetCommandRouterAccess = () =>
+    new Promise((resolve) => {
+      release = resolve;
+    });
+  const pending = withModalCommandStartSignal(controller.signal, () =>
+    session
+      .materializeEntry({ path: "never-start", entry: { type: "dir" } })
+      .catch((failure) => failure),
+  );
+  const timer = setTimeout(() => controller.abort(new Error("lookup cancelled")), 100);
+  try {
+    const error = await pending;
+    expect(error).toBe(controller.signal.reason);
+    expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(false);
+    release({ url: f.url, jwt: "test-token" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.starts).toHaveLength(0);
+    expect(f.polls).toHaveLength(0);
+  } finally {
+    clearTimeout(timer);
+    sandbox.detach();
+    f.server.forceShutdown();
+  }
+});
+
+test("both distributions cancel hanging setup Wait after lost or received Start acknowledgement", async () => {
+  for (const { sdk, ambiguous } of [
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: true },
+    { sdk: cjs, ambiguous: true },
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: false },
+    { sdk: cjs, ambiguous: false },
+  ]) {
+    const f = await routerFixture(ambiguous, false, "running", false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const controller = new AbortController();
+    const pending = withModalCommandStartSignal(controller.signal, () =>
+      session
+        .materializeEntry({ path: "original-setup", entry: { type: "dir" } })
+        .catch((failure) => failure),
+    );
+    try {
+      await f.waitStarted;
+      const started = Date.now();
+      controller.abort(new Error("owning continuation cancelled"));
+      const failure = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve("unsettled"), 500)),
+      ]);
+      expect(failure).not.toBe("unsettled");
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        taskId: f.starts[0]!.taskId,
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(ambiguous ? 1 : 0);
+      expect(f.waits).toHaveLength(1);
+      expect(f.waits[0]!.execId).toBe(f.starts[0]!.execId);
+    } finally {
+      sandbox.detach();
+      await pending;
+      f.server.forceShutdown();
+    }
+  }
+});
+
+test("both distributions exhaust hanging adopted Waits under real transport bounds without replay", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, true);
+    const { sandbox } = sdkSession(f.url, sdk);
+    const started = Date.now();
+    try {
+      const process = await sandbox.exec(["original-wait"], { pty: true });
+      const failure = await process.wait().catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(4500);
+      expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(true);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+        pty: true,
+      });
+      expect((f.starts[0] as any).ptyInfo.enabled).toBe(true);
+      expect(f.starts).toHaveLength(1);
+      expect(f.waits.length).toBeGreaterThan(0);
+      expect(f.waits.length).toBeLessThanOrEqual(3);
+      expect(new Set(f.waits.map((wait) => wait.execId))).toEqual(new Set([f.starts[0]!.execId]));
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("both distributions bound adopted stdio continuation and preserve exact invocation uncertainty", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const started = Date.now();
+    try {
+      const failure = await session
+        .materializeEntry({ path: "original-stdio", entry: { type: "dir" } })
+        .catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(4500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(1);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("both distributions cancel setup stderr after lost or received ACK without false EOF or a new Start", async () => {
+  for (const { sdk, ambiguous } of [
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: true },
+    { sdk: cjs, ambiguous: true },
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: false },
+    { sdk: cjs, ambiguous: false },
+  ]) {
+    const f = await routerFixture(ambiguous, false, "running", false, false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const controller = new AbortController();
+    const pending = withModalCommandStartSignal(controller.signal, () =>
+      session
+        .materializeEntry({ path: "original-stderr", entry: { type: "dir" } })
+        .catch((failure) => failure),
+    );
+    try {
+      await f.readStarted;
+      const started = Date.now();
+      controller.abort(new Error("owning stdio continuation cancelled"));
+      const failure = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve("unsettled"), 500)),
+      ]);
+      expect(failure).not.toBe("unsettled");
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(ambiguous ? 1 : 0);
+      expect(f.waits).toHaveLength(0);
+      expect(f.reads.every((read) => read.execId === f.starts[0]!.execId)).toBe(true);
+    } finally {
+      sandbox.detach();
+      await pending;
+      f.server.forceShutdown();
+    }
+  }
+});
+
+test("both distributions bound caller-owned acknowledged Wait, stdio and stdin by the original deadline", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    for (const operation of ["wait", "read", "write"] as const) {
+      const f = await routerFixture(
+        false,
+        false,
+        "running",
+        false,
+        operation === "wait",
+        operation === "read",
+        operation === "write",
+      );
+      const { sandbox } = sdkSession(f.url, sdk);
+      const controller = new AbortController();
+      try {
+        const process = await withModalCommandStartSignal(controller.signal, () =>
+          sandbox.exec(["original-acknowledged"], { timeoutMs: 1000, pty: true }),
+        );
+        const started = Date.now();
+        const failure = await (
+          operation === "wait"
+            ? process.wait()
+            : operation === "read"
+              ? process.stderr.readText()
+              : process.stdin.writeText("only once")
+        ).catch((error) => error);
+        expect(Date.now() - started).toBeLessThan(1500);
+        expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(true);
+        expect(getModalCommandStartInvocation(failure)).toMatchObject({
+          taskId: f.starts[0]!.taskId,
+          execId: f.starts[0]!.execId,
+          pty: true,
+        });
+        expect(f.starts).toHaveLength(1);
+        expect(f.polls).toHaveLength(0);
+        if (operation === "write") expect(f.writes).toHaveLength(1);
+      } finally {
+        sandbox.detach();
+        f.server.forceShutdown();
+      }
+    }
+  }
+}, 10_000);
+
+test("normally acknowledged owned commands keep the ordinary RPC allowance, not lost-ACK probe bounds", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(false, false, "running", false, false, false, false, 3500);
+    const { sandbox } = sdkSession(f.url, sdk);
+    try {
+      const controller = new AbortController();
+      const process = await withModalCommandStartSignal(controller.signal, () =>
+        sandbox.exec(["ordinary-longer-wait"], { timeoutMs: 5000 }),
+      );
+      expect(await process.wait()).toBe(0);
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(0);
+      expect(f.waits).toHaveLength(1);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("failed create never physically closes a sandbox on incomplete error-graph inspection", async () => {
+  let getters = 0;
+  let deep: unknown = new ModalCommandStartOutcomeUnknownError(
+    "original-task",
+    "original-exec",
+    null,
+  );
+  for (let depth = 0; depth < 9; depth++) deep = new Error("wrapper", { cause: deep });
+  const sparse = [new Error("ordinary")];
+  sparse.length = 2;
+  const accessor = Object.defineProperty(new Error("unreadable"), "cause", {
+    get() {
+      getters++;
+      return deep;
+    },
+  });
+  const oversized = new AggregateError(Array.from({ length: 33 }, () => new Error("ordinary")));
+  for (const failure of [deep, new AggregateError(sparse), accessor, oversized]) {
+    let physicalCloses = 0;
+    let transportCloses = 0;
+    const result = await releaseModalCreateFailure(
+      {
+        close: async () => {
+          physicalCloses++;
+        },
+      },
+      {
+        close: () => {
+          transportCloses++;
+        },
+      },
+      failure,
+    ).catch((error) => error);
+    expect(result).toBe(failure);
+    expect(physicalCloses).toBe(0);
+    expect(transportCloses).toBe(1);
+  }
+  expect(getters).toBe(0);
+  let ordinaryCloses = 0;
+  const ordinary = new Error("ordinary complete graph", { cause: new Error("leaf") });
+  const result = await releaseModalCreateFailure(
+    {
+      close: async () => {
+        ordinaryCloses++;
+      },
+    },
+    { close: () => {} },
+    ordinary,
+  ).catch((error) => error);
+  expect(result).toBe(ordinary);
+  expect(ordinaryCloses).toBe(1);
+});
+
+test("both distributions send adopted stdin once and retain uncertainty on deadline", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, false, false, true);
+    const { sandbox } = sdkSession(f.url, sdk);
+    const started = Date.now();
+    try {
+      const process = await sandbox.exec(["original-stdin"]);
+      const failure = await process.stdin.writeText("only once").catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(2500);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.writes).toHaveLength(1);
+      expect(f.writes[0]!.execId).toBe(f.starts[0]!.execId);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 5_000);
+
+test("failed and NOT_FOUND original-ID observations retain immutable descriptors without replay", async () => {
+  for (const observation of ["unknown", "not-found"] as const) {
+    const f = await routerFixture(true, false, observation);
+    const { sandbox, session } = sdkSession(f.url);
+    try {
+      const error = await session
+        .materializeEntry({ path: "once", entry: { type: "dir" } })
+        .catch((failure) => failure);
+      expect(isModalCommandStartOutcomeUnknownError(error)).toBe(true);
+      const invocation = getModalCommandStartInvocation(error);
+      expect(invocation).not.toBeNull();
+      expect(invocation).toMatchObject({
+        sandboxId: "sb-resumed",
+        taskId: f.starts[0]!.taskId,
+        execId: f.starts[0]!.execId,
+      });
+      expect(Object.isFrozen(invocation)).toBe(true);
+      expect(f.polls).toHaveLength(3);
+      expect(new Set(f.polls.map((poll) => poll.execId))).toEqual(new Set([f.starts[0]!.execId]));
+      await expect(invocation!.observe(undefined, 100)).rejects.toThrow();
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls.length).toBeGreaterThanOrEqual(4);
+      expect(f.polls.length).toBeLessThanOrEqual(6);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+});
+
+test("hanging observation has transport and attempt bounds; cancellation retains original IDs", async () => {
+  for (const cancel of [false, true]) {
+    const f = await routerFixture(true, false, "hanging");
+    const { sandbox, session } = sdkSession(f.url);
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = withModalCommandStartSignal(controller.signal, () =>
+      session
+        .materializeEntry({ path: "bounded-once", entry: { type: "dir" } })
+        .catch((error) => error),
+    );
+    const timer = cancel
+      ? setTimeout(() => controller.abort(new Error("owning turn cancelled")), 100)
+      : undefined;
+    try {
+      const error = await pending;
+      const duration = Date.now() - started;
+      expect(duration).toBeLessThan(cancel ? 1500 : 5000);
+      expect(isModalCommandStartOutcomeUnknownError(error)).toBe(true);
+      expect(getModalCommandStartInvocation(error)).toMatchObject({ execId: f.starts[0]!.execId });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls.length).toBeLessThanOrEqual(cancel ? 1 : 3);
+      const retained = getModalCommandStartInvocation(error)!;
+      const observationStarted = Date.now();
+      await expect(retained.observe(undefined, 50)).rejects.toThrow();
+      expect(Date.now() - observationStarted).toBeLessThan(1000);
+      expect(f.starts).toHaveLength(1);
+    } finally {
+      if (timer) clearTimeout(timer);
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
 test("dual manifest and close failure preserves genuine Start uncertainty in both installed helper distributions", async () => {
   const extensionEntry = import.meta.resolve("@openai/agents-extensions/sandbox/modal");
   const esm = await import(new URL("../shared/session.mjs", extensionEntry).href);
@@ -307,7 +897,7 @@ test("dual manifest and close failure preserves genuine Start uncertainty in bot
     closeClient.close();
     f.server.forceShutdown();
   }
-});
+}, 20_000);
 
 test("native capability/control/materialization Starts also contain ambiguous gRPC outcomes", async () => {
   const f = await routerFixture();

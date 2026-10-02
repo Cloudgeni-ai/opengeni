@@ -91,7 +91,12 @@ Wait observations do not increment physical provider-operation counters.
 measure physical warm capture/publication through gate cleanup, including late
 settlement after the initiating caller times out. Capture/publication failure or
 fenced publication is not reported as successful. Collector deployments must
-retain these exact names to preserve attribution.
+retain these exact names to preserve attribution. The turn-end logical revision
+capture (`opengeni_workspace_capture_total{result}`) reports its committed
+duration as the unlabeled
+`opengeni_workspace_capture_revision_duration_seconds`; it must never reuse the
+physical histogram name, because one metric name has exactly one label set in a
+process registry.
 
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks

@@ -413,7 +413,13 @@ Modal Start transport errors are not rejection proof, including DNS-shaped
 `UNAVAILABLE`. Only locally constructed pre-dispatch readiness proof permits
 recovery. Function tools return explicit outcome-unknown results without replay;
 retain the exact invocation and its writer fence until terminal provider proof.
-Setup/lifecycle calls still throw. Readiness uses a fixed native `/bin/true`
+SDK setup observes/adopts only its original invocation while the helper frame
+is alive. If setup unwinds with a genuine unknown outcome, retain its command
+or unresolved admission and park the exact turn as recovering with the durable
+`sandboxSetupOutcomeUnknown` marker. Work peek and claim must not replay setup;
+deadline, NOT_FOUND, one command exiting, or lease loss cannot clear this marker.
+Do not fabricate a tool call, success, capacity waiter, or human approval.
+Readiness uses a fixed native `/bin/true`
 probe, retries only local pre-dispatch failures, and observes the same invocation
 after a lost reply within its existing budget. See `docs/run-lifecycle.md`.
 

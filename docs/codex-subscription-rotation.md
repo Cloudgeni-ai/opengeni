@@ -65,9 +65,13 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    `codex_rotation_settings` for a workspace pool or
    `organization_codex_rotation_settings` for an organization pool. Concurrent
    replicas using the same pool wait; they do not `SKIP LOCKED`.
-2. Lock the durable turn for update and verify it belongs to the exact
-   account/workspace. If a downstream policy supplies an opaque accepted-turn
-   scope resolver, resolve it from that locked turn metadata while the rotation
+2. Take the shared workspace-control prefix, then the actual workspace row
+   `FOR KEY SHARE`, before locking the session, durable turn and exact attempt.
+   The workspace identity lock must precede the turn lock: taking it only through
+   the lease insert's FK can deadlock behind a workspace writer waiting for that
+   turn. Source-advisory and rotation-row order is unchanged. Verify the turn
+   belongs to the exact account/workspace. If a downstream policy supplies an
+   opaque accepted-turn scope resolver, resolve it from that locked turn metadata while the rotation
    transaction remains held. A present
    `codexCredentialPolicySnapshotV1` is the accepted allocator policy for this
    logical turn; malformed present metadata fails closed.

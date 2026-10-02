@@ -1939,6 +1939,6 @@ mod capability_tests {
             encode_frame(&rgba, 8, 4, Some(options)).expect("encode compact frame");
         assert_eq!(mime_type, "image/png");
         assert_eq!((width, height), (4, 2));
-        assert!(!bytes.is_empty());
+        assert_ne!(bytes, Vec::<u8>::new());
     }
 }

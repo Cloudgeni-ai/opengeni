@@ -704,7 +704,7 @@ mod tests {
             raw,
             true,
         ));
-        assert!(!wire.message.is_empty());
+        assert_ne!(wire.message, "");
         assert!(wire
             .message
             .chars()

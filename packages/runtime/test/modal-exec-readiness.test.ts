@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
+import { Metadata, Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +7,16 @@ import { spawnSync } from "node:child_process";
 import { Sandbox } from "modal";
 import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
-import { verifySandboxExecReadiness, SandboxExecReadinessError } from "../src/sandbox";
+import {
+  verifySandboxExecReadiness,
+  SandboxExecReadinessError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+} from "../src/sandbox";
 import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import {
   ModalCommandRouterWire,
+  ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
   modalRouterWire,
 } from "../src/sandbox/providers/modal-command-router-wire";
@@ -47,6 +52,10 @@ let mode: Mode = "success";
 let starts: Array<{ execId: string; commandArgs: string[]; workdir: string; env: object }> = [];
 let observations: string[] = [];
 let failedRead = false;
+let preparations: string[] = [];
+let preparationPending = false;
+let preparationEntered: () => void;
+let completePreparation: () => void;
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "opengeni-readiness-"));
   const key = join(directory, "server.key"),
@@ -79,6 +88,7 @@ beforeAll(async () => {
       start: definition("TaskExecStart", "Start", "Empty"),
       read: definition("TaskExecStdioRead", "Read", "Data", true),
       poll: definition("TaskExecPoll", "Identity", "Poll"),
+      preparation: definition("ReadinessPreparation", "Identity", "Empty"),
     } as ServiceDefinition,
     {
       start(call: any, callback: any) {
@@ -112,6 +122,14 @@ beforeAll(async () => {
         observations.push(call.request.execId);
         callback(null, { code: mode === "nonzero" ? 127 : 0 });
       },
+      preparation(call: any, callback: any) {
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        preparations.push(call.request.taskId);
+        completePreparation = () => callback(null, {});
+        preparationEntered();
+        if (!preparationPending)
+          callback({ code: status.UNAVAILABLE, details: "read-only preparation unavailable" });
+      },
     },
   );
   const port = await new Promise<number>((resolve, reject) =>
@@ -130,11 +148,21 @@ afterAll(() => {
   if (directory) rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(selected: Mode = "success", url = endpoint) {
+function fixture(
+  selected: Mode = "success",
+  url = endpoint,
+  preparation?: { stage: "task" | "access"; pending?: boolean },
+) {
   mode = selected;
   starts = [];
   observations = [];
   failedRead = false;
+  preparations = [];
+  preparationPending = preparation?.pending ?? false;
+  const enteredPreparation = new Promise<void>((resolve) => {
+    preparationEntered = resolve;
+  });
+  completePreparation = () => undefined;
   let sdkStarts = 0;
   const sandbox = new Sandbox(
     {
@@ -166,25 +194,64 @@ function fixture(selected: Mode = "success", url = endpoint) {
     modal: { version: () => "0.9.0" },
     app: {},
   } as never);
+  const wire = new ModalCommandRouterWire({ url, jwt: "test-token" }, certificate);
+  const prepare = async (stage: "task" | "access", signal?: AbortSignal): Promise<void> => {
+    signal?.throwIfAborted();
+    const metadata = new Metadata();
+    metadata.set("authorization", "Bearer test-token");
+    await new Promise<void>((resolve, reject) => {
+      const client = (wire as any).client;
+      const call = client.makeUnaryRequest(
+        service + "ReadinessPreparation",
+        (value: object) =>
+          Buffer.from(modalRouterWire.lookupType("Identity").encode(value).finish()),
+        (bytes: Buffer) => modalRouterWire.lookupType("Empty").decode(bytes),
+        { taskId: stage },
+        metadata,
+        { deadline: Date.now() + 5_000 },
+        (error: Error | null) => {
+          signal?.removeEventListener("abort", abort);
+          if (signal?.aborted) reject(signal.reason);
+          else if (error) reject(error);
+          else resolve();
+        },
+      );
+      const abort = () => call.cancel();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+  };
   const control = ModalCommandControl.forSandbox(
     {
       version: () => "0.9.0",
-      cpClient: { sandboxGetTaskId: async () => ({ taskId: "task-readiness" }) },
+      cpClient: {
+        sandboxGetTaskId: async (_request: unknown, options: { signal?: AbortSignal }) => {
+          if (preparation?.stage === "task") await prepare("task", options?.signal);
+          return { taskId: "task-readiness" };
+        },
+        taskGetCommandRouterAccess: async (
+          _request: unknown,
+          options: { signal?: AbortSignal },
+        ) => {
+          await prepare("access", options?.signal);
+          return { url, jwt: "test-token" };
+        },
+      },
     } as never,
     "sb-readiness",
     "/workspace",
   );
-  const wire = new ModalCommandRouterWire({ url, jwt: "test-token" }, certificate);
-  Object.defineProperty(control, "withRouter", {
-    value: async (
-      _task: string,
-      signal: AbortSignal,
-      run: (router: ModalCommandRouterWire) => Promise<unknown>,
-    ) => {
-      signal.throwIfAborted();
-      return await run(wire);
-    },
-  });
+  if (!preparation)
+    Object.defineProperty(control, "withRouter", {
+      value: async (
+        _task: string,
+        signal: AbortSignal,
+        run: (router: ModalCommandRouterWire) => Promise<unknown>,
+      ) => {
+        signal.throwIfAborted();
+        return await run(wire);
+      },
+    });
   installModalCommandSession(session, control);
   const established = {
     backendId: "modal",
@@ -197,6 +264,9 @@ function fixture(selected: Mode = "success", url = endpoint) {
     established,
     session,
     wire,
+    control,
+    enteredPreparation,
+    completePreparation: () => completePreparation(),
     sdkStarts: () => sdkStarts,
     close: async () => {
       wire.close();
@@ -205,6 +275,51 @@ function fixture(selected: Mode = "success", url = endpoint) {
     },
   };
 }
+
+test.each(["task", "access"] as const)(
+  "genuine %s preparation transport failure proves zero-Start non-dispatch",
+  async (stage) => {
+    const f = fixture("success", endpoint, { stage });
+    try {
+      const error = await f.control
+        .verifyExecReadiness(AbortSignal.timeout(2_000))
+        .catch((caught) => caught);
+      expect(error).toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+      expect(error.cause).toBeInstanceOf(Error);
+      expect(error.cause.code).toBe(status.UNAVAILABLE);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(true);
+      expect(preparations).toEqual([stage]);
+      expect(starts).toHaveLength(0);
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["task", "access"] as const)(
+  "owning cancellation fences a late %s preparation reply without retry authority",
+  async (stage) => {
+    const f = fixture("success", endpoint, { stage, pending: true });
+    const owner = new AbortController();
+    const reason = new Error("owning attempt cancelled during preparation");
+    try {
+      const result = f.control.verifyExecReadiness(owner.signal).catch((caught) => caught);
+      await f.enteredPreparation;
+      owner.abort(reason);
+      const error = await result;
+      expect(error).toBe(reason);
+      expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(false);
+      f.completePreparation();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(preparations).toEqual([stage]);
+      expect(starts).toHaveLength(0);
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("worker readiness uses native pre-dispatch proof instead of the pinned SDK DNS failure", async () => {
   const f = fixture();

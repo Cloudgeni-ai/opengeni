@@ -75,6 +75,86 @@ function services(): () => Promise<ActivityServices> {
 }
 
 describe("automation dispatch activity", () => {
+  test("setup-restricted accepted templates freeze the marker into generated turn policy", async () => {
+    const restrictedRun: AutomationRunExecution = {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          credentialRestriction: "developer_setup",
+          metadata: {
+            credentialRestriction: "none",
+            turnExecutionPolicyV1: { credentialRestriction: "none" },
+          },
+        },
+      },
+    };
+    let createInput: Record<string, unknown> | null = null;
+    const activity = createAutomationActivities(services(), {
+      claim: async () => restrictedRun,
+      settle: async () => undefined,
+      admit: async () => null,
+      assertModelPolicy: async () => undefined,
+      assertAuthority: async () => undefined,
+      recordUsage: async () => undefined,
+      createSession: (async (input) => {
+        createInput = input as unknown as Record<string, unknown>;
+        return {
+          session: { id: sessionId },
+          outcome: "created",
+          replay: false,
+          changed: true,
+        } as never;
+      }) as typeof import("@opengeni/core").createAndStartSessionWithOutcome,
+    });
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "started",
+      sessionId,
+    });
+    expect(createInput).toMatchObject({
+      turnExecutionPolicy: { credentialRestriction: "developer_setup" },
+      firstPartyMcpPermissions: [],
+      firstPartyMcpTools: [],
+    });
+  });
+
+  test("restricted accepted templates cannot delegate forbidden explicit key/secret/organization scopes", async () => {
+    const settle = mock(async () => undefined);
+    const createSession = mock(async () => {
+      throw new Error("forbidden template must not create a session");
+    });
+    for (const permission of [
+      "api_keys:manage",
+      "secrets:read",
+      "account:admin",
+      "billing:manage",
+      "workspace:create",
+    ] as const) {
+      const activity = createAutomationActivities(services(), {
+        claim: async () => ({
+          ...run,
+          acceptedExecution: {
+            ...run.acceptedExecution,
+            sessionTemplate: {
+              ...run.acceptedExecution.sessionTemplate,
+              credentialRestriction: "developer_setup",
+              firstPartyMcpPermissions: [permission],
+            },
+          },
+        }),
+        settle,
+        createSession: createSession as never,
+      });
+      expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+        action: "failed",
+        reason: "credential_restriction_violation",
+      });
+    }
+    expect(createSession).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledTimes(5);
+  });
+
   test("atomically binds an ordinary idempotent session to the exact accepted authority", async () => {
     const assertAuthority = mock(async () => undefined);
     const settle = mock(async () => undefined);
@@ -119,6 +199,7 @@ describe("automation dispatch activity", () => {
       surface: "automation",
     });
     expect(createInput).not.toHaveProperty("requestedSessionId");
+    expect(createInput?.["turnExecutionPolicy"]).not.toHaveProperty("credentialRestriction");
     expect(assertAuthority).toHaveBeenCalledWith(expect.anything(), {
       workspaceId,
       runId,

@@ -1,5 +1,17 @@
 # @opengeni/sdk
 
+## 7.6.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
 ## 7.5.0
 
 ### Minor Changes

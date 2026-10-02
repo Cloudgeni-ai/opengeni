@@ -16,6 +16,27 @@ import {
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 describe("failure presentation", () => {
+  test("database failures show a safe explanation without altering stored diagnostics", () => {
+    for (const classification of [
+      { code: "db_deadlock" },
+      { code: "db_serialization_failure" },
+      { code: "db_failure" },
+      { sqlState: "40P01", database: { severity: "ERROR", routine: "DeadLockReport" } },
+    ]) {
+      const payload = Object.freeze({
+        ...classification,
+        error: "Failed query: INSERT INTO runtime_records VALUES ($1)",
+        detail: "params: fixture-value",
+        lastRetryableError: "fixture-value",
+      });
+      const before = JSON.stringify(payload);
+      expect(presentFailure(payload)).toEqual({
+        reason: "OpenGeni encountered a database error.",
+        safetyRefusal: false,
+      });
+      expect(JSON.stringify(payload)).toBe(before);
+    }
+  });
   const refusal =
     "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
   test("exposes the actual reason in legacy exhausted-retry failures", () => {

@@ -3,6 +3,7 @@ import {
   StoredAutomationAcceptedExecution,
   AutomationNormalizedEvent,
   StoredAutomationSessionTemplate,
+  AutomationSessionTemplateWrite,
   type AutomationRun,
   type AutomationSource,
   type AutomationTrigger,
@@ -26,6 +27,13 @@ export class AutomationDeliveryConflictError extends Error {
   readonly name = "AutomationDeliveryConflictError";
   constructor() {
     super("Automation delivery identity was reused with different authenticated bytes");
+  }
+}
+
+export class AutomationCredentialRestrictionConflictError extends Error {
+  readonly name = "AutomationCredentialRestrictionConflictError";
+  constructor() {
+    super("Restricted automation invocation cannot reuse an unrestricted accepted event or run");
   }
 }
 
@@ -222,6 +230,8 @@ export async function createAutomationTrigger(
     createdBySubjectId: string;
     request: CreateAutomationTriggerRequest;
     adapterId: string;
+    /** Canonical server-only creator restriction, never request metadata. */
+    credentialRestriction?: "developer_setup";
     /** Trusted database-only admission seam. Throwing rolls creation back. */
     beforeCreateCommit?: (tx: Database) => Promise<void>;
   },
@@ -280,7 +290,12 @@ export async function createAutomationTrigger(
             eventTypes: [...new Set(input.request.eventTypes)],
             configuration: input.request.configuration,
             parameters: input.request.parameters,
-            sessionTemplate: input.request.sessionTemplate,
+            sessionTemplate: {
+              ...AutomationSessionTemplateWrite.parse(input.request.sessionTemplate),
+              ...(input.credentialRestriction
+                ? { credentialRestriction: input.credentialRestriction }
+                : {}),
+            },
             createdBySubjectId: input.createdBySubjectId,
           })
           .returning();
@@ -404,6 +419,8 @@ export async function updateAutomationTrigger(
     triggerId: string;
     subjectId: string;
     request: UpdateAutomationTriggerRequest;
+    /** May add a canonical restriction; can never downgrade the stored ceiling. */
+    credentialRestriction?: "developer_setup";
     /** Trusted database-only admission seam. Throwing rolls the revision back. */
     beforeUpdateCommit?: (tx: Database) => Promise<void>;
   },
@@ -444,6 +461,14 @@ export async function updateAutomationTrigger(
         if (existing.head.currentRevision !== input.request.expectedRevision) {
           throw new AutomationRevisionConflictError();
         }
+        const previousTemplate = StoredAutomationSessionTemplate.parse(
+          existing.revision.sessionTemplate,
+        );
+        const credentialRestriction =
+          previousTemplate.credentialRestriction ?? input.credentialRestriction;
+        const sessionTemplate = input.request.sessionTemplate
+          ? AutomationSessionTemplateWrite.parse(input.request.sessionTemplate)
+          : existing.revision.sessionTemplate;
 
         await input.beforeUpdateCommit?.(tx);
         const revisionNumber = existing.head.currentRevision + 1;
@@ -471,7 +496,10 @@ export async function updateAutomationTrigger(
               : existing.revision.eventTypes,
             configuration: input.request.configuration ?? existing.revision.configuration,
             parameters: input.request.parameters ?? existing.revision.parameters,
-            sessionTemplate: input.request.sessionTemplate ?? existing.revision.sessionTemplate,
+            sessionTemplate: {
+              ...sessionTemplate,
+              ...(credentialRestriction ? { credentialRestriction } : {}),
+            },
             createdBySubjectId: input.subjectId,
           })
           .returning();
@@ -493,9 +521,16 @@ export async function recordAutomationEvent(
     deliveryKey: string;
     requestDigest: string;
     normalizedEvent: AutomationNormalizedEvent;
+    /** Trusted caller authority; never accepted from normalized adapter/event JSON. */
+    credentialRestriction?: "developer_setup";
     ignoredReason?: string | null;
   },
 ): Promise<{ event: AutomationStoredEvent; duplicate: boolean }> {
+  const { credentialRestriction: _untrustedRestriction, ...eventData } = input.normalizedEvent;
+  const normalizedEvent = AutomationNormalizedEvent.parse({
+    ...eventData,
+    ...(input.credentialRestriction ? { credentialRestriction: input.credentialRestriction } : {}),
+  });
   return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
     const [inserted] = await scoped
       .insert(schema.automationTriggerEvents)
@@ -508,10 +543,10 @@ export async function recordAutomationEvent(
         matchedTriggerRevisions: input.matchedTriggerRevisions,
         deliveryKey: input.deliveryKey,
         requestDigest: input.requestDigest,
-        adapterId: input.normalizedEvent.adapterId,
-        eventType: input.normalizedEvent.eventType,
-        occurrenceKey: input.normalizedEvent.occurrenceKey,
-        normalizedEvent: input.normalizedEvent,
+        adapterId: normalizedEvent.adapterId,
+        eventType: normalizedEvent.eventType,
+        occurrenceKey: normalizedEvent.occurrenceKey,
+        normalizedEvent,
         status: input.ignoredReason ? "ignored" : "accepted",
         ignoredReason: input.ignoredReason ?? null,
       })
@@ -537,7 +572,11 @@ export async function recordAutomationEvent(
     if (existing.requestDigest !== input.requestDigest) {
       throw new AutomationDeliveryConflictError();
     }
-    return { event: mapEvent(existing), duplicate: true };
+    const event = mapEvent(existing);
+    if (input.credentialRestriction && !event.normalizedEvent.credentialRestriction) {
+      throw new AutomationCredentialRestrictionConflictError();
+    }
+    return { event, duplicate: true };
   });
 }
 
@@ -589,6 +628,13 @@ export async function createAutomationRun(
         ) {
           throw new Error("Automation occurrence key was reused with different provenance");
         }
+        const run = mapRunExecution(row);
+        if (
+          input.acceptedExecution.sessionTemplate.credentialRestriction &&
+          !run.acceptedExecution.sessionTemplate.credentialRestriction
+        ) {
+          throw new AutomationCredentialRestrictionConflictError();
+        }
         await tx
           .insert(schema.automationRunEventLinks)
           .values({
@@ -600,7 +646,7 @@ export async function createAutomationRun(
             triggerId: input.triggerId,
           })
           .onConflictDoNothing();
-        return { run: mapRunExecution(row), duplicate: !inserted };
+        return { run, duplicate: !inserted };
       }),
   );
 }

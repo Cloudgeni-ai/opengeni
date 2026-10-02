@@ -1750,6 +1750,7 @@ async function createBrowserDriver(
       runner,
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
       targetLifecycle: "cdp",
+      focusEmulation: true,
     });
   }
   const route = context.networkRoute;
@@ -1810,7 +1811,7 @@ async function createBrowserDriver(
             : {}),
         }
       : {}),
-    foregroundManagedTabs: context.headed,
+    focusEmulation: true,
     ...(headlessShell && browserExecutablePath === headlessShell.path
       ? { userAgentMetadataSource: "intercepted_local" as const }
       : {}),

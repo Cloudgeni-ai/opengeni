@@ -8840,6 +8840,7 @@
         "$.agent": "ref(AgentConfigRequest)?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
+        "$.credentialRestriction": "const?=[\"\\\"developer_setup\\\"\"]",
         "$.firstPartyMcpPermissions": "array?",
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array?",
@@ -11612,10 +11613,11 @@
       ],
       "shape": {
         "$": "object",
-        "$.access": "enum?=[\"\\\"full\\\"\",\"\\\"read\\\"\"]",
+        "$.access": "enum?=[\"\\\"developer_setup\\\"\",\"\\\"full\\\"\",\"\\\"read\\\"\"]",
         "$.description": "string?",
         "$.expiresAt": "string?",
-        "$.name": "string!"
+        "$.name": "string!",
+        "$.preset": "enum?=[\"\\\"developer_setup\\\"\"]"
       }
     },
     "CreateOrganizationInvitationRequest": {
@@ -16824,7 +16826,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"full\\\"\",\"\\\"read\\\"\"]"
+        "$": "enum=[\"\\\"developer_setup\\\"\",\"\\\"full\\\"\",\"\\\"read\\\"\"]"
       }
     },
     "OrganizationCredentialProvider": {
@@ -17389,7 +17391,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
+        "$": "enum=[\"\\\"account:admin\\\"\",\"\\\"account:read\\\"\",\"\\\"api_keys:manage\\\"\",\"\\\"artifacts:publish\\\"\",\"\\\"artifacts:read\\\"\",\"\\\"billing:manage\\\"\",\"\\\"billing:read\\\"\",\"\\\"capabilities:manage\\\"\",\"\\\"codemode:call\\\"\",\"\\\"connections:read\\\"\",\"\\\"connections:write\\\"\",\"\\\"documents:manage\\\"\",\"\\\"documents:search\\\"\",\"\\\"enrollments:manage\\\"\",\"\\\"enrollments:read\\\"\",\"\\\"environments:manage\\\"\",\"\\\"environments:use\\\"\",\"\\\"files:read\\\"\",\"\\\"files:upload\\\"\",\"\\\"files:write\\\"\",\"\\\"github:manage\\\"\",\"\\\"github:use\\\"\",\"\\\"goals:manage\\\"\",\"\\\"mcp_servers:attach\\\"\",\"\\\"members:manage\\\"\",\"\\\"rigs:manage\\\"\",\"\\\"rigs:use\\\"\",\"\\\"scheduled_tasks:manage\\\"\",\"\\\"scheduled_tasks:run\\\"\",\"\\\"secrets:list\\\"\",\"\\\"secrets:read\\\"\",\"\\\"secrets:write\\\"\",\"\\\"sessions:control\\\"\",\"\\\"sessions:create\\\"\",\"\\\"sessions:read\\\"\",\"\\\"stream:acknowledge\\\"\",\"\\\"stream:control\\\"\",\"\\\"stream:view\\\"\",\"\\\"terminal:attach\\\"\",\"\\\"usage_allowances:manage\\\"\",\"\\\"variable-sets:attach\\\"\",\"\\\"variable-sets:list\\\"\",\"\\\"variable-sets:manage\\\"\",\"\\\"variable-sets:read\\\"\",\"\\\"variable-sets:use\\\"\",\"\\\"variable-sets:write\\\"\",\"\\\"workspace:admin\\\"\",\"\\\"workspace:create\\\"\",\"\\\"workspace:read\\\"\"]"
       }
     },
     "PersonalGitHubConnectionStatusResponse": {

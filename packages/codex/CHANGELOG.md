@@ -1,5 +1,13 @@
 # @opengeni/codex
 
+## 0.2.31
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
 ## 0.2.30
 
 ### Patch Changes

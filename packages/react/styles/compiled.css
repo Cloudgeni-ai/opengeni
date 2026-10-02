@@ -1472,6 +1472,10 @@
     -webkit-text-fill-color: currentColor;
   }
 }
+:where(.og-root).\@container\/computer-viewer,:where(.og-root) .\@container\/computer-viewer {
+    container-type: inline-size;
+    container-name: computer-viewer;
+  }
 :where(.og-root).pointer-events-auto,:where(.og-root) .pointer-events-auto {
     pointer-events: auto;
   }
@@ -2238,6 +2242,9 @@
   }
 :where(.og-root).w-full,:where(.og-root) .w-full {
     width: 100%;
+  }
+:where(.og-root).w-max,:where(.og-root) .w-max {
+    width: max-content;
   }
 :where(.og-root).w-px,:where(.og-root) .w-px {
     width: 1px;
@@ -6090,6 +6097,33 @@
 :where(.og-root).\@max-\[20rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[20rem\]\/model-controls\:hidden {
     @container model-controls (width < 20rem) {
       display: none;
+    }
+  }
+:where(.og-root).\@xl\/computer-viewer\:max-h-none,:where(.og-root) .\@xl\/computer-viewer\:max-h-none {
+    @container computer-viewer (width >= 36rem) {
+      max-height: none;
+    }
+  }
+:where(.og-root).\@xl\/computer-viewer\:w-64,:where(.og-root) .\@xl\/computer-viewer\:w-64 {
+    @container computer-viewer (width >= 36rem) {
+      width: calc(var(--spacing) * 64);
+    }
+  }
+:where(.og-root).\@xl\/computer-viewer\:flex-row,:where(.og-root) .\@xl\/computer-viewer\:flex-row {
+    @container computer-viewer (width >= 36rem) {
+      flex-direction: row;
+    }
+  }
+:where(.og-root).\@xl\/computer-viewer\:border-t-0,:where(.og-root) .\@xl\/computer-viewer\:border-t-0 {
+    @container computer-viewer (width >= 36rem) {
+      border-top-style: var(--tw-border-style);
+      border-top-width: 0px;
+    }
+  }
+:where(.og-root).\@xl\/computer-viewer\:border-l,:where(.og-root) .\@xl\/computer-viewer\:border-l {
+    @container computer-viewer (width >= 36rem) {
+      border-left-style: var(--tw-border-style);
+      border-left-width: 1px;
     }
   }
 :where(.og-root).dark\:border-border,:where(.og-root) .dark\:border-border {

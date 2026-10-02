@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import * as opengeniCore from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
 import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -237,6 +239,23 @@ describe("worker agent-run admission funding", () => {
   test("goal activity publishes an allowance pause using locked causal admission", async () => {
     const restoreCodex = mockCodexBilled(false);
     const settings = testSettings({ billingMode: "disabled", usageLimitsMode: "none" });
+    const sessionId = "00000000-0000-4000-8000-000000000004";
+    const causalTurnId = "00000000-0000-4000-8000-000000000005";
+    const sourcePolicy = {
+      ...resolveTurnExecutionPolicyV1(settings, {
+        modelId: "scripted-model",
+        requestedModelId: null,
+        modelSource: "session",
+        reasoningEffort: "medium",
+        reasoningSource: "session",
+      }),
+      credentialRestriction: "developer_setup" as const,
+    };
+    const source = spyOn(opengeniDb, "getSessionTurn").mockResolvedValue({
+      id: causalTurnId,
+      sessionId,
+      metadata: metadataWithTurnExecutionPolicyV1({}, sourcePolicy),
+    } as Awaited<ReturnType<typeof opengeniDb.getSessionTurn>>);
     const catalog = spyOn(opengeniCore, "resolveCatalogSettings").mockResolvedValue({
       settings,
     } as Awaited<ReturnType<typeof opengeniCore.resolveCatalogSettings>>);
@@ -263,13 +282,15 @@ describe("worker agent-run admission funding", () => {
       async (_db, input) => {
         expect(
           await input.admission!(lockedDb, {
-            id: "00000000-0000-4000-8000-000000000005",
+            id: causalTurnId,
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
           budgetBlocked: "OpenGeni usage allowance exhausted",
           budgetPausedReason: "allowance",
         });
+        expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);
+        expect(input.policy.turnExecutionPolicy?.credentialRestriction).toBe("developer_setup");
         return {
           action: "paused",
           events: [event],
@@ -295,7 +316,6 @@ describe("worker agent-run admission funding", () => {
       message: "Exhausted",
     });
     try {
-      const sessionId = "00000000-0000-4000-8000-000000000004";
       expect(
         await createGoalActivities(async () => services).maybeContinueGoal({
           accountId: ACCOUNT,
@@ -323,6 +343,7 @@ describe("worker agent-run admission funding", () => {
       previous.mockRestore();
       policy.mockRestore();
       materialize.mockRestore();
+      source.mockRestore();
       restoreCodex();
     }
   });

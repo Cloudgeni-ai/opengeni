@@ -96,6 +96,7 @@ import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
+export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -497,6 +498,7 @@ import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   contextForCausalTurn,
+  contextWithFrozenCredentialRestrictions,
   creatorColumns,
   frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
@@ -5783,17 +5785,19 @@ export type ScheduledTaskCreatorSessionPolicy = {
 
 /**
  * Frozen creator boundary of a scheduled task (migration 0428). Every field is
- * null for a human/API-created task, which keeps the deployment default for
+ * null for an ordinary human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
  * cannot widen itself through a schedule. Only its owner's explicit access
  * refresh re-freezes the tools and permissions, within that person's grants;
- * the session policy never changes after create.
+ * the session policy and optional credential restriction never change after
+ * create. A restriction alone does not select tools or permissions.
  */
 export type ScheduledTaskCreatorPolicy = {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
   firstPartyMcpPermissions: Permission[] | null;
   sessionPolicy: ScheduledTaskCreatorSessionPolicy | null;
+  credentialRestriction?: "developer_setup";
 };
 
 export type CreateScheduledTaskInput = {
@@ -5812,7 +5816,7 @@ export type CreateScheduledTaskInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
-  /** Frozen creator boundary; omit (or pass null fields) for human/API creates. */
+  /** Trusted frozen creator boundary, never copied from task metadata. */
   creatorPolicy?: ScheduledTaskCreatorPolicy | null;
   targetSessionId?: string | null;
   variableSetId?: string | null;
@@ -17343,7 +17347,7 @@ export async function createScheduledTask(
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
-          creatorSessionPolicy: input.creatorPolicy?.sessionPolicy ?? null,
+          creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
           rigId: input.rigId ?? null,
@@ -17708,6 +17712,23 @@ export async function listScheduledTaskCreatorPolicies(
   });
 }
 
+/** Additive JSON on the existing write-once creator column; no new storage seam. */
+function scheduledTaskCreatorSessionPolicyForInsert(
+  policy: ScheduledTaskCreatorPolicy | null | undefined,
+): ScheduledTaskCreatorSessionPolicy | SQL | null {
+  if (policy?.credentialRestriction === undefined) return policy?.sessionPolicy ?? null;
+  if (policy.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed scheduled task credential restriction");
+  }
+  // The Drizzle column's original type describes the three legacy session
+  // fields. Serialize the additive JSON explicitly, including restriction-only
+  // snapshots without manufacturing a session policy or changing defaults.
+  return sql`${JSON.stringify({
+    ...policy.sessionPolicy,
+    credentialRestriction: policy.credentialRestriction,
+  })}::jsonb`;
+}
+
 function scheduledTaskCreatorPolicyFromRow(row: {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
   firstPartyMcpPermissions: Permission[] | null;
@@ -17715,23 +17736,37 @@ function scheduledTaskCreatorPolicyFromRow(row: {
     agentAccess?: string | null;
     scopeSubjectId?: string | null;
     memoryScope?: string | null;
+    credentialRestriction?: unknown;
   } | null;
 }): ScheduledTaskCreatorPolicy {
+  const hasRestriction = Boolean(
+    row.sessionPolicy && Object.hasOwn(row.sessionPolicy, "credentialRestriction"),
+  );
+  if (hasRestriction && row.sessionPolicy?.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed scheduled task credential restriction");
+  }
+  const restrictionOnly =
+    hasRestriction &&
+    !["agentAccess", "scopeSubjectId", "memoryScope"].some((key) =>
+      Object.hasOwn(row.sessionPolicy!, key),
+    );
   return {
     firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
     firstPartyMcpPermissions: row.firstPartyMcpPermissions
       ? [...row.firstPartyMcpPermissions]
       : null,
-    sessionPolicy: row.sessionPolicy
-      ? {
-          agentAccess: row.sessionPolicy.agentAccess ?? null,
-          scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-          memoryScope:
-            row.sessionPolicy.memoryScope === "session"
-              ? "off"
-              : (row.sessionPolicy.memoryScope ?? null),
-        }
-      : null,
+    ...(hasRestriction ? { credentialRestriction: "developer_setup" as const } : {}),
+    sessionPolicy:
+      row.sessionPolicy && !restrictionOnly
+        ? {
+            agentAccess: row.sessionPolicy.agentAccess ?? null,
+            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
+            memoryScope:
+              row.sessionPolicy.memoryScope === "session"
+                ? "off"
+                : (row.sessionPolicy.memoryScope ?? null),
+          }
+        : null,
   };
 }
 
@@ -25746,6 +25781,13 @@ export async function acquireCodexCredentialLease<
         input.workspaceId,
         "share",
       );
+      // Lease FKs need the workspace identity. Take it before any session/turn
+      // locks, matching capacity and connection-use lifecycle writers; a late
+      // FK request can otherwise wait behind a workspace writer needing our turn.
+      await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "already_locked",
+      });
       // Rotation row -> durable turn is the common allocator/waiter lock order.
       // Fail closed before taking a credential: the turn and allocator must be
       // inside exactly the same RLS-scoped workspace/account. A downstream
@@ -71973,6 +72015,13 @@ export async function claimSessionWorkForAttempt(
               return { action: "unclaimed", reason: "stale-approval" };
             }
             if (activeTurn.status === "recovering") {
+              // An internal setup coroutine unwound after possible dispatch.
+              // A new attempt would replay the whole helper, not just observe
+              // its original command. Neither a wake nor lease/command loss
+              // proves that the remaining setup finished.
+              if (sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata)) {
+                return { action: "unclaimed", reason: "no-work" };
+              }
               const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(activeTurn.metadata);
               if (lifecycleWait) {
                 const [lease] = await tx
@@ -72864,6 +72913,29 @@ export async function claimSessionWorkForAttempt(
                 true
               )
             `);
+          }
+          // Private producer lineage survives source-turn cleanup and every
+          // coalesced message, including a later restricted sender. A frozen
+          // goal/schedule model policy cannot remove this inherited ceiling.
+          const initialCredentialPolicy = readTurnExecutionPolicyV1(session.metadata);
+          internalInitiator.context = contextWithFrozenCredentialRestrictions(
+            internalInitiator.context,
+            [
+              ...delivered.updates.map((update) => update.lineage),
+              initialCredentialPolicy.kind === "valid" &&
+              initialCredentialPolicy.policy.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : undefined,
+            ],
+          );
+          if (
+            internalInitiator.context.credentialRestriction === "developer_setup" &&
+            frozenTurnExecutionPolicy
+          ) {
+            frozenTurnExecutionPolicy = {
+              ...frozenTurnExecutionPolicy,
+              credentialRestriction: "developer_setup",
+            };
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
@@ -74252,7 +74324,11 @@ export type SessionWorkPeek =
       activityRef: SessionAttemptActivityRef;
     }
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
-  | { kind: "admission-blocked" }
+  | {
+      kind: "admission-blocked";
+      reason?: "sandbox_setup_outcome_unknown";
+      ref?: SandboxSetupOutcomeUnknown;
+    }
   | {
       kind: "sandbox-lifecycle-wait";
       ref: SandboxLifecycleWait;
@@ -74779,6 +74855,17 @@ export async function peekSessionWork(
         );
       }
       if (turn.status === "recovering" || turn.status === "waiting_capacity") {
+        const setupUnknown = sandboxSetupOutcomeUnknownFromTurnMetadata(turn.metadata);
+        if (turn.status === "recovering" && setupUnknown) {
+          // Existing workflow releases already park this wire kind. Do not
+          // introduce a new peek kind that an older control worker could
+          // mistake for runnable work during a rolling deployment.
+          return {
+            kind: "admission-blocked",
+            reason: "sandbox_setup_outcome_unknown",
+            ref: setupUnknown,
+          };
+        }
         const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(turn.metadata);
         if (turn.status === "recovering" && lifecycleWait) {
           const [lease] = await scopedDb
@@ -77018,6 +77105,35 @@ async function wakeSandboxLifecycleWaitersTx(
 }
 
 const SANDBOX_LIFECYCLE_WAIT_METADATA_KEY = "sandboxLifecycleWait";
+const SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY = "sandboxSetupOutcomeUnknown";
+
+/** Logical setup is incomplete even if one retained physical command exits.
+ * There is deliberately no deadline or lease-liveness clearing condition. */
+export type SandboxSetupOutcomeUnknown = {
+  version: 1;
+  turnId: string;
+  attemptId: string;
+  reason: "sandbox_command_start_outcome_unknown";
+};
+
+function sandboxSetupOutcomeUnknownFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SandboxSetupOutcomeUnknown | null {
+  const value = metadata?.[SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Partial<SandboxSetupOutcomeUnknown>;
+  if (
+    marker.version !== 1 ||
+    typeof marker.turnId !== "string" ||
+    marker.turnId.length === 0 ||
+    typeof marker.attemptId !== "string" ||
+    marker.attemptId.length === 0 ||
+    marker.reason !== "sandbox_command_start_outcome_unknown"
+  ) {
+    return null;
+  }
+  return marker as SandboxSetupOutcomeUnknown;
+}
 
 export type SandboxLifecycleWait = {
   version: 1;
@@ -79218,6 +79334,8 @@ export type RequestSessionTurnRecoveryInput = {
   reason: string;
   detail?: Record<string, unknown>;
   sandboxLifecycleWait?: SandboxLifecycleWait;
+  /** Park incomplete setup; this never authorizes a replacement setup attempt. */
+  sandboxSetupOutcomeUnknown?: true;
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
@@ -79483,6 +79601,16 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(input.sandboxSetupOutcomeUnknown
+              ? {
+                  [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
+                    version: 1,
+                    turnId: input.turnId,
+                    attemptId: input.attemptId,
+                    reason: "sandbox_command_start_outcome_unknown",
+                  } satisfies SandboxSetupOutcomeUnknown,
+                }
+              : {}),
             ...(input.providerRecoveryCount !== undefined
               ? { providerRecoveryCount: input.providerRecoveryCount }
               : {}),

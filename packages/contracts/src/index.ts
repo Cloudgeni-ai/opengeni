@@ -63,6 +63,7 @@ export const HostMcpCreateSelections = z
   });
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -104,6 +105,7 @@ export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
+export * from "./api-key-presets";
 export * from "./session-titles";
 export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
@@ -2772,6 +2774,7 @@ export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
 
 const reservedServiceTurnInitiatorContextKeys = new Set([
   "backfill",
+  "credentialRestriction",
   "label",
   "provenanceError",
   "opengeniSiteAuthConnectionId",
@@ -2848,10 +2851,11 @@ export type AccessGrant = z.infer<typeof AccessGrant>;
  * Organization API key access tier. `full` keys administer the organization
  * (create workspaces, mint keys, run sessions in every shared workspace);
  * `read` keys only inventory shared workspaces and read their sessions, events,
- * and files. The tier is derived from the key's stored permissions, never
+ * and files. Developer setup keys configure workspaces and budgets without key
+ * management or credential delegation. The tier is derived from stored permissions, never
  * stored separately: a key whose permissions omit `workspace:admin` is `read`.
  */
-export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export const OrganizationApiKeyAccess = z.enum(["full", "read", "developer_setup"]);
 export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 /** Informational projection of direct API-key authority, not an authorization grant. */
@@ -2897,6 +2901,8 @@ export const DelegatedAccessTokenPayload = z
     // select a principal kind instead of inferring "human" from absent machine
     // markers.
     principalKind: DelegatedAccessPrincipalKind,
+    /** Trusted frozen setup-key ceiling, covered by the token HMAC. */
+    credentialRestriction: z.literal("developer_setup").optional(),
     // Trusted embedding hosts can sign a causal service principal separately
     // from the grant subject that authorizes the request. The claim is consumed
     // only when a command creates a new session/turn.
@@ -3014,22 +3020,25 @@ export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPay
 
 const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
+const delegatedRestrictedAccessTokenPrefix = "ogd3_";
 
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
 ): Promise<string> {
   const parsed = DelegatedAccessTokenPayload.parse(payload);
-  const prefix = parsed.serviceInitiator
-    ? delegatedServiceAccessTokenPrefix
-    : delegatedAccessTokenPrefix;
+  const prefix =
+    parsed.credentialRestriction === "developer_setup"
+      ? delegatedRestrictedAccessTokenPrefix
+      : parsed.serviceInitiator
+        ? delegatedServiceAccessTokenPrefix
+        : delegatedAccessTokenPrefix;
   const encodedPayload = base64UrlEncode(JSON.stringify(parsed));
-  // The service-capable envelope binds its prefix into the signature. An old
-  // verifier accepts only ogd_ and therefore fails closed during a rolling
-  // deploy; changing ogd2_ to ogd_ cannot turn provenance loss into success.
+  // Critical provenance uses a versioned, prefix-bound envelope. Older
+  // verifiers reject it; downgrading its prefix cannot discard the ceiling.
   const signature = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix !== delegatedAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
   return `${prefix}${encodedPayload}.${signature}`;
 }
@@ -3039,11 +3048,13 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
-  const prefix = token.startsWith(delegatedServiceAccessTokenPrefix)
-    ? delegatedServiceAccessTokenPrefix
-    : token.startsWith(delegatedAccessTokenPrefix)
-      ? delegatedAccessTokenPrefix
-      : null;
+  const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
+    ? delegatedRestrictedAccessTokenPrefix
+    : token.startsWith(delegatedServiceAccessTokenPrefix)
+      ? delegatedServiceAccessTokenPrefix
+      : token.startsWith(delegatedAccessTokenPrefix)
+        ? delegatedAccessTokenPrefix
+        : null;
   if (!prefix) {
     return null;
   }
@@ -3056,7 +3067,7 @@ export async function verifyDelegatedAccessToken(
   const signature = withoutPrefix.slice(dot + 1);
   const expected = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix !== delegatedAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
   if (!constantTimeEqual(signature, expected)) {
     return null;
@@ -3072,8 +3083,14 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   if (
-    (prefix === delegatedServiceAccessTokenPrefix) !==
-    (payload.data.serviceInitiator !== undefined)
+    (prefix === delegatedRestrictedAccessTokenPrefix) !==
+    (payload.data.credentialRestriction === "developer_setup")
+  ) {
+    return null;
+  }
+  if (
+    prefix !== delegatedRestrictedAccessTokenPrefix &&
+    (prefix === delegatedServiceAccessTokenPrefix) !== (payload.data.serviceInitiator !== undefined)
   ) {
     return null;
   }
@@ -3492,8 +3509,14 @@ export const CreateOrganizationApiKeyRequest = z
     expiresAt: z.string().datetime({ offset: true }).optional(),
     /** Access tier; omitted means `full` so existing callers keep their keys. */
     access: OrganizationApiKeyAccess.default("full"),
+    /** Optional creation alias for the developer_setup access tier. */
+    preset: OrganizationApiKeyPreset.optional(),
   })
-  .strict();
+  .strict()
+  .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
+    path: ["access"],
+    message: "Developer setup is not read-only organization API key access",
+  });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
@@ -10748,6 +10771,8 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
       metadata: AutomationBoundedJson.default({}),
       // Agent configuration for generated sessions. Omitted keeps legacy.
       agent: AgentConfigRequest.optional(),
+      // Server-frozen creator ceiling; never accepted as public write authority.
+      credentialRestriction: z.literal("developer_setup").optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -10767,6 +10792,14 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
 );
 export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
 
+/** A caller can neither forge nor clear the server-owned creator ceiling. */
+export const AutomationSessionTemplateWrite = /* @__PURE__ */ defineSkillContractSchema(() =>
+  AutomationSessionTemplate.transform(
+    ({ credentialRestriction: _restriction, ...template }) => template,
+  ),
+);
+export type AutomationSessionTemplateWrite = z.infer<typeof AutomationSessionTemplateWrite>;
+
 /** Stored labels are projections, not assertions supplied by a new caller. */
 export const StoredAutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.preprocess(projectStoredTemplateSkillMetadata, AutomationSessionTemplate),
@@ -10781,6 +10814,8 @@ export const AutomationNormalizedEvent = z
     subject: z.string().trim().min(1).max(512).nullable().default(null),
     resource: z.string().trim().min(1).max(1024).nullable().default(null),
     payload: AutomationBoundedJson,
+    /** Server-owned manual-caller restriction, frozen in the immutable event. */
+    credentialRestriction: z.literal("developer_setup").optional(),
   })
   .strict();
 export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
@@ -10863,7 +10898,7 @@ export const CreateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContrac
       eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
       configuration: AutomationBoundedJson.default({}),
       parameters: AutomationBoundedJson.default({}),
-      sessionTemplate: AutomationSessionTemplate,
+      sessionTemplate: AutomationSessionTemplateWrite,
       status: AutomationTriggerStatus.default("active"),
     })
     .strict(),
@@ -10878,7 +10913,7 @@ export const UpdateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContrac
       eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
       configuration: AutomationBoundedJson.optional(),
       parameters: AutomationBoundedJson.optional(),
-      sessionTemplate: AutomationSessionTemplate.optional(),
+      sessionTemplate: AutomationSessionTemplateWrite.optional(),
       status: AutomationTriggerStatus.optional(),
     })
     .strict()
@@ -17481,6 +17516,8 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+      /** Immutable setup-key ceiling inherited by this session/turn. */
+      credentialRestriction: z.literal("developer_setup").optional(),
     })
     .strict()
     .superRefine((policy, context) => {
