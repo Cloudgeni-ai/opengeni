@@ -374,10 +374,20 @@ describe("Insights route presentation", () => {
     }
   });
 
-  test("shows other people's private chats as amounts per person, never as sessions", async () => {
-    nextSnapshot = {
+  const privateChats = (overrides: Record<string, unknown> = {}) =>
+    ({
       ...snapshot(),
       privateChats: [
+        {
+          ownerKey: "owner-2",
+          name: "Kari Hansen",
+          you: false,
+          calls: 1,
+          tokens: 200,
+          creditUsd: 0,
+          estimatedProviderUsd: 1.5,
+          estimatedProviderCostKnownCalls: 1,
+        },
         {
           ownerKey: "owner-1",
           name: "Ola Nordmann",
@@ -389,18 +399,81 @@ describe("Insights route presentation", () => {
           estimatedProviderCostKnownCalls: 3,
         },
       ],
-    } as WorkspaceInsightsSnapshot;
+      ...overrides,
+    }) as WorkspaceInsightsSnapshot;
+
+  test("lists other people's private chats as plain amounts per person, largest first", async () => {
+    nextSnapshot = privateChats();
     const rendered = await renderRoute();
     try {
-      const rows = tableRows(rendered.container, "Usage by session");
-      expect(rows).toEqual([
-        ["Ola Nordmann: private chats", "900", "82%", "-", "$12.40", "~$6.00"],
+      expect(tableRows(rendered.container, "Private chats by person")).toEqual([
+        ["Ola Nordmann", "$12.40", "~$6.00", "900", "3"],
+        ["Kari Hansen", "$0.00", "~$1.50", "200", "1"],
       ]);
+      const table = rendered.container.querySelector(
+        '[role="table"][aria-label="Private chats by person"]',
+      );
+      // Amounts only: no row is a link, a button or anything focusable.
       expect(
-        rowButton(rendered.container, "Usage by session", "Ola Nordmann: private chats"),
-      ).toBeNull();
-      expect(rendered.container.textContent).not.toContain("isn't included");
+        table?.querySelectorAll("a, button, [role=button], [role=link], [tabindex]"),
+      ).toHaveLength(0);
+      expect(table?.querySelector(".cursor-pointer")).toBeNull();
+      expect(tableRows(rendered.container, "Usage by session")).toEqual([]);
+      expect(rendered.container.textContent).toContain(
+        "Other people's Only me chats, already counted above. Amounts only.",
+      );
+      expect(rendered.container.textContent).not.toContain("Showing the largest 200.");
+      for (const caveat of ["isn't included", "aren't included", "not included"]) {
+        expect(rendered.container.textContent).not.toContain(caveat);
+      }
     } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("says when the private list is cut to the largest 200", async () => {
+    nextSnapshot = privateChats({ privateChatsTruncated: true });
+    const rendered = await renderRoute();
+    try {
+      expect(rendered.container.textContent).toContain("Showing the largest 200.");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a session scope hides the private section instead of showing it empty", async () => {
+    nextSnapshot = privateChats();
+    const rendered = await renderRoute({
+      search: { root: "33333333-3333-4333-8333-333333333333" },
+    });
+    try {
+      expect(
+        rendered.container.querySelector('[role="table"][aria-label="Private chats by person"]'),
+      ).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Only me");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a failed refresh keeps the last data and gives advice, not the raw error", async () => {
+    const rendered = await renderRoute();
+    try {
+      nextError = Object.assign(new Error("OpenGeni API 500: boom Reference: req_500."), {
+        status: 500,
+      });
+      const month = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Month",
+      );
+      await click(month ?? null);
+      const alert = rendered.container.querySelector('[role="alert"]')?.textContent ?? "";
+      expect(alert).toContain("Couldn't refresh Insights");
+      expect(alert).toContain("Try again");
+      expect(rendered.container.textContent).not.toContain("OpenGeni API");
+      expect(rendered.container.textContent).not.toContain("req_500");
+      expect(rendered.container.textContent).toContain("Paid with");
+    } finally {
+      nextError = null;
       await rendered.unmount();
     }
   });

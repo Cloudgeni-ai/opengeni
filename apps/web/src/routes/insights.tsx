@@ -38,8 +38,11 @@ import {
   type InsightsSearch,
 } from "@/components/insights/search";
 import {
+  MODEL_COLUMNS,
   ModelUsageList,
+  PAID_WITH_COLUMNS,
   PaidWithList,
+  PrivateChatsList,
   ProjectUsageList,
   SessionUsageList,
   UsageStats,
@@ -51,7 +54,7 @@ import { ContentPage } from "@/components/ui/content-layout";
 import { BackLink } from "@/components/ui/detail-page";
 import { EmptyState } from "@/components/ui/empty-state";
 import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
@@ -61,7 +64,7 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatGroup, StatTile } from "@/components/ui/stat-tile";
 import { useAppContext } from "@/context";
-import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import { apiErrorAdvice, isPermissionDenied } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
@@ -320,14 +323,7 @@ export function InsightsRoute({
     return (
       <ContentPage width="wide" data-insights className="gap-6">
         {heading}
-        <div role="status" aria-label="Loading workspace insights" className="grid gap-4">
-          <StatGroup label="Loading">
-            {["Spend", "Tokens", "Model calls", "Cache hit"].map((label) => (
-              <StatTile key={label} label={label} loading />
-            ))}
-          </StatGroup>
-          <Skeleton aria-hidden="true" className="h-56" />
-        </div>
+        <InsightsSkeleton />
       </ContentPage>
     );
   }
@@ -335,14 +331,18 @@ export function InsightsRoute({
   const { totals, deltas, series, models } = view;
   const comparison = `vs ${snap.priorLabel.toLowerCase()}`;
   const payers = payerTotals(models);
-  const privateRows = privateSpendRows(snap);
+  const { rows: privateRows, truncated: privateTruncated } = privateSpendRows(snap);
+  // A session scope holds no one else's private chats: hide the section, no empty state.
+  const showPrivate = !scopeActive && privateRows.length > 0;
+  const longerRange = RANGE_OPTIONS[RANGE_OPTIONS.findIndex((option) => option.id === range) + 1];
   const estimatedSpend = payers
     .filter((payer) => payer.estimated)
     .reduce((sum, payer) => sum + payer.amountUsd, 0);
   const anyEstimate = payers.some((payer) => payer.estimated && payer.pricedCalls > 0);
   const spendValue = `${anyEstimate ? "~" : ""}${formatUsd(totals.creditUsd + estimatedSpend, 2)}`;
+  // The "~" marks the total as partly estimated; "Paid with" itemises the rest.
   const spendCaption = anyEstimate
-    ? `${formatUsd(totals.creditUsd, 2)} charged + ~${formatUsd(estimatedSpend, 2)}`
+    ? `${formatUsd(totals.creditUsd, 2)} charged`
     : "Charged to credits";
   const modelOptions = [
     { value: ALL, label: "All models" },
@@ -432,7 +432,7 @@ export function InsightsRoute({
           </Button>
         }
       >
-        Showing the last selection that loaded. {userErrorText(loadError)}
+        Showing the last selection that loaded. {apiErrorAdvice(loadError)}
       </Notice>
     </div>
   ) : null;
@@ -447,7 +447,7 @@ export function InsightsRoute({
         description={
           filtered
             ? "Filters narrow everything on this tab. Activity stays workspace-wide."
-            : "Every chat in this workspace counts, private chats included."
+            : OVERVIEW_DESCRIPTION
         }
       >
         <div className="flex min-w-0 flex-col gap-4">
@@ -493,10 +493,7 @@ export function InsightsRoute({
       </Section>
 
       {payers.length > 0 ? (
-        <Section
-          title="Paid with"
-          description="Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is the provider's list price."
-        >
+        <Section title="Paid with" description={PAID_WITH_DESCRIPTION}>
           <PaidWithList totals={payers} />
         </Section>
       ) : null}
@@ -517,7 +514,7 @@ export function InsightsRoute({
         }
         description={
           measure === "tokens"
-            ? "Input and output tokens, in UTC. A gap means those calls reported no token counts."
+            ? TOKENS_CHART_DESCRIPTION
             : "Credits charged, and every priced call at the provider's list price."
         }
       >
@@ -610,7 +607,7 @@ export function InsightsRoute({
         </div>
       </Section>
 
-      <Section title="By model" description="Select a model to see only its usage.">
+      <Section title="By model" description={BY_MODEL_DESCRIPTION}>
         {models.length > 0 ? (
           <ModelUsageList
             models={models}
@@ -641,10 +638,9 @@ export function InsightsRoute({
             : "Each session with its subagents. Select one to see only its usage."
         }
       >
-        {snap.drivers.length > 0 || privateRows.length > 0 ? (
+        {snap.drivers.length > 0 ? (
           <SessionUsageList
             drivers={snap.drivers}
-            privateRows={privateRows}
             totalTokens={totals.totalTokens}
             selectedRootId={filters.rootSessionId ?? null}
             rootIdOf={(driver) => driverRootSessionId(driver.id)}
@@ -654,6 +650,20 @@ export function InsightsRoute({
           <EmptyLine>No session usage in this selection.</EmptyLine>
         )}
       </Section>
+
+      {showPrivate ? (
+        <Section
+          title="Private chats"
+          description="Other people's Only me chats, already counted above. Amounts only."
+        >
+          <div className="flex min-w-0 flex-col gap-2">
+            <PrivateChatsList rows={privateRows} />
+            {privateTruncated ? (
+              <p className="text-xs leading-[18px] text-fg-muted">Showing the largest 200.</p>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
 
       {snap.schedules.length > 0 ? (
         <Section
@@ -1077,12 +1087,23 @@ export function InsightsRoute({
               description={
                 filtered
                   ? "Choose another model or session, or clear the filters."
-                  : "Spend and tokens show up here once someone in this workspace starts a chat."
+                  : longerRange
+                    ? "Try a longer period."
+                    : "Spend and tokens show up here once someone in this workspace starts a chat."
               }
               action={
                 filtered ? (
                   <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
                     Clear filters
+                  </Button>
+                ) : longerRange ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => update({ range: longerRange.id })}
+                  >
+                    Show {longerRange.label.toLowerCase()}
                   </Button>
                 ) : undefined
               }
@@ -1104,18 +1125,79 @@ export function InsightsRoute({
  */
 const TOOLBAR_CLASS = "flex min-w-0 flex-wrap items-center gap-2";
 
+/**
+ * The usage tab's shape while the first snapshot loads: toolbar, period line,
+ * stats, chart and a list, at their final sizes so nothing jumps when data lands.
+ */
+function InsightsSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading workspace insights"
+      className="flex min-w-0 flex-col gap-6"
+    >
+      <div aria-hidden="true" className="flex min-w-0 flex-col gap-2">
+        <div className={TOOLBAR_CLASS}>
+          <Skeleton className="ml-auto h-8 w-56 max-w-full rounded-lg" />
+        </div>
+        <Skeleton className="h-[18px] w-72 max-w-full rounded-full" />
+      </div>
+      <SectionStack variant="open">
+        <Section title="Overview" description={OVERVIEW_DESCRIPTION}>
+          <StatGroup label="Loading">
+            {["Spend", "Tokens", "Model calls", "Cache hit"].map((label) => (
+              <StatTile key={label} label={label} loading />
+            ))}
+          </StatGroup>
+        </Section>
+        <Section title="Paid with" description={PAID_WITH_DESCRIPTION}>
+          <RowList variant="table" label="Loading payers" columns={PAID_WITH_COLUMNS}>
+            <ListRowSkeleton count={3} />
+          </RowList>
+        </Section>
+        <Section title="Over time" description={TOKENS_CHART_DESCRIPTION}>
+          <div aria-hidden="true" className="flex min-w-0 flex-col gap-4">
+            <Skeleton className="h-[220px] rounded-lg" />
+            <Skeleton className="h-2 rounded-full" />
+          </div>
+        </Section>
+        <Section title="By model" description={BY_MODEL_DESCRIPTION}>
+          <RowList variant="table" label="Loading models" columns={MODEL_COLUMNS}>
+            <ListRowSkeleton count={3} />
+          </RowList>
+        </Section>
+      </SectionStack>
+    </div>
+  );
+}
+
+// Shared with the skeleton so loading and loaded copy take the same lines.
+const OVERVIEW_DESCRIPTION = "Every chat counts, private ones included.";
+const PAID_WITH_DESCRIPTION =
+  "Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is a list-price estimate.";
+const TOKENS_CHART_DESCRIPTION =
+  "Input and output tokens, in UTC. A gap means those calls reported no token counts.";
+const BY_MODEL_DESCRIPTION = "Select a model to see only its usage.";
+
 const SCHEDULE_COLUMNS: RowListColumn[] = [
   { id: "fires", label: "Runs", width: 72, align: "end" },
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
-  { id: "credits", label: "Credits", width: 96, align: "end" },
-  { id: "listPrice", label: "At list price", width: 112, align: "end" },
+  { id: "credits", label: "Credits", width: 96, align: "end", leadsWhenFolded: true },
+  { id: "listPrice", label: "At list price", width: 112, align: "end", leadsWhenFolded: true },
 ];
 
 const CALL_COLUMNS: RowListColumn[] = [
   { id: "payer", label: "Paid with", width: 128 },
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
   { id: "cache", label: "Cache hit", width: 80, align: "end" },
-  { id: "amount", label: "Amount", width: 96, align: "end" },
+  {
+    id: "amount",
+    label: "Amount",
+    width: 96,
+    align: "end",
+    hideLabel: true,
+    leadsWhenFolded: true,
+  },
 ];
 
 const FLOOR_COLUMNS: RowListColumn[] = [

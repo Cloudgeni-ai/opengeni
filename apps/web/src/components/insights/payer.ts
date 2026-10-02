@@ -41,9 +41,9 @@ export function payerDescription(payer: UsagePayer): string {
     case "opengeni_credits":
       return "Charged to your Opengeni credits.";
     case "subscription":
-      return "Paid by a connected plan. Shown at list price.";
+      return "Paid by a connected plan. List-price estimate, not charged.";
     case "own_key":
-      return "Billed to your own provider account. Shown at list price.";
+      return "Billed to your own provider account. List-price estimate, not charged.";
   }
 }
 

@@ -98,9 +98,16 @@ export function percentDelta(
 
 /* --------------------------------------------------------------- Paid with */
 
-const PAID_WITH_COLUMNS: RowListColumn[] = [
-  // Amount first: on a phone the row folds to its first fact.
-  { id: "amount", label: "Amount", width: 120, align: "end" },
+export const PAID_WITH_COLUMNS: RowListColumn[] = [
+  // On a phone the amount leads the folded meta line.
+  {
+    id: "amount",
+    label: "Amount",
+    width: 120,
+    align: "end",
+    hideLabel: true,
+    leadsWhenFolded: true,
+  },
   { id: "calls", label: "Calls", width: 96, align: "end" },
   { id: "tokens", label: "Tokens", width: 96, align: "end" },
 ];
@@ -125,7 +132,7 @@ export function PaidWithList(props: { totals: readonly PayerTotal[] }) {
             }
             title={payerLabel(total.payer)}
             meta={[
-              total.estimated ? "At list price, not charged" : "Charged",
+              total.estimated ? "List-price estimate, not charged" : "Charged",
               ...(note ? [note] : []),
             ]}
             cells={{
@@ -144,8 +151,15 @@ export function PaidWithList(props: { totals: readonly PayerTotal[] }) {
 
 /* --------------------------------------------------------------- By model */
 
-const MODEL_COLUMNS: RowListColumn[] = [
-  { id: "amount", label: "Amount", width: 104, align: "end" },
+export const MODEL_COLUMNS: RowListColumn[] = [
+  {
+    id: "amount",
+    label: "Amount",
+    width: 104,
+    align: "end",
+    hideLabel: true,
+    leadsWhenFolded: true,
+  },
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
   { id: "calls", label: "Calls", width: 80, align: "end" },
   { id: "cache", label: "Cache hit", width: 80, align: "end" },
@@ -204,7 +218,7 @@ export function ModelUsageList(props: {
                 </Quiet>
               ),
               amount: (
-                <Amount title={estimated ? "At list price, not charged" : "Charged"}>
+                <Amount title={estimated ? "List-price estimate, not charged" : "Charged"}>
                   {amountLabel(amount, estimated, priced)}
                 </Amount>
               ),
@@ -222,8 +236,8 @@ const PROJECT_COLUMNS: RowListColumn[] = [
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
   { id: "sessions", label: "Sessions", width: 88, align: "end" },
   { id: "share", label: "Share", width: 72, align: "end" },
-  { id: "credits", label: "Credits", width: 96, align: "end" },
-  { id: "listPrice", label: "At list price", width: 112, align: "end" },
+  { id: "credits", label: "Credits", width: 96, align: "end", leadsWhenFolded: true },
+  { id: "listPrice", label: "At list price", width: 112, align: "end", leadsWhenFolded: true },
 ];
 
 const PROJECT_META: Record<InsightsProjectRow["kind"], string | null> = {
@@ -252,7 +266,12 @@ export function ProjectUsageList(props: { projects: readonly InsightsProjectRow[
             title={project.kind === "unavailable" ? "Private chats" : project.label}
             meta={meta ? [meta] : undefined}
             cells={{
-              sessions: <Quiet>{project.rootSessions.toLocaleString()}</Quiet>,
+              // Private chats are amounts only: no session count.
+              sessions: (
+                <Quiet>
+                  {project.kind === "unavailable" ? "-" : project.rootSessions.toLocaleString()}
+                </Quiet>
+              ),
               tokens: <Amount>{formatTokens(project.tokens)}</Amount>,
               share: (
                 <Quiet>
@@ -279,29 +298,16 @@ export function ProjectUsageList(props: { projects: readonly InsightsProjectRow[
 
 /* ------------------------------------------------------------ By session */
 
-/** Amounts from other people's private chats: a person and a sum, never a session. */
-export interface PrivateSpendRow {
-  key: string;
-  person: string;
-  you: boolean;
-  calls: number;
-  tokens: number;
-  creditUsd: number;
-  listPriceUsd: number;
-  listPricedCalls: number;
-}
-
 const SESSION_COLUMNS: RowListColumn[] = [
   { id: "tokens", label: "Tokens", width: 88, align: "end" },
   { id: "share", label: "Share", width: 72, align: "end" },
   { id: "cache", label: "Cache hit", width: 80, align: "end" },
-  { id: "credits", label: "Credits", width: 96, align: "end" },
-  { id: "listPrice", label: "At list price", width: 112, align: "end" },
+  { id: "credits", label: "Credits", width: 96, align: "end", leadsWhenFolded: true },
+  { id: "listPrice", label: "At list price", width: 112, align: "end", leadsWhenFolded: true },
 ];
 
 export function SessionUsageList(props: {
   drivers: readonly InsightsSpendDriver[];
-  privateRows: readonly PrivateSpendRow[];
   /** Every token in the selection, so a share is of the whole and not of the rows shown. */
   totalTokens: number;
   /** The root session the page is scoped to, if any. */
@@ -341,19 +347,55 @@ export function SessionUsageList(props: {
           />
         );
       })}
-      {props.privateRows.map((row) => (
+    </RowList>
+  );
+}
+
+/* ---------------------------------------------------------- Private chats */
+
+/** Amounts from other people's private chats: a person and a sum, never a session. */
+export interface PrivateSpendRow {
+  key: string;
+  person: string;
+  you: boolean;
+  calls: number;
+  tokens: number;
+  creditUsd: number;
+  listPriceUsd: number;
+  listPricedCalls: number;
+}
+
+const PRIVATE_COLUMNS: RowListColumn[] = [
+  // On a phone the amount leads the folded meta line.
+  { id: "credits", label: "Credits", width: 96, align: "end", leadsWhenFolded: true },
+  { id: "listPrice", label: "At list price", width: 112, align: "end", leadsWhenFolded: true },
+  { id: "tokens", label: "Tokens", width: 88, align: "end" },
+  { id: "calls", label: "Calls", width: 80, align: "end" },
+];
+
+/**
+ * One plain row per person: a lock, a name and amounts. The rows are not
+ * actions (no link, button, hover or drilldown); the chats stay private.
+ */
+export function PrivateChatsList(props: { rows: readonly PrivateSpendRow[] }) {
+  return (
+    <RowList
+      variant="table"
+      label="Private chats by person"
+      nameLabel="Person"
+      columns={PRIVATE_COLUMNS}
+    >
+      {props.rows.map((row) => (
         <ListRow
           key={row.key}
           leading={<LogoTile icon={<LockGlyph />} name={row.person} />}
-          title={`${row.person}: private chats`}
+          title={row.person}
           titleAddon={row.you ? <MetaChip variant="outline">You</MetaChip> : undefined}
-          meta={["Amounts only. The chats stay private."]}
           cells={{
-            tokens: <Amount>{formatTokens(row.tokens)}</Amount>,
-            share: <Quiet>{share(row.tokens)}</Quiet>,
-            cache: <Quiet>-</Quiet>,
             credits: <Amount>{formatUsd(row.creditUsd, 2)}</Amount>,
             listPrice: <Quiet>{amountLabel(row.listPriceUsd, true, row.listPricedCalls)}</Quiet>,
+            tokens: <Quiet>{formatTokens(row.tokens)}</Quiet>,
+            calls: <Quiet>{row.calls.toLocaleString()}</Quiet>,
           }}
         />
       ))}
