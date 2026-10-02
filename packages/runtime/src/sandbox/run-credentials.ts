@@ -499,25 +499,52 @@ async function runCredentialCommand(
 
 async function writeCredentialFile(
   session: RunCredentialCommandSession,
-  path: string,
+  directory: string,
+  relativePath: string,
   content: string,
   commandRunner?: RunCredentialCommandRunner,
 ): Promise<void> {
-  await runCredentialCommand(session, `: > ${shellQuote(path)}`, commandRunner);
+  await runCredentialCommand(
+    session,
+    credentialFileCommand(directory, relativePath, ': > "$_opengeni_credential_path"'),
+    commandRunner,
+  );
   const encoded = base64(content);
   for (let offset = 0; offset < encoded.length; offset += WRITE_CHUNK_BYTES) {
     const chunk = encoded.slice(offset, offset + WRITE_CHUNK_BYTES);
     await runCredentialCommand(
       session,
-      `printf %s ${shellQuote(chunk)} | ${portableBase64DecodeCommand()} >> ${shellQuote(path)}`,
+      credentialFileCommand(
+        directory,
+        relativePath,
+        `printf %s ${shellQuote(chunk)} | ${portableBase64DecodeCommand()} >> "$_opengeni_credential_path"`,
+      ),
       commandRunner,
     );
   }
   await runCredentialCommand(
     session,
-    `[ "$(wc -c < ${shellQuote(path)} | tr -d '[:space:]')" = ${shellQuote(String(byteLength(content)))} ]`,
+    credentialFileCommand(
+      directory,
+      relativePath,
+      `[ "$(wc -c < "$_opengeni_credential_path" | tr -d '[:space:]')" = ${shellQuote(String(byteLength(content)))} ]`,
+    ),
     commandRunner,
   );
+}
+
+function credentialFileCommand(directory: string, relativePath: string, command: string): string {
+  // Avoid multiplying accepted path quotes through nested shell wrappers. The
+  // existing outer Bash decodes only literal UTF-8 bytes, including trailing
+  // newlines, without evaluating host-provided text or invoking a path decoder.
+  const escapedPath = [...Buffer.from(relativePath, "utf8")]
+    .map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`)
+    .join("");
+  return [
+    `printf -v _opengeni_credential_path %b ${shellQuote(escapedPath)}`,
+    `_opengeni_credential_path=${shellQuote(directory)}/"$_opengeni_credential_path"`,
+    command,
+  ].join("\n");
 }
 
 export type MaterializeRunCredentialsOptions = {
@@ -577,7 +604,8 @@ export async function materializeRunCredentials(
   ];
   await writeCredentialFile(
     session,
-    `${stage}/env`,
+    stage,
+    "env",
     environmentLines.length > 0 ? `${environmentLines.join("\n")}\n` : "",
     options.commandRunner,
   );
@@ -588,13 +616,20 @@ export async function materializeRunCredentials(
   );
 
   for (const file of material.files) {
-    const target = `${stage}/files/${file.path}`;
-    const parent = target.slice(0, target.lastIndexOf("/"));
-    await runCredentialCommand(session, `mkdir -p -- ${shellQuote(parent)}`, options.commandRunner);
-    await writeCredentialFile(session, target, file.content, options.commandRunner);
+    const directory = `${stage}/files`;
     await runCredentialCommand(
       session,
-      `chmod -- ${shellQuote(file.mode ?? "0600")} ${shellQuote(target)}`,
+      credentialFileCommand(directory, file.path, 'mkdir -p -- "${_opengeni_credential_path%/*}"'),
+      options.commandRunner,
+    );
+    await writeCredentialFile(session, directory, file.path, file.content, options.commandRunner);
+    await runCredentialCommand(
+      session,
+      credentialFileCommand(
+        directory,
+        file.path,
+        `chmod -- ${shellQuote(file.mode ?? "0600")} "$_opengeni_credential_path"`,
+      ),
       options.commandRunner,
     );
   }
