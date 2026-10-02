@@ -13,7 +13,9 @@ import {
 import { createContext, lazy, Suspense, useContext, useState, type ReactNode } from "react";
 
 import { NewSessionStarters } from "@/components/new-session-starters";
-import { UseOwnCodingAgentSection } from "@/components/onboarding/coding-agent-section";
+import { useFirstRunStarters } from "@/lib/first-run-starters";
+import { WorkspaceManagementShell } from "@/components/settings/workspace-settings-shell";
+import { OrgSettingsRoute } from "@/routes/org-settings";
 import { OnboardingFrame } from "@/components/onboarding/onboarding-frame";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -581,6 +583,15 @@ function AppFixture({ children }: { children: (workspaceId: string) => ReactNode
           ]
         : [];
     },
+    async listOrganizationApiKeys() {
+      return [];
+    },
+    async listWorkspaceWebhooks() {
+      return { webhooks: [] };
+    },
+    async getWorkspaceCredentialProvider() {
+      return { provider: null };
+    },
     async createOrganizationApiKey() {
       return { token: `ogk_${"preview".padEnd(64, "0")}`, apiKey: { id: "preview-key" } };
     },
@@ -696,7 +707,7 @@ function NewChatPreview() {
               What should the agent do?
             </h1>
             <StaticComposer model={noModel ? null : "GPT-6 Luna"} />
-            <NewSessionStarters workspaceId={workspaceId} onSelect={() => undefined} />
+            <PreviewStarters workspaceId={workspaceId} />
           </div>
         </main>
       )}
@@ -704,21 +715,39 @@ function NewChatPreview() {
   );
 }
 
-/** Organization settings > Developer's "Use your own coding agent", over fixtures. */
+/**
+ * Organization settings > Developer as people see it, over fixtures: the
+ * settings rail, the page header, API keys, then "Use your own coding agent".
+ */
 function DeveloperPreview() {
   return (
     <AppFixture>
-      {() => (
-        <main className="min-h-dvh overflow-y-auto bg-canvas">
-          <div className="mx-auto max-w-[960px] px-4 pt-10 pb-16 min-[721px]:px-10">
-            <h1 className="text-xl leading-7 font-semibold tracking-[-0.5px] text-fg">Developer</h1>
-            <div className="mt-8">
-              <UseOwnCodingAgentSection organizationId={FIXTURE_ORG} canCreateApiKeys />
-            </div>
-          </div>
-        </main>
+      {(workspaceId) => (
+        <div className="flex h-dvh min-h-0 bg-bg">
+          <WorkspaceManagementShell
+            workspaceId={workspaceId}
+            workspaceName="Development"
+            organizationName="Acme Robotics"
+            location={{ kind: "organization", section: "developer" }}
+          >
+            <OrgSettingsRoute workspaceId={workspaceId} section="developer" />
+          </WorkspaceManagementShell>
+        </div>
       )}
     </AppFixture>
+  );
+}
+
+/** The starters the real page picks from the saved first-run answer. */
+function PreviewStarters({ workspaceId }: { workspaceId: string }) {
+  const starters = useFirstRunStarters(workspaceId);
+  return (
+    <NewSessionStarters
+      workspaceId={workspaceId}
+      set={starters.set}
+      productPrompt={starters.productPrompt}
+      onSelect={() => undefined}
+    />
   );
 }
 

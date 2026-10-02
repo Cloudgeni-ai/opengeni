@@ -80,7 +80,7 @@ describe("web bundle budget policy", () => {
 
   test("pins the measured first-run raw aggregate", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
-    expect(source).toContain("wholeKibEnvelope(2_577_259, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(2_580_716, 1.5 * kib)");
     expect(wholeKibEnvelope(2_577_723, 1.5 * KIB)).toBe(2519 * KIB);
     expect(2519 * KIB - 2_577_723).toBeGreaterThanOrEqual(1.5 * KIB);
   });

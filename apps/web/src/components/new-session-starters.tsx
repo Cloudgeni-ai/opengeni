@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
+import { Blocks, Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
 import slackLogo from "../../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg?url";
 import linearLogo from "../../../../data/catalog/logos/linear-app-4b4a9f349c60.png?url";
 import { Button } from "@/components/ui/button";
@@ -50,33 +50,100 @@ export const NEW_SESSION_STARTERS = [
   },
 ] as const;
 
-/** The recorded playground demo, offered with the starters in a workspace. */
+/** For people who said they build a product: their agent first, then a demo. */
+export const ADD_AGENT_STARTER = {
+  id: "add-agent",
+  title: "Add an agent to my product",
+  description: "Starts from what you told us.",
+} as const;
+
+/** The recorded playground demo, opened in the workspace. */
 export const PLAYGROUND_STARTER = {
   id: "playground",
   title: "See a demo of an agent in a product",
   description: "A recorded agent inside a sample app.",
 } as const;
 
+/** Without saved product answers, the agent asks about the product first. */
+export const ADD_AGENT_DEFAULT_PROMPT =
+  "I want to add an AI agent to my product with Opengeni. Ask me what the product is and where it lives (a website, an app, a GitHub repository), propose where an agent fits best, then help me build it.";
+
+/** The general starters a builder still needs, after their own two. */
+const PRODUCT_GENERAL_IDS = ["github", "create", "research", "schedule"] as const;
+
+export type StarterSet = "general" | "product";
+
 const STARTER_CLASS =
   "h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer";
 
+/**
+ * Six starters under the new-chat composer. The set follows the first-run
+ * answer: people adding agents to a product get their own agent and the
+ * playground demo first; everyone else gets the general six.
+ */
 export function NewSessionStarters({
   onSelect,
   disabled = false,
+  set = "general",
   workspaceId,
+  productPrompt,
 }: {
   onSelect: (prompt: string) => void;
   disabled?: boolean;
-  /** Adds the playground demo, which opens the workspace's playground. */
+  set?: StarterSet;
+  /** Where the playground demo opens (product set). */
   workspaceId?: string;
+  /** The prompt built from the first-run product answers. */
+  productPrompt?: string | null;
 }) {
+  const general =
+    set === "product"
+      ? PRODUCT_GENERAL_IDS.map((id) => NEW_SESSION_STARTERS.find((starter) => starter.id === id)!)
+      : NEW_SESSION_STARTERS;
   return (
     <section className="mt-8" aria-label="Starter suggestions">
       <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Suggestions
       </h2>
       <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">
-        {NEW_SESSION_STARTERS.map((starter) => {
+        {set === "product" ? (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={disabled}
+              className={STARTER_CLASS}
+              data-starter={ADD_AGENT_STARTER.id}
+              onClick={() => onSelect(productPrompt || ADD_AGENT_DEFAULT_PROMPT)}
+            >
+              <Blocks aria-hidden="true" className="size-5 text-fg-subtle" />
+              <StarterText
+                title={ADD_AGENT_STARTER.title}
+                description={
+                  productPrompt
+                    ? ADD_AGENT_STARTER.description
+                    : "Tell the agent about your product."
+                }
+              />
+            </Button>
+            {workspaceId ? (
+              <Button asChild variant="outline" className={STARTER_CLASS}>
+                <Link
+                  to="/workspaces/$workspaceId/playground"
+                  params={{ workspaceId }}
+                  data-starter={PLAYGROUND_STARTER.id}
+                >
+                  <PlayCircleIcon aria-hidden="true" className="size-5 text-fg-subtle" />
+                  <StarterText
+                    title={PLAYGROUND_STARTER.title}
+                    description={PLAYGROUND_STARTER.description}
+                  />
+                </Link>
+              </Button>
+            ) : null}
+          </>
+        ) : null}
+        {general.map((starter) => {
           const Icon =
             starter.id === "schedule" ? Clock3 : starter.id === "research" ? Search : PanelsTopLeft;
           const logo =
@@ -102,34 +169,21 @@ export function NewSessionStarters({
               ) : (
                 <Icon aria-hidden="true" className="size-5 text-fg-subtle" />
               )}
-              <span className="min-w-0">
-                <span className="block text-sm">{starter.title}</span>
-                <span className="mt-1 block text-xs font-normal text-fg-muted">
-                  {starter.description}
-                </span>
-              </span>
+              <StarterText title={starter.title} description={starter.description} />
             </Button>
           );
         })}
-        {workspaceId ? (
-          <Button asChild variant="outline" className={STARTER_CLASS}>
-            <Link
-              to="/workspaces/$workspaceId/playground"
-              params={{ workspaceId }}
-              data-starter={PLAYGROUND_STARTER.id}
-            >
-              <PlayCircleIcon aria-hidden="true" className="size-5 text-fg-subtle" />
-              <span className="min-w-0">
-                <span className="block text-sm">{PLAYGROUND_STARTER.title}</span>
-                <span className="mt-1 block text-xs font-normal text-fg-muted">
-                  {PLAYGROUND_STARTER.description}
-                </span>
-              </span>
-            </Link>
-          </Button>
-        ) : null}
       </div>
     </section>
+  );
+}
+
+function StarterText({ title, description }: { title: string; description: string }) {
+  return (
+    <span className="min-w-0">
+      <span className="block text-sm">{title}</span>
+      <span className="mt-1 block text-xs font-normal text-fg-muted">{description}</span>
+    </span>
   );
 }
 

@@ -39,7 +39,10 @@ export function UseOwnCodingAgentSection({
   const apiOrigin = apiOriginFor(apiBaseUrl, window.location.origin);
   const answers = journey?.firstAgent ?? null;
   return (
-    <Section title="Use your own coding agent">
+    <Section
+      title="Use your own coding agent"
+      description="Claude Code, Codex or Cursor builds Opengeni into your product with one setup."
+    >
       {workspace ? (
         <div className="py-4">
           <OwnAgentSetup

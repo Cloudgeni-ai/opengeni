@@ -635,12 +635,13 @@ const effectiveBudgets = {
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
     wholeKibEnvelope(2_575_385, 1.5 * kib),
     // First run: the new-chat page sends a chat first run asked to start, once
-    // (composer-prefill's send hand-off and its readiness effect). Locally this
-    // head measures 1,874 raw over main 15234d2e1 built the same way
-    // (2,589,747 vs 2,587,873, Bun 1.4 Linux/x64), so the CI graph is about
-    // 2,577,259. Keep the established 1.5 KiB headroom; gzip, file count and
-    // every other cap stay fixed.
-    wholeKibEnvelope(2_577_259, 1.5 * kib),
+    // (composer-prefill's send hand-off and its readiness effect), and picks its
+    // starters from the saved first-run answer (the onboarding journey and the
+    // product prompt). Locally this head measures 5,331 raw over main
+    // 15234d2e1 built the same way (2,593,204 vs 2,587,873, Bun 1.4
+    // Linux/x64), so the CI graph is about 2,580,716. Keep the established
+    // 1.5 KiB headroom; gzip, file count and every other cap stay fixed.
+    wholeKibEnvelope(2_580_716, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

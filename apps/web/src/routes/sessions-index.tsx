@@ -73,6 +73,7 @@ import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
 import { takeComposerPrefill, takeComposerSend } from "@/lib/composer-prefill";
+import { useFirstRunStarters } from "@/lib/first-run-starters";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import {
@@ -1015,6 +1016,7 @@ function SessionsIndexRouteContent({
     // GitHub remains optional and must not keep the composer unsendable.
     resourceHydrationReady: context.workspaceMcpCatalogReady && tenancyCapabilities !== null,
   });
+  const firstRunStarters = useFirstRunStarters(workspaceId);
   // A first task picked on Get started arrives here to be confirmed with Send.
   // Take it only after the saved draft has loaded, so the draft can't replace it.
   const prefillComposer = useLatestCallback((text: string) => {
@@ -1997,6 +1999,8 @@ function SessionsIndexRouteContent({
         <RecentSessions workspaceId={workspaceId} />
         <NewSessionStarters
           workspaceId={workspaceId}
+          set={firstRunStarters.set}
+          productPrompt={firstRunStarters.productPrompt}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);

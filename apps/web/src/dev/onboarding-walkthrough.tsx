@@ -182,10 +182,11 @@ const SCREENS: readonly ScreenSpec[] = [
   {
     id: "new-chat",
     section: "In the app",
-    title: "New chat: composer on Luna, the suggestions and the demo",
+    title: "New chat: composer on Luna and suggestions for the answer",
     view: "new-chat",
     query: (path) => ({
       path: fixturePath(path),
+      ...(path === "invited" ? {} : answersQuery(path)),
       ...(path === "no-trial" ? { model: "none" } : { credits: "trial" }),
     }),
   },
