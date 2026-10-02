@@ -15,7 +15,6 @@ import { isModelCallFetch } from "../src/model-provider-transport";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
 import { buildCompactionReplacementHistory } from "../src/context-compaction";
-import compactedStagingShapes from "./fixtures/anthropic-compacted-staging-shapes.json";
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -267,10 +266,35 @@ function expectValidSystemPlacement(messages: any[]) {
   }
 }
 
-for (const fixture of compactedStagingShapes) {
-  test(`real staging post-compaction and machine-input shape ${fixture.sessionId} recovers without history writes`, async () => {
-    // Provenance: scoped read of durable session_history_items. Text is redacted;
-    // active row order, roles, string/array content and block counts are retained.
+const syntheticCompactedHistories = [false, true].flatMap((userArray) =>
+  [false, true].flatMap((systemArray) =>
+    [false, true].map((summaryArray) => {
+      const content = (texts: string[], array: boolean) =>
+        array ? texts.map((text) => ({ type: "input_text" as const, text })) : texts.join("\n");
+      return {
+        name: `user ${userArray ? "blocks" : "text"}, system ${systemArray ? "blocks" : "text"}, summary ${summaryArray ? "blocks" : "text"}`,
+        input: [
+          { role: "developer", content: "Available test tools" },
+          { role: "user", content: content(["Prepare a plan", "Include a timeline"], userArray) },
+          { role: "system", content: content(["Tool result", "Execution context"], systemArray) },
+          {
+            role: "user",
+            content: content(
+              ["Completed work", "Remaining work", "Continue the task"],
+              summaryArray,
+            ),
+          },
+          { role: "system", content: content(["Updated policy", "Current task state"], true) },
+        ],
+        wireUserBlocks: (userArray ? 2 : 1) + (summaryArray ? 3 : 1),
+        wireSystemBlocks: (systemArray ? 2 : 1) + 2,
+      };
+    }),
+  ),
+);
+
+for (const fixture of syntheticCompactedHistories) {
+  test(`generated compacted history (${fixture.name}) recovers without history writes`, async () => {
     const input = fixture.input as ModelRequest["input"];
     const before = JSON.stringify(input);
     const oldProjection = anthropicMessages(input);

@@ -491,6 +491,10 @@ const effectiveBudgets = {
     // bytes: 2,592,833 / 730,558. Keep the established 1.5 KiB allowance;
     // per-file, file-count, and unrelated caps stay fixed.
     wholeKibEnvelope(2_592_833, 1.5 * kib),
+    // Current main's shared client error handling measures 2,595,849 raw
+    // bytes on Bun 1.4 macOS/arm64; the integrated graph is identical.
+    // Restore the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_595_849, 1.5 * kib),
     // Custom MCP OAuth endpoint discovery and isolated popup completion:
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
