@@ -2465,7 +2465,11 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
         message: "Codex product id must match its upstream model slug",
       });
     }
-  });
+  })
+  .transform((model) => ({
+    ...model,
+    capabilities: reviewedCodexCatalogCapabilities(model.upstreamModelId, model.capabilities),
+  }));
 
 export const ModelCatalogDocument = z
   .object({
@@ -4721,9 +4725,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
-    modelId.startsWith("gpt-6-") ||
+    /^gpt-6(?:\.\d+)?-/u.test(modelId) ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId.startsWith("codex/gpt-6-")
+    /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4736,6 +4740,31 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function isReviewedGptVisionModel(slug: string): boolean {
+  return slug.startsWith("gpt-5.6-") || /^gpt-6(?:\.\d+)?-/u.test(slug);
+}
+
+/** Repair missing reviewed capabilities in live/stored Codex definitions.
+ * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ */
+function reviewedCodexCatalogCapabilities(
+  slug: string,
+  capabilities: ModelCapabilitiesV1,
+): ModelCapabilitiesV1 {
+  if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
+  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
+    (mode) => mode.id === "fast",
+  );
+  return normalizeCapabilities({
+    ...capabilities,
+    inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    latencyModes:
+      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
+        ? [...capabilities.latencyModes, fast]
+        : capabilities.latencyModes,
+  });
 }
 
 function builtinPromptCachingForModel(
@@ -4831,9 +4860,22 @@ function assertLatencyModeRunnable(
 ): void {
   const runnable = runnableLatencyModesForModel(settings, modelId);
   if (!runnable.includes(latencyMode)) {
-    throw new Error(
-      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    throw new UnsupportedLatencyModeError(modelId, latencyMode, runnable);
+  }
+}
+
+export class UnsupportedLatencyModeError extends Error {
+  readonly code = "UNSUPPORTED_LATENCY_MODE";
+
+  constructor(
+    readonly modelId: string,
+    readonly latencyMode: LatencyMode,
+    readonly allowedLatencyModes: readonly LatencyMode[],
+  ) {
+    super(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${allowedLatencyModes.join(", ")})`,
     );
+    this.name = "UnsupportedLatencyModeError";
   }
 }
 
@@ -5169,7 +5211,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+            vision: isReviewedGptVisionModel(slug),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5436,7 +5478,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
+          vision: isReviewedGptVisionModel(id),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
