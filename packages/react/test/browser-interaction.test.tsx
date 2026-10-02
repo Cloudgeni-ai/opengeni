@@ -1,6 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
@@ -2506,6 +2506,197 @@ describe("BrowserViewer", () => {
     } finally {
       await fixture.rendered.unmount();
       canvasMock.restore();
+    }
+  });
+
+  for (const state of ["failed", "outcome_unknown"] as const) {
+    test(`retains an HTTP 200 ${state} input notice while frames and polls remain healthy`, async () => {
+      const canvasMock = mockBrowserCanvas();
+      let requests = 0;
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const sdk = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        fetch: async (input, init) => {
+          expect(new URL(String(input)).pathname).toEndWith(
+            `/browser-sessions/${BROWSER_SESSION_ID}/actions`,
+          );
+          expect(init?.method).toBe("POST");
+          requests += 1;
+          const request = JSON.parse(String(init?.body)) as BrowserActionRequest;
+          await pending;
+          return Response.json({
+            ...receipt(observation(), request.operationId),
+            state,
+            observation: null,
+            error: {
+              code: state === "failed" ? "invalid_action" : "outcome_unknown",
+              message: "Inspect the page before continuing.",
+              retryable: false,
+            },
+          } satisfies BrowserActionReceipt);
+        },
+      });
+      const fixture = await renderViewerInputFixture(
+        async (request) => sdk.actInBrowser(WORKSPACE_ID, BROWSER_SESSION_ID, request),
+        true,
+      );
+      try {
+        await fixture.frame(1);
+        for (const text of ["a", "b", "c"]) {
+          await actRun(() => {
+            fixture.keyboard.value = text;
+            fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+          });
+          await flush(25);
+        }
+        await actRun(() => release());
+        await flush(50);
+        await fixture.frame(2);
+        await flush(2_050);
+        const notice = fixture.rendered.container.querySelector(
+          '[role="alert"][aria-label="Browser input status"]',
+        );
+        expect(notice?.textContent).toContain(
+          state === "failed" ? "Browser input failed" : "Input result unknown",
+        );
+        expect(notice?.textContent).toContain("Inspect the page before continuing.");
+        expect(fixture.canvas.className).not.toContain("invisible");
+        expect(fixture.keyboard.disabled).toBe(false);
+        expect(requests).toBe(1);
+        const check = Array.from(notice!.querySelectorAll("button")).find(
+          (button) => button.textContent === "Check browser",
+        );
+        await actRun(() => check!.click());
+        await flush(30);
+        expect(
+          fixture.rendered.container.querySelector('[aria-label="Browser input status"]'),
+        ).toBeNull();
+        expect(requests).toBe(1);
+        expect(fixture.actions).toHaveLength(1);
+      } finally {
+        release();
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    });
+  }
+
+  test("a fresh browser check cannot clear a newer failed input or replay either action", async () => {
+    let release!: () => void;
+    let gate: Promise<void> | null = null;
+    let failRead = false;
+    let actions = 0;
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => {
+        if (gate) await gate;
+        if (failRead) throw new Error("Browser check unavailable");
+        return {
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [target()],
+        };
+      },
+      observeBrowserTarget: async () => observation(),
+      actInBrowser: async (_workspaceId, _browserId, request) => ({
+        ...receipt(observation(), request.operationId),
+        state: "outcome_unknown",
+        observation: null,
+        error: {
+          code: "outcome_unknown",
+          message: `Unconfirmed input ${++actions}`,
+          retryable: false,
+        },
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    try {
+      await flush();
+      await actRun(() => hook.result.current.act({ type: "press", key: "Enter" }));
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let check!: Promise<void>;
+      await actRun(() => {
+        check = hook.result.current.refresh();
+      });
+      await actRun(() => hook.result.current.act({ type: "press", key: "Tab" }));
+      await actRun(async () => {
+        gate = null;
+        release();
+        await check;
+      });
+      expect(hook.result.current.inputFailure?.error?.message).toBe("Unconfirmed input 2");
+      failRead = true;
+      await actRun(() => hook.result.current.refresh());
+      expect(hook.result.current.inputFailure?.error?.message).toBe("Unconfirmed input 2");
+      failRead = false;
+      await actRun(() => hook.result.current.refresh());
+      expect(hook.result.current.inputFailure).toBeNull();
+      expect(actions).toBe(2);
+    } finally {
+      release?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a late input receipt cannot mark a replacement browser as failed", async () => {
+    let release!: (receipt: BrowserActionReceipt) => void;
+    const pending = new Promise<BrowserActionReceipt>((resolve) => {
+      release = resolve;
+    });
+    const client = fakeClient({
+      getBrowserSession: async (_workspaceId, id) => browserSession(id),
+      listBrowserTargets: async (_workspaceId, id) => ({
+        browserSessionId: id,
+        controllerGeneration: "controller-1",
+        targets: [target(id)],
+      }),
+      observeBrowserTarget: async (_workspaceId, id) => observation(id),
+      actInBrowser: async () => pending,
+    });
+    const hook = await renderHook(
+      ({ browserSessionId }: { browserSessionId: string }) =>
+        useBrowserSession({ client, workspaceId: WORKSPACE_ID, browserSessionId }),
+      { browserSessionId: BROWSER_SESSION_ID },
+    );
+    try {
+      await flush();
+      let action!: Promise<BrowserActionReceipt>;
+      await actRun(() => {
+        action = hook.result.current.act({ type: "press", key: "Enter" });
+      });
+      await hook.rerender({ browserSessionId: PEER_BROWSER_SESSION_ID });
+      await flush();
+      await actRun(async () => {
+        release({
+          ...receipt(observation()),
+          state: "failed",
+          observation: null,
+          error: {
+            code: "invalid_action",
+            message: "The old browser refused input.",
+            retryable: false,
+          },
+        });
+        await action;
+      });
+      expect(hook.result.current.session?.id).toBe(PEER_BROWSER_SESSION_ID);
+      expect(hook.result.current.inputFailure).toBeNull();
+    } finally {
+      await hook.unmount();
     }
   });
 

@@ -921,6 +921,32 @@ export function BrowserViewer({
                   .catch((cause) => notifyError(cause, "Could not reload."));
             }}
           />
+          {browser.inputFailure ? (
+            <div
+              role="alert"
+              aria-label="Browser input status"
+              className="flex shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-3 py-2 text-og-xs"
+            >
+              <CircleAlertIcon className="size-4 shrink-0 text-og-status-failed" />
+              <div className="min-w-0 flex-1">
+                <span className="font-medium">
+                  {browser.inputFailure.state === "failed"
+                    ? "Browser input failed"
+                    : "Input result unknown"}
+                </span>
+                <p className="text-og-fg-subtle">
+                  {browser.inputFailure.error?.message ?? "Inspect the page before continuing."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void browser.refresh()}
+                className="shrink-0 rounded border border-og-border px-2 py-1 transition hover:bg-og-surface-2"
+              >
+                Check browser
+              </button>
+            </div>
+          ) : null}
           <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
             <BrowserViewport
               // A new control scope must discard every buffered gesture and queued action.
@@ -1024,6 +1050,7 @@ export function BrowserViewer({
             profile={selectedProfile}
             target={browser.selectedTarget}
             observation={browser.observation}
+            inputFailure={browser.inputFailure}
             connectionState={displayConnectionState}
             refreshing={registry.refreshing}
             diagnosticsOpen={diagnosticsView !== null}
@@ -2642,6 +2669,7 @@ function BrowserStatusBar(props: {
   profile: BrowserIdentity | null;
   target: BrowserTarget | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
+  inputFailure: ReturnType<typeof useBrowserSession>["inputFailure"];
   connectionState: string;
   refreshing: boolean;
   diagnosticsOpen: boolean;
@@ -2669,6 +2697,11 @@ function BrowserStatusBar(props: {
             ? "Semantic"
             : browserConnectionLabel(props.connectionState)}
       </span>
+      {props.inputFailure ? (
+        <span className="text-og-status-failed">
+          {props.inputFailure.state === "failed" ? "Input failed" : "Input result unknown"}
+        </span>
+      ) : null}
       <span>{props.profile?.name ?? "Temporary browser"}</span>
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}

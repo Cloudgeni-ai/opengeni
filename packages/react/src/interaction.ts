@@ -58,6 +58,7 @@ export type {
 } from "./hooks/use-browser-identities";
 export { useBrowserSession } from "./hooks/use-browser-session";
 export type {
+  BrowserInputFailure,
   UseBrowserSessionOptions,
   UseBrowserSessionResult,
 } from "./hooks/use-browser-session";
