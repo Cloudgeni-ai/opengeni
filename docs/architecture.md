@@ -381,6 +381,11 @@ provider identity and all other executable fields remain exact.
 permitted serving account for browser/default/agent choices. It rechecks authority,
 refreshes tokens, and caches support by workspace/credential/revision.
 
+Claude's request-local system placement groups each assistant-delimited input
+phase at Anthropic's user/system boundary without changing canonical roles or
+content; `anthropic-request-error.ts` exposes bounded provider diagnostics to
+durable failure settlement while transport exception text stays structural.
+
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
