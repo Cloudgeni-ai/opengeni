@@ -5,7 +5,7 @@ import {
   type EffectiveControlResumeOption,
   type EffectiveSessionControl,
   type LatencyMode,
-  type OpenGeniApiError,
+  OpenGeniApiError,
   type ReasoningEffort,
   type ResourceRef,
   type SaveComposerDraftRequest,
@@ -15,7 +15,14 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
-import { composerSubmissionCanRetry, composerSubmissionErrorMessage } from "../lib/format";
+import {
+  ComposerReconciliationRequiredError,
+  ComposerStateError,
+  ComposerWorkspaceControlUnavailableError,
+  composerSubmissionCanRetry,
+  composerSubmissionErrorMessage,
+} from "../lib/format";
+import { useErrorMessage } from "../lib/error-message";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -98,6 +105,8 @@ export type ComposerOptimisticMessage = {
   triggerEventId?: string | null | undefined;
   appliedQueueVersion?: number | null | undefined;
   error?: string | undefined;
+  /** Bounded support reference retained independently of display copy across remounts. */
+  correlationId?: string | undefined;
   /** False for a definitive refusal that requires changing payment or allowance settings. */
   retryable?: boolean | undefined;
   outcomeUnknown?: boolean | undefined;
@@ -185,12 +194,19 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
       operation.state === "sending" || operation.state === "queued"
         ? true
         : operation.outcomeUnknown,
-    error:
-      operation.state === "sending"
-        ? "Delivery was interrupted; retry to reconcile this message."
-        : operation.error
-          ? composerSubmissionErrorMessage(new Error(operation.error))
-          : undefined,
+    correlationId: restoredCorrelationId(operation.correlationId),
+    error: restoredErrorReference(
+      operation.correlationId,
+      hasMcpCredentialUpdates && (operation.state === "sending" || operation.outcomeUnknown)
+        ? composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())
+        : operation.state === "sending"
+          ? "Delivery was interrupted; retry to reconcile this message."
+          : operation.outcomeUnknown
+            ? "The request could not be confirmed. Check its status before retrying."
+            : operation.error
+              ? composerSubmissionErrorMessage(new Error(operation.error))
+              : undefined,
+    ),
     retryable:
       operation.state === "sending" || operation.outcomeUnknown
         ? true
@@ -199,6 +215,18 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
     input: operation.input,
     canRetry: !hasMcpCredentialUpdates,
   }));
+}
+
+function restoredCorrelationId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[\w.:-]{1,128}$/u.test(value) ? value : undefined;
+}
+
+function restoredErrorReference(
+  reference: unknown,
+  message: string | undefined,
+): string | undefined {
+  const correlationId = restoredCorrelationId(reference);
+  return message && correlationId ? `${message} Reference: ${correlationId}.` : message;
 }
 
 function rememberOptimisticSendOperations(
@@ -651,6 +679,7 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerControllerState {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
+  const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
   if (!durableDrafts && !options.initialPolicy) {
     throw new Error("useComposer requires initialPolicy when draft persistence is disabled");
@@ -1071,7 +1100,9 @@ export function useComposer(
           const problem = asError(cause);
           const timedOut = problem.name === "TimeoutError";
           setDraftReadError(
-            timedOut ? new Error("Draft sync timed out. Retrying…", { cause }) : problem,
+            timedOut
+              ? new ComposerStateError("Draft sync timed out. Retrying…", { cause })
+              : problem,
           );
           if (
             timedOut ||
@@ -1391,9 +1422,20 @@ export function useComposer(
               ? {
                   ...candidate,
                   state: "failed",
-                  error: outcomeUnknown ? problem.message : composerSubmissionErrorMessage(problem),
+                  error: formatError(
+                    problem,
+                    outcomeUnknown &&
+                      !isOutcomeUnknownError(problem) &&
+                      !(problem instanceof ComposerReconciliationRequiredError)
+                      ? `The request could not be confirmed. Check its status before retrying.${problem instanceof OpenGeniApiError && problem.correlationId ? ` Reference: ${problem.correlationId}.` : ""}`
+                      : composerSubmissionErrorMessage(problem),
+                  ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
+                  correlationId:
+                    problem instanceof OpenGeniApiError
+                      ? problem.correlationId
+                      : candidate.correlationId,
                 }
               : candidate,
           ),
@@ -1444,15 +1486,13 @@ export function useComposer(
             return;
           }
           if (!operation.canRetry) {
-            throw new Error(
-              "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
-            );
+            throw new ComposerReconciliationRequiredError();
           }
         }
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
           if (!(await persistPayload(operation.draftPayload))) {
-            throw new Error("The message draft could not be saved before delivery.");
+            throw new ComposerStateError("The message draft could not be saved before delivery.");
           }
           expectedDraftRevision = draftRef.current?.revision;
         }
@@ -1470,7 +1510,7 @@ export function useComposer(
         let acceptedEvent: SessionEvent | null = null;
         if (durableDrafts) {
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new Error("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
           }
           const result = await client
             .submitComposerDraft(workspaceId, sessionId, {
@@ -1580,6 +1620,7 @@ export function useComposer(
     adoptDraftBase,
     client,
     durableDrafts,
+    formatError,
     markOptimisticAccepted,
     loadDraft,
     onSent,
@@ -1748,7 +1789,7 @@ export function useComposer(
             input.reasoningEffort === undefined ||
             input.latencyMode === undefined
           ) {
-            throw new Error("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
           }
           const result = await client.submitComposerDraft(workspaceId, sessionId, {
             text: input.text,
@@ -1853,11 +1894,7 @@ export function useComposer(
             return true;
           }
           if (!pending.canRetry) {
-            setError(
-              new Error(
-                "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
-              ),
-            );
+            setError(new ComposerReconciliationRequiredError());
             return false;
           }
           try {
@@ -2323,9 +2360,7 @@ export function useComposer(
             (blocker) => blocker.kind === "workspace",
           );
           if (!client.setWorkspaceInferenceState) {
-            throw new Error(
-              "@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.",
-            );
+            throw new ComposerWorkspaceControlUnavailableError();
           }
           const clientEventId = generateClientEventId();
           await replayOutcomeUnknown(() =>
@@ -2455,7 +2490,7 @@ export function useComposer(
   const addAnnotation = useCallback(
     (annotation: DraftTimelineAnnotation) => {
       if (annotationsRef.current.length >= 12) {
-        setError(new Error("A message can include at most 12 timeline annotations."));
+        setError(new ComposerStateError("A message can include at most 12 timeline annotations."));
         return;
       }
       const next = [...annotationsRef.current, annotation];

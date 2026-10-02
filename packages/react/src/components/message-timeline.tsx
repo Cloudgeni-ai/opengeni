@@ -1,4 +1,5 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
 import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
@@ -562,6 +563,7 @@ export function MessageTimeline({
   emptyState,
   className,
 }: MessageTimelineProps) {
+  const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
     const projectedItems = items ?? buildTimeline(events ?? []);
     if (!shouldRenderAuthNeeded) {
@@ -672,12 +674,12 @@ export function MessageTimeline({
             setNewerRetryPending(false);
             setNewerFailure({
               key: newerBoundaryKey,
-              message: reason instanceof Error ? reason.message : String(reason),
+              message: formatError(reason),
             });
           },
         );
     },
-    [onLoadNewer, loadingNewer, newerBoundaryKey],
+    [onLoadNewer, loadingNewer, newerBoundaryKey, formatError],
   );
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);

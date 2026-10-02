@@ -9,6 +9,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { SessionClientLike } from "./client";
 import { usePageLiveActivity } from "./hooks/internal";
 import { OpenGeniContext } from "./session-context";
+import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
+
+export type { ErrorMessageFormatter } from "./lib/error-message";
 
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -27,6 +30,8 @@ export type OpenGeniProviderProps = {
    * the SDK's tolerant-reader compatibility applies.
    */
   reloadOnApiContractChange?: boolean | undefined;
+  /** Host-owned error copy. Receives the original diagnostic error and neutral default copy. */
+  formatError?: ErrorMessageFormatter | undefined;
   children?: ReactNode;
 };
 
@@ -40,6 +45,7 @@ export function OpenGeniProvider({
   onWorkspaceControlEvent,
   onWorkspaceInteractionEvent,
   reloadOnApiContractChange = false,
+  formatError,
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -331,10 +337,12 @@ export function OpenGeniProvider({
     ],
   );
   return (
-    <OpenGeniContext.Provider value={value}>
-      {children}
-      {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
-    </OpenGeniContext.Provider>
+    <ErrorMessageContext.Provider value={formatError}>
+      <OpenGeniContext.Provider value={value}>
+        {children}
+        {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
+      </OpenGeniContext.Provider>
+    </ErrorMessageContext.Provider>
   );
 }
 

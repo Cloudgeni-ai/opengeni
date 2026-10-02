@@ -2,6 +2,7 @@ import type { OpenGeniClient } from "@opengeni/sdk";
 import { MenuIcon, SendIcon, XIcon } from "lucide-react";
 import { useCallback, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
@@ -198,7 +199,8 @@ function NewChat({
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ cause: unknown } | null>(null);
+  const formatError = useErrorMessage();
   // One key per draft, so a retried send returns the same chat.
   const idempotencyKey = useRef(crypto.randomUUID());
 
@@ -214,7 +216,7 @@ function NewChat({
       setText("");
       onCreated(id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ cause });
     } finally {
       setSending(false);
     }
@@ -228,7 +230,12 @@ function NewChat({
     >
       {error ? (
         <p role="alert" className="text-og-xs text-og-status-failed">
-          {error}
+          {formatError(
+            error.cause,
+            error.cause instanceof Error && error.cause.message === labels.newChatUnavailable
+              ? labels.newChatUnavailable
+              : undefined,
+          )}
         </p>
       ) : null}
       <div className="flex items-end gap-2 rounded-lg border border-og-border bg-og-surface-1 p-2">

@@ -154,7 +154,7 @@ describe("ApprovalSurface", () => {
       await Promise.resolve();
     });
     expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
-      "Decision was not accepted",
+      "The request could not be completed.",
     );
     expect(approve?.hasAttribute("disabled")).toBe(false);
 

@@ -1,4 +1,4 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -109,7 +109,7 @@ export function tryParseJson(text: string): unknown {
  * workspace no longer has.
  */
 export const CREDIT_EXHAUSTION_MESSAGE =
-  "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+  "Out of credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
 
 /** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
 export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE =
@@ -123,17 +123,53 @@ export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "Your organization doesn't have enough OpenGeni credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
+  "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
+
+/** Trusted, composer-owned guidance; unlike remote diagnostic prose, this is UI copy. */
+export class ComposerStateError extends Error {}
+
+/** A restored request has omitted credentials and must be reconciled, not replayed. */
+export class ComposerReconciliationRequiredError extends ComposerStateError {
+  constructor() {
+    super(
+      "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+    );
+  }
+}
+
+export class ComposerWorkspaceControlUnavailableError extends Error {
+  constructor() {
+    super("@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.");
+  }
+}
 
 export function composerSubmissionErrorMessage(error: Error): string {
+  if (error instanceof ComposerReconciliationRequiredError) {
+    return "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.";
+  }
+  if (error instanceof ComposerWorkspaceControlUnavailableError) {
+    return "This client cannot resume the workspace. Ask your administrator for a control-capable client.";
+  }
+  if (error instanceof ComposerStateError) return error.message;
+  if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
     // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
     // so this startup-path helper adds no SDK or wording imports.
-    return (error as { scope?: unknown }).scope === "workspace"
-      ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
-      : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
+    const message =
+      (error as { scope?: unknown }).scope === "workspace"
+        ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
+        : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
+    return composerErrorReference(error, message);
   }
-  return isComposerCreditRefusal(error) ? COMPOSER_PAYMENT_REQUIRED_MESSAGE : error.message;
+  return isComposerCreditRefusal(error)
+    ? composerErrorReference(error, COMPOSER_PAYMENT_REQUIRED_MESSAGE)
+    : formatErrorMessage(error);
+}
+
+function composerErrorReference(error: Error, message: string): string {
+  return error instanceof OpenGeniApiError && error.correlationId
+    ? `${message} Reference: ${error.correlationId}.`
+    : message;
 }
 
 /** These definitive refusals need a payment or allowance change, not an unchanged retry. */
@@ -228,7 +264,7 @@ export function presentFailure(payload: Record<string, unknown>): {
       typeof payload.database === "object" &&
       !Array.isArray(payload.database));
   if (databaseFailure) {
-    return { reason: "OpenGeni encountered a database error.", safetyRefusal: false };
+    return { reason: "The service encountered a database error.", safetyRefusal: false };
   }
   const text = (key: string): string | null => {
     const value = payload[key];

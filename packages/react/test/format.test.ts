@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  ComposerReconciliationRequiredError,
+  ComposerStateError,
+  ComposerWorkspaceControlUnavailableError,
   CREDIT_EXHAUSTION_MESSAGE,
   composerSubmissionErrorMessage,
   composerSubmissionCanRetry,
@@ -31,7 +34,7 @@ describe("failure presentation", () => {
       });
       const before = JSON.stringify(payload);
       expect(presentFailure(payload)).toEqual({
-        reason: "OpenGeni encountered a database error.",
+        reason: "The service encountered a database error.",
         safetyRefusal: false,
       });
       expect(JSON.stringify(payload)).toBe(before);
@@ -174,11 +177,32 @@ describe("composerSubmissionErrorMessage", () => {
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("Codex");
   });
 
-  test("passes unrelated submission errors through", () => {
+  test("keeps unrelated submission diagnostics out of default UI copy", () => {
     expect(composerSubmissionErrorMessage(new Error("network unavailable"))).toBe(
-      "network unavailable",
+      "The request could not be completed.",
     );
     expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
+  });
+
+  test("preserves composer-owned validation and safe reconciliation guidance", () => {
+    expect(
+      composerSubmissionErrorMessage(
+        new ComposerStateError("A message can include at most 12 timeline annotations."),
+      ),
+    ).toContain("at most 12");
+    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
+      "cannot safely retry",
+    );
+    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
+      "reconcile the session",
+    );
+    expect(new ComposerReconciliationRequiredError().message).toContain("Opengeni");
+    expect(
+      composerSubmissionErrorMessage(new ComposerWorkspaceControlUnavailableError()),
+    ).toContain("Ask your administrator");
+    expect(new ComposerWorkspaceControlUnavailableError().message).toContain(
+      "setWorkspaceInferenceState",
+    );
   });
 
   test("recognizes retained legacy credit errors without their API object", () => {
