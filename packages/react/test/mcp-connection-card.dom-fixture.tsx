@@ -188,6 +188,47 @@ test("stopping sign-in restores retry without waiting for an unresponsive backen
   }
 });
 
+test("custom MCP setup discovers missing auth from its live endpoint", async () => {
+  const inspected: string[] = [];
+  const custom = {
+    ...item,
+    id: "custom-oauth",
+    enabled: false,
+    authKind: null,
+    connectionRef: null,
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [custom] }),
+    inspectMcpAuthentication: async (_workspace: string, endpoint: string) => {
+      inspected.push(endpoint);
+      return { kind: "oauth2" };
+    },
+    connectTransport: () => ({}),
+  } as unknown as OpenGeniClient;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="custom-oauth"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    expect(inspected).toEqual(["https://service.example/mcp"]);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      [...document.querySelectorAll("button")].some(
+        (button) => button.textContent === "Continue to Example service",
+      ),
+    ).toBe(true);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a stalled connection reconciliation can close and reopen the inline card", async () => {
   const disconnected = {
     ...item,

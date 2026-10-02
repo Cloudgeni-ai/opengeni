@@ -29,7 +29,7 @@ await og.addExternalWorkspaceMember(workspaceId, {
 });
 ```
 
-Grant the final permission set at onboarding. Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, revoke with `cancelExternalWorkspaceMemberGrant` (this also cancels the user's running turns) and add the member again with a new `operationId`.
+Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, call `updateExternalWorkspaceMember` with a new `operationId` and the complete new set; do not revoke and re-add. Use `cancelExternalWorkspaceMemberGrant` only to remove access: it also cancels the user's running turns.
 
 Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
 

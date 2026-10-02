@@ -66,6 +66,49 @@ and examples are in [Registry configuration](#registry-configuration). In
 database catalog mode the host JSON still owns transport and credentials; the
 singleton owns membership.
 
+### Customer OpenAI and Azure OpenAI keys
+
+The web console offers **OpenAI** and **Azure OpenAI** in the model step after
+organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+asks for an API key, with the model preselected and an optional Change model
+control. Azure asks for an API key, resource endpoint
+(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
+name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+are refused. Azure endpoint/deployment/API-version configuration remains available
+separately for deployment operators.
+
+The web flow sends `verifyModelAccess: true` on connection creation. Before
+saving, the API checks the exact provider/model with a short Responses message
+(32 output tokens maximum, `store: false`, no tools). Provider usage applies;
+this uses no OpenGeni credits. Failed checks do not save a connection and show
+safe actionable errors without reflecting upstream response text. Other API
+callers can omit the check for offline provisioning. A successful setup check
+does not establish ongoing provider health. The connected model is selected in
+the current user’s next-chat draft from onboarding and Workspace settings.
+
+These connections are workspace-owned, including in the onboarding Personal
+workspace. The existing Connections API encrypts the key at rest and returns
+metadata only. Usage is externally billed to that provider account and consumes
+no OpenGeni credits. Organization provider inheritance does not apply to these
+workspace connections. Replace a key, endpoint, or model by disconnecting and
+reconnecting; the new connection has a distinct model ID.
+
+`directModelProvider` metadata declares the provider, model/deployment, and Azure
+endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
+include the exact connection ID and version. The metadata-only workspace catalog
+adds a secret-free provider definition; the worker loads only the selected exact
+active connection, verifies its definition and access, and overlays its decrypted
+key for that turn. Revocation or an identity mismatch fails closed. Missing
+customer connections never fall back to deployment credentials. Customer routes
+use conservative text/function capabilities; hosted tools and reasoning controls
+are not enabled implicitly for an arbitrary Azure deployment name.
+
+Canonical: `packages/contracts/src/direct-model-provider.ts`,
+`packages/core/src/domain/direct-model-provider.ts` for the setup check,
+`withDirectModelProviders` in `packages/config/src/index.ts`,
+`loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+
 ### Reviewed overlays — not generic JSON
 
 | Route                        | Enable                                        | Wire             | Catalog                                                           |
@@ -254,6 +297,18 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
+`validation_failed` (`model is not available: <id>`) plus
+`details: { code: "model_unavailable", modelId }`; retrying the same request
+cannot succeed, so clients must choose another model. The web console detects
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
+
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model
 selection immediately, while an already accepted turn or an existing-session
@@ -360,6 +415,7 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 
@@ -665,6 +721,13 @@ It does not include aliases, display labels, health, entitlement state, concrete
 credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
+
+Accepted policies also tolerate strictly additive latency-mode and input-modality
+declarations. Verification reconstructs an exact historical subset digest, keeping
+the frozen runnable mode and every retained mode declaration unchanged. It never
+rewrites the accepted policy or request tier. Removed modes/modalities, changed
+mode support or billing multipliers, and all other executable-definition drift
+remain fail-closed; this path does not compose with historical digest migrations.
 
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
@@ -1021,9 +1084,12 @@ first match wins:
    against a database catalog (edited independently of this env value), fall
    back instead: when the configured model is not selectable, the first
    selectable credits-billed model in operator catalog order is used at its own
-   default reasoning. This step is skipped when the deployment default is
-   already a selectable credits-billed model, so an operator's paid default is
-   never replaced.
+   default reasoning. When the deployment default is already a selectable
+   credits-billed model, it is never replaced: it keeps the deployment effort,
+   except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
+   `credits`) when it is the credits default model itself, so a deployment
+   whose default is `gpt-6-luna` still starts credit holders on extra high
+   reasoning.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -1350,19 +1416,33 @@ durable telemetry and UI currently show aggregate writes. Registry pricing has o
 cache-write rate, which must match its configured TTL (do not use a 5-minute write
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
 billing; OpenGeni does not debit these tokens as credits.
-Organization connections use conservative 200k context / 168k
-input / 150k compaction limits and 32k maximum output; configurable registry
-providers can declare model-specific limits. The managed connection catalog enables
-reasoning only for the captured adaptive models `claude-opus-5-5` and
-`claude-sonnet-5-5`; other model IDs
-remain available without a reasoning option. Registry providers can explicitly
-declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
+Managed Claude connections use per-model native profiles from
+`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
+expose low, medium, high, xhigh and max, with medium as the new-selection default.
+Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
+threshold and up to 128k output; the native request includes the 1M-context beta.
+Smaller models retain their own output ceiling. Unknown IDs keep conservative
+200k context / 168k input / 150k compaction / 32k output and no adaptive thinking.
+Registry providers can explicitly declare additional verified model capabilities
+and lower request defaults. Native xhigh is never silently downgraded to high;
+unsupported effort on a known adaptive model is rejected before network I/O.
+Historical models requiring fixed thinking budgets are not enabled through
+adaptive-thinking controls. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.
 HTTP error details are read for at most 5 seconds (or the shorter configured
 stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
 hide the HTTP status, request ID or Retry-After header; caller cancellation
 interrupts the read.
+
+HTTP and SSE permission failures remain access errors, separate from expired
+credentials. A provider `model_access_suspended` rejection reports the validated
+UTC suspension deadline when present and stops automatic retry; reconnecting
+does not lift a provider suspension. Native `stop_reason: "refusal"` is a terminal
+policy rejection even when HTTP is 200 and content is empty. It uses the existing
+policy-refusal presentation, never completes an empty successful response, and
+never executes tools from refused output. These failures retain the request ID
+without persisting arbitrary provider explanation text.
 
 
 ### Claude subscription request identity
@@ -1435,7 +1515,10 @@ re-reads the captured generation and writes only encrypted token material. Renew
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
 dispatch, including title and compaction requests; replacement credentials are never
-lent to an older turn. Catalog loading is offline, so Claude renewal failures do not
+lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
+the previously captured token is never used as a fallback. Claude currently has
+one connection per scope and no Codex-style account pool or quota failover.
+Catalog loading is offline, so Claude renewal failures do not
 block turns using another provider. Invalid refresh grants require sign-in again;
 transient failures retain credentials and existing usage readings.
 

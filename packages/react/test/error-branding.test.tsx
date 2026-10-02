@@ -98,6 +98,131 @@ async function submitNewChat(container: HTMLElement) {
 }
 
 describe("native branded-host error paths", () => {
+  test("Steer formatting receives the raw rejection while hook state and callbacks stay Error-typed", async () => {
+    const sdk = client();
+    const failure = {
+      code: "host_error",
+      details: { action: "steer" },
+      message: "OpenGeni diagnostic",
+    };
+    sdk.steerMessage = async () => {
+      throw failure;
+    };
+    const sessionId = crypto.randomUUID();
+    let composer!: ComposerControllerState;
+    let diagnostic: Error | undefined;
+    const received: unknown[] = [];
+    function Harness() {
+      composer = useComposer(sessionId, {
+        draftPersistence: "disabled",
+        initialPolicy: {
+          model: "host-default",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+        onDeliveryError: (error) => {
+          diagnostic = error;
+        },
+      });
+      return <ChatComposer composer={composer} />;
+    }
+    const view = await renderComponent(
+      <OpenGeniProvider
+        client={sdk}
+        workspaceId={WORKSPACE_ID}
+        formatError={(original, message) => {
+          received.push(original);
+          return `ACME: ${message}`;
+        }}
+      >
+        <Harness />
+      </OpenGeniProvider>,
+    );
+    try {
+      await actRun(() => composer.setValue("A bounded steer"));
+      await actRun(() => composer.steer());
+      await flush(30);
+      expect(received).toContain(failure);
+      expect(diagnostic).toBeInstanceOf(Error);
+      expect(composer.error).toBeInstanceOf(Error);
+      expect(composer.error?.message).toBe("[object Object]");
+      expect(view.container.textContent).toContain("ACME: The request could not be completed.");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("list-read formatting receives the original non-Error rejection", async () => {
+    const sdk = client();
+    const failure = {
+      code: "host_error",
+      details: { action: "list" },
+      message: "OpenGeni diagnostic",
+    };
+    sdk.listSessionPage = async () => {
+      throw failure;
+    };
+    let received: unknown;
+    const view = await renderComponent(
+      <OpenGeniProvider
+        client={sdk}
+        workspaceId={WORKSPACE_ID}
+        formatError={(original, message) => {
+          received = original;
+          return `ACME: ${message}`;
+        }}
+      >
+        <SessionList onSelect={() => {}} />
+      </OpenGeniProvider>,
+    );
+    try {
+      await flush(40);
+      expect(received).toBe(failure);
+      expect(view.container.querySelector("[role='alert']")!.textContent).toBe(
+        "ACME: The request could not be completed.",
+      );
+      expect(view.container.textContent).not.toContain("No chats yet");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("genuine Error causes remain diagnostic details, not replacement formatter inputs", async () => {
+    const cause = { message: "nested private diagnostic" };
+    const failure = new Error("outer diagnostic", { cause });
+    let received: unknown;
+    const view = await renderComponent(
+      <OpenGeniProvider
+        client={client()}
+        workspaceId={WORKSPACE_ID}
+        formatError={(original, message) => {
+          received = original;
+          return message;
+        }}
+      >
+        <QueueErrorAlert
+          queue={
+            {
+              mutationError: failure,
+              error: null,
+              clearMutationError: () => {},
+              refresh: async () => {},
+            } as never
+          }
+        />
+      </OpenGeniProvider>,
+    );
+    try {
+      expect(received).toBe(failure);
+      expect(failure.cause).toBe(cause);
+      expect(view.container.querySelector("[role='alert']")!.textContent).toBe(
+        "The request could not be completed.",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a throwing host formatter cannot break NewChat failure settlement", async () => {
     let attempts = 0;
     const view = await renderComponent(
@@ -538,8 +663,12 @@ describe("native branded-host error paths", () => {
     );
     try {
       await actRun(() =>
-        view.container
-          .querySelectorAll<HTMLButtonElement>("[data-approval-id='approval'] button")[1]!
+        [
+          ...view.container.querySelectorAll<HTMLButtonElement>(
+            "[data-approval-id='approval'] button",
+          ),
+        ]
+          .find((button) => button.textContent === "Approve")!
           .click(),
       );
       await flush(20);
@@ -547,7 +676,7 @@ describe("native branded-host error paths", () => {
         "Check its status before retrying",
       );
       expect(view.container.textContent).not.toMatch(/opengeni/i);
-      expect(view.container.textContent).toContain("Approval required");
+      expect(view.container.textContent).toContain("Approval needed");
     } finally {
       await view.unmount();
     }

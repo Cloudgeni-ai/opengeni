@@ -1117,6 +1117,8 @@ export type ComputerSessionCapabilities = {
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
+  /** Raw window input stays in the background. Absent means foreground-only. */
+  backgroundInput?: boolean | undefined;
   parallelApps: boolean;
 };
 

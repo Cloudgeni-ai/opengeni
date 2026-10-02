@@ -1027,6 +1027,7 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionBackgroundCommand,
+  SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
@@ -1041,6 +1042,8 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListEntry,
+  SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,
   SessionQueueMutationResponse,
@@ -1392,3 +1395,5 @@ export type {
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "./types";
+
+export { sessionListEntry } from "./session-list-entries";

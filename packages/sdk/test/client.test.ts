@@ -2219,6 +2219,43 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
+  test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: "next-page",
+        filtersApplied: true,
+        sortBy: "name",
+      }),
+    );
+    expect(
+      await client.listSessionSummaryPage(WORKSPACE_ID, { channelId: null, sortBy: "name" }),
+    ).toEqual({
+      projection: "summary",
+      pinned: [],
+      sessions: [],
+      nextCursor: "next-page",
+      filtersApplied: true,
+      sortBy: "name",
+    });
+    expect(new URL(requests[0]!.url).searchParams.get("projection")).toBe("summary");
+    const older = makeClient(() => jsonResponse([])).client;
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { cursor: "opaque" })).rejects.toThrow(
+      "stable session-page cursors",
+    );
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
+      "filtered session lists",
+    );
+    const summaryServer = makeClient(() =>
+      jsonResponse({ projection: "summary", pinned: [], sessions: [], nextCursor: null }),
+    ).client;
+    await expect(summaryServer.listSessionPage(WORKSPACE_ID)).rejects.toThrow(
+      "full session details",
+    );
+    expect((await summaryServer.listSessionSummaryPage(WORKSPACE_ID)).projection).toBe("summary");
+  });
+
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
@@ -2262,6 +2299,16 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+  });
+
+  test("can request ordinary pages without repeatedly hydrating pinned details", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await client.listSessionPage(WORKSPACE_ID, { limit: 4, includePinned: false });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=4&includePinned=false`,
     );
   });
 

@@ -8,6 +8,8 @@ Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
+Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
@@ -76,6 +78,8 @@ newer consumed activity or explicit mark-read supersedes it.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
 SSE replays durable events, subscribes to fanout, and backfills gaps from Postgres.
+Replay reads select a byte-bounded prefix before transferring payloads. One
+oversized event travels intact, alone; a short page does not prove EOF.
 NATS restarts affect delivery/reachability, never history or queued obligations.
 
 Raw-isolation rollback:
@@ -101,6 +105,11 @@ Conversation/goals/queues/usage/provider/tool transcripts never enter workflow h
 
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
+
+Stalled turn finalization requests host-owned graceful shutdown, so peer turns
+checkpoint and hand off before the existing shutdown ceiling contains a stuck
+writer. Cleanup may consume an independently committed exact retained-process
+terminal proof; it never manufactures quiescence or replays an unknown command.
 
 Control observation is not settlement: unavailable reads/owned attempts keep
 bounded, interruptible waits without marking idle, revoking writers or dispatching
@@ -359,9 +368,15 @@ catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
 provider/billing identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
+native model effort vocabularies, defaults, context windows and output ceilings;
+both catalog projection and request shaping consume it.
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.
+Accepted execution-policy digests tolerate only provably additive latency-mode
+and input-modality declarations, retaining the frozen mode and request tier;
+provider identity and all other executable fields remain exact.
 `packages/core/src/codex-model-availability.ts` requires exact live support on every
 permitted serving account for browser/default/agent choices. It rechecks authority,
 refreshes tokens, and caches support by workspace/credential/revision.
@@ -475,7 +490,9 @@ supervision. See [command supervision](command-supervision.md).
 Modal `TaskExecStart` recovery requires read-only task/router lookup or local
 channel-readiness failure before any Start RPC, for native and pinned-SDK
 setup/filesystem/archive commands alike. Typed proof permits finite
-five-replacement same-turn recovery; server DNS text and post-dispatch errors
+five-replacement same-turn recovery. Exhaustion parks proven non-dispatch as
+`sandboxSetupRecoveryExhausted`, retaining count five; peek and claim refuse
+automatic replay. Server DNS text and post-dispatch errors
 never prove non-execution. Uncertain Starts return typed outcome-unknown
 results, never transport retries, and block replay. An unwound setup parks its
 turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse
@@ -491,9 +508,8 @@ changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
-Legacy stopping-error containment requires owner quiescence and cancellation grace.
-Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
-Observation failure never proves exit; uncancelled running commands stay excluded.
+Supervision-key presence—even malformed—blocks legacy containment enrollment,
+capture, publication and teardown. Observation failure never proves exit.
 
 Acquisition/mutation waits extend once through the first durable capture deadline
 plus handoff grace (one-hour cap). Expired/replacement claims never replenish
@@ -1352,12 +1368,20 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
+
+Linux managed-browser cleanup and recovery share exact profile/executable and
+process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
+
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
 
 Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
+
+`ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
+Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
 
 Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
@@ -1530,10 +1554,10 @@ Post-start recovery preserves IDs/cursors, budgets and writer fences.
 Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
 helper UUID/cursors.
 
-Idle, unobservable Modal commands use the existing drain after group-wide agent,
-holder, mutation, and idle-grace checks. Records remain until termination;
-unobserved outcomes become lost. Command backoff never suppresses rotation's
-provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+Legacy retained Modal commands, whatever their health, use the existing drain once
+the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
+wait or pending request; they settle lost with a notice. Command backoff never
+suppresses rotation's provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 `apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
 the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,

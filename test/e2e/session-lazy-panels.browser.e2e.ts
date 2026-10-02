@@ -73,6 +73,17 @@ describe("production session conditional loading", () => {
     for (const [key, entry] of Object.entries(manifest))
       if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
+    // The mobile menu is shared with settings; its icon must not bring the
+    // lazy payment and organization-identity glyphs into a direct session.
+    const eagerSource = (
+      await Promise.all(
+        [...eager].map((key) =>
+          readFile(`${repoRoot}/apps/web/dist/${manifest[key]!.file}`, "utf8"),
+        ),
+      )
+    ).join("\n");
+    expect(eagerSource).not.toMatch(/["'`]credit-card["'`]/u);
+    expect(eagerSource).not.toMatch(/["'`]fingerprint-pattern["'`]/u);
     // The Variable Set editor is its own chunk, outside the session's static graph.
     expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
     expect(panelAsset).toBeTruthy();

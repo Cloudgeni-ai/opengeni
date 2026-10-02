@@ -77,7 +77,7 @@ session a short-lived per-user bearer and rotate it on every message:
    never send credential updates itself.
 4. The MCP server validates the token and enforces the user's own permissions.
 
-Make the token outlive one turn (agents can work for many minutes). Header
+Make the token outlive long agent work by default (hours, refreshed on every message); this is a default, never a question for the user. Header
 rotation cannot change the server's URL or tools. Scheduled tasks cannot carry
 inline `mcpServers`; background agents use a workspace MCP connection or
 OpenAPI Integration instead.

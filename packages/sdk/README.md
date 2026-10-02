@@ -169,6 +169,19 @@ workspace, and `false` disables listing. Archive and restore go through
 sends only `{ initialMessage, idempotencyKey }`, so it needs the
 `createSession` hook.
 
+`listSessionPage` includes personal pinned details by default. A caller with a
+separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
+to avoid repeatedly loading those details. Ordinary pages still exclude pinned
+rows; `pinsOnly: true` and `includePinned: false` cannot be combined. Older API
+versions may ignore `includePinned` and return the default pin projection.
+
+For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
+pin rules and cursors, returning `SessionListEntry` records. Entries include
+display/rename titles, creator, lifecycle, personal state and hierarchy counts;
+prompts and execution configuration remain on `getSession`. Older APIs return
+full pages that the SDK projects locally. Unknown filters/cursors still fail
+explicitly rather than returning an unfiltered result.
+
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
 workspace. Only the native routes `OpenGeniProvider` and the conversation use

@@ -130,7 +130,12 @@ export type {
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
 } from "./voice-recording-store";
-export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  composerSubmissionErrorMessage,
+  isModelUnavailableSubmissionError,
+} from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,

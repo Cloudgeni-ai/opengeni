@@ -61,7 +61,7 @@ See [Goals](/concepts/goals).
 ## Bring results back
 
 - **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report, with the same authorization as any other call. This is the most direct path.
-- **Workspace webhooks.** OpenGeni can notify your product when a turn completes or fails, when a session's status changes, or when an agent waits for an approval or a question. Events are signed, delivered at least once, and may arrive out of order; treat each as a signal to read the session through the API. See [Host-managed credentials & webhooks](/integrate/host-managed-integrations#webhooks).
+- **Webhooks.** OpenGeni can notify your product when a turn completes or fails, when a session's status changes, when an agent waits for an approval or a question, or when a usage allowance crosses a threshold, runs out, or resets. Set them up per workspace or once for the organization. Events are signed, delivered at least once, and may arrive out of order; treat each as a signal to read the session through the API. See [Webhooks and credentials](/guides/webhooks-and-credentials#webhooks).
 - **Read the session.** `listEvents` and `getSession` return the full history and final answer at any time.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

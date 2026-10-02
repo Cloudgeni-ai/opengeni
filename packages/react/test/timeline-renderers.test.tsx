@@ -2301,6 +2301,30 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("readable turns carry a live approval wait in the header, not a second banner", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy it" }),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "terraform apply" },
+      }),
+      timelineEvent("session.requiresAction", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} status="requires_action" turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+
+    // The host's approval surface is the one place to decide.
+    expect(r.container.textContent).toContain("Waiting for you");
+    expect(r.container.textContent).not.toContain("Approval needed");
+
+    await r.unmount();
+  });
+
   test("a STREAMING cluster never folds while another prompt waits outside the timeline", async () => {
     resetTimelineEvents();
     const events = [

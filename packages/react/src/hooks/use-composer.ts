@@ -16,13 +16,14 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
   composerSubmissionCanRetry,
   composerSubmissionErrorMessage,
 } from "../lib/format";
-import { useErrorMessage } from "../lib/error-message";
+import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -226,7 +227,9 @@ function restoredErrorReference(
   message: string | undefined,
 ): string | undefined {
   const correlationId = restoredCorrelationId(reference);
-  return message && correlationId ? `${message} Reference: ${correlationId}.` : message;
+  return message && correlationId && message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE
+    ? `${message} Reference: ${correlationId}.`
+    : message;
 }
 
 function rememberOptimisticSendOperations(
@@ -2290,7 +2293,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
         }
       } finally {
         if (
@@ -2334,7 +2337,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
         }
       } finally {
         if (
@@ -2888,7 +2891,7 @@ async function replayOutcomeUnknown<T>(command: () => Promise<T>): Promise<T> {
 }
 
 function asError(cause: unknown): Error {
-  return cause instanceof Error ? cause : new Error(String(cause));
+  return normalizeError(cause);
 }
 
 function promptRoutingFromAcceptedEvent(

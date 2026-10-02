@@ -127,12 +127,40 @@
   "footer": {
     "socials": {
       "github": "https://github.com/Cloudgeni-ai/opengeni"
-    }
+    },
+    "links": [
+      {
+        "header": "Support",
+        "items": [
+          {
+            "label": "support@opengeni.ai",
+            "href": "mailto:support@opengeni.ai"
+          }
+        ]
+      },
+      {
+        "header": "Legal",
+        "items": [
+          {
+            "label": "Privacy Policy",
+            "href": "https://opengeni.ai/privacy"
+          },
+          {
+            "label": "Terms of Service",
+            "href": "https://opengeni.ai/terms"
+          }
+        ]
+      }
+    ]
   },
   "redirects": [
     {
       "source": "/guides/integrate-your-product",
       "destination": "/embed-manually"
+    },
+    {
+      "source": "/guides/coding-agents",
+      "destination": "/guides/developer-plugin"
     }
   ]
 }

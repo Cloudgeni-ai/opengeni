@@ -63,13 +63,15 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
+- Two choices belong to the user: who can see a chat (`chats`: private, shared
+  or isolated) and whether the agent may change data. If the request or
+  repository does not settle one, ask ONE short, plain-language question with a
+  recommended answer, before building. Never ask what the repository answers.
+- Do not ask about background work, schedules, session length or credential
+  lifetime up front. Long agent sessions just work. Only when the requested
+  feature itself is scheduled or runs in the background (for example "email me
+  a weekly report"), ask for the missing details (day, time, time zone, where
+  results appear) and say in one sentence why you need them. See
   [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.

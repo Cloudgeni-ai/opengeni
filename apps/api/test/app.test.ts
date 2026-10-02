@@ -1117,6 +1117,7 @@ describe("API helpers", () => {
     });
 
     expect(params.mode).toBe("payment");
+    expect(params.allow_promotion_codes).toBe(true);
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
@@ -1128,6 +1129,7 @@ describe("API helpers", () => {
           opengeni_credit_amount_usd: "25.50",
           opengeni_credit_micros: "25500000",
           opengeni_credit_idempotency_key: "checkout:test",
+          opengeni_credit_coupon_v1: "1",
         },
       },
     });
@@ -1135,9 +1137,11 @@ describe("API helpers", () => {
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
     expect(params.metadata?.opengeni_credit_idempotency_key).toBe("checkout:test");
+    expect(params.metadata?.opengeni_credit_coupon_v1).toBe("1");
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe(
       "00000000-0000-4000-8000-000000000001",
     );
+    expect(params.payment_intent_data?.metadata?.opengeni_credit_coupon_v1).toBe("1");
   });
 
   test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
@@ -1169,6 +1173,36 @@ describe("API helpers", () => {
     ).toThrow("successUrl must use the OpenGeni public origin");
   });
 
+  test("returns local Stripe Checkout to the configured web origin", () => {
+    const base = {
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 1000,
+      amountMicros: 10_000_000,
+      publicBaseUrl: "http://127.0.0.1:8000",
+      webBaseUrl: "http://127.0.0.1:3000",
+      idempotencyKey: "checkout:test-local-return",
+    };
+    const params = stripeCheckoutSessionCreateParams({
+      ...base,
+      successUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=success",
+      cancelUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=cancelled",
+    });
+    expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
+    expect(params.cancel_url).toContain("checkout=cancelled");
+    expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
+      "http://127.0.0.1:3000/billing?checkout=success",
+    );
+    expect(() =>
+      stripeCheckoutSessionCreateParams({
+        ...base,
+        successUrl: "https://evil.example/checkout",
+      }),
+    ).toThrow("successUrl must use the OpenGeni public or web origin");
+  });
+
   test("namespaces Stripe customer mirrors by live and test mode", () => {
     expect(stripeCustomerProvider({ livemode: true } as never)).toBe("stripe:live");
     expect(stripeCustomerProvider({ livemode: false } as never)).toBe("stripe:test");
@@ -1198,6 +1232,14 @@ describe("API helpers", () => {
         returnUrl: "https://evil.example/billing",
       }),
     ).toThrow("returnUrl must use the OpenGeni public origin");
+    expect(
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "http://127.0.0.1:8000",
+        webBaseUrl: "http://127.0.0.1:3000",
+        returnUrl: "http://127.0.0.1:3000/workspaces/test/organization?section=billing",
+      }).return_url,
+    ).toBe("http://127.0.0.1:3000/workspaces/test/organization?section=billing");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {
@@ -2023,6 +2065,25 @@ describe("GET /v1/config/client", () => {
     expect(
       (await fetchClientConfig(testSettings({ documentationUrl: null }))).documentationUrl,
     ).toBeNull();
+  });
+
+  test("publishes legal document links only when the operator configures them", async () => {
+    const unconfigured = await fetchClientConfig(testSettings());
+    expect(unconfigured.legal).toEqual({});
+    expect(unconfigured.supportEmail).toBeUndefined();
+
+    const configured = await fetchClientConfig(
+      testSettings({
+        legalPrivacyPolicyUrl: "https://opengeni.ai/privacy",
+        legalTermsOfServiceUrl: "https://opengeni.ai/terms",
+        supportEmail: "support@opengeni.ai",
+      }),
+    );
+    expect(configured.legal).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(configured.supportEmail).toBe("support@opengeni.ai");
   });
 
   test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {

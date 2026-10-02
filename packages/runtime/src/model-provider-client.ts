@@ -266,6 +266,12 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 }
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  if (
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
+    !provider.apiKey?.trim()
+  ) {
+    throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
     provider.credentialSource?.kind === "workspace_connection" ||

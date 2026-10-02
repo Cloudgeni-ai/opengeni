@@ -15,6 +15,11 @@ on:
     paths:
       - "agent/**"
       - ".github/workflows/agent-ci.yml"
+      - "packages/browserd/src/cua/**"
+      - "packages/browserd/scripts/stage-cua-runtime.ts"
+      - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
+      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
+      - "packages/browserd/package.json"
   push:
     branches:
       - main
@@ -22,6 +27,11 @@ on:
     paths:
       - "agent/**"
       - ".github/workflows/agent-ci.yml"
+      - "packages/browserd/src/cua/**"
+      - "packages/browserd/scripts/stage-cua-runtime.ts"
+      - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
+      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
+      - "packages/browserd/package.json"
 
 concurrency:
   group: agent-ci-${{ github.ref }}
@@ -115,6 +125,22 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Install Bun for the compiled macOS desktop adapter
+        if: runner.os == 'macOS'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Verify both macOS CUA packages and the isolated compiled loader
+        if: runner.os == 'macOS'
+        working-directory: .
+        env:
+          OPENGENI_CUA_PACKAGING_E2E: "1"
+        run: |
+          bun install --frozen-lockfile --os=darwin --cpu='*'
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
+          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable

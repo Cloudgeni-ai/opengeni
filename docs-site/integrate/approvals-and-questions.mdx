@@ -47,6 +47,6 @@ Persist a stable `clientEventId` before sending a decision and retain its return
 
 If a user sends an ordinary message while a session waits, the pending approval or question is cancelled and the message is delivered as a Steer. "Actually, do this instead" is one action.
 
-To notify people who are not watching, subscribe a [workspace webhook](/integrate/host-managed-integrations#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
+To notify people who are not watching, subscribe a [webhook](/guides/webhooks-and-credentials#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

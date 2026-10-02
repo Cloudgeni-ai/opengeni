@@ -28,6 +28,7 @@ type CreditRequiredPromptProps = {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
+  purpose?: "required" | "topup";
   onOpenChange: (open: boolean) => void;
 };
 
@@ -41,6 +42,7 @@ export function CreditRequiredPromptView({
   workspaceId,
   accountId,
   canBuyCredits,
+  purpose = "required",
   onOpenChange,
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
@@ -88,19 +90,24 @@ export function CreditRequiredPromptView({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add Opengeni credits to continue</DialogTitle>
+          <DialogTitle>
+            {purpose === "topup" ? "Add Opengeni credits" : "Add Opengeni credits to continue"}
+          </DialogTitle>
           <DialogDescription>
-            This chat uses Opengeni credits and none are currently available. Buy credits, or
-            connect a model you already pay for.
+            {purpose === "topup"
+              ? "Choose an amount, then enter a gift code or payment details in Stripe Checkout."
+              : "This chat uses Opengeni credits and none are currently available. Buy credits, or connect a model you already pay for."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
-            {/* The footer's Connect a model is this dialog's one primary. */}
+            <p className="text-xs text-fg-subtle">
+              For a gift code, select its stated credit value and enter the code in Stripe Checkout.
+            </p>
             <Button
               type="button"
-              variant="outline"
+              variant={purpose === "topup" ? "default" : "outline"}
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
               {...analyticsAction("buy_credits")}
@@ -110,7 +117,7 @@ export function CreditRequiredPromptView({
               ) : (
                 <CreditCardIcon className="size-4" />
               )}
-              Buy credits
+              {purpose === "topup" ? "Continue to Stripe" : "Buy credits"}
             </Button>
           </div>
         ) : !canBuyCredits ? (
@@ -118,20 +125,22 @@ export function CreditRequiredPromptView({
             Ask an organization owner to add credits, or an admin to connect a model.
           </p>
         ) : null}
-        <DialogFooter>
-          <Button asChild type="button">
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              search={{ section: "models", workspace: workspaceId }}
-              onClick={() => onOpenChange(false)}
-              {...analyticsAction("connect_model")}
-            >
-              <SparklesIcon className="size-3.5" />
-              Connect a model
-            </Link>
-          </Button>
-        </DialogFooter>
+        {purpose === "required" ? (
+          <DialogFooter>
+            <Button asChild type="button">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "models", workspace: workspaceId }}
+                onClick={() => onOpenChange(false)}
+                {...analyticsAction("connect_model")}
+              >
+                <SparklesIcon className="size-3.5" />
+                Connect a model
+              </Link>
+            </Button>
+          </DialogFooter>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

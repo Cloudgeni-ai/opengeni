@@ -1,4 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
+import { deflateSync } from "node:zlib";
 import { StreamClose, StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
@@ -1544,6 +1545,52 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 
+  test("routes advertised background window clicks and typing without focusing the desktop", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture(undefined, undefined, {
+      currentTarget: { ...target(), title: "Background window", focused: false },
+      backgroundInput: true,
+    });
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      expect(fixture.keyboard.disabled).toBe(false);
+      expect(fixture.rendered.container.textContent).not.toContain("Control directly");
+      expect(fixture.rendered.container.textContent).toContain(
+        "clicks and typing stay in the background",
+      );
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            clientX: 20,
+            clientY: 20,
+            button: 0,
+          }),
+        );
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            clientX: 20,
+            clientY: 20,
+            button: 0,
+          }),
+        );
+        fixture.keyboard.value = "background text";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+      await flush(40);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "pointer", frameId: "frame-1", action: "click", x: 0, y: 0 },
+        { type: "keyboard", action: "type", value: "background text" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("verifies the native clipboard before issuing a paste keystroke", async () => {
     const currentTarget = target();
     const actions: Array<ComputerActionReceipt["state"] | string> = [];
@@ -1725,6 +1772,163 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
+  test("fits captured windows to the dock while preserving pixels and input coordinates", async () => {
+    const canvasMock = mockComputerCanvas();
+    const resizeMock = mockComputerViewportResize();
+    const fixture = await renderComputerInputFixture();
+    const canvas = fixture.rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
+    const viewport = canvas.parentElement!;
+    let available = { width: 1_000, height: 900 };
+    let measurements = 0;
+    Object.defineProperties(viewport, {
+      clientWidth: {
+        get: () => {
+          measurements += 1;
+          return available.width;
+        },
+      },
+      clientHeight: { get: () => available.height },
+    });
+    canvas.getBoundingClientRect = () =>
+      ({
+        left: 10,
+        top: 20,
+        width: Number.parseFloat(canvas.style.width),
+        height: Number.parseFloat(canvas.style.height),
+      }) as DOMRect;
+    try {
+      await fixture.frame(1, { width: 400, height: 300 });
+      await canvasMock.finishDecode(0);
+      expect([canvas.width, canvas.height]).toEqual([400, 300]);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["1000px", "750px"]);
+      const observer = resizeMock.observers.find(({ observed }) => observed.has(viewport))!;
+      expect(observer.observed).toEqual(new Set([viewport]));
+
+      await actRun(() => {
+        for (const type of ["pointerdown", "pointerup"]) {
+          canvas.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              clientX: 760,
+              clientY: 207.5,
+            }),
+          );
+        }
+      });
+      await flush(350);
+      expect(fixture.actions.map(({ action }) => action)).toEqual([
+        { type: "pointer", frameId: "frame-1", action: "click", x: 300, y: 75 },
+      ]);
+
+      measurements = 0;
+      await fixture.frame(2, { width: 400, height: 300 });
+      await canvasMock.finishDecode(1);
+      expect(measurements).toBe(0);
+      expect(resizeMock.observers.filter(({ observed }) => observed.has(viewport))).toHaveLength(1);
+
+      available = { width: 240, height: 500 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+      expect([canvas.width, canvas.height]).toEqual([400, 300]);
+
+      available = { width: 0, height: 0 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+      await fixture.frame(3, { width: 300, height: 600 });
+      await canvasMock.finishDecode(2);
+      expect([canvas.width, canvas.height]).toEqual([300, 600]);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+
+      available = { width: 1_000, height: 900 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["450px", "900px"]);
+      await fixture.frame(4, { width: 1_200, height: 600 });
+      await canvasMock.finishDecode(3);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["1000px", "500px"]);
+      expect([canvas.width, canvas.height]).toEqual([1_200, 600]);
+
+      await fixture.rendered.unmount();
+      expect(observer.disconnected).toBe(true);
+      expect(observer.observed.size).toBe(0);
+    } finally {
+      await fixture.rendered.unmount();
+      resizeMock.restore();
+      canvasMock.restore();
+    }
+  });
+
+  test("sends only committed desktop composition text", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      await actRun(() => fixture.keyboard.focus());
+      await actRun(() =>
+        fixture.keyboard.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })),
+      );
+      for (const text of ["n", "ni"]) {
+        await actRun(() => {
+          fixture.keyboard.value = text;
+          fixture.keyboard.dispatchEvent(
+            new InputEvent("input", { bubbles: true, data: text, isComposing: true }),
+          );
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              bubbles: true,
+              key: "ArrowDown",
+              isComposing: true,
+            }),
+          );
+        });
+        await flush(25);
+      }
+      expect(fixture.actions).toEqual([]);
+      await actRun(() => {
+        fixture.keyboard.value = "你";
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "你" }),
+        );
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "你" }));
+      });
+      await flush(25);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "keyboard", action: "type", value: "你" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
+  test("keeps native composing keys and uncommitted desktop input local", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      await actRun(() => fixture.keyboard.focus());
+      await actRun(() => {
+        fixture.keyboard.value = "uncommitted";
+        fixture.keyboard.dispatchEvent(
+          new InputEvent("input", { bubbles: true, isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", isComposing: true }),
+        );
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 229 }),
+        );
+        fixture.keyboard.value = "";
+        fixture.keyboard.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "" }),
+        );
+      });
+      await flush(25);
+      expect(fixture.actions).toEqual([]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
   test("retains keyboard focus after a canvas click and types after that click", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
@@ -1856,6 +2060,292 @@ describe("ComputerViewer input reliability", () => {
     });
   }
 
+  test("keeps control unavailable across live frames and reconnects the same desktop", async () => {
+    const canvasMock = mockComputerCanvas();
+    let controlUnavailable = true;
+    const fixture = await renderComputerInputFixture(
+      async (request) => {
+        if (controlUnavailable) throw new OpenGeniApiError(503, "Desktop control unavailable");
+        return receipt(observation(), request.operationId);
+      },
+      undefined,
+      {
+        currentTarget: { ...target(), title: "Background window", focused: false },
+        backgroundInput: true,
+      },
+    );
+    const refreshed: string[] = [];
+    const getSession = fixture.client.getComputerSession;
+    const listTargets = fixture.client.listComputerTargets;
+    fixture.client.getComputerSession = async (workspaceId, computerSessionId, options) => {
+      refreshed.push(`session:${workspaceId}:${computerSessionId}`);
+      return await getSession(workspaceId, computerSessionId, options);
+    };
+    fixture.client.listComputerTargets = async (workspaceId, computerSessionId, options) => {
+      refreshed.push(`targets:${workspaceId}:${computerSessionId}`);
+      return await listTargets(workspaceId, computerSessionId, options);
+    };
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await actRun(() => {
+        fixture.keyboard.focus();
+        fixture.keyboard.value = "a";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "a" }));
+      });
+      await flush(50);
+      await fixture.frame(2);
+      await canvasMock.finishDecode(1);
+      expect(fixture.actions).toHaveLength(1);
+      expect(fixture.keyboard.disabled).toBe(true);
+      expect(fixture.rendered.container.textContent).toContain("Desktop controls unavailable");
+      expect(fixture.rendered.container.textContent).toContain("Reconnect to use desktop input");
+      expect(fixture.rendered.container.textContent).not.toContain("App controls remain available");
+      await actRun(() =>
+        [...fixture.rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent?.startsWith("Controls "))!
+          .click(),
+      );
+      expect(
+        [...fixture.rendered.container.querySelectorAll("button")].find((button) =>
+          button.textContent?.endsWith("Run checks"),
+        )?.disabled,
+      ).toBe(true);
+      controlUnavailable = false;
+      await actRun(() =>
+        [...fixture.rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent === "Reconnect")!
+          .click(),
+      );
+      await flush(40);
+      expect(refreshed).toEqual([
+        `session:${WORKSPACE_ID}:${COMPUTER_SESSION_ID}`,
+        `targets:${WORKSPACE_ID}:${COMPUTER_SESSION_ID}`,
+      ]);
+      expect(fixture.actions).toHaveLength(1);
+      const socket = fixture.sockets.at(-1)!;
+      await dispatch(socket, "open");
+      await dispatch(socket, "message", { data: frameMessage("window-1", 1).buffer });
+      await canvasMock.finishDecode(2);
+      expect(fixture.keyboard.disabled).toBe(false);
+      expect(fixture.rendered.container.textContent).not.toContain("Desktop controls unavailable");
+      await actRun(() => {
+        fixture.keyboard.focus();
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+        );
+      });
+      await flush();
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "keyboard", action: "type", value: "a" },
+        { type: "keyboard", action: "press", value: "Enter" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test.each(["discovery", "clipboard"] as const)(
+    "keeps controls unavailable after a %s service failure while capture continues",
+    async (source) => {
+      const canvasMock = mockComputerCanvas();
+      const fixture = await renderComputerInputFixture(
+        async (request) => receipt(observation(), request.operationId),
+        async () => {
+          throw new OpenGeniApiError(503, "Desktop control unavailable");
+        },
+      );
+      try {
+        await fixture.frame(1);
+        await canvasMock.finishDecode(0);
+        if (source === "discovery") {
+          fixture.client.listComputerTargets = async () => {
+            throw new OpenGeniApiError(503, "Desktop control unavailable");
+          };
+          await actRun(() =>
+            fixture.rendered.container
+              .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+              .click(),
+          );
+        } else {
+          await actRun(() => {
+            fixture.keyboard.focus();
+            fixture.keyboard.dispatchEvent(new Event("copy", { bubbles: true, cancelable: true }));
+          });
+        }
+        await flush();
+        await fixture.frame(2);
+        await canvasMock.finishDecode(1);
+        expect(fixture.keyboard.disabled).toBe(true);
+        expect(fixture.rendered.container.textContent).toContain("Desktop controls unavailable");
+        expect(fixture.rendered.container.textContent).not.toContain(
+          "App controls remain available",
+        );
+        expect(canvasMock.painted).toEqual([0, 1]);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test("keeps background semantic actions usable when app inspection fails", async () => {
+    const canvasMock = mockComputerCanvas();
+    const backgroundTarget = { ...target(), focused: false };
+    const fixture = await renderComputerInputFixture(async (request) =>
+      receipt(observation(backgroundTarget), request.operationId),
+    );
+    fixture.client.listComputerTargets = async () => ({
+      computerSessionId: COMPUTER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targets: [backgroundTarget],
+    });
+    fixture.client.observeComputerTarget = async () => {
+      throw new OpenGeniApiError(500, "App inspection unavailable");
+    };
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await actRun(() =>
+        fixture.rendered.container
+          .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+          .click(),
+      );
+      await flush();
+      expect(fixture.keyboard.disabled).toBe(true);
+      expect(fixture.rendered.container.textContent).toContain(
+        "Background view · use app controls",
+      );
+      await actRun(() =>
+        [...fixture.rendered.container.querySelectorAll("button")]
+          .find((button) => button.textContent?.startsWith("Controls "))!
+          .click(),
+      );
+      const control = [...fixture.rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.endsWith("Run checks"),
+      )!;
+      expect(control.disabled).toBe(false);
+      await actRun(() => control.click());
+      await flush();
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test.each([500, 503])(
+    "keeps live input available after a %s app inspection failure",
+    async (status) => {
+      const canvasMock = mockComputerCanvas();
+      const fixture = await renderComputerInputFixture();
+      fixture.client.observeComputerTarget = async () => {
+        throw new OpenGeniApiError(status, "App inspection unavailable");
+      };
+      try {
+        await fixture.frame(1);
+        await canvasMock.finishDecode(0);
+        await actRun(() =>
+          fixture.rendered.container
+            .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+            .click(),
+        );
+        await flush();
+        await fixture.frame(2);
+        await canvasMock.finishDecode(1);
+        expect(fixture.canvas.className).not.toContain("invisible");
+        expect(fixture.keyboard.disabled).toBe(false);
+        expect(fixture.rendered.container.textContent).not.toContain(
+          "Desktop controls unavailable",
+        );
+        await actRun(() => {
+          fixture.keyboard.focus();
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+          );
+        });
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+        expect(fixture.actions[0]!.targetId).toBe("window-1");
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test.each([
+    ["stale target", new OpenGeniApiError(409, "Target changed")],
+    [
+      "OS refusal",
+      new OpenGeniApiError(
+        500,
+        JSON.stringify({
+          error: {
+            status: 500,
+            code: "control_failure",
+            message: "App action unavailable",
+            retryable: false,
+            outcomeUnknown: false,
+            details: {
+              interactionLayer: "connected_machine",
+              interactionSurface: "computer",
+              controlFailureCode: "os",
+            },
+          },
+        }),
+      ),
+    ],
+    [
+      "uncertain gateway mutation",
+      new OpenGeniApiError(504, "Gateway unavailable", { mutation: true }),
+    ],
+    [
+      "uncertain transport mutation",
+      new OpenGeniApiError(0, "Transport unavailable", { outcomeUnknown: true }),
+    ],
+  ] as const)("does not label a %s as a control outage or replay it", async (_name, error) => {
+    const canvasMock = mockComputerCanvas();
+    let fail = true;
+    const fixture = await renderComputerInputFixture(async (request) => {
+      if (fail) throw error;
+      return receipt(observation(), request.operationId);
+    });
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      await actRun(() => {
+        fixture.keyboard.focus();
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+        );
+      });
+      await flush();
+      await fixture.frame(2);
+      await canvasMock.finishDecode(1);
+      expect(fixture.actions).toHaveLength(1);
+      expect(fixture.keyboard.disabled).toBe(false);
+      expect(fixture.canvas.className).not.toContain("invisible");
+      expect(fixture.rendered.container.textContent).not.toContain("Desktop controls unavailable");
+      fail = false;
+      await actRun(() => {
+        fixture.keyboard.focus();
+        fixture.keyboard.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Tab" }));
+      });
+      await flush();
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "keyboard", action: "press", value: "Enter" },
+        { type: "keyboard", action: "press", value: "Tab" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("hides a frame after the selected target generation changes", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(async (request) =>
@@ -1984,6 +2474,43 @@ describe("ComputerViewer input reliability", () => {
   });
 });
 
+function mockComputerViewportResize() {
+  const priorObserver = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+  const observers: ControlledResizeObserver[] = [];
+  class ControlledResizeObserver implements ResizeObserver {
+    readonly observed = new Set<Element>();
+    disconnected = false;
+
+    constructor(private readonly callback: ResizeObserverCallback) {
+      observers.push(this);
+    }
+    observe(element: Element): void {
+      this.observed.add(element);
+    }
+    unobserve(element: Element): void {
+      this.observed.delete(element);
+    }
+    disconnect(): void {
+      this.disconnected = true;
+      this.observed.clear();
+    }
+    emit(): void {
+      this.callback([], this);
+    }
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ControlledResizeObserver,
+  });
+  return {
+    observers,
+    restore: () => {
+      if (priorObserver) Object.defineProperty(globalThis, "ResizeObserver", priorObserver);
+      else Reflect.deleteProperty(globalThis, "ResizeObserver");
+    },
+  };
+}
+
 function mockComputerCanvas(deferred = false) {
   const priorBitmap = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
   const priorContext = HTMLCanvasElement.prototype.getContext;
@@ -2027,14 +2554,19 @@ function computerWheel(deltaY: number): WheelEvent {
 async function renderComputerInputFixture(
   actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
   readComputerClipboard?: () => Promise<ComputerClipboard>,
+  options: { currentTarget?: ComputerTarget; backgroundInput?: boolean } = {},
 ) {
-  const currentTarget = target();
+  const currentTarget = options.currentTarget ?? target();
+  const currentSession = computerSession();
+  if (options.backgroundInput !== undefined) {
+    currentSession.capabilities!.backgroundInput = options.backgroundInput;
+  }
   const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
   const actions: ComputerActionRequest[] = [];
   const sockets: FakeComputerSocket[] = [];
   const client = fakeClient({
-    listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
-    getComputerSession: async () => computerSession(),
+    listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+    getComputerSession: async () => currentSession,
     listComputerTargets: async () => ({
       computerSessionId: COMPUTER_SESSION_ID,
       controllerGeneration: "controller-1",
@@ -2073,6 +2605,7 @@ async function renderComputerInputFixture(
     client,
     rendered,
     actions,
+    sockets,
     get canvas() {
       const canvas = rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
       canvas.getBoundingClientRect = () =>
@@ -2117,12 +2650,15 @@ function frameMessage(
   sequence: number,
   overrides: Partial<ComputerFrameMetadata> = {},
 ): Uint8Array {
-  const png = Uint8Array.from(
-    atob(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-    ),
-    (character) => character.charCodeAt(0),
-  );
+  const png =
+    (overrides.width ?? 1) !== 1 || (overrides.height ?? 1) !== 1
+      ? solidPng(overrides.width ?? 1, overrides.height ?? 1)
+      : Uint8Array.from(
+          atob(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          ),
+          (character) => character.charCodeAt(0),
+        );
   const metadata: ComputerFrameMetadata = {
     frameId: `frame-${sequence}`,
     computerSessionId: COMPUTER_SESSION_ID,
@@ -2134,7 +2670,7 @@ function frameMessage(
     width: 1,
     height: 1,
     capturedAt: NOW,
-    sha256: PNG_SHA256,
+    sha256: new Bun.CryptoHasher("sha256").update(png).digest("hex"),
     ...overrides,
   };
   const encodedMetadata = new TextEncoder().encode(JSON.stringify(metadata));
@@ -2143,4 +2679,27 @@ function frameMessage(
   message.set(encodedMetadata, 4);
   message.set(png, 4 + encodedMetadata.byteLength);
   return message;
+}
+
+function solidPng(width: number, height: number): Uint8Array {
+  const chunk = (name: string, data: Uint8Array) => {
+    const body = Buffer.concat([Buffer.from(name), data]);
+    const result = Buffer.alloc(body.length + 8);
+    result.writeUInt32BE(data.length, 0);
+    result.set(body, 4);
+    result.writeUInt32BE(Bun.hash.crc32(body), body.length + 4);
+    return result;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const pixels = Buffer.alloc(height * (width * 3 + 1));
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(pixels)),
+    chunk("IEND", new Uint8Array()),
+  ]);
 }

@@ -85,6 +85,7 @@ test("subscription wire identity matches the pinned client while request identif
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");
   expect(betas).toContain("claude-code-20250219");
+  expect(betas).toContain("context-1m-2025-08-07");
   expect(betas).toContain("extended-cache-ttl-2025-04-11");
   expect(betas).not.toContain("message-threads-2026-08-12");
   expect(betas).not.toContain("advisor-tool-2026-03-01");
@@ -101,6 +102,7 @@ test("API-key calls do not inherit subscription identity or billing attribution"
       const body = JSON.parse(String(init?.body));
       expect(headers.has("x-app")).toBe(false);
       expect(headers.get("x-api-key")).toBe("test-token");
+      expect(headers.get("anthropic-beta")?.split(",")).toContain("context-1m-2025-08-07");
       expect(body.metadata).toBeUndefined();
       expect(body.system[0].text).toBe("OpenGeni instructions");
       return Response.json(result);

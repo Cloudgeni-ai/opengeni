@@ -1,4 +1,4 @@
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 function archiveTimestampOrder(timestamp: string | null | undefined) {
   const milliseconds = timestamp ? Date.parse(timestamp) : 0;
@@ -54,7 +54,7 @@ export type SessionContinuationChannelEvidence = readonly [
  * object to overwrite unrelated list projections that may have advanced while
  * the request was in flight.
  */
-export function applySessionArchiveProjection(current: Session, updated: Session): Session {
+export function applySessionArchiveProjection<T extends Session>(current: T, updated: Session): T {
   if ((current.archiveVersion ?? 0) > (updated.archiveVersion ?? 0)) return current;
   const currentTime = archiveTimestampOrder(current.archivedAt);
   const updatedTime = archiveTimestampOrder(updated.archivedAt);

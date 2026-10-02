@@ -143,6 +143,32 @@ export class ComposerWorkspaceControlUnavailableError extends Error {
   }
 }
 
+/**
+ * The send named a model that is no longer in the live catalog (retired or
+ * removed). Retrying the same send cannot succeed; the person must choose
+ * another model, and the typed message stays recoverable via Edit message.
+ */
+export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
+
+/** `details.code` the API sets on a 422 for a model missing from the live catalog. */
+export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
+
+/**
+ * Is this send refusal "the model is no longer available"? Reads the typed
+ * `details.code`, and also the historical message so a refusal persisted
+ * before a reload (only its text survives) or from an older API is recognized.
+ */
+export function isModelUnavailableSubmissionError(error: Error): boolean {
+  if (error instanceof OpenGeniApiError && error.details?.code === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return true;
+  }
+  return (
+    error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    /^OpenGeni API 422: model is not available: /.test(error.message)
+  );
+}
+
 export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof ComposerReconciliationRequiredError) {
     return "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.";
@@ -152,6 +178,7 @@ export function composerSubmissionErrorMessage(error: Error): string {
   }
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
+  if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
     // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
     // so this startup-path helper adds no SDK or wording imports.
@@ -172,10 +199,11 @@ function composerErrorReference(error: Error, message: string): string {
     : message;
 }
 
-/** These definitive refusals need a payment or allowance change, not an unchanged retry. */
+/** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */
 export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
+    isModelUnavailableSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
   );
 }

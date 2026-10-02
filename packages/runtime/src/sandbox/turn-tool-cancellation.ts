@@ -100,6 +100,7 @@ type CommandCancellationSession = {
   supportsPty?(): boolean;
   supportsCommandInput?(providerSessionId: number): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  reconcileRetainedProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
@@ -477,8 +478,14 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
-    '  [ -n "$__opengeni_setsid" ] || exit 125',
-    `  exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    '  if [ -n "$__opengeni_setsid" ]; then',
+    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    "  fi",
+    // macOS has setsid(2), but no setsid executable. The parent is proven
+    // not to be a group leader, so the same process can safely start a session.
+    '  __opengeni_python="$(command -v python3 2>/dev/null)"',
+    '  [ -n "$__opengeni_python" ] || exit 125',
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");
@@ -1843,11 +1850,54 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     return state.cancellation;
   }
 
+  private async reconcileSettledShellSession(state: ActiveShellSession): Promise<boolean> {
+    try {
+      if (await state.processSession?.reconcileRetainedProcess?.(state.sessionId)) {
+        this.shellSessions.delete(state.sessionId);
+        return true;
+      }
+    } catch {
+      // A failed durable read is not exit proof; keep physical cancellation live.
+    }
+    return false;
+  }
+
+  private async awaitShellControl<T>(
+    state: ActiveShellSession,
+    operation: Promise<T>,
+  ): Promise<{ reconciled: true } | { reconciled: false; value: T }> {
+    if (!state.processSession?.reconcileRetainedProcess)
+      return { reconciled: false, value: await operation };
+    // These are idempotent control observations/cancellation, never the original
+    // command. A late failure is contained if independent physical proof wins.
+    const observed = operation.then(
+      (value) => ({ kind: "resolved" as const, value }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    while (true) {
+      const result = await Promise.race([
+        observed,
+        delay(SHELL_POLL_MS).then(() => ({ kind: "pending" as const })),
+      ]);
+      if (result.kind === "resolved") return { reconciled: false, value: result.value };
+      if (result.kind === "rejected") throw result.error;
+      if (await this.reconcileSettledShellSession(state)) return { reconciled: true };
+    }
+  }
+
   private async cancelShellSessionOnce(state: ActiveShellSession): Promise<void> {
+    if (await this.reconcileSettledShellSession(state)) return;
     // Native supervision is authoritative for supported commands. Never run a
     // numeric PID/PGID helper against a supervised invocation, even when its
     // original shell wrapper happened to create a legacy marker.
-    if (await state.processSession?.cancelSupervisedCommand?.(state.sessionId, "explicit_stop")) {
+    const nativeCancellation = await this.awaitShellControl(
+      state,
+      Promise.resolve(
+        state.processSession?.cancelSupervisedCommand?.(state.sessionId, "explicit_stop"),
+      ),
+    );
+    if (nativeCancellation.reconciled) return;
+    if (nativeCancellation.value) {
       while (state.processSession?.hasRetainedProcess?.(state.sessionId) === true) {
         if (await this.rawWrite(state, "", SHELL_POLL_MS)) {
           await this.forgetShellSessionAfterExactSettlement(state);
@@ -1886,12 +1936,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       state.processSession.writeStdinForProcessControl
     ) {
       while (state.processSession.hasRetainedProcess?.(state.sessionId) === true) {
+        if (await this.reconcileSettledShellSession(state)) return;
         try {
-          const output = await state.processSession.execCommandForProcessControl(
-            state.sessionId,
-            shellHelperArgs(retainedShellCancellationCommand(state)),
+          const control = await this.awaitShellControl(
+            state,
+            state.processSession.execCommandForProcessControl(
+              state.sessionId,
+              shellHelperArgs(retainedShellCancellationCommand(state)),
+            ),
           );
-          const exitCode = parseExecBannerExitCode(output);
+          if (control.reconciled) return;
+          const exitCode = parseExecBannerExitCode(control.value);
           if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) {
             await this.forgetShellSessionAfterExactSettlement(state);
             return;
@@ -1981,25 +2036,31 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     chars: string,
     yieldTimeMs: number,
   ): Promise<boolean> {
+    if (await this.reconcileSettledShellSession(state)) return true;
     if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) return false;
     try {
-      const output = state.processSession?.writeStdinForProcessControl
-        ? await state.processSession.writeStdinForProcessControl({
-            sessionId: state.sessionId,
-            chars,
-            yieldTimeMs,
-            maxOutputTokens: 128,
-          })
-        : await state.writeInvoke!(
-            state.runContext,
-            JSON.stringify({
-              session_id: state.sessionId,
+      const control = await this.awaitShellControl(
+        state,
+        state.processSession?.writeStdinForProcessControl
+          ? state.processSession.writeStdinForProcessControl({
+              sessionId: state.sessionId,
               chars,
-              yield_time_ms: yieldTimeMs,
-              max_output_tokens: 128,
-            }),
-            undefined,
-          );
+              yieldTimeMs,
+              maxOutputTokens: 128,
+            })
+          : state.writeInvoke!(
+              state.runContext,
+              JSON.stringify({
+                session_id: state.sessionId,
+                chars,
+                yield_time_ms: yieldTimeMs,
+                max_output_tokens: 128,
+              }),
+              undefined,
+            ),
+      );
+      if (control.reconciled) return true;
+      const output = control.value;
       if (typeof output !== "string") return false;
       // Preserve legacy missing-handle classification only where the adapter
       // has no typed loss contract. Otherwise only metadata can prove exit.

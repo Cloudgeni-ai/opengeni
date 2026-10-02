@@ -5,8 +5,10 @@ import { configuredProviders, type ResolvedModelProvider } from "@opengeni/confi
 import { testSettings } from "@opengeni/testing";
 import {
   AnthropicMessagesModel,
+  AnthropicProviderRejection,
   anthropicMessages,
   anthropicResponse,
+  anthropicSse,
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
 import { isModelCallFetch } from "../src/model-provider-transport";
@@ -47,6 +49,179 @@ const response = (content: unknown[], stop = "end_turn") => ({
     cache_creation_input_tokens: 30,
     output_tokens: 7,
   },
+});
+
+test.each(["low", "medium", "high", "xhigh", "max"] as const)(
+  "native effort %s reaches the wire unchanged for both 5.5 models",
+  (effort) => {
+    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+      const req = request();
+      req.modelSettings = { reasoning: { effort } };
+      const body = buildAnthropicRequest(req, model, provider, false);
+      expect(body.thinking).toEqual({ type: "adaptive" });
+      expect(body.output_config.effort).toBe(effort);
+      expect(body.max_tokens).toBe(128_000);
+    }
+  },
+);
+
+test("known models reject unsupported effort instead of silently downgrading", () => {
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "xhigh" } };
+  expect(() => buildAnthropicRequest(req, "claude-opus-4-6", provider, false)).toThrow(
+    "does not support this reasoning effort",
+  );
+});
+
+test("nonadaptive managed models never receive adaptive thinking and keep their own output limits", () => {
+  const managed = {
+    ...provider,
+    kind: "anthropic-workspace" as const,
+    anthropic: {
+      auth: "api-key" as const,
+      cacheTtl: "5m" as const,
+      maxOutputTokens: 128_000,
+      streamIdleTimeoutMs: 600_000,
+    },
+  };
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "high" } };
+  for (const [id, limit] of [
+    ["claude-haiku-4-5-20251001", 64_000],
+    ["claude-unknown", 32_000],
+  ] as const) {
+    const body = buildAnthropicRequest(req, id, managed, false);
+    expect(body.thinking).toBeUndefined();
+    expect(body.output_config).toBeUndefined();
+    expect(body.max_tokens).toBe(limit);
+  }
+  req.modelSettings.maxTokens = 1_000;
+  expect(buildAnthropicRequest(req, "claude-opus-5-5", managed, false).max_tokens).toBe(1_000);
+});
+
+test("explicit registry reasoning for an unknown model remains available", () => {
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "xhigh" } };
+  expect(buildAnthropicRequest(req, "claude-custom", provider, false).output_config.effort).toBe(
+    "xhigh",
+  );
+});
+
+test("caller abort interrupts a stalled SSE read without waiting for cleanup", async () => {
+  const abort = new AbortController();
+  const reason = new Error("synthetic caller interruption");
+  let cancelled = false;
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () =>
+      new Response(
+        new ReadableStream(
+          {
+            pull() {
+              abort.abort(reason);
+            },
+            cancel() {
+              cancelled = true;
+              return new Promise<void>(() => {});
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+      )) as typeof fetch,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Abort did not settle")), 1000);
+  });
+  try {
+    const read = async () => {
+      for await (const event of model.getStreamedResponse({ ...request(), signal: abort.signal })) {
+        void event;
+      }
+    };
+    await expect(Promise.race([read(), deadline])).rejects.toBe(reason);
+    expect(cancelled).toBe(true);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test.each([false, true])(
+  "abort at the response boundary cancels the owned body (stream=%s)",
+  async (streamed) => {
+    const abort = new AbortController();
+    const reason = new Error("synthetic response-boundary interruption");
+    let cancelled = false;
+    const model = new AnthropicMessagesModel(provider, "claude-test", (async () => {
+      const body = new ReadableStream({
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      abort.abort(reason);
+      return new Response(body);
+    }) as typeof fetch);
+    const req = { ...request(), signal: abort.signal };
+    const read = async () => {
+      if (!streamed) return model.getResponse(req);
+      for await (const event of model.getStreamedResponse(req)) {
+        void event;
+      }
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Abort did not settle")), 1000);
+    });
+    try {
+      await expect(Promise.race([read(), deadline])).rejects.toBe(reason);
+      expect(cancelled).toBe(true);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+);
+
+test("SSE cancellation listeners end with each read, including consumer pauses", async () => {
+  const abort = new AbortController();
+  const signal = abort.signal;
+  const listeners = new Set<unknown>();
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (type, listener, options) => {
+    if (type === "abort") listeners.add(listener);
+    add(type, listener, options);
+  };
+  signal.removeEventListener = (type, listener, options) => {
+    if (type === "abort") listeners.delete(listener);
+    remove(type, listener, options);
+  };
+  let count = 0;
+  let cancelled = false;
+  const reason = new Error("Synthetic paused consumer cancellation");
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(`data: {"type":"ping","index":${count++}}\n\n`),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const consume = async () => {
+    for await (const event of anthropicSse(body, 1000, signal)) {
+      expect(listeners.size).toBe(0);
+      if (event.index === 7) abort.abort(reason);
+    }
+  };
+  await expect(consume()).rejects.toBe(reason);
+  expect(listeners.size).toBe(0);
+  expect(cancelled).toBe(true);
 });
 
 test("initial system and developer instructions move to top-level while later policy stays in place", () => {
@@ -206,7 +381,7 @@ describe("Claude full-history Messages adapter", () => {
     expect(body.system[0].cache_control).toEqual(body.tools[0].cache_control);
     expect(body.messages[0].content[0].cache_control).toEqual(body.tools[0].cache_control);
     expect(body.thread).toBeUndefined();
-    expect(body.max_tokens).toBe(32000);
+    expect(body.max_tokens).toBe(128000);
     expect(req).toEqual(before);
     const uncached = buildAnthropicRequest(
       req,
@@ -471,6 +646,232 @@ test("HTTP context overflow exposes a typed recovery signal without echoing inpu
     expect(error.message).not.toContain("private user text");
   }
 });
+
+test.each([false, true])(
+  "model suspension is a permission rejection (stream=%s)",
+  async (streamed) => {
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude-test",
+      (async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "permission_error",
+              message:
+                'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z',
+              details: { error_code: "model_access_suspended", private: "synthetic-private-value" },
+            },
+          }),
+          {
+            status: 403,
+            headers: { "request-id": "req_synthetic_suspended", "retry-after": "3600" },
+          },
+        )) as typeof fetch,
+    );
+    const error = await (streamed ? collect(model) : model.getResponse(request())).catch((e) => e);
+    expect(error).toBeInstanceOf(AnthropicProviderRejection);
+    expect(error).toMatchObject({
+      status: 403,
+      code: "anthropic_model_access_suspended",
+      request_id: "req_synthetic_suspended",
+      suspendedUntil: "2031-04-05T06:07:08.000Z",
+      headers: { "retry-after": "3600" },
+    });
+    expect(error.message).toContain("2031-04-05 06:07:08 UTC");
+    expect(error.message).not.toContain("expired");
+    expect(JSON.stringify(error)).not.toContain("synthetic-private-value");
+  },
+);
+
+test.each([
+  'model: "claude-test" is suspended for this organization until 2031-02-30T06:07:08Z',
+  'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z synthetic-private-value',
+  "synthetic-private-value",
+])("suspension diagnostics do not echo malformed or arbitrary details: %s", async (message) => {
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "permission_error",
+            message,
+            details: { error_code: "model_access_suspended" },
+          },
+        }),
+        { status: 403 },
+      )) as typeof fetch,
+  );
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toMatchObject({ status: 403, code: "anthropic_model_access_suspended" });
+  expect(error.suspendedUntil).toBeUndefined();
+  expect(error.message).not.toContain("2031-");
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test.each([
+  "{truncated",
+  JSON.stringify({
+    error: {
+      type: "permission_error",
+      message: "synthetic-private-value",
+    },
+  }),
+])("other HTTP 403 failures remain permission errors without echoed text", async (detail) => {
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () => new Response(detail, { status: 403 })) as typeof fetch,
+  );
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toMatchObject({ status: 403, code: "anthropic_permission_denied" });
+  expect(error.message).toContain("permissions");
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test("SSE permission errors preserve the model suspension", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+    stream([
+      {
+        type: "error",
+        error: {
+          type: "permission_error",
+          message:
+            'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z',
+          details: { error_code: "model_access_suspended" },
+        },
+      },
+    ])) as typeof fetch);
+  await expect(collect(model)).rejects.toMatchObject({
+    status: 403,
+    code: "anthropic_model_access_suspended",
+    request_id: "req_test",
+  });
+});
+
+test("an empty refusal is a terminal policy rejection in the JSON response", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+    Response.json(
+      {
+        ...response([], "refusal"),
+        stop_details: {
+          type: "refusal",
+          category: "synthetic_policy",
+          explanation: "synthetic-private-value",
+        },
+      },
+      { headers: { "request-id": "req_synthetic_refusal" } },
+    )) as typeof fetch);
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toBeInstanceOf(AnthropicProviderRejection);
+  expect(error).toMatchObject({
+    status: 200,
+    code: "content_policy_violation",
+    request_id: "req_synthetic_refusal",
+  });
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test.each([false, true])(
+  "the Agents SDK cannot execute a tool from refused output (stream=%s)",
+  async (streamed) => {
+    let requests = 0;
+    let executions = 0;
+    const block = { type: "tool_use", id: "toolu_synthetic", name: "act", input: {} };
+    const model = new AnthropicMessagesModel(provider, "claude-test", (async () => {
+      requests++;
+      return streamed
+        ? stream(events([block], "refusal"))
+        : Response.json(response([block], "refusal"));
+    }) as typeof fetch);
+    const agent = new Agent({
+      name: "Test",
+      model,
+      tools: [
+        tool({
+          name: "act",
+          description: "Synthetic action",
+          parameters: z.object({}),
+          execute: async () => {
+            executions++;
+            return "synthetic result";
+          },
+        }),
+      ],
+    });
+    const runner = new Runner({ tracingDisabled: true });
+    const execute = async () => {
+      if (streamed) {
+        const run = await runner.run(agent, "Run the synthetic tool", { stream: true });
+        for await (const event of run) {
+          void event;
+        }
+      } else await runner.run(agent, "Run the synthetic tool");
+    };
+    await expect(execute()).rejects.toBeInstanceOf(AnthropicProviderRejection);
+    expect(requests).toBe(1);
+    expect(executions).toBe(0);
+  },
+);
+
+test.each([false, true])(
+  "a streamed refusal stops even when completion or cleanup stalls (%s)",
+  async (stalledCleanup) => {
+    const frames = [
+      { type: "message_start", message: response([], null as any) },
+      {
+        type: "message_delta",
+        delta: {
+          stop_reason: "refusal",
+          stop_details: {
+            type: "refusal",
+            explanation: "synthetic-private-value",
+          },
+        },
+        usage: { output_tokens: 0 },
+      },
+    ];
+    let cancelled = false;
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude-test",
+      (async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  frames.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""),
+                ),
+              );
+            },
+            cancel() {
+              cancelled = true;
+              if (stalledCleanup) return new Promise<void>(() => {});
+            },
+          }),
+          { headers: { "request-id": "req_synthetic_refusal" } },
+        )) as typeof fetch,
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Terminal refusal did not settle")), 1000);
+    });
+    try {
+      await expect(Promise.race([collect(model), deadline])).rejects.toMatchObject({
+        status: 200,
+        code: "content_policy_violation",
+        request_id: "req_synthetic_refusal",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(cancelled).toBe(true);
+  },
+  1000,
+);
 
 test("stream idle timeout cancels the body without accepting a partial response", async () => {
   let cancelled = false;

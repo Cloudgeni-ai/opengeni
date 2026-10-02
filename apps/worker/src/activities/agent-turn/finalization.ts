@@ -74,6 +74,8 @@ export type TurnFinalizationDeps = {
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   signalSessionAttemptQuiesced: ActivityServices["signalSessionAttemptQuiesced"];
   signalCodexCapacityWorkflow: ActivityServices["signalCodexCapacityWorkflow"];
+  requestWorkerDrain: ActivityServices["requestWorkerDrain"];
+  turnFinalizationTimeoutMs: ActivityServices["turnFinalizationTimeoutMs"];
   cancellationSignal: AbortSignal | undefined;
   sandboxResumeController: AbortController;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -113,6 +115,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   deps.eventing.heartbeatTimer = startActivityHeartbeat(deps.activityContext, details);
   const monitor = startTurnFinalizationMonitor({
     observability: deps.observability,
+    ...(deps.turnFinalizationTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: deps.turnFinalizationTimeoutMs }),
     details,
     heartbeat: (value) => {
       try {
@@ -121,7 +126,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         // A closed Temporal transport is not proof of physical quiescence.
       }
     },
-    terminateWorker: () => process.exit(1),
+    requestWorkerDrain: deps.requestWorkerDrain,
   });
   try {
     monitor.enter("tool_writers");

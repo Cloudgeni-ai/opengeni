@@ -620,10 +620,26 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/private-session-settings",
       "sdk": [
+        "getOrganizationPrivateSessionSettings",
         "settingsPath"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/private-session-settings",
+      "sdk": [
+        "updateOrganizationPrivateSessionSettings"
+      ],
+      "request": [
+        "UpdateOrganizationPrivateSessionSettingsRequest"
+      ],
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
     },
     {
       "method": "GET",
@@ -1179,7 +1195,8 @@
       "method": "DELETE",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.clearWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.clearWorkspaceAllowance",
+        "clearWorkspaceAllowance"
       ],
       "request": [
         "ClearWorkspaceAllowanceRequest"
@@ -1192,7 +1209,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.getWorkspaceAllowance",
+        "getWorkspaceAllowance"
       ],
       "request": [],
       "response": [
@@ -1203,7 +1221,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.setWorkspaceAllowance",
+        "setWorkspaceAllowance"
       ],
       "request": [
         "SetWorkspaceAllowanceRequest"
@@ -1217,7 +1236,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/grants",
       "sdk": [
         "OpenGeniEmbeddingClient.grantWorkspaceCredits",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "grantWorkspaceCredits"
       ],
       "request": [
         "GrantWorkspaceCreditsRequest"
@@ -1231,7 +1251,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/state",
       "sdk": [
         "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getWorkspaceAllowanceState"
       ],
       "request": [],
       "response": [
@@ -2256,10 +2277,15 @@
       "path": "/v1/workspaces/:workspaceId/company-brain/context-receipts",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -2267,20 +2293,30 @@
       "sdk": [
         "OpenGeniDocumentAuthorityClient.exportCompanyBrainOkf",
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -4473,7 +4509,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setMemberAllowance"
+        "OpenGeniEmbeddingClient.setMemberAllowance",
+        "setMemberAllowance"
       ],
       "request": [
         "SetMemberAllowanceRequest"
@@ -5591,6 +5628,7 @@
       "path": "/v1/workspaces/:workspaceId/sessions",
       "sdk": [
         "OpenGeniClient.listSessionPage",
+        "OpenGeniClient.listSessionSummaryPage",
         "OpenGeniClient.listSessions",
         "createSessionProxyHandler"
       ],
@@ -5599,6 +5637,7 @@
       ],
       "response": [
         "Session",
+        "SessionListEntryResponse",
         "SessionListResponse"
       ]
     },
@@ -5630,7 +5669,8 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
       "sdk": [
         "OpenGeniClient.getSession",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "sessionPath"
       ],
       "request": [],
       "response": [
@@ -7188,7 +7228,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
-        "OpenGeniEmbeddingClient.getUsage"
+        "OpenGeniEmbeddingClient.getUsage",
+        "getUsage"
       ],
       "request": [
         "GetUsageRequest"
@@ -7202,7 +7243,8 @@
       "path": "/v1/workspaces/:workspaceId/usage/me",
       "sdk": [
         "OpenGeniEmbeddingClient.getMyUsage",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getMyUsage"
       ],
       "request": [
         "GetMyUsageRequest"
@@ -10192,6 +10234,9 @@
         "$.legacyModelFallback.availability.selectable": "const!=[\"false\"]",
         "$.legacyModelFallback.availability.status": "const!=[\"\\\"unavailable\\\"\"]",
         "$.legacyModelFallback.id": "string!",
+        "$.legal": "object?",
+        "$.legal.privacyPolicyUrl": "string?",
+        "$.legal.termsOfServiceUrl": "string?",
         "$.managedAuthSessionSetMode": "enum!=[\"\\\"broker\\\"\",\"\\\"dual\\\"\",\"\\\"legacy\\\"\"]",
         "$.mcpServers": "array!",
         "$.mcpServers[]": "object",
@@ -10206,6 +10251,7 @@
         "$.structuredServices.fileSystem": "boolean!",
         "$.structuredServices.git": "boolean!",
         "$.structuredServices.terminalEvents": "boolean!",
+        "$.supportEmail": "string?",
         "$.voiceInput": "object!",
         "$.voiceInput.acceptedMimeTypes": "array!",
         "$.voiceInput.acceptedMimeTypes[]": "string",
@@ -10326,6 +10372,46 @@
         "$.status": "enum!=[\"\\\"completed\\\"\",\"\\\"noop\\\"\",\"\\\"pending\\\"\"]"
       }
     },
+    "CompanyBrainContextReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.acceptedAt": "string!",
+        "$.budgetOmittedMemoryCount": "integer!",
+        "$.companyProfileIncluded": "boolean!",
+        "$.companyProfileSnapshotHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.instructionPolicyEntryHash": "string!",
+        "$.memoryEnabled": "boolean!",
+        "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)!",
+        "$.preferenceDescriptorHash": "string! null",
+        "$.renderedMemoryCount": "integer!",
+        "$.rootSessionId": "string!",
+        "$.selectedMemoryCount": "integer!",
+        "$.selectionHash": "string!",
+        "$.sessionId": "string!",
+        "$.sessionRole": "enum!=[\"\\\"child\\\"\",\"\\\"root\\\"\"]",
+        "$.turnContextSnapshotHash": "string!",
+        "$.turnContextSnapshotId": "string!",
+        "$.turnContextSnapshotSource": "enum!=[\"\\\"accepted_turn\\\"\",\"\\\"legacy_first_claim\\\"\"]",
+        "$.turnId": "string!"
+      }
+    },
+    "CompanyBrainContextReceiptPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.hasMore": "boolean!",
+        "$.nextCursor": "string! null",
+        "$.receipts": "array!",
+        "$.receipts[]": "ref(CompanyBrainContextReceipt)"
+      }
+    },
     "CompanyBrainGuidanceClassification": {
       "io": [
         "output"
@@ -10385,6 +10471,42 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"aggregate_content_bytes\\\"\",\"\\\"aggregate_item_count\\\"\",\"\\\"company_profile_history\\\"\",\"\\\"instruction_policy_history\\\"\",\"\\\"preference_count\\\"\",\"\\\"preference_history\\\"\"]"
+      }
+    },
+    "CompanyBrainKnowledgeProposal": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.authority": "ref(KnowledgeAuthority)!",
+        "$.content": "string!",
+        "$.contentHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.projection": "object!",
+        "$.projection.originalContentUtf8Bytes": "integer!",
+        "$.projection.truncated": "boolean!",
+        "$.source": "object!",
+        "$.source.claimId": "string!",
+        "$.source.evidenceId": "string!",
+        "$.status": "const!=[\"\\\"proposed\\\"\"]",
+        "$.targetKey": "string! null",
+        "$.targetKind": "ref(KnowledgeChangeProposalTargetKind)!",
+        "$.targetScope": "string!"
+      }
+    },
+    "CompanyBrainKnowledgeProposalPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.proposals": "array!",
+        "$.proposals[]": "ref(CompanyBrainKnowledgeProposal)",
+        "$.responseBytes": "integer!",
+        "$.truncatedForCount": "boolean!",
+        "$.truncatedForResponseBytes": "boolean!"
       }
     },
     "CompanyBrainOkfPackage": {
@@ -10860,6 +10982,7 @@
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
+        "$.backgroundInput": "boolean?",
         "$.clipboard": "boolean!",
         "$.keyboardInput": "boolean!",
         "$.parallelApps": "boolean!",
@@ -11507,7 +11630,8 @@
         "$.operationId": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
         "$.providerDomain": "string!",
-        "$.subjectId": "string? null"
+        "$.subjectId": "string? null",
+        "$.verifyModelAccess": "boolean?"
       }
     },
     "CreateDocumentBaseRequest": {
@@ -12928,7 +13052,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
+        "$": "enum=[\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
       }
     },
     "ForkSessionRequest": {
@@ -15036,6 +15160,15 @@
         "$.workspaceSharedAcknowledged": "boolean?"
       }
     },
+    "KnowledgeAuthority": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.kind": "ref(KnowledgeEntryScope)!"
+      }
+    },
     "KnowledgeChangeProposalTargetKind": {
       "io": [
         "output"
@@ -16945,6 +17078,20 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
+      }
+    },
+    "OrganizationPrivateSessionSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.changed": "boolean?",
+        "$.enabled": "boolean!",
+        "$.organizationId": "string!",
+        "$.updatedAt": "string!",
+        "$.version": "integer!"
       }
     },
     "OrganizationProviderCustomModel": {
@@ -19658,6 +19805,7 @@
         "$.id": "string!",
         "$.observationStatus": "const?=[\"\\\"unavailable\\\"\"]",
         "$.provider": "ref(SessionBackgroundCommandProvider)!",
+        "$.reconciliation": "ref(SessionBackgroundCommandReconciliation)?",
         "$.sessionId": "string!",
         "$.settledAt": "string! null",
         "$.settlementReason": "string! null",
@@ -19694,6 +19842,19 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"managed\\\"\"]"
+      }
+    },
+    "SessionBackgroundCommandReconciliation": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attempts": "integer!",
+        "$.claimedAt": "string! null",
+        "$.dueAt": "string!",
+        "$.lastOutcome": "string! null",
+        "$.terminalProof": "unknown! null"
       }
     },
     "SessionBackgroundCommandState": {
@@ -20065,6 +20226,83 @@
         "$.children[].session": "ref(Session)!",
         "$.sessionHasSchedules": "boolean?",
         "$.truncated": "boolean!"
+      }
+    },
+    "SessionListEntry": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.activelyWorking": "boolean!",
+        "$.archiveVersion": "integer!",
+        "$.archived": "boolean!",
+        "$.archivedAt": "string! null",
+        "$.attentionVersion": "integer!",
+        "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
+        "$.channelId": "string! null",
+        "$.createdAt": "string!",
+        "$.createdBy": "ref(TurnInitiator)!",
+        "$.displayTitle": "string!",
+        "$.effectiveControl": "ref(EffectiveSessionControl)!",
+        "$.hasSchedules": "boolean?",
+        "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
+        "$.inputWait": "object? null",
+        "$.inputWait.deadlineAt": "string!",
+        "$.inputWait.reason": "string!",
+        "$.lastSequence": "integer!",
+        "$.parentSessionId": "string! null",
+        "$.pinVersion": "integer!",
+        "$.pinned": "boolean!",
+        "$.pinnedAt": "string! null",
+        "$.renameSeed": "string!",
+        "$.requiresActionSince": "string? null",
+        "$.rootSessionId": "string!",
+        "$.scheduledTaskId": "string! null",
+        "$.siteOrigin": "object! null",
+        "$.siteOrigin.siteId": "string!",
+        "$.siteOrigin.title": "string!",
+        "$.status": "ref(SessionStatus)!",
+        "$.title": "string! null",
+        "$.titleSource": "enum! null=[\"\\\"agent\\\"\",\"\\\"user\\\"\"]",
+        "$.treeStats": "object?",
+        "$.treeStats.activelyWorkingDescendants": "integer?",
+        "$.treeStats.attentionDescendants": "integer!",
+        "$.treeStats.attentionSince": "string? null",
+        "$.treeStats.directChildren": "integer!",
+        "$.treeStats.failedDescendants": "integer!",
+        "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.queuedDescendants": "integer!",
+        "$.treeStats.runningDescendants": "integer!",
+        "$.treeStats.totalDescendants": "integer!",
+        "$.treeStats.truncated": "boolean!",
+        "$.treeStats.unreadDescendants": "integer?",
+        "$.treeStats.unreadFailedDescendants": "integer?",
+        "$.treeStats.waitingDescendants": "integer?",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "SessionListEntryResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
+        "$.filtersApplied": "const?=[\"true\"]",
+        "$.nextCursor": "string! null",
+        "$.originSiteId": "string?",
+        "$.pinned": "array!",
+        "$.pinned[]": "ref(SessionListEntry)",
+        "$.pinnedTruncated": "boolean?",
+        "$.projection": "const!=[\"\\\"summary\\\"\"]",
+        "$.sessions": "array!",
+        "$.sessions[]": "ref(SessionListEntry)",
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
       }
     },
     "SessionListResponse": {
@@ -22151,6 +22389,17 @@
         "$.operationId": "string!"
       }
     },
+    "UpdateOrganizationPrivateSessionSettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.enabled": "boolean!",
+        "$.expectedVersion": "integer!",
+        "$.operationId": "string!"
+      }
+    },
     "UpdateOrganizationRetentionPolicyRequest": {
       "io": [
         "input"
@@ -23951,7 +24200,8 @@
     },
     "WorkspaceMemoryPromptMode": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"legacy_standing\\\"\",\"\\\"retrieval_only\\\"\"]"
@@ -25583,6 +25833,7 @@
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
+      "SessionBackgroundCommandReconciliation": "type",
       "SessionCapabilities": "type",
       "SessionCodexAccountsResponse": "type",
       "SessionCommandReceipt": "type",
@@ -25614,6 +25865,9 @@
       "SessionGoalStatus": "type",
       "SessionHumanInputRequest": "type",
       "SessionLineageResponse": "type",
+      "sessionListEntry": "value",
+      "SessionListEntry": "type",
+      "SessionListEntryResponse": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionMcpApprovalPolicy": "type",
@@ -26815,6 +27069,9 @@
       "importExternalWorkspaceArchivedSession": "value",
       "SessionImportedArchive": "type"
     },
+    "@opengeni/sdk/session-list-entries": {
+      "sessionListEntry": "value"
+    },
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",
       "createSessionProxyHandler": "value",
@@ -27044,6 +27301,7 @@
       "CommandPaletteProps": "type",
       "CommandResult": "type",
       "completeSessionCapabilityOAuth": "value",
+      "COMPOSER_MODEL_UNAVAILABLE_MESSAGE": "value",
       "COMPOSER_PAYMENT_REQUIRED_MESSAGE": "value",
       "ComposerControllerState": "type",
       "ComposerDraftMapContext": "type",
@@ -27175,6 +27433,7 @@
       "isHumanInputEvent": "value",
       "isLastStartedTurnPolicyEvent": "value",
       "isLineageRefreshEvent": "value",
+      "isModelUnavailableSubmissionError": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
@@ -28007,6 +28266,7 @@
       "BrowserFrameWebSocket": "type",
       "BrowserFrameWebSocketFactory": "type",
       "BrowserIdentitiesClient": "type",
+      "BrowserInputFailure": "type",
       "BrowserSessionsClient": "type",
       "BrowserViewer": "value",
       "BrowserViewerNotification": "type",
@@ -29047,6 +29307,7 @@
       "listSessionCodexAccounts",
       "listSessionEditableArtifacts",
       "listSessionPage",
+      "listSessionSummaryPage",
       "listSessions",
       "listSiteAuthConnections",
       "listSlackInstallationBindings",

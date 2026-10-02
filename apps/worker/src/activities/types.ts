@@ -144,6 +144,11 @@ export type ControlActivityServices = SharedActivityServices;
 
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
+  /** Host-owned containment: stop polling and checkpoint peer turns before exit.
+   * Bare activity embedders must provide their own worker lifecycle edge. */
+  requestWorkerDrain: () => void;
+  /** Deterministic test clock for the cleanup-only monitor. */
+  turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
@@ -304,6 +309,8 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerFailureCode?: string;
   /** Persist the no-replay setup marker, not a new provider/setup attempt. */
   sandboxSetupOutcomeUnknown?: true;
+  /** Preserve the exhausted budget for a command proven not dispatched. */
+  sandboxSetupRecoveryExhausted?: true;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";

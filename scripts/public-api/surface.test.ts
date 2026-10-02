@@ -87,7 +87,20 @@ describe("SDK path extraction", () => {
     const file = join(dir, "client.ts");
     writeFileSync(
       file,
-      `export class Client {
+      `function sessionRoot(workspaceId: string, sessionId: string) {
+  return \`/v1/workspaces/\${workspaceId}/sessions/\${sessionId}\`;
+}
+export class Client {
+  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
+    return this.requestJson<Session>("GET", sessionRoot(workspaceId, sessionId));
+  }
+  async getEvents(workspaceId: string, sessionId: string): Promise<SessionEvent[]> {
+    return this.requestJson("GET", \`\${sessionRoot(workspaceId, sessionId)}/events\`);
+  }
+  opaqueHelper() {
+    const sessionRoot = unknownHelper;
+    return this.requestJson("GET", sessionRoot("workspace", "session"));
+  }
   async createThing(workspaceId: string, request: CreateThingRequest): Promise<Thing> {
     return await this.requestJson<Thing>("POST", \`/v1/workspaces/\${workspaceId}/things\`, request);
   }
@@ -102,6 +115,13 @@ describe("SDK path extraction", () => {
 }`,
     );
     const methods = extractSdkMethods([file]);
+    expect([...methods.find((method) => method.name === "Client.getSession")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p",
+    ]);
+    expect([...methods.find((method) => method.name === "Client.getEvents")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p/events",
+    ]);
+    expect(methods.some((method) => method.name === "Client.opaqueHelper")).toBe(false);
     const create = methods.find((method) => method.name === "Client.createThing")!;
     expect([...create.verbs]).toEqual(["POST"]);
     expect([...create.paths]).toEqual(["/v1/workspaces/:p/things"]);

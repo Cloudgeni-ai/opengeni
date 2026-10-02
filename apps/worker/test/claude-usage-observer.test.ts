@@ -2,8 +2,10 @@ import { expect, test } from "bun:test";
 import { parseModelProvidersJson } from "@opengeni/config";
 import {
   createClaudeUsageObserver,
+  ClaudeSubscriptionConnectionUnavailable,
   type CapturedClaudeUsage,
 } from "../src/activities/agent-turn/claude-usage-observer";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 
 const providers = parseModelProvidersJson(
   JSON.stringify([
@@ -110,4 +112,94 @@ test("native generation bindings survive another replica renewing between catalo
     credentialVersion: 8,
   });
   expect(observe.binding("workspace-claude-subscription")!.token).toBe("sk-ant-oat01-renewed");
+});
+
+test.each(["workspace", "organization"] as const)(
+  "physical %s requests renew the same generation and stop when its connection changes",
+  async (scope) => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const providerId = `${scope}-claude-subscription`;
+    const bound = parseModelProvidersJson(
+      JSON.stringify(
+        providers.map((provider) => ({
+          ...provider,
+          id: providerId,
+          kind: `claude-subscription-${scope}`,
+          anthropic: {
+            auth: "oauth",
+            credentialBinding: { connectionId: id, credentialVersion: 7 },
+          },
+          models: provider.models.map((model) => ({
+            ...model,
+            id: `${providerId}/claude-opus-5-5`,
+          })),
+        })),
+      ),
+    );
+    const observe = await createClaudeUsageObserver(bound, new Map(), async () => {
+      throw new Error("Captured generation needs no fallback lookup");
+    });
+    const renewed = { token: "sk-ant-oat01-renewed", connectionId: id, credentialVersion: 7 };
+    const headers = new Headers({
+      authorization: "Bearer sk-ant-oat01-fixture",
+      "x-api-key": "fixture",
+    });
+    await observe.prepareRequest(providerId, headers, async (binding) => {
+      expect(binding).toEqual({ scope, expectedConnectionId: id, expectedCredentialVersion: 7 });
+      return renewed;
+    });
+    expect(headers.get("authorization")).toBe("Bearer sk-ant-oat01-renewed");
+    expect(headers.has("x-api-key")).toBe(false);
+    expect(observe.binding(providerId)!.token).toBe(renewed.token);
+    for (const credential of [
+      null,
+      { ...renewed, credentialVersion: 8 },
+      { ...renewed, connectionId: "replacement" },
+    ]) {
+      let dispatched = 0;
+      const send = async () => {
+        await observe.prepareRequest(providerId, headers, async () => credential);
+        dispatched++;
+      };
+      await expect(send()).rejects.toBeInstanceOf(ClaudeSubscriptionConnectionUnavailable);
+      expect(dispatched).toBe(0);
+      expect(observe.binding(providerId)!.token).toBe(renewed.token);
+    }
+  },
+);
+
+test("unbound managed subscriptions stop while other provider credentials remain untouched", async () => {
+  const observe = await createClaudeUsageObserver(providers, new Map(), async () => null);
+  const headers = new Headers({ authorization: "Bearer fixture" });
+  let lookups = 0;
+  const resolve = async () => {
+    lookups++;
+    return null;
+  };
+  await expect(
+    observe.prepareRequest("workspace-claude-subscription", headers, resolve),
+  ).rejects.toBeInstanceOf(ClaudeSubscriptionConnectionUnavailable);
+  expect(await observe.prepareRequest("registry-claude", headers, resolve)).toBe(headers);
+  expect(lookups).toBe(0);
+  expect(headers.get("authorization")).toBe("Bearer fixture");
+  expect(agentRunFailurePayload(new ClaudeSubscriptionConnectionUnavailable())).toEqual({
+    error:
+      "Claude connection changed or was disconnected. Start a new turn with the current connection.",
+    code: "claude_subscription_connection_changed",
+    retryable: false,
+  });
+});
+
+test("renewal failures propagate without dispatching the captured token", async () => {
+  const observe = await createClaudeUsageObserver(providers, new Map(), async () => ({
+    token: "sk-ant-oat01-fixture",
+    connectionId: "original",
+    credentialVersion: 7,
+  }));
+  const reason = new Error("Synthetic refresh unavailable");
+  await expect(
+    observe.prepareRequest("workspace-claude-subscription", new Headers(), async () => {
+      throw reason;
+    }),
+  ).rejects.toBe(reason);
 });

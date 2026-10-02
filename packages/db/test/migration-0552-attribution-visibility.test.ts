@@ -87,6 +87,10 @@ test("real non-bypass owner migrates receipts while all original source policies
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
       ADD COLUMN imported_archive_next_offset integer`;
+    // Current event writers read this additive field while seeding legacy rows.
+    // Remove it before replay so the actual attention backfill still runs.
+    await owner`ALTER TABLE session_event_cursors
+      ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply only that additive migration early; allowance/collaborator repairs
@@ -238,6 +242,7 @@ test("real non-bypass owner migrates receipts while all original source policies
       DROP COLUMN imported_archive_request_hash,
       DROP COLUMN imported_archive_subject_id,
       DROP COLUMN imported_archive_next_offset`;
+    await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
     await migrate(owned.ownerUrl);
     expect([...(await snapshot())]).toEqual([...before]);
     const [backfill] =

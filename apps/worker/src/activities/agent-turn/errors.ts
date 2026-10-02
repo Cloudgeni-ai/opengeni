@@ -1,4 +1,5 @@
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -12,6 +13,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderRejection,
@@ -397,6 +399,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   triggerEventId: string;
   executionGeneration: number;
   sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
@@ -404,7 +407,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
-  if (input.sandboxSetupOutcomeUnknown && input.providerRecovery) return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -420,6 +429,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     executionGeneration: input.executionGeneration,
     code,
     ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -1110,6 +1120,17 @@ function baseAgentRunFailurePayload(
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);

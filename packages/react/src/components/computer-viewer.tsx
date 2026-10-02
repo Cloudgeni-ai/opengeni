@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   type ClipboardEvent,
+  type CompositionEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
@@ -290,9 +291,12 @@ export function ComputerViewer({
   const rfbStream =
     frames.attachment?.stream.kind === "direct_rfb" ? frames.attachment.stream : null;
   const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
+  const controlUnavailable = computer.controlError !== null;
+  const connectionState = controlUnavailable ? "error" : frames.state;
   // RFB has one combined input switch; partial native input stays view-only.
   const rfbInputEnabled =
     !machineLocked &&
+    !controlUnavailable &&
     computer.session?.capabilities?.pointerInput === true &&
     computer.session?.capabilities?.keyboardInput === true;
   const rfbCapability = useMemo<DesktopStreamCapability | null>(() => {
@@ -441,6 +445,7 @@ export function ComputerViewer({
 
   const perform = useCallback(
     async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
+      if (computer.controlError) throw computer.controlError;
       let receipt;
       if (action.type === "pointer") {
         if (!frame) throw new Error("Desktop view is not ready for pointer input.");
@@ -452,8 +457,13 @@ export function ComputerViewer({
         throw new Error(receipt.error?.message ?? "Desktop input did not complete.");
       }
     },
-    [act, actFromFrame],
+    [act, actFromFrame, computer.controlError],
   );
+
+  const reconnect = () => {
+    void refreshComputer();
+    frames.reconnect();
+  };
 
   const copyFromRfb = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
@@ -586,7 +596,7 @@ export function ComputerViewer({
         }}
         onCreate={hideGenericCreate ? undefined : createComputer}
         onRefresh={() => {
-          if (frames.state === "error" && !generationLossSelected && !generationLossFrames) {
+          if (connectionState === "error" && !generationLossSelected && !generationLossFrames) {
             frames.reconnect();
           }
           void Promise.all([refreshRegistry(), refreshComputer()]);
@@ -644,7 +654,20 @@ export function ComputerViewer({
                 />
                 {!rfbInputEnabled ? (
                   <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-white/80 backdrop-blur">
-                    View only · direct input unavailable
+                    {controlUnavailable ? (
+                      <>
+                        Desktop controls unavailable{" "}
+                        <button
+                          type="button"
+                          onClick={reconnect}
+                          className="pointer-events-auto ml-2 font-medium underline"
+                        >
+                          Reconnect
+                        </button>
+                      </>
+                    ) : (
+                      "View only · direct input unavailable"
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -660,19 +683,19 @@ export function ComputerViewer({
                 observation={computer.observation}
                 target={computer.selectedTarget}
                 machineLocked={machineLocked}
-                connectionState={frames.state}
-                connectionError={frames.error ?? computer.error}
+                controlUnavailable={controlUnavailable}
+                connectionState={connectionState}
+                connectionError={computer.controlError ?? frames.error ?? computer.error}
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                backgroundInput={computer.session?.capabilities?.backgroundInput === true}
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 pointerInput={computer.session?.capabilities?.pointerInput === true}
                 keyboardInput={computer.session?.capabilities?.keyboardInput === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={
-                  generationLossSelected || generationLossFrames
-                    ? () => undefined
-                    : frames.reconnect
+                  generationLossSelected || generationLossFrames ? () => undefined : reconnect
                 }
                 onError={(cause) => notifyError(cause, "Desktop input failed.")}
               />
@@ -680,7 +703,8 @@ export function ComputerViewer({
             {showControls ? (
               <ComputerSemanticPanel
                 observation={computer.observation}
-                mutating={computer.mutating}
+                mutating={computer.mutating || controlUnavailable}
+                controlUnavailable={controlUnavailable}
                 onAction={(action) =>
                   void perform(action, null).catch((cause) =>
                     notifyError(cause, "Desktop action failed."),
@@ -692,7 +716,8 @@ export function ComputerViewer({
           <ComputerStatusBar
             session={computer.session}
             target={computer.selectedTarget}
-            connectionState={frames.state}
+            connectionState={connectionState}
+            controlUnavailable={controlUnavailable}
             refreshing={registry.refreshing}
             showControls={showControls}
             controlCount={semanticControls(computer.observation).length}
@@ -1025,10 +1050,12 @@ function ComputerViewport(props: {
   observation: ComputerObservation | null;
   target: ComputerTarget | null;
   machineLocked: boolean;
+  controlUnavailable: boolean;
   connectionState: string;
   connectionError: Error | null;
   mutating: boolean;
   backgroundActions: boolean;
+  backgroundInput: boolean;
   clipboardEnabled: boolean;
   pointerInput: boolean;
   keyboardInput: boolean;
@@ -1039,6 +1066,7 @@ function ComputerViewport(props: {
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<{
@@ -1076,8 +1104,12 @@ function ComputerViewport(props: {
   const streamFailed = props.connectionState === "error";
   const rawInputEnabled =
     !streamFailed &&
+    !props.controlUnavailable &&
     !props.machineLocked &&
-    (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
+    (props.backgroundInput ||
+      !props.backgroundActions ||
+      props.target?.kind === "screen" ||
+      props.target?.focused === true);
 
   const clearBufferedInput = useCallback(() => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
@@ -1088,11 +1120,28 @@ function ComputerViewport(props: {
     pendingTextRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
+    composingRef.current = false;
     if (inputRef.current) inputRef.current.value = "";
   }, []);
 
   const pointerInputEnabled = rawInputEnabled && props.pointerInput;
   const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const viewport = canvas?.parentElement;
+    if (!canvas || !viewport) return;
+    const fit = () => fitComputerCanvas(canvas);
+    fit();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", fit);
+      return () => window.removeEventListener("resize", fit);
+    }
+    // The canvas is absolute, so fitting it cannot resize the observed dock.
+    const observer = new ResizeObserver(fit);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1403,6 +1452,13 @@ function ComputerViewport(props: {
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (!keyboardInputEnabled) return;
+    if (
+      composingRef.current ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -1456,7 +1512,8 @@ function ComputerViewport(props: {
     });
   };
 
-  const input = (value: string) => {
+  const input = (value: string, nativeComposing = false) => {
+    if (composingRef.current || nativeComposing) return;
     if (!value || !keyboardInputEnabled) return;
     flushPendingWheel();
     flushPendingClick();
@@ -1472,6 +1529,11 @@ function ComputerViewport(props: {
       };
     }
     if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const compositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    input(event.currentTarget.value || event.data);
   };
 
   const showCanvas =
@@ -1501,7 +1563,13 @@ function ComputerViewport(props: {
       <textarea
         ref={inputRef}
         defaultValue=""
-        onInput={(event) => input(event.currentTarget.value)}
+        onInput={(event) =>
+          input(event.currentTarget.value, (event.nativeEvent as InputEvent).isComposing)
+        }
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={compositionEnd}
         onKeyDown={keyDown}
         onCopy={copy}
         onPaste={paste}
@@ -1516,6 +1584,7 @@ function ComputerViewport(props: {
         <ComputerViewportFallback
           observation={props.observation}
           machineLocked={props.machineLocked}
+          controlUnavailable={props.controlUnavailable}
           connectionState={props.connectionState}
           error={props.connectionError}
           onAction={(action) => enqueue(action, null)}
@@ -1563,6 +1632,7 @@ function assertExactComputerClipboard(clipboard: ComputerClipboard, expected: st
 function ComputerViewportFallback(props: {
   observation: ComputerObservation | null;
   machineLocked: boolean;
+  controlUnavailable: boolean;
   connectionState: string;
   error: Error | null;
   onAction: (action: ComputerAction) => void;
@@ -1597,9 +1667,11 @@ function ComputerViewportFallback(props: {
           <p className="text-og-menu font-medium text-og-fg">
             {isAttachedChromeGenerationLossError(props.error)
               ? "Chrome reconnected—open a fresh browser/desktop."
-              : props.error
-                ? "Live view disconnected"
-                : computerConnectionLabel(props.connectionState)}
+              : props.controlUnavailable
+                ? "Desktop controls unavailable"
+                : props.error
+                  ? "Live view disconnected"
+                  : computerConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error ? (
@@ -1609,7 +1681,7 @@ function ComputerViewportFallback(props: {
               : (controlFailure?.message ?? props.error.message)}
           </p>
         ) : null}
-        {interactive.length > 0 ? (
+        {interactive.length > 0 && !props.controlUnavailable ? (
           <div className="mt-3 border-t border-og-border pt-3">
             <p className="mb-2 text-og-xs text-og-fg-subtle">App controls remain available</p>
             <div className="flex flex-wrap gap-1.5">
@@ -1646,6 +1718,7 @@ function ComputerViewportFallback(props: {
 function ComputerSemanticPanel(props: {
   observation: ComputerObservation | null;
   mutating: boolean;
+  controlUnavailable: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
   const nodes = semanticControls(props.observation).slice(0, 100);
@@ -1654,10 +1727,17 @@ function ComputerSemanticPanel(props: {
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
         <KeyboardIcon className="size-3" /> App controls
       </div>
-      {nodes.length === 0 ? (
+      {props.controlUnavailable ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
-          This view has no accessibility controls. Use the live image instead.
+          Reconnect to use app controls.
         </p>
+      ) : null}
+      {nodes.length === 0 ? (
+        props.controlUnavailable ? null : (
+          <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
+            This view has no accessibility controls. Use the live image instead.
+          </p>
+        )
       ) : (
         <div className="space-y-0.5">
           {nodes.map((node) => (
@@ -1747,6 +1827,7 @@ function ComputerStatusBar(props: {
   session: ComputerSession | null;
   target: ComputerTarget | null;
   connectionState: string;
+  controlUnavailable: boolean;
   refreshing: boolean;
   showControls: boolean;
   controlCount: number;
@@ -1762,14 +1843,22 @@ function ComputerStatusBar(props: {
         )}
       />
       <span>
-        {props.connectionState === "live" ? "Live" : computerConnectionLabel(props.connectionState)}
+        {props.controlUnavailable
+          ? "Controls unavailable"
+          : props.connectionState === "live"
+            ? "Live"
+            : computerConnectionLabel(props.connectionState)}
       </span>
       <span className="min-w-0 flex-1 truncate">
-        {screen
-          ? "Full screen · input may move pointer and focus"
-          : props.session?.capabilities?.backgroundActions
-            ? "Window · app controls work in the background"
-            : (props.target?.kind ?? "Desktop")}
+        {props.controlUnavailable
+          ? "Reconnect to use desktop input"
+          : screen
+            ? "Full screen · input may move pointer and focus"
+            : props.session?.capabilities?.backgroundInput
+              ? "Window · clicks and typing stay in the background"
+              : props.session?.capabilities?.backgroundActions
+                ? "Window · app controls work in the background"
+                : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
@@ -1866,11 +1955,26 @@ function paintCanvas(
   width: number,
   height: number,
 ): void {
+  const dimensionsChanged = canvas.width !== width || canvas.height !== height;
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Desktop canvas is unavailable.");
   context.drawImage(image, 0, 0, width, height);
+  if (dimensionsChanged) fitComputerCanvas(canvas);
+}
+
+function fitComputerCanvas(canvas: HTMLCanvasElement): void {
+  const viewport = canvas.parentElement;
+  if (!viewport || canvas.width <= 0 || canvas.height <= 0) return;
+  const scale = Math.min(
+    viewport.clientWidth / canvas.width,
+    viewport.clientHeight / canvas.height,
+  );
+  // Hidden docks retain their previous fit until their content box is visible.
+  if (!Number.isFinite(scale) || scale <= 0) return;
+  canvas.style.width = `${canvas.width * scale}px`;
+  canvas.style.height = `${canvas.height * scale}px`;
 }
 
 function loadImage(url: string): Promise<HTMLImageElement> {

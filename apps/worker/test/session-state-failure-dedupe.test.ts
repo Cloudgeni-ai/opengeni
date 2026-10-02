@@ -414,6 +414,78 @@ describe("failSessionAttempt child-terminal identity", () => {
     expect(terminal).not.toHaveBeenCalled();
   });
 
+  test.each([
+    [0, {}, false],
+    [4, {}, false],
+    [5, {}, true],
+    [6, {}, false],
+    [5, { triggerEventId: "other-trigger" }, false],
+    [5, { executionGeneration: 8 }, false],
+    [5, { sandboxSetupOutcomeUnknown: true }, false],
+    [5, { providerRecoveryCount: 6, providerFailureCode: "provider_unavailable" }, false],
+  ] as const)(
+    "DB-only setup exhaustion preserves only the exact exhausted budget %s with authority %j",
+    async (count, authority, parks) => {
+      const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+      const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+      const activities = createSessionStateActivities(
+        async () =>
+          ({ db: {}, bus: {}, settings: {}, observability: {}, wakeSessionWorkflow: null }) as any,
+        {
+          requireSession: mock(async () => ({ status: "running" }) as any),
+          getSessionTurnForAttempt: mock(
+            async () =>
+              ({
+                id: "turn-1",
+                triggerEventId: "trigger-1",
+                executionGeneration: 4,
+                metadata: { providerRecoveryCount: count },
+              }) as any,
+          ),
+          requestSessionTurnRecovery: recovery as any,
+          applySessionTurnSettlement: terminal as any,
+          publishDurableSessionEvents: mock(async () => undefined),
+          countQueuedTurns: mock(async () => 0),
+          recordTurnsQueuedGauge: mock(() => undefined),
+        },
+      );
+      const input = {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+          sandboxSetupRecoveryExhausted: true,
+          ...authority,
+        },
+      } as const;
+      expect(await activities.failSessionAttempt(input)).toEqual({
+        action: parks ? "recovering" : "stale",
+      });
+      if (parks) {
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_start_recovery_exhausted",
+          sandboxSetupRecoveryExhausted: true,
+          detail: {
+            retryable: false,
+            setupOutcome: "not_started",
+            replay: "blocked",
+            providerRecoveryCount: 5,
+          },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+      } else {
+        expect(recovery).not.toHaveBeenCalled();
+      }
+      expect(terminal).not.toHaveBeenCalled();
+    },
+  );
+
   test("recovers an ambiguously committed claim from retryable pre-claim truth", async () => {
     const recoveryCalls: unknown[] = [];
     const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));

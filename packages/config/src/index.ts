@@ -1,5 +1,6 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
+  directModelConnectionSpec,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -99,6 +100,13 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+/** An absolute http(s) URL that is safe to render as a browser link. */
+const PublicHttpUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
 
 /** Default pacing between consecutive no-input goal continuations. */
 export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
@@ -311,6 +319,15 @@ const SettingsSchema = z.object({
     .max(32)
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
+  // Optional operator-owned legal documents linked from the signed-out console.
+  // Unset by default, so a self-hosted deployment never shows another operator's
+  // policies; the managed service points these at its own published pages.
+  legalPrivacyPolicyUrl: PublicHttpUrl.optional(),
+  legalTermsOfServiceUrl: PublicHttpUrl.optional(),
+  // Optional operator support address, shown as a "Contact support" mailto link
+  // on the signed-out page and in the Help menu. Unset by default for the same
+  // reason as the legal links.
+  supportEmail: z.string().trim().email().max(254).optional(),
   publicBaseUrl: z.string().url().optional(),
   // Product documentation the web console links from its Help menu. Absent
   // means the public OpenGeni docs; `none` hides the link for deployments that
@@ -1223,6 +1240,26 @@ const SettingsSchema = z.object({
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  // Idle command containment. A legacy retained background command (a dev
+  // server, a command whose output is still draining, a stopped command the
+  // provider no longer answers for) keeps its box warm through a non-expiring
+  // process holder, so the zero-holder drain never runs and the box would stay
+  // up until the provider deadline kills it uncaptured. Once every session of
+  // the sandbox group has been unused this long - no open turn or pending
+  // request, no held wait_for_input, no other holder or writer, measured from
+  // durable turn/holder/admission facts - the reaper checkpoints the workspace,
+  // stops the box and settles those commands `lost` with reason
+  // `idle_containment`. Default 30min: twice the default
+  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // never contained earlier than an idle lease would drain, and well inside
+  // the 1h provider-deadline rotation lead, so an idle box is saved long before
+  // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
+  // plus this window plus the drain capture budget must fit before it.
+  // getSettings derives the unset default between those two for short-lived
+  // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
+  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().optional(),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -2113,6 +2150,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
   "vercel-gateway-organization",
+  "direct-openai-workspace",
+  "direct-azure-workspace",
   "openrouter-workspace",
   "openrouter-organization",
   "anthropic-organization",
@@ -2465,7 +2504,11 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
         message: "Codex product id must match its upstream model slug",
       });
     }
-  });
+  })
+  .transform((model) => ({
+    ...model,
+    capabilities: reviewedCodexCatalogCapabilities(model.upstreamModelId, model.capabilities),
+  }));
 
 export const ModelCatalogDocument = z
   .object({
@@ -2526,7 +2569,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        provider.id.startsWith("workspace-openai-") ||
+        provider.id.startsWith("workspace-azure-openai-")
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -3226,6 +3273,9 @@ function optionalEnvironmentValue(name: string, source: NodeJS.ProcessEnv): stri
   return value && value.trim().length > 0 ? value : undefined;
 }
 
+// getSettings runs per request in some processes; say this once per process.
+let idleCommandContainmentDisabledWarned = false;
+
 export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   const optional = (name: string): string | undefined => optionalEnvironmentValue(name, source);
   const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
@@ -3282,6 +3332,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
+    legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
+    legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
+    supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
@@ -3586,6 +3639,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
+    sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
@@ -3717,6 +3771,40 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
+  if (raw.sandboxIdleCommandContainmentMs === undefined) {
+    // Strictly between the idle grace and the rotation lead whenever that
+    // interval exists (short test/canary lifetimes), never above 30 minutes,
+    // and early enough that an explicit Modal idle timeout cannot fire first.
+    const modalIdleCeilingMs =
+      settings.sandboxBackend === "modal" && settings.modalIdleTimeoutSeconds !== undefined
+        ? settings.modalIdleTimeoutSeconds * 1000 -
+          settings.sandboxLeaseReaperPeriodMs -
+          sandboxArchiveCaptureTimeoutMs({
+            sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+          }) -
+          1
+        : Number.POSITIVE_INFINITY;
+    const derived = Math.min(
+      1_800_000,
+      Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
+      modalIdleCeilingMs,
+    );
+    // A derived value never fails validation: with no room above the idle
+    // grace, idle containment stays off and only the deadline rule applies.
+    if (derived > settings.sandboxIdleGraceMs) {
+      settings.sandboxIdleCommandContainmentMs = derived;
+    } else {
+      settings.sandboxIdleCommandContainmentMs = undefined;
+      if (!idleCommandContainmentDisabledWarned) {
+        idleCommandContainmentDisabledWarned = true;
+        console.warn(
+          "[config] idle command containment disabled: no window fits between " +
+            `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}) and the Modal idle ` +
+            "timeout / rotation lead ceiling; set OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS to override.",
+        );
+      }
+    }
+  }
   validateSettings(settings, source);
   return settings;
 }
@@ -4469,6 +4557,53 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
+/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+export function withDirectModelProviders(
+  settings: Settings,
+  connections: readonly {
+    id: string;
+    version: number;
+    subjectId: string | null;
+    kind: string;
+    status: string;
+    providerDomain: string;
+    metadata: Record<string, unknown>;
+    apiKey?: string;
+  }[],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) =>
+      !provider.id.startsWith("workspace-openai-") &&
+      !provider.id.startsWith("workspace-azure-openai-"),
+  );
+  for (const connection of connections) {
+    const spec = directModelConnectionSpec(connection);
+    if (!spec) continue;
+    providers.push({
+      kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
+      id: spec.providerId,
+      label: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+      api: "responses",
+      wireProfile: spec.provider === "openai" ? "openai" : "azure-openai",
+      baseUrl: spec.baseUrl,
+      ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+      models: [
+        {
+          id: spec.modelId,
+          upstreamModelId: spec.model,
+          label: spec.model,
+          capabilities: legacyModelCapabilities(settings, {
+            reasoningEffort: false,
+            hostedWebSearch: false,
+          }),
+          toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        },
+      ],
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** Static catalog overlay; it contains no concrete workspace credential. */
 export function withWorkspaceGatewayCatalogProvider(
   settings: Settings,
@@ -4721,9 +4856,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
-    modelId.startsWith("gpt-6-") ||
+    /^gpt-6(?:\.\d+)?-/u.test(modelId) ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId.startsWith("codex/gpt-6-")
+    /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4736,6 +4871,31 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function isReviewedGptVisionModel(slug: string): boolean {
+  return slug.startsWith("gpt-5.6-") || /^gpt-6(?:\.\d+)?-/u.test(slug);
+}
+
+/** Repair missing reviewed capabilities in live/stored Codex definitions.
+ * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ */
+function reviewedCodexCatalogCapabilities(
+  slug: string,
+  capabilities: ModelCapabilitiesV1,
+): ModelCapabilitiesV1 {
+  if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
+  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
+    (mode) => mode.id === "fast",
+  );
+  return normalizeCapabilities({
+    ...capabilities,
+    inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    latencyModes:
+      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
+        ? [...capabilities.latencyModes, fast]
+        : capabilities.latencyModes,
+  });
 }
 
 function builtinPromptCachingForModel(
@@ -4831,9 +4991,22 @@ function assertLatencyModeRunnable(
 ): void {
   const runnable = runnableLatencyModesForModel(settings, modelId);
   if (!runnable.includes(latencyMode)) {
-    throw new Error(
-      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    throw new UnsupportedLatencyModeError(modelId, latencyMode, runnable);
+  }
+}
+
+export class UnsupportedLatencyModeError extends Error {
+  readonly code = "UNSUPPORTED_LATENCY_MODE";
+
+  constructor(
+    readonly modelId: string,
+    readonly latencyMode: LatencyMode,
+    readonly allowedLatencyModes: readonly LatencyMode[],
+  ) {
+    super(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${allowedLatencyModes.join(", ")})`,
     );
+    this.name = "UnsupportedLatencyModeError";
   }
 }
 
@@ -4846,6 +5019,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -4875,6 +5050,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -5054,6 +5231,48 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
 }
 
+function matchesAdditiveCapabilityDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { latencyModes, inputModalities } = model.capabilities;
+  // V1 has only three unique latency ids and three unique input modalities:
+  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // exact historical declaration; never ignore the digest or alter existing
+  // mode support, runnable state, billing multiplier, or request-tier routing.
+  // Every other executable field remains in the digest. Do not compose this
+  // with the pre-wire-profile or implicit-caching migration exceptions.
+  for (let latencyMask = 1; latencyMask < 1 << latencyModes.length; latencyMask += 1) {
+    const retainedModes = latencyModes.filter((_mode, index) => latencyMask & (1 << index));
+    if (!retainedModes.some((mode) => mode.id === policy.latencyMode && mode.runnable)) {
+      continue;
+    }
+    for (let inputMask = 1; inputMask < 1 << inputModalities.length; inputMask += 1) {
+      const retainedInputs = inputModalities.filter((_modality, index) => inputMask & (1 << index));
+      if (
+        retainedModes.length === latencyModes.length &&
+        retainedInputs.length === inputModalities.length
+      ) {
+        continue;
+      }
+      const capabilities = {
+        ...model.capabilities,
+        latencyModes: retainedModes,
+        inputModalities: retainedInputs,
+      };
+      if (
+        policy.definitionVersion ===
+        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5169,7 +5388,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+            vision: isReviewedGptVisionModel(slug),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5436,7 +5655,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
+          vision: isReviewedGptVisionModel(id),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
@@ -5770,7 +5989,7 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
- * Any deployment/provider drift fails before a provider or compaction call.
+ * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(
   settings: Settings,
@@ -5822,7 +6041,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === resolved.model.definitionVersion ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -7610,6 +7830,26 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
           `leases after a default-backend rollout.`,
       );
     }
+    const containmentMs = settings.sandboxIdleCommandContainmentMs;
+    if (containmentMs !== undefined && !(containmentMs > settings.sandboxIdleGraceMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must exceed ` +
+          `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}): a box kept warm only by ` +
+          `retained commands must stay available at least as long as an idle box awaiting drain.`,
+      );
+    }
+    if (
+      containmentMs !== undefined &&
+      optionalEnvironmentValue("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS", source) !==
+        undefined &&
+      !(containmentMs < rotationLeadMs)
+    ) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}): an idle box must be checkpointed ` +
+          `and stopped well before its provider deadline.`,
+      );
+    }
     if (settings.sandboxBackend === "modal") {
       const idleGraceMs = settings.sandboxIdleGraceMs;
       const lifecycle = effectiveSandboxLifecycle(settings, "modal");
@@ -7651,6 +7891,19 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
             `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise ` +
             `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower ` +
             `OPENGENI_SANDBOX_IDLE_GRACE_MS.`,
+        );
+      }
+      if (
+        settings.modalIdleTimeoutSeconds !== undefined &&
+        containmentMs !== undefined &&
+        !(reaperPeriod + containmentMs + drainCaptureTimeoutMs < idleTimeoutMs)
+      ) {
+        throw new Error(
+          `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS + ` +
+            `drain capture timeout (${reaperPeriod} + ${containmentMs} + ${drainCaptureTimeoutMs}) ` +
+            `must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}): ` +
+            `idle command containment must checkpoint a box before Modal's own idle reaper stops it. ` +
+            `Lower OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS or raise the Modal idle timeout.`,
         );
       }
     }
@@ -7710,6 +7963,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
       provider.kind === "vercel-gateway-organization" ||
+      provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "anthropic-organization" ||
@@ -8107,6 +8362,59 @@ function delay(ms: number): Promise<void> {
 /** Native Claude connections reuse the encrypted workspace and organization boundaries. */
 export const CLAUDE_CONNECTION_KINDS = ["anthropic", "claude_subscription"] as const;
 export type ClaudeConnectionKind = (typeof CLAUDE_CONNECTION_KINDS)[number];
+// Per-model native Messages controls. Unknown IDs never inherit adaptive
+// thinking merely because they share a provider with a supported model.
+const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
+  Record<
+    string,
+    Readonly<{
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort | null;
+      contextWindowTokens: number;
+      maxOutputTokens: number;
+    }>
+  >
+> = Object.fromEntries([
+  ...[
+    ["claude-opus-5-5", "medium"],
+    ["claude-sonnet-5-5", "medium"],
+    ["claude-opus-5", "high"],
+    ["claude-sonnet-5", "high"],
+    ["claude-opus-4-8", "high"],
+    ["claude-opus-4-7", "xhigh"],
+  ].map(([id, defaultEffort]) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort,
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "max"],
+      defaultEffort: "high",
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  [
+    "claude-haiku-4-5-20251001",
+    {
+      efforts: [],
+      defaultEffort: null,
+      contextWindowTokens: 200_000,
+      maxOutputTokens: 64_000,
+    },
+  ],
+]);
+export function claudeNativeModelProfile(upstreamModelId: string) {
+  return Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, upstreamModelId)
+    ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
+    : undefined;
+}
 export function claudeProviderId(
   kind: ClaudeConnectionKind,
   scope: "workspace" | "organization" = "organization",
@@ -8148,19 +8456,21 @@ export function withClaudeConnectionCatalog(
       anthropic: {
         auth: kind === "anthropic" ? "api-key" : "oauth",
         cacheTtl: "5m",
-        maxOutputTokens: 32000,
+        maxOutputTokens: 128000,
         streamIdleTimeoutMs: 600000,
       },
       models: connection.models.map((model) => {
-        // Only captured adaptive-thinking models are enabled by the managed catalog.
-        // Operators can explicitly declare other capabilities in a registry provider.
-        const adaptiveThinking = ["claude-opus-5-5", "claude-sonnet-5-5"].includes(
-          model.upstreamModelId,
-        );
+        const profile = claudeNativeModelProfile(model.upstreamModelId);
+        const adaptiveThinking = Boolean(profile?.efforts.length);
+        const contextWindowTokens = profile?.contextWindowTokens ?? 200_000;
+        const outputReserve = profile?.maxOutputTokens ?? 32_000;
         return {
-          contextWindowTokens: 200000,
-          effectiveContextWindowTokens: 168000,
-          autoCompactTokenLimit: 150000,
+          contextWindowTokens,
+          effectiveContextWindowTokens: contextWindowTokens - outputReserve,
+          autoCompactTokenLimit:
+            contextWindowTokens === 1_000_000
+              ? 800_000
+              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000),
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
           label:
@@ -8182,8 +8492,8 @@ export function withClaudeConnectionCatalog(
             reasoning: {
               upstream: adaptiveThinking ? "supported" : "unknown",
               runnable: adaptiveThinking,
-              efforts: adaptiveThinking ? ["low", "medium", "high"] : [],
-              defaultEffort: adaptiveThinking ? "high" : null,
+              efforts: [...(profile?.efforts ?? [])],
+              defaultEffort: profile?.defaultEffort ?? null,
               required: false,
             },
             functionCalling: { upstream: "supported", runnable: true },
