@@ -244,12 +244,16 @@ describe("public editable-artifact browser composition", () => {
       for (let index = 0; index < 2; index += 1) {
         await page.getByRole("button", { name: "Add slide" }).click();
         await waitForEditorIdle(page, "presentation");
+        // Command settlement precedes projection refresh and insertion selection.
+        await page.locator(`[data-og-slide-index="${index + 1}"][aria-selected="true"]`).waitFor();
       }
       const desktopViewport = page.viewportSize()!;
       const rail = page.locator("[data-og-slide-rail]");
       await rail.focus();
+      expect(await rail.evaluate((element) => document.activeElement === element)).toBe(true);
       await page.keyboard.press("Home");
       await page.locator('[data-og-slide-index="0"][aria-selected="true"]').waitFor();
+      expect(await rail.evaluate((element) => document.activeElement === element)).toBe(true);
       await page.keyboard.press("End");
       await page.locator('[data-og-slide-index="2"][aria-selected="true"]').waitFor();
 
