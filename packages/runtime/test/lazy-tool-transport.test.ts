@@ -1554,7 +1554,7 @@ describe("generic lazy tool dispatch", () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
-        description: `weather capability ${index} ${"x".repeat(50_000)}`,
+        description: `weather capability ${index} ${"x".repeat(100_000)}`,
         parameters: {
           type: "object",
           properties: { city: { type: "string" } },
