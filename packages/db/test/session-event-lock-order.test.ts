@@ -31,10 +31,14 @@ import {
   getOrCreateSessionSystemUpdateOutbox,
   markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
+  nestedPostgresSqlState,
   QueueCommandConflictError,
   reconcileCodexCapacityWait,
+  recordConsumedChildAnswers,
+  recordPendingSessionToolCallResult,
   recoverSessionDispatch,
   registerDbBinding,
+  registerPendingSessionToolCall,
   sendAgentMessageInTransaction,
   SessionCommandIdempotencyError,
   SessionControlInvariantError,
@@ -978,6 +982,28 @@ beforeAll(async () => {
     create trigger eventorder_system_update_outbox_test_trigger
     before insert on session_system_update_outbox
     for each row execute function eventorder_system_update_outbox_test_trigger();
+
+    create function eventorder_child_answer_barrier()
+    returns trigger language plpgsql security definer
+    set search_path = pg_catalog, public
+    as $function$
+    declare configured record;
+    begin
+      select lock_class, lock_id into configured
+      from public.eventorder_event_barriers
+      where event_type = 'child-answer:' || new.id::text;
+      if found then
+        perform pg_catalog.pg_advisory_xact_lock(configured.lock_class, configured.lock_id);
+      end if;
+      return new;
+    end
+    $function$;
+    -- Alphabetical trigger order pauses the real metadata UPDATE after its
+    -- turn lock, but before 0560's session-locking archive guard. No SQLSTATE
+    -- is injected: only PostgreSQL's deadlock detector can fail this race.
+    create trigger aaa_eventorder_child_answer_barrier
+    before update of metadata on session_turns
+    for each row execute function eventorder_child_answer_barrier();
   `);
 }, 180_000);
 
@@ -990,6 +1016,122 @@ afterAll(async () => {
 }, 60_000);
 
 describe("event-ordering invariant canonical session-event lock order", () => {
+  test("child-answer acknowledgment cannot deadlock a parallel pending tool result", async () => {
+    const parent = await seedRunningSession();
+    const child = await seedIdleChild(parent, crypto.randomUUID(), parent.sessionId);
+    const [answer] = await appendSessionEvents(db, parent.workspaceId, child.sessionId, [
+      { type: "turn.completed", payload: { output: "complete child answer" } },
+    ]);
+    const identity = { ...parent, executionGeneration: 1, callId: "parallel-exec-result" };
+    await registerPendingSessionToolCall(db, {
+      ...identity,
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        callId: identity.callId,
+        name: "exec_command",
+        arguments: {},
+      },
+    });
+    const lockId = nextBarrierId++;
+    const barrierKey = `child-answer:${parent.turnId}`;
+    await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
+    await admin`
+      insert into eventorder_event_barriers (event_type, lock_class, lock_id)
+      values (${barrierKey}, ${BARRIER_CLASS}, ${lockId})
+    `;
+    let acknowledgment: Promise<unknown> | undefined;
+    let result: Promise<unknown> | undefined;
+    let released = false;
+    try {
+      acknowledgment = recordConsumedChildAnswers(db, {
+        ...identity,
+        children: [{ sessionId: child.sessionId, sequences: [answer!.sequence] }],
+      });
+      void acknowledgment.catch(() => undefined);
+      await waitForAdvisoryWaiter();
+      result = recordPendingSessionToolCallResult(db, {
+        ...identity,
+        resultItem: {
+          type: "function_call_result",
+          callId: identity.callId,
+          output: "exec result",
+        },
+      });
+      void result.catch(() => undefined);
+      await waitForTwoAppLockWaiters();
+      const graph = await monitor<
+        Array<{ pid: number; blockers: number[]; tupleRelations: string[] }>
+      >`
+        select activity.pid, pg_blocking_pids(activity.pid) as blockers,
+          array(select distinct lock.relation::regclass::text from pg_locks lock
+                where lock.pid = activity.pid and lock.locktype = 'tuple') as "tupleRelations"
+        from pg_stat_activity activity
+        where datname = current_database() and usename = 'opengeni_app'
+          and wait_event_type = 'Lock'
+        order by pid
+      `;
+      // With the original implementation, the second backend owns the session
+      // and waits on the acknowledgment's turn; corrected code waits on the
+      // acknowledgment's session before touching the turn or its receipt.
+      expect(graph).toHaveLength(2);
+      expect(
+        graph.some(
+          (edge) => edge.blockers.includes(graph[0]!.pid) || edge.blockers.includes(graph[1]!.pid),
+        ),
+      ).toBeTrue();
+      await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+      released = true;
+      const outcomes = await within(
+        Promise.allSettled([acknowledgment, result]),
+        "child-answer acknowledgment and pending result settlement",
+      );
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") {
+          console.error("child-answer race SQLSTATE", nestedPostgresSqlState(outcome.reason));
+          let error = outcome.reason;
+          for (let depth = 0; error && depth < 6; depth++, error = error.cause) {
+            if (error.detail) console.error("child-answer race detector DETAIL", error.detail);
+          }
+        }
+      }
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(graph.some((edge) => edge.tupleRelations.includes("sessions"))).toBeTrue();
+      expect((outcomes[0] as PromiseFulfilledResult<unknown>).value).toEqual({ recorded: 1 });
+      expect((outcomes[1] as PromiseFulfilledResult<unknown>).value).toEqual({
+        accepted: true,
+        recorded: true,
+      });
+      const [stored] = await admin<Array<{ metadata: Record<string, unknown>; result: unknown }>>`
+        select turn.metadata, pending.result_item as result
+        from session_turns turn join session_pending_tool_calls pending on pending.turn_id = turn.id
+        where turn.id = ${parent.turnId} and pending.call_id = ${identity.callId}
+      `;
+      expect(stored?.metadata.consumedChildAnswers).toEqual([
+        {
+          childSessionId: child.sessionId,
+          sequence: answer!.sequence,
+          attemptId: parent.attemptId,
+        },
+      ]);
+      expect(stored?.result).toEqual({
+        type: "function_call_result",
+        callId: identity.callId,
+        output: "exec result",
+      });
+      expect(
+        await recordConsumedChildAnswers(db, {
+          ...identity,
+          children: [{ sessionId: child.sessionId, sequences: [answer!.sequence] }],
+        }),
+      ).toEqual({ recorded: 0 });
+    } finally {
+      if (!released) await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+      await Promise.allSettled([acknowledgment, result].filter(Boolean) as Promise<unknown>[]);
+      await admin`delete from eventorder_event_barriers where event_type = ${barrierKey}`;
+    }
+  }, 180_000);
+
   test("fresh history appends verify returned rows without rereading history under the session lock", async () => {
     const fixture = await seedRunningSession();
     const queries: string[] = [];
