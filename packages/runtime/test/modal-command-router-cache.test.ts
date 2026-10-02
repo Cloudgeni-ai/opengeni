@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
 import type { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
+import { ProviderCommandObservationUnavailableError } from "../src/sandbox/provider-command-session";
 
 type CacheEntry = { router: ModalCommandRouterWire; users: number; refreshAt: number };
 type CacheControl = {
@@ -255,6 +256,139 @@ test("a quiet stream's read deadline returns a partial page before outer contain
     expect(page.chunks.map((chunk) => chunk.text)).toEqual(["partial"]);
     expect(page.command.streams.stdout).toMatchObject({ byteOffset: 7, eof: false });
     expect(page.exitCode).toBeNull();
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("settlement allowance never admits another read after the original retry budget", async () => {
+  const f = fixture();
+  let stdoutReads = 0;
+  const router = {
+    close: () => {},
+    read: async (_identity: unknown, stream: string) => {
+      if (stream === "stdout") {
+        stdoutReads++;
+        await Bun.sleep(40);
+        throw Object.assign(new Error("read unavailable"), { code: 14 });
+      }
+      return { bytes: Buffer.alloc(0), eof: false };
+    },
+    poll: async () => null,
+  } as unknown as ModalCommandRouterWire;
+  f.cache.routers.set(
+    "task-original",
+    Promise.resolve({ router, users: 0, refreshAt: Date.now() + 60_000 }),
+  );
+  const command: ModalRouterProviderCommand = {
+    kind: "modal-router-v1",
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+    execId: "79c723cd-ce29-4614-9424-d3171d24d55f",
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  };
+  try {
+    await expect(f.control.read(command, 20)).rejects.toThrow();
+    expect(stdoutReads).toBe(1);
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("late authenticated access cannot start observations after the original read budget", async () => {
+  const f = fixture();
+  let reads = 0;
+  const router = {
+    close: () => {},
+    read: async () => {
+      reads++;
+      return { bytes: Buffer.alloc(0), eof: true };
+    },
+    poll: async () => 0,
+  } as unknown as ModalCommandRouterWire;
+  const pending = Bun.sleep(80).then(() => ({ router, users: 0, refreshAt: Date.now() + 60_000 }));
+  f.cache.routers.set("task-original", pending);
+  const command: ModalRouterProviderCommand = {
+    kind: "modal-router-v1",
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+    execId: "79c723cd-ce29-4614-9424-d3171d24d55f",
+    streams: {
+      stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+    },
+  };
+  try {
+    await expect(f.control.read(command, 20)).rejects.toBeInstanceOf(
+      ProviderCommandObservationUnavailableError,
+    );
+    await pending;
+    expect(reads).toBe(0);
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("captured complete streams retain their terminal observation without a provider handle", async () => {
+  const f = fixture();
+  const command: ModalRouterProviderCommand = {
+    kind: "modal-router-v1",
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+    execId: "79c723cd-ce29-4614-9424-d3171d24d55f",
+    streams: {
+      stdout: { byteOffset: 7, utf8Remainder: "", eof: true, exitCode: 7 },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: true, exitCode: 7 },
+    },
+  };
+  try {
+    const page = await f.control.read(command, 0);
+    expect(page.exitCode).toBe(7);
+    expect(page.command).toEqual(command);
+    expect(page.expected).toEqual(command);
+    expect(page.chunks).toEqual([]);
+    expect(f.lookups()).toBe(0);
+    const cancelled = new AbortController();
+    cancelled.abort(new Error("owner cancelled"));
+    await expect(f.control.read(command, 0, cancelled.signal)).rejects.toThrow("owner cancelled");
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("incomplete or contradictory captured streams still require provider observation", async () => {
+  const f = fixture();
+  let polls = 0;
+  const router = {
+    close: () => {},
+    read: async () => ({ bytes: Buffer.alloc(0), eof: true }),
+    poll: async () => {
+      polls++;
+      throw new Error("provider handle unavailable");
+    },
+  } as unknown as ModalCommandRouterWire;
+  f.cache.routers.set(
+    "task-original",
+    Promise.resolve({ router, users: 0, refreshAt: Date.now() + 60_000 }),
+  );
+  const command: ModalRouterProviderCommand = {
+    kind: "modal-router-v1",
+    sandboxId: "sandbox-original",
+    taskId: "task-original",
+    execId: "79c723cd-ce29-4614-9424-d3171d24d55f",
+    streams: {
+      stdout: { byteOffset: 7, utf8Remainder: "", eof: true, exitCode: 0 },
+      stderr: { byteOffset: 0, utf8Remainder: "", eof: true, exitCode: 1 },
+    },
+  };
+  try {
+    await expect(f.control.read(command, 0)).rejects.toThrow("provider handle unavailable");
+    command.streams.stderr = { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null };
+    await expect(f.control.read(command, 0)).rejects.toThrow("provider handle unavailable");
+    expect(polls).toBe(2);
   } finally {
     await f.control.close();
   }

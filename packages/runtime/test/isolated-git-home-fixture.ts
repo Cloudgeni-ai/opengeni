@@ -7,7 +7,7 @@
 // sandbox session that runs commands on the host must come from
 // `hostShellSession` below rather than a hand-rolled `Bun.spawn`.
 
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -161,7 +161,17 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
   const environment = isolatedGitEnvironment({ ...options.env, HOME: home });
   return {
     exec: async (args: { cmd: string }): Promise<HostShellCommandResult> => {
-      const cmd = options.rewriteCommand ? options.rewriteCommand(args.cmd) : args.cmd;
+      let cmd = options.rewriteCommand ? options.rewriteCommand(args.cmd) : args.cmd;
+      // Lifecycle hooks can transport scripts as base64 chunks. Map virtual
+      // paths in the decoded program too, before executing it on the host.
+      const stagedScript = cmd.match(/^exec \/bin\/sh '(\/tmp\/opengeni\/[^']+\.sh)'$/u);
+      if (stagedScript && options.rewriteCommand) {
+        const path = stagedScript[1]!;
+        writeFileSync(path, options.rewriteCommand(readFileSync(path, "utf8")));
+        if (options.shell === "bash") {
+          cmd = cmd.replace("exec /bin/sh ", "exec bash --noprofile --norc ");
+        }
+      }
       const child = Bun.spawn(
         [
           options.shell ?? "sh",
