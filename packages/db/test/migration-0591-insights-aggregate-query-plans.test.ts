@@ -5,7 +5,8 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 
-import { createDb, ensureManagedAccessForUser } from "../src";
+import { createDb, createSession, ensureManagedAccessForUser } from "../src";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -153,4 +154,78 @@ test("0591 aggregate source retains complete totals, private owner sums and deci
   expect(routine?.definition).toContain("sum(usage_row.event_count) AS event_count");
   expect(routine?.definition).toContain("'eventCount', event_count::text");
   expect(routine?.definition).toContain("'privateChatsTruncated'");
+});
+
+test("0594 hash-safe organization reads retain missing-session amounts and restore caller settings", async () => {
+  if (!shared || !appUrl) throw new Error("PostgreSQL test database unavailable");
+  const client = createDb(appUrl, { max: 1, rlsStrategy: "force" });
+  const app = postgres(appUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    const userId = `organization-hash-plan-${crypto.randomUUID()}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Organization hash plan fixture",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "Deleted ledger plan fixture",
+      resources: [],
+      metadata: {},
+      model: "plan-fixture",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: `user:${userId}` },
+      createdByContext: {},
+    });
+    await shared.admin`insert into usage_events
+      (account_id, workspace_id, session_id, event_type, quantity, unit, idempotency_key, occurred_at)
+      values (${grant.accountId}, ${grant.workspaceId}, ${session.id},
+        'model.cost', 123, 'usd_micros', ${crypto.randomUUID()}, '2026-09-14T01:00:00Z')`;
+    await shared.admin`delete from sessions where id = ${session.id}`;
+    const [routine] = await shared.admin<Array<{ settings: string[]; definer: boolean }>>`
+      select proconfig as settings, prosecdef as definer from pg_proc
+      where oid = 'opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean)'::regprocedure`;
+    expect(routine?.definer).toBe(true);
+    expect(routine?.settings).toContain("enable_nestloop=off");
+    expect(routine?.settings).toContain("plan_cache_mode=force_custom_plan");
+    await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${grant.accountId}, true),
+        set_config('opengeni.workspace_id', '', true),
+        set_config('opengeni.subject_id', ${`user:${userId}`}, true),
+        set_config('opengeni.initiating_human_subject_id', '', true),
+        set_config('enable_nestloop', 'on', true)`;
+      const [row] = await tx<Array<{ summary: { totals: unknown[]; privateChats: unknown[] } }>>`
+        select opengeni_private.organization_usage_summary(${grant.accountId}::uuid,
+          '2026-09-14'::timestamptz, '2026-09-15'::timestamptz, 'day', null, true) as summary`;
+      expect(row?.summary.totals).toEqual([
+        { eventType: "model.cost", unit: "usd_micros", quantity: "123", eventCount: "1" },
+      ]);
+      expect(row?.summary.privateChats).toEqual([]);
+      const [afterRead] = await tx<Array<{ enabled: string }>>`
+        select current_setting('enable_nestloop') as enabled`;
+      expect(afterRead?.enabled).toBe("on");
+      await expect(
+        tx.savepoint(async (savepoint) => {
+          await savepoint`select opengeni_private.organization_usage_summary(${grant.accountId}::uuid,
+            '2026-09-15'::timestamptz, '2026-09-14'::timestamptz, 'day', null, true)`;
+        }),
+      ).rejects.toMatchObject({ code: "22023" });
+      const [afterError] = await tx<Array<{ enabled: string }>>`
+        select current_setting('enable_nestloop') as enabled`;
+      expect(afterError?.enabled).toBe("on");
+    });
+    const [leftover] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from opengeni_private.organization_usage_read_capabilities`;
+    expect(leftover?.count).toBe(0);
+  } finally {
+    await client.close();
+    await app.end();
+  }
 });
