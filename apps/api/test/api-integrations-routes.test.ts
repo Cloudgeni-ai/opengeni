@@ -13,6 +13,8 @@ import {
   GoogleDriveConnectionMetadata,
 } from "@opengeni/contracts/google-drive";
 import {
+  ApiIntegrationPreview,
+  InstalledApiIntegration,
   IntegrationPresentation,
   OrganizationIntegrationDeniedError,
   ListIntegrationDefinitionsResponse,
@@ -968,6 +970,177 @@ describe("API Integration routes", () => {
       }
     }
   }, 60_000);
+
+  for (const sharedOwner of [false, true]) {
+    test(`numeric operation-ID reorder deduplicates storage${sharedOwner ? " with another owner" : ""} with unchanged selected tools`, async () => {
+      if (!client || !shared) throw new Error("Numeric reorder regression requires PostgreSQL");
+      const fetchesBefore = sourceFetches;
+      const role = await shared.admin`
+        select rolsuper, rolbypassrls from pg_roles where rolname = ${new URL(shared.appUrl).username}`;
+      expect(role[0]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+      const path = (operationId: string, serverUrl: string) => ({
+        get: {
+          operationId,
+          servers: [{ url: serverUrl }],
+          responses: { "200": { description: "OK" } },
+        },
+      });
+      const one = path("1", "https://127.0.0.1/numeric/one/");
+      const two = path("2", "https://127.0.0.1/numeric/two/");
+      const document = {
+        openapi: "3.1.0",
+        info: { title: "Numeric operation-ID reorder", version: "1.0.0" },
+        paths: { "/two": two, "/one": one },
+      };
+      const source = {
+        kind: "openapi_document" as const,
+        sourceKey: `numeric-reorder-${crypto.randomUUID()}`,
+        document: JSON.stringify(document),
+      };
+      const reorderedSource = {
+        ...source,
+        document: JSON.stringify({ ...document, paths: { "/one": one, "/two": two } }),
+      };
+      const preview = async (selectedSource: typeof source) => {
+        const response = await request("/integrations/preview", {
+          method: "POST",
+          body: JSON.stringify({ source: selectedSource }),
+        });
+        expect(response.status).toBe(200);
+        return ApiIntegrationPreview.parse(await response.json());
+      };
+      let installed: InstalledApiIntegration | null = null;
+      const ownerId = `numeric-reorder-owner-${crypto.randomUUID()}`;
+      try {
+        const first = await preview(source);
+        // Keep the selected request authority unchanged: the omitted-tools
+        // default preserves traversal order and is independent of revision hashing.
+        const allowedTools = first.tools.map((tool) => tool.id).sort();
+        const created = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source,
+            expectedRevisionId: first.revisionId,
+            expectedContentSha256: first.contentSha256,
+            allowedTools,
+          }),
+        });
+        expect(created.status).toBe(201);
+        installed = InstalledApiIntegration.parse(await created.json());
+        if (sharedOwner) {
+          await shared.admin`
+            insert into capability_component_owners
+              (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
+            values
+              (${accountId}, ${workspaceId}, ${installed.integrationFacetInstallationId}, 'migration', ${ownerId}, false),
+              (${accountId}, ${workspaceId}, ${installed.apiFacetInstallationId}, 'migration', ${ownerId}, false)`;
+          await shared.admin`
+            insert into integration_facet_binding_owners
+              (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
+            values (${accountId}, ${workspaceId}, ${installed.instanceId}, 'migration', ${ownerId}, false)`;
+        }
+        const snapshot = async () => {
+          const [versions, installation, facets, bindings, componentOwners, bindingOwners] =
+            await Promise.all([
+              shared!.admin`
+              select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+              from capability_plugin_versions v
+              join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+              join integration_spec_revisions s on s.api_facet_id = f.id
+              where v.plugin_id = ${installed!.pluginId} order by v.id`,
+              shared!.admin`
+              select * from capability_plugin_installations where id = ${installed!.pluginInstallationId}`,
+              shared!.admin`
+              select * from capability_facet_installations
+              where plugin_installation_id = ${installed!.pluginInstallationId} order by id`,
+              shared!.admin`
+              select * from integration_facet_bindings where id = ${installed!.instanceId}`,
+              shared!.admin`
+              select * from capability_component_owners where workspace_id = ${workspaceId}
+              and facet_installation_id in (${installed!.integrationFacetInstallationId}, ${installed!.apiFacetInstallationId})
+              order by id`,
+              shared!.admin`
+              select * from integration_facet_binding_owners where binding_id = ${installed!.instanceId} order by id`,
+            ]);
+          return { versions, installation, facets, bindings, componentOwners, bindingOwners };
+        };
+        const before = await snapshot();
+        expect(before.versions).toHaveLength(1);
+        expect(before.bindings[0]!.config.allowedTools).toEqual(allowedTools);
+        expect(first.baseUrl).toBe("https://127.0.0.1/numeric/one/");
+        expect(before.versions[0]!.manifest.baseUrl).toBe(first.baseUrl);
+        expect(Object.values(before.versions[0]!.spec.bindings)[0]).toMatchObject({
+          serverUrl: first.baseUrl,
+        });
+        if (sharedOwner) {
+          expect(before.componentOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            2,
+          );
+          expect(before.bindingOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            1,
+          );
+        }
+        const reordered = await preview(reorderedSource);
+        expect(reordered.baseUrl).toBe(first.baseUrl);
+        expect(reordered.capabilityId).toBe(first.capabilityId);
+        const byId = (value: ApiIntegrationPreview) =>
+          [...value.tools].sort((left, right) => left.id.localeCompare(right.id));
+        expect(byId(reordered)).toEqual(byId(first));
+        let failure: unknown;
+        const repeated = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source: reorderedSource,
+            expectedRevisionId: reordered.revisionId,
+            expectedContentSha256: reordered.contentSha256,
+            expectedInstanceVersion: installed.instanceVersion,
+            allowedTools,
+          }),
+        }).catch((error: unknown) => {
+          failure = error;
+          return null;
+        });
+        const after = await snapshot();
+        if (failure || after.versions.length !== 1) {
+          console.info(
+            `[numeric-reorder:${sharedOwner ? "shared" : "direct"}] published=${before.versions.length}->${after.versions.length}; instance=${before.bindings[0]!.version}->${after.bindings[0]!.version}; failure=${failure instanceof Error ? failure.name : "none"}`,
+          );
+        }
+        expect(failure).toBeUndefined();
+        expect(repeated!.status).toBe(200);
+        expect(await repeated!.json()).toEqual(installed);
+        expect(after).toEqual(before);
+        expect(reordered.revisionId).toBe(first.revisionId);
+        expect(reordered.contentSha256).toBe(first.contentSha256);
+        expect(sourceFetches).toBe(fetchesBefore);
+      } finally {
+        if (installed) {
+          if (sharedOwner) {
+            await shared.admin`delete from integration_facet_binding_owners
+              where binding_id = ${installed.instanceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+            await shared.admin`delete from capability_component_owners
+              where workspace_id = ${workspaceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+          }
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            installed.capabilityId,
+            installed.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId: installed.capabilityId,
+            instanceKey: installed.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }, 60_000);
+  }
 
   test("installers can auto-approve selected write tools for unattended runs", async () => {
     if (!available || !client) return;

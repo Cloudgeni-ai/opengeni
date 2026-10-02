@@ -229,11 +229,13 @@ export function compileOpenApiRevision(
   // changing any document bytes. Hash the normalized, effective operation
   // URLs and the primary URL used by the installation manifest, not raw
   // options (which may be equivalent or overridden).
+  // Match the manifest's binding enumeration: integer-like tool IDs enumerate
+  // numerically, independently of the tools' path traversal order.
   const contentSha256 = sha256Hex(
     canonicalJson({
       document,
       ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
-      baseUrl: bindings[tools[0]!.id]!.serverUrl,
+      baseUrl: Object.values(bindings)[0]!.serverUrl,
       serverUrls: Object.fromEntries(
         Object.entries(bindings).map(([id, binding]) => [id, binding.serverUrl]),
       ),

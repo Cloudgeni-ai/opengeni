@@ -140,6 +140,35 @@ describe("OpenAPI immutable executable context", () => {
     expect(reordered.id).not.toBe(first.id);
   });
 
+  test("numeric operation IDs retain the manifest primary URL and revision across path reorders", () => {
+    const path = (operationId: string, serverUrl: string) => ({
+      get: {
+        operationId,
+        servers: [{ url: serverUrl }],
+        responses: { "200": { description: "OK" } },
+      },
+    });
+    const one = path("1", "https://one.example.test/");
+    const two = path("2", "https://two.example.test/");
+    const firstDocument = { ...document, paths: { "/two": two, "/one": one } };
+    const reorderedDocument = { ...document, paths: { "/one": one, "/two": two } };
+    expect(reorderedDocument).toEqual(firstDocument);
+    const first = compileOpenApiRevision(firstDocument, options);
+    const reordered = compileOpenApiRevision(reorderedDocument, options);
+    expect(first.tools.map((tool) => tool.id)).toEqual(["2", "1"]);
+    expect(reordered.tools.map((tool) => tool.id)).toEqual(["1", "2"]);
+    expect(reordered.bindings).toEqual(first.bindings);
+    const byId = (revision: typeof first) =>
+      [...revision.tools].sort((left, right) => left.id.localeCompare(right.id));
+    expect(byId(reordered)).toEqual(byId(first));
+    // Integer-like binding keys enumerate numerically, not by path insertion.
+    expect(Object.keys(first.bindings)).toEqual(["1", "2"]);
+    expect(Object.values(first.bindings)[0]?.serverUrl).toBe("https://one.example.test/");
+    expect(Object.values(reordered.bindings)[0]?.serverUrl).toBe("https://one.example.test/");
+    expect(reordered.contentSha256).toBe(first.contentSha256);
+    expect(reordered.id).toBe(first.id);
+  });
+
   test("invalid executable URLs are still rejected before a revision is returned", () => {
     for (const baseUrl of [
       "https://user:secret@api.example.test/",

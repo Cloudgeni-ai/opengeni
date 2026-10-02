@@ -12,7 +12,6 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
-  deleteWorkspace,
   encryptEnvironmentValue,
   grantWorkspaceAccess,
   installApiIntegration,
@@ -159,11 +158,13 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  for (const id of [workspaceId, foreignWorkspaceId]) {
-    if (client && id) await deleteWorkspace(client.db, id);
+  // This file owns a disposable database; release it without mutating immutable
+  // Connection ownership through workspace lifecycle teardown.
+  try {
+    await client?.close();
+  } finally {
+    await shared?.release();
   }
-  await client?.close();
-  await shared?.release();
 }, 60_000);
 
 async function connection(
