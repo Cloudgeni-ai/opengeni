@@ -909,19 +909,17 @@ Canonical: [`human-input.md`](human-input.md),
 
 ### 5.5 Model, tool, and compute preparation
 
-The accepted turn freezes its public model choice, provider/deployment routing,
-billing attribution, governance context, initiating authority, and relevant
-tool/connection delegations. Recovery reuses that accepted truth rather than
-sampling mutable workspace defaults again.
+Accepted turns freeze model choice, provider/deployment routing, billing,
+governance, initiating authority, and tool/connection delegations. Recovery
+reuses these snapshots, never mutable workspace defaults.
 
-Workspace built-in tool and MCP-server defaults inherit independently when
-their respective `settings.sessionToolDefaults` key is absent. Existing arrays
-remain exact custom selections (including empty arrays). The settings API
-merges these nested keys atomically; explicit `null` removes only that override.
-The UI requires deliberate customization and exposes partial selections;
-saving plugin defaults never freezes built-in defaults. Persistence lives in
-`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
-and changing defaults never rewrites existing sessions or accepted attempts.
+Built-in tool and MCP-server defaults inherit independently when their
+`settings.sessionToolDefaults` key is absent. Arrays, including empty ones,
+remain exact selections; atomic settings updates use `null` to remove only
+that override. The UI requires deliberate customization, exposes partial
+selections, and keeps plugin/built-in defaults independent.
+`packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
+ceilings apply; defaults never rewrite sessions or accepted attempts.
 
 A fresh session selecting a workspace Gateway or OpenRouter custom model, an
 existing session explicitly switching from another model, a new/materially
@@ -947,41 +945,39 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Eager/lazy, local/MCP-backed, and model/Codemode tool calls share the current
-authorized catalog, execution fences, and approval requirements.
+All tool calls share the current authorized catalog, execution fences, and
+approval requirements, regardless of loading, backend, or model/Codemode entry.
 
-The closed always-visible local first-request set is `exec_command`,
+The closed always-visible first-request local tool set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists selectable models; never switches
-them), and optional [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
-remain behind progressive search.
+`request_human_input`, `list_models` (lists, never switches models), and optional
+[`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
+require progressive search.
 
-Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
-managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
+Repository descriptors use sandbox-bound `repository_skill_read`, separate
+from managed `skill_read`: [run lifecycle](run-lifecycle.md).
 
-Repository guidance lives in `.agents/skills`; runtime bundles in
+Repository Skills: `.agents/skills`; runtime bundles:
 `packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
-client assets/docs from `.agents/skills/opengeni-client`, with drift tests.
-`opengeni-schedules` supplies creation guidance when tools/host selection permit;
-the Schedules shortcut sends only the request and time zone.
+client assets/docs from `.agents/skills/opengeni-client`; tests detect drift.
+Tools/host selection gate `opengeni-schedules`; the Schedules shortcut sends
+only the request and time zone.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
-Before every follow-up provider request, the worker reconciles the SDK's
-complete prior history into durable call/result truth; the first request has no
-prior model/tool history to flush. An empty Responses terminal is reconstructed
-from observed `output_item.done` events in numeric `output_index` order. Sparse
-indices do not create synthetic history items, while duplicate indices remain
-invalid.
+Each follow-up provider request reconciles complete SDK history into durable
+call/result truth; the first request has none to flush. Empty Responses
+terminals reconstruct observed `output_item.done` events in numeric
+`output_index` order, without synthetic items for sparse indices; duplicates
+remain invalid.
 
-Compute is established lazily where possible. A text-only turn can begin
-without provisioning a box or contacting a Connected Machine. Once a tool
-needs filesystem, process, Git, browser, or computer access, routing resolves
-the exact current target and validates its epoch and authority.
+Text-only turns can start without compute provisioning or contacting a
+Connected Machine. Filesystem, process, Git, browser, or computer tools resolve
+the exact current target and validate its epoch and authority.
 
-Explicit Variable Sets are ordered from low to high precedence and are frozen
-for execution. Reconfiguration is a quiescent session-control mutation that
-rotates managed compute rather than hot-swapping credentials into active work.
+Explicit Variable Sets freeze for execution in ascending precedence.
+Session-control reconfiguration requires quiescence and rotates managed compute; it never
+hot-swaps active credentials.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
