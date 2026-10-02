@@ -394,6 +394,12 @@ describe("organization billing StrictMode ownership", () => {
     await act(async () => button(container, "Add credits").click());
     await flush();
     expect(createBillingCheckout).toHaveBeenCalledTimes(1);
+    expect(createBillingCheckout).toHaveBeenCalledWith({
+      amountUsd: 25,
+      accountId,
+      successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
+      cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+    });
     expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
       description: "bounded checkout failure",
     });

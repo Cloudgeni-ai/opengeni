@@ -66,6 +66,49 @@ and examples are in [Registry configuration](#registry-configuration). In
 database catalog mode the host JSON still owns transport and credentials; the
 singleton owns membership.
 
+### Customer OpenAI and Azure OpenAI keys
+
+The web console offers **OpenAI** and **Azure OpenAI** in the model step after
+organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+asks for an API key, with the model preselected and an optional Change model
+control. Azure asks for an API key, resource endpoint
+(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
+name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+are refused. Azure endpoint/deployment/API-version configuration remains available
+separately for deployment operators.
+
+The web flow sends `verifyModelAccess: true` on connection creation. Before
+saving, the API checks the exact provider/model with a short Responses message
+(32 output tokens maximum, `store: false`, no tools). Provider usage applies;
+this uses no OpenGeni credits. Failed checks do not save a connection and show
+safe actionable errors without reflecting upstream response text. Other API
+callers can omit the check for offline provisioning. A successful setup check
+does not establish ongoing provider health. The connected model is selected in
+the current user’s next-chat draft from onboarding and Workspace settings.
+
+These connections are workspace-owned, including in the onboarding Personal
+workspace. The existing Connections API encrypts the key at rest and returns
+metadata only. Usage is externally billed to that provider account and consumes
+no OpenGeni credits. Organization provider inheritance does not apply to these
+workspace connections. Replace a key, endpoint, or model by disconnecting and
+reconnecting; the new connection has a distinct model ID.
+
+`directModelProvider` metadata declares the provider, model/deployment, and Azure
+endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
+include the exact connection ID and version. The metadata-only workspace catalog
+adds a secret-free provider definition; the worker loads only the selected exact
+active connection, verifies its definition and access, and overlays its decrypted
+key for that turn. Revocation or an identity mismatch fails closed. Missing
+customer connections never fall back to deployment credentials. Customer routes
+use conservative text/function capabilities; hosted tools and reasoning controls
+are not enabled implicitly for an arbitrary Azure deployment name.
+
+Canonical: `packages/contracts/src/direct-model-provider.ts`,
+`packages/core/src/domain/direct-model-provider.ts` for the setup check,
+`withDirectModelProviders` in `packages/config/src/index.ts`,
+`loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+
 ### Reviewed overlays — not generic JSON
 
 | Route                        | Enable                                        | Wire             | Catalog                                                           |
@@ -360,6 +403,7 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 

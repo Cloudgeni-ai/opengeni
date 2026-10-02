@@ -8,6 +8,8 @@ Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
+Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.

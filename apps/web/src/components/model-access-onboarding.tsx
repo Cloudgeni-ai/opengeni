@@ -1,3 +1,4 @@
+import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { labelReasoningEffort } from "@opengeni/react";
 import type { CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
@@ -64,6 +65,8 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
   credits: "Opengeni credits",
+  openai: "OpenAI",
+  azure_openai: "Azure OpenAI",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
@@ -89,7 +92,7 @@ function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string
 
 /**
  * First-sign-in product step after the durable organization-name lifecycle.
- * When the organization already holds OpenGeni credits (for example the
+ * When the organization already holds Opengeni credits (for example the
  * verified-signup trial grant) and new chats default to a credits model,
  * starting to chat on those credits is the primary path: the step shows the
  * balance and the resolved default, and names the free model as what applies
@@ -133,6 +136,8 @@ export function ModelAccessOnboardingPanel({
   const [pending, setPending] = useState<DevicePending | null>(null);
   const [pendingSlow, setPendingSlow] = useState(false);
   const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
+  const [directProvider, setDirectProvider] = useState<"openai" | "azure_openai" | null>(null);
+  const connectedModelId = useRef<string | undefined>(undefined);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [selectionRetry, setSelectionRetry] = useState<ConnectedModelFamily | null>(null);
@@ -183,11 +188,20 @@ export function ModelAccessOnboardingPanel({
     onComplete();
   }
 
-  async function finishWithConnectedModel(family: ConnectedModelFamily): Promise<boolean> {
+  async function finishWithConnectedModel(
+    family: ConnectedModelFamily,
+    preferredModelId?: string,
+  ): Promise<boolean> {
+    connectedModelId.current = preferredModelId;
     if (client) {
       finishing.current = true;
       try {
-        const model = await applyConnectedModelToNewSessionDraft(client, workspaceId, family);
+        const model = await applyConnectedModelToNewSessionDraft(
+          client,
+          workspaceId,
+          family,
+          preferredModelId,
+        );
         if (model) {
           setSelectionRetry(null);
           toast.success(`${model.label} (${FAMILY_LABELS[family]}) is selected for your next chat`);
@@ -215,7 +229,7 @@ export function ModelAccessOnboardingPanel({
     if (!client || busy || !selectionRetry) return;
     setBusy(true);
     try {
-      await finishWithConnectedModel(selectionRetry);
+      await finishWithConnectedModel(selectionRetry, connectedModelId.current);
     } finally {
       setBusy(false);
     }
@@ -385,6 +399,7 @@ export function ModelAccessOnboardingPanel({
       providerKeyOperation.current = null;
     }
     setKeyProvider(next);
+    setDirectProvider(null);
   }
 
   const validAmount = validTopupAmount(topupAmount);
@@ -466,6 +481,47 @@ export function ModelAccessOnboardingPanel({
     </div>
   ) : (
     <div className="divide-y divide-border">
+      {(["openai", "azure_openai"] as const).map((provider) => (
+        <div key={provider}>
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-auto min-h-16 w-full justify-between gap-4 rounded-md px-2 py-3 text-left"
+            aria-label={`Connect ${FAMILY_LABELS[provider]}`}
+            aria-expanded={directProvider === provider}
+            disabled={busy}
+            onClick={() => {
+              setDirectProvider(directProvider === provider ? null : provider);
+              setKeyProvider(null);
+            }}
+          >
+            <span className="grid gap-1 whitespace-normal">
+              <span className="text-sm font-medium">{FAMILY_LABELS[provider]}</span>
+              <span className="text-xs font-normal text-fg-muted">
+                {provider === "openai"
+                  ? "Use your OpenAI API key."
+                  : "Use your Azure OpenAI resource key and deployment."}
+              </span>
+            </span>
+            <ChevronRightIcon
+              className={`size-4 text-fg-subtle ${directProvider === provider ? "rotate-90" : ""}`}
+            />
+          </Button>
+          {directProvider === provider ? (
+            <div className="px-2 pb-4 pt-1">
+              <DirectModelProviderForm
+                client={client}
+                workspaceId={workspaceId}
+                provider={provider}
+                onBusyChange={setBusy}
+                onConnected={async (modelId) => {
+                  await finishWithConnectedModel(provider, modelId);
+                }}
+              />
+            </div>
+          ) : null}
+        </div>
+      ))}
       {providers.map((provider) => (
         <div key={provider.name}>
           <Button

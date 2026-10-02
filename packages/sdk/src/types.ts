@@ -847,6 +847,8 @@ type CreateConnectionRequestBase = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   operationId?: string | undefined;
+  /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
+  verifyModelAccess?: boolean | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &

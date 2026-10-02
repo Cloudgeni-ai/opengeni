@@ -1,3 +1,4 @@
+import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -850,6 +851,19 @@ export function WorkspaceModelsPageBody({
             }
             providerSections={
               <>
+                {workspacePage ? (
+                  <Section
+                    title="OpenAI and Azure OpenAI"
+                    description="Use your own API key for models in this workspace."
+                  >
+                    <DirectModelProviderConnections
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageConnections && organizationAdmin}
+                      onConnectionChange={connectionChanged}
+                    />
+                  </Section>
+                ) : null}
                 {codexSectionVisible(codex) ? (
                   <Section title="Codex">
                     <CodexSettingRows

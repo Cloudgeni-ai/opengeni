@@ -11507,7 +11507,8 @@
         "$.operationId": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
         "$.providerDomain": "string!",
-        "$.subjectId": "string? null"
+        "$.subjectId": "string? null",
+        "$.verifyModelAccess": "boolean?"
       }
     },
     "CreateDocumentBaseRequest": {

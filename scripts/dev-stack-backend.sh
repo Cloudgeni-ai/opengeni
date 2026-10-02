@@ -28,7 +28,7 @@ opengeni_docker_usable() {
     const seconds = Number(process.env.OPENGENI_DOCKER_PROBE_SECONDS);
     if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 60) process.exit(1);
     try {
-      const result = Bun.spawnSync(["docker", "info"], {
+      const result = Bun.spawnSync(["docker", "version", "--format", "{{.Server.Version}}"], {
         stdout: "ignore", stderr: "ignore", timeout: seconds * 1000,
       });
       process.exit(result.exitCode === 0 ? 0 : 1);

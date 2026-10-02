@@ -1,5 +1,6 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
+  directModelConnectionSpec,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -2113,6 +2114,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
   "vercel-gateway-organization",
+  "direct-openai-workspace",
+  "direct-azure-workspace",
   "openrouter-workspace",
   "openrouter-organization",
   "anthropic-organization",
@@ -2530,7 +2533,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        provider.id.startsWith("workspace-openai-") ||
+        provider.id.startsWith("workspace-azure-openai-")
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -4473,6 +4480,53 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
+/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+export function withDirectModelProviders(
+  settings: Settings,
+  connections: readonly {
+    id: string;
+    version: number;
+    subjectId: string | null;
+    kind: string;
+    status: string;
+    providerDomain: string;
+    metadata: Record<string, unknown>;
+    apiKey?: string;
+  }[],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) =>
+      !provider.id.startsWith("workspace-openai-") &&
+      !provider.id.startsWith("workspace-azure-openai-"),
+  );
+  for (const connection of connections) {
+    const spec = directModelConnectionSpec(connection);
+    if (!spec) continue;
+    providers.push({
+      kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
+      id: spec.providerId,
+      label: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+      api: "responses",
+      wireProfile: spec.provider === "openai" ? "openai" : "azure-openai",
+      baseUrl: spec.baseUrl,
+      ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+      models: [
+        {
+          id: spec.modelId,
+          upstreamModelId: spec.model,
+          label: spec.model,
+          capabilities: legacyModelCapabilities(settings, {
+            reasoningEffort: false,
+            hostedWebSearch: false,
+          }),
+          toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        },
+      ],
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** Static catalog overlay; it contains no concrete workspace credential. */
 export function withWorkspaceGatewayCatalogProvider(
   settings: Settings,
@@ -4888,6 +4942,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -4917,6 +4973,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -7752,6 +7810,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
       provider.kind === "vercel-gateway-organization" ||
+      provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "anthropic-organization" ||
