@@ -23,7 +23,7 @@ type Operation = {
 /** CUA owns OS delivery. OpenGeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
-  readonly identity = { platform: "macos" as const, adapterId: "opengeni.cua.macos.v1" };
+  readonly identity: { platform: "macos" | "windows"; adapterId: string };
   readonly initialCapabilities: ComputerSessionCapabilities;
   private readonly session = `opengeni-${randomUUID()}`;
   private readonly targetsById = new Map<string, Target>();
@@ -37,7 +37,9 @@ export class CuaComputerBackend implements ComputerBackend {
   private constructor(
     private readonly runtime: CuaDesktopRuntime,
     permissions: { accessibility: boolean; screen_recording: boolean },
+    platform: "macos" | "windows",
   ) {
+    this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
       semanticObservation: permissions.accessibility,
       appDiscovery: true,
@@ -45,25 +47,23 @@ export class CuaComputerBackend implements ComputerBackend {
       windowCapture: permissions.screen_recording,
       screenCapture: false,
       semanticActions: permissions.accessibility,
-      pointerInput: permissions.accessibility && permissions.screen_recording,
-      keyboardInput: permissions.accessibility,
+      pointerInput:
+        platform === "macos" && permissions.accessibility && permissions.screen_recording,
+      keyboardInput: platform === "macos" && permissions.accessibility,
       clipboard: false,
       backgroundActions: permissions.accessibility,
-      backgroundInput: permissions.accessibility,
+      backgroundInput: platform === "macos" && permissions.accessibility,
       parallelApps: false,
     };
   }
 
-  static async open(runtime: CuaDesktopRuntime): Promise<CuaComputerBackend> {
+  static async open(
+    runtime: CuaDesktopRuntime,
+    platform: "macos" | "windows" = "macos",
+  ): Promise<CuaComputerBackend> {
     try {
-      const { data } = await callDesktop(runtime, "check_permissions", {
-        prompt: false,
-        probe_direct_capture: false,
-      });
-      const backend = new CuaComputerBackend(runtime, {
-        accessibility: data.accessibility === true,
-        screen_recording: data.screen_recording === true,
-      });
+      const permissions = await readPermissions(runtime, platform);
+      const backend = new CuaComputerBackend(runtime, permissions, platform);
       await callDesktop(runtime, "start_session", { session: backend.session });
       return backend;
     } catch (error) {
@@ -74,19 +74,17 @@ export class CuaComputerBackend implements ComputerBackend {
 
   capabilities(): Promise<ComputerSessionCapabilities> {
     return this.run(async () => {
-      const { data } = await callDesktop(this.runtime, "check_permissions", {
-        prompt: false,
-        probe_direct_capture: false,
-      });
+      const permissions = await readPermissions(this.runtime, this.identity.platform);
+      const macos = this.identity.platform === "macos";
       return {
         ...this.initialCapabilities,
-        semanticObservation: data.accessibility === true,
-        semanticActions: data.accessibility === true,
-        keyboardInput: data.accessibility === true,
-        backgroundActions: data.accessibility === true,
-        backgroundInput: data.accessibility === true,
-        windowCapture: data.screen_recording === true,
-        pointerInput: data.accessibility === true && data.screen_recording === true,
+        semanticObservation: permissions.accessibility,
+        semanticActions: permissions.accessibility,
+        keyboardInput: macos && permissions.accessibility,
+        backgroundActions: permissions.accessibility,
+        backgroundInput: macos && permissions.accessibility,
+        windowCapture: permissions.screen_recording,
+        pointerInput: macos && permissions.accessibility && permissions.screen_recording,
       };
     });
   }
@@ -261,7 +259,7 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
-    const roots = projectElements(state.elements);
+    const roots = projectElements(state.elements, this.identity.platform);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
       target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
@@ -310,7 +308,9 @@ export class CuaComputerBackend implements ComputerBackend {
       state.pid !== target.pid ||
       state.window_id !== target.windowId ||
       !state.capture_id ||
-      !state.screenshot_frame_valid ||
+      (this.identity.platform === "macos"
+        ? state.screenshot_frame_valid !== true
+        : state.screenshot_frame_valid === false || data.screenshot_error !== undefined) ||
       !state.screenshot_width ||
       !state.screenshot_height ||
       result.images.length !== 1 ||
@@ -372,6 +372,8 @@ export class CuaComputerBackend implements ComputerBackend {
       throw new ComputerBackendError("target_stale", "CUA target generation changed", false, false);
     const args = this.args(target),
       action = command.action;
+    if (this.identity.platform === "windows" && action.type !== "semantic")
+      throw unsupported("The Windows CUA experiment admits advertised semantic actions only");
     if (action.type === "pointer") {
       const frame = this.frames.get(action.frameId);
       if (
@@ -523,7 +525,12 @@ export class CuaComputerBackend implements ComputerBackend {
         return [
           {
             name: "set_value",
-            args: { ...args, element_token: node.ref, value: String(action.value) },
+            args: {
+              ...args,
+              element_token: node.ref,
+              value: String(action.value),
+              ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
+            },
           },
         ];
       }
@@ -574,6 +581,24 @@ export class CuaComputerBackend implements ComputerBackend {
       },
     ];
   }
+}
+
+async function readPermissions(runtime: CuaDesktopRuntime, platform: "macos" | "windows") {
+  const { data } = await callDesktop(
+    runtime,
+    "check_permissions",
+    platform === "windows" ? {} : { prompt: false, probe_direct_capture: false },
+  );
+  return {
+    accessibility:
+      platform === "windows"
+        ? data.uia === true && data.post_message === true
+        : data.accessibility === true,
+    // Windows has no Screen Recording grant. Interactive-seat admission is
+    // checked before opening the SDK; each target capture still must prove its
+    // native capture ID, exact window identity, PNG dimensions and bytes.
+    screen_recording: platform === "windows" || data.screen_recording === true,
+  };
 }
 
 function unsupported(message: string): ComputerBackendError {

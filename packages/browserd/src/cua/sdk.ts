@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
  * Releases carry the unmodified SDK bundle and native assets in the same
  * immutable helper generation. No ambient package lookup or runtime download. */
 export async function loadCuaDriver(): Promise<typeof import("@trycua/cua-driver").CuaDriver> {
-  if (!import.meta.path.startsWith("/$bunfs/")) {
+  if (!/^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/i.test(import.meta.path)) {
     return (await import("@trycua/cua-driver")).CuaDriver;
   }
   const path = join(dirname(process.execPath), "cua-sdk", "index.js");

@@ -98,6 +98,46 @@ class Fixture implements CuaDesktopRuntime {
   }
 }
 
+class WindowsFixture extends Fixture {
+  async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+    const response = await super.callTool(name, argumentsJson);
+    if (name === "check_permissions") return result({ uia: true, post_message: true });
+    if (name === "get_window_state") {
+      const state = JSON.parse(response.structuredJson!);
+      delete state.screenshot_frame_valid;
+      if (state.elements) {
+        state.elements = [
+          {
+            element_index: 0,
+            element_token: `s${this.snapshot}:0`,
+            role: "Button",
+            label: "Apply",
+            actions: ["invoke"],
+          },
+          {
+            element_index: 1,
+            element_token: `s${this.snapshot}:1`,
+            role: "Edit",
+            label: "Value",
+            actions: ["set_value"],
+            value: "synthetic value",
+          },
+          {
+            element_index: 2,
+            element_token: `s${this.snapshot}:2`,
+            role: "Edit",
+            label: "Read only",
+            actions: [],
+          },
+          { element_index: 3, role: "Button", label: "No token", actions: ["invoke"] },
+        ];
+      }
+      response.structuredJson = JSON.stringify(state);
+    }
+    return response;
+  }
+}
+
 function command(observation: ComputerBackendObservation): ComputerBackendActionCommand {
   return {
     targetId: observation.target.id,
@@ -113,6 +153,187 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("Windows Edit values and value-label fallbacks stay redacted without password metadata", async () => {
+    const fixture = new WindowsFixture();
+    const original = fixture.callTool.bind(fixture);
+    const secret = "synthetic protected value";
+    fixture.callTool = async (name, args) => {
+      const response = await original(name, args);
+      if (name === "get_window_state" && JSON.parse(args).include_accessibility_tree) {
+        const state = JSON.parse(response.structuredJson!);
+        state.elements = [
+          {
+            element_index: 0,
+            element_token: "s1:0",
+            role: "Edit",
+            label: "Named field",
+            value: secret,
+            actions: ["set_value"],
+          },
+          {
+            element_index: 1,
+            element_token: "s1:1",
+            role: "Edit",
+            label: secret,
+            value: secret,
+            actions: ["set_value"],
+          },
+          {
+            element_index: 2,
+            element_token: "s1:2",
+            role: "Edit",
+            label: "Value unavailable",
+            actions: [],
+          },
+        ];
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "windows");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      expect(JSON.stringify(observation)).not.toContain(secret);
+      expect(observation.roots.map((node) => node.value)).toEqual([
+        { redacted: true, reason: "policy" },
+        { redacted: true, reason: "policy" },
+        { redacted: true, reason: "policy" },
+      ]);
+      expect(observation.roots[0]).toMatchObject({
+        ref: "s1:0",
+        name: "Named field",
+        actions: ["set_value"],
+      });
+      expect(observation.roots[1]).toMatchObject({ ref: "s1:1", actions: ["set_value"] });
+      expect(observation.roots[1]!.name).toBeUndefined();
+      await backend.dispatch({
+        ...command(observation),
+        action: {
+          type: "semantic",
+          action: "set_value",
+          locator: { kind: "ref", ref: "s1:1" },
+          value: "Replacement",
+        },
+      });
+      expect(fixture.calls.find((call) => call.name === "set_value")?.args).toMatchObject({
+        element_token: "s1:1",
+        value: "Replacement",
+        delivery_mode: "background",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows retains real platform identity and only advertises native UIA actions", async () => {
+    const fixture = new WindowsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "windows");
+    try {
+      expect(backend.identity).toEqual({
+        platform: "windows",
+        adapterId: "opengeni.cua.windows.v1",
+      });
+      expect(await backend.capabilities()).toMatchObject({
+        semanticObservation: true,
+        semanticActions: true,
+        backgroundActions: true,
+        windowCapture: true,
+        pointerInput: false,
+        keyboardInput: false,
+        backgroundInput: false,
+      });
+      expect(
+        fixture.calls
+          .filter((call) => call.name === "check_permissions")
+          .every((call) => Object.keys(call.args).length === 0),
+      ).toBe(true);
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      expect(observation.roots.map((node) => [node.role, node.actions])).toEqual([
+        ["button", ["invoke"]],
+        ["textbox", ["set_value"]],
+        ["textbox", []],
+        ["button", []],
+      ]);
+      await backend.dispatch(command(observation));
+      const fresh = await backend.observe(target.id);
+      await backend.dispatch({
+        ...command(fresh),
+        action: {
+          type: "semantic",
+          action: "set_value",
+          locator: { kind: "ref", ref: fresh.roots[1]!.ref },
+          value: "Synthetic Ω",
+        },
+      });
+      expect(fixture.calls.find((call) => call.name === "set_value")?.args).toMatchObject({
+        value: "Synthetic Ω",
+        delivery_mode: "background",
+        pid: 42,
+        window_id: 1,
+      });
+      const latest = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(latest),
+          action: {
+            type: "semantic",
+            action: "set_value",
+            locator: { kind: "ref", ref: latest.roots[2]!.ref },
+            value: "Rejected",
+          },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      await expect(
+        backend.dispatch({
+          ...command(latest),
+          action: { type: "keyboard", action: "type", value: "Rejected" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows capture requires exact native publication, including failed-image envelopes", async () => {
+    for (const change of [
+      { capture_id: undefined },
+      { pid: 43 },
+      { window_id: 2 },
+      { screenshot_error: "synthetic capture failure" },
+      { screenshot_frame_valid: false },
+      { screenshot_width: 201 },
+    ]) {
+      const fixture = new WindowsFixture();
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, args) => {
+        const response = await original(name, args);
+        if (name === "get_window_state")
+          response.structuredJson = JSON.stringify({
+            ...JSON.parse(response.structuredJson!),
+            ...change,
+          });
+        return response;
+      };
+      const backend = await CuaComputerBackend.open(fixture, "windows");
+      try {
+        const target = (await backend.targets())[0]!;
+        await expect(backend.capture(target.id)).rejects.toMatchObject({
+          code: "driver_failed",
+          dispatched: false,
+        });
+        expect(
+          fixture.calls.some((call) => call.name === "click" || call.name === "set_value"),
+        ).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
   test("invokes controls and opens their menu through the native button contract", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

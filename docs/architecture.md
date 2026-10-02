@@ -1353,7 +1353,7 @@ Typing batches: [React](../packages/react/README.md).
 
 Native macOS cleans Cocoa/capture resources; discovery needs no semantic inspection.
 `ComputerBackend` delivers; `ComputerDriver` owns receipts/viewer.
-Experimental [CUA](../packages/browserd/CUA-PILOT.md) shares embedded helpers; native stays default.
+Experimental [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native stays default.
 
 Recording supports `manual` and `on-verify`.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes

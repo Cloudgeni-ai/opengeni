@@ -1,6 +1,6 @@
 # CUA desktop pilot
 
-Experimental macOS adapter for `@trycua/cua-driver` 0.30.4. **Not ready
+Experimental macOS adapter and narrow Windows experiment for `@trycua/cua-driver` 0.30.4. **Not ready
 for deployment or replacing the native backend.** The native backend remains the
 default. Browsers, attached Chrome, browser profiles and browser input are unchanged.
 
@@ -12,14 +12,19 @@ another operation journal. Machine/session access remains enforced above it.
 Semantic invoke and context-menu actions use CUA's native `button` contract:
 `left` and `right`, respectively. SDK 0.30.4 supports both; upstream 0.31's typed
 click input rejects the older `action` field. This compatibility does not adopt
-the unreleased SDK or accept another operating system.
+the unreleased SDK.
 
 For source-mode experiments, select `OPENGENI_BROWSERD_COMPUTER_BACKEND=cua` with
 the existing desktop environment mode. Only one CUA session may own this process's
 physical desktop. Existing macOS accessibility and screen-recording permissions
 are required; the adapter does not request permissions or silently front apps.
+Windows requires an unlocked interactive user session on `WinSta0/Default`;
+the existing-seat allocator reads the actual session and desktop. SSH/service
+Session 0 is refused. Windows identity, UIA roles, advertised Invoke/SetValue
+patterns and native capture IDs remain Windows data through the same controller.
+Windows pointer/keyboard input is not admitted by this experiment.
 
-The adapter advertises `backgroundInput` because pointer and keyboard delivery
+The macOS adapter advertises `backgroundInput` because pointer and keyboard delivery
 targets the selected window without taking desktop focus. The viewer accepts
 those clicks and keystrokes directly. Native backends that omit this capability
 retain their foreground-window guard; background semantic controls are separate.
@@ -58,11 +63,17 @@ can replace it. The macOS native CI leg runs that test and stages both architect
   native package inside Bun's compiled virtual filesystem. `stage-cua-runtime.ts`
   bundles its unmodified JavaScript and stages the pinned native package with its
   notices. Signed native bytes join the existing immutable embedded helper
-  generation, and compiled controllers load that adjacent SDK. Source mode uses
+  generation, and compiled controllers load that adjacent SDK, including Bun's
+  Windows virtual-filesystem path. Release staging remains macOS-only. Source mode uses
   the normal pinned package. Canonical release CI and signed application acceptance
   remain required; packaging alone does not resolve the live-viewer failure.
 - App launch, whole-desktop capture, clipboard, native hover and foreground focus
-  are not yet exposed. Linux and Windows have not been accepted through this adapter.
+  are not yet exposed. Linux and Windows have not completed adoption acceptance.
+  Windows capture has no macOS frame-valid flag: exact native capture identity,
+  PNG bytes/dimensions and absence of a capture error are required. Full Windows
+  capture fidelity still requires acceptance. SDK 0.30.4 omits UIA password
+  metadata, so Windows Edit values are redacted by policy; labels copied from
+  those values are omitted. Exact element references and advertised actions remain.
 
 Pointer frames supply coordinate dimensions, not one-shot action permission.
 Repeated scroll/drag requests may use the same displayed frame. No new screenshot

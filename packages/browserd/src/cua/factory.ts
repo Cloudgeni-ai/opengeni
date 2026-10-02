@@ -10,9 +10,9 @@ let occupied = false;
 export async function createCuaComputerDriver(
   context: ComputerSupervisorDriverContext,
 ): Promise<ComputerDriver> {
-  if (process.platform !== "darwin")
+  if (process.platform !== "darwin" && process.platform !== "win32")
     throw new Error(
-      "CUA computer pilot currently requires macOS; Linux and Windows acceptance is pending",
+      "CUA computer pilot currently requires macOS or an interactive Windows desktop",
     );
   if (occupied) throw new Error("CUA desktop runtime is already owned by another ComputerSession");
   occupied = true;
@@ -22,20 +22,23 @@ export async function createCuaComputerDriver(
     const CuaDriver = await loadCuaDriver();
     const sdk = CuaDriver.create(undefined);
     let closed = false;
-    const backend = await CuaComputerBackend.open({
-      callTool: (name, args) => sdk.callTool(name, args),
-      shutdown: async () => {
-        if (closed) return;
-        closed = true;
-        try {
-          await sdk.shutdown();
-        } finally {
-          if ("uniffiDestroy" in sdk && typeof sdk.uniffiDestroy === "function")
-            sdk.uniffiDestroy();
-          occupied = false;
-        }
+    const backend = await CuaComputerBackend.open(
+      {
+        callTool: (name, args) => sdk.callTool(name, args),
+        shutdown: async () => {
+          if (closed) return;
+          closed = true;
+          try {
+            await sdk.shutdown();
+          } finally {
+            if ("uniffiDestroy" in sdk && typeof sdk.uniffiDestroy === "function")
+              sdk.uniffiDestroy();
+            occupied = false;
+          }
+        },
       },
-    });
+      process.platform === "win32" ? "windows" : "macos",
+    );
     return new ComputerDriver({
       computerSessionId: context.computerSessionId,
       controllerGeneration: context.controllerGeneration,
