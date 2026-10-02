@@ -98,6 +98,249 @@ async function submitNewChat(container: HTMLElement) {
 }
 
 describe("native branded-host error paths", () => {
+  test("a throwing host formatter cannot break NewChat failure settlement", async () => {
+    let attempts = 0;
+    const view = await renderComponent(
+      <OpenGeniProvider
+        client={client()}
+        workspaceId={WORKSPACE_ID}
+        formatError={() => {
+          throw new Error("Broken host presentation");
+        }}
+      >
+        <OpenGeniChat
+          createSession={async () => {
+            attempts += 1;
+            throw errors()[0];
+          }}
+        />
+      </OpenGeniProvider>,
+    );
+    try {
+      await submitNewChat(view.container);
+      expect(attempts).toBe(1);
+      expect(view.container.querySelector("[role='alert']")!.textContent).toBe(
+        "You don’t have permission to do that. Reference: acme-403.",
+      );
+      expect(view.container.querySelector("textarea")!.value).toBe("A private ACME question");
+      expect(
+        view.container.querySelector<HTMLButtonElement>("button[type='submit']")!.disabled,
+      ).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("throwing host copy cannot replay an uncertain composer mutation", async () => {
+    const sdk = client();
+    const failure = errors()[3]!;
+    const sequence: string[] = [];
+    const keys: (string | undefined)[] = [];
+    sdk.sendMessage = async (_workspace, _session, input) => {
+      sequence.push("send");
+      expect(typeof input).toBe("object");
+      keys.push(typeof input === "string" ? undefined : input.clientEventId);
+      throw failure;
+    };
+    sdk.listEvents = async () => {
+      sequence.push("reconcile");
+      return [];
+    };
+    const sessionId = crypto.randomUUID();
+    let composer!: ComposerControllerState;
+    let diagnostic: Error | undefined;
+    function Harness() {
+      composer = useComposer(sessionId, {
+        draftPersistence: "disabled",
+        initialPolicy: {
+          model: "host-default",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+        onDeliveryError: (error) => {
+          diagnostic = error;
+        },
+      });
+      return <ChatComposer composer={composer} />;
+    }
+    const view = await renderComponent(
+      <OpenGeniProvider
+        client={sdk}
+        workspaceId={WORKSPACE_ID}
+        formatError={() => {
+          throw new Error("Broken host presentation");
+        }}
+      >
+        <Harness />
+      </OpenGeniProvider>,
+    );
+    try {
+      await actRun(() => composer.setValue("Only send on explicit action"));
+      await actRun(() => composer.send());
+      await flush(60);
+      expect(sequence).toEqual(["send"]);
+      expect(diagnostic).toBe(failure);
+      const operation = composer.optimisticMessages![0]!;
+      expect(operation).toMatchObject({ state: "failed", outcomeUnknown: true, retryable: true });
+      expect(operation.error).toContain("Check its status before retrying");
+      expect(operation.error).toContain("Reference: acme-unknown.");
+      await actRun(() => composer.retryOptimisticMessage!(operation.clientEventId));
+      await flush(60);
+      expect(sequence).toEqual(["send", "reconcile", "send"]);
+      expect(keys).toEqual([operation.clientEventId, operation.clientEventId]);
+      expect(composer.optimisticMessages![0]).toMatchObject({
+        state: "failed",
+        outcomeUnknown: true,
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  for (const failure of [
+    { code: "host_error", details: { private: true }, message: "OpenGeni diagnostic" },
+    "OpenGeni transport diagnostic",
+  ]) {
+    test(`composer preserves the original ${typeof failure} rejection for host copy`, async () => {
+      const sdk = client();
+      sdk.sendMessage = async () => {
+        throw failure;
+      };
+      const sessionId = crypto.randomUUID();
+      let composer!: ComposerControllerState;
+      let received: unknown;
+      let diagnostic: Error | undefined;
+      function Harness() {
+        composer = useComposer(sessionId, {
+          draftPersistence: "disabled",
+          initialPolicy: {
+            model: "host-default",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
+          onDeliveryError: (error) => {
+            diagnostic = error;
+          },
+        });
+        return <ChatComposer composer={composer} />;
+      }
+      const view = await renderComponent(
+        <OpenGeniProvider
+          client={sdk}
+          workspaceId={WORKSPACE_ID}
+          formatError={(original, message) => {
+            received = original;
+            return `ACME: ${message}`;
+          }}
+        >
+          <Harness />
+        </OpenGeniProvider>,
+      );
+      try {
+        await actRun(() => composer.setValue("Preserve the cause"));
+        await actRun(() => composer.send());
+        await flush(40);
+        expect(received).toBe(failure);
+        expect(diagnostic).toBeInstanceOf(Error);
+        expect(composer.optimisticMessages![0]).toMatchObject({
+          state: "failed",
+          outcomeUnknown: false,
+        });
+        expect(composer.optimisticMessages![0]!.error).toBe(
+          "ACME: The request could not be completed.",
+        );
+      } finally {
+        await view.unmount();
+      }
+    });
+  }
+
+  test("inline formatter changes preserve mounted playback and verified Skill files", async () => {
+    const sdk = client();
+    let videoReads = 0;
+    let skillReads = 0;
+    const loadPlaybackSource = async () => {
+      videoReads += 1;
+      return { url: "https://example.test/video.mp4" } as never;
+    };
+    const loadSkillReview = async () => {
+      skillReads += 1;
+      return {
+        id: "skill",
+        revisionId: "revision",
+        scope: "workspace",
+        files: [{ path: "SKILL.md", content: "Verified OpenGeni source content." }],
+      } as never;
+    };
+    const render = (label: string) => (
+      <OpenGeniProvider
+        client={sdk}
+        workspaceId={WORKSPACE_ID}
+        formatError={(_cause, message) => `${label}: ${message}`}
+      >
+        <QueueErrorAlert
+          queue={
+            {
+              mutationError: errors()[0],
+              error: null,
+              clearMutationError: () => {},
+              refresh: async () => {},
+            } as never
+          }
+        />
+        <GeneratedVideoPlayer
+          receipt={{ artifact: { artifactId: "video" } } as never}
+          loadPlaybackSource={loadPlaybackSource}
+        />
+        <HumanInputForm
+          request={{
+            id: "review",
+            allowSkip: false,
+            expiresAt: null,
+            questions: [
+              {
+                id: "skill",
+                kind: "single_select",
+                prompt: "Review the exact files",
+                options: [{ id: "save", label: "Save" }],
+                required: true,
+                allowOther: false,
+                skillReview: {
+                  sourceOperationId: "operation",
+                  skillId: "skill",
+                  revisionId: "revision",
+                  expectedRevisionId: null,
+                  expectedScopeVersion: 1,
+                },
+              },
+            ],
+          }}
+          loadSkillReview={loadSkillReview}
+          onSubmit={() => {}}
+        />
+      </OpenGeniProvider>
+    );
+    const view = await renderComponent(render("ACME"));
+    try {
+      await flush(20);
+      const video = view.container.querySelector("video");
+      const preview = view.container.querySelector("pre");
+      expect(video).not.toBeNull();
+      expect(preview?.textContent).toBe("Verified OpenGeni source content.");
+      await view.rerender(render("New host label"));
+      await flush(20);
+      expect(videoReads).toBe(1);
+      expect(skillReads).toBe(1);
+      expect(view.container.querySelector("video")).toBe(video);
+      expect(view.container.querySelector("pre")).toBe(preview);
+      expect(view.container.querySelector("[role='alert']")!.textContent).toContain(
+        "New host label:",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("the host formatter receives non-Error rejections unchanged", async () => {
     const failure = { code: "host_error", message: "OpenGeni diagnostic" };
     let received: unknown;

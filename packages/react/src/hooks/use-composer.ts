@@ -1409,13 +1409,14 @@ export function useComposer(
     optimisticProcessorBusyRef.current = true;
     void (async () => {
       let mutationFailureObserved = false;
-      const markFailed = (problem: Error, outcomeUnknown: boolean): void => {
+      const markFailed = (cause: unknown, outcomeUnknown: boolean): void => {
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
         ) {
           return;
         }
+        const problem = asError(cause);
         replaceOptimisticSends((current) =>
           current.map((candidate) =>
             candidate.clientEventId === operation.clientEventId
@@ -1423,7 +1424,7 @@ export function useComposer(
                   ...candidate,
                   state: "failed",
                   error: formatError(
-                    problem,
+                    cause,
                     outcomeUnknown &&
                       !isOutcomeUnknownError(problem) &&
                       !(problem instanceof ComposerReconciliationRequiredError)
@@ -1462,7 +1463,7 @@ export function useComposer(
             // This read cannot settle the prior mutation in either direction.
             // Preserve its exact key and uncertain status until reconciliation
             // succeeds or that same mutation is actually replayed.
-            markFailed(asError(cause), true);
+            markFailed(cause, true);
             return;
           }
           const reconciled = reconcileOptimisticSendFromEvents(operation, events);
@@ -1608,7 +1609,7 @@ export function useComposer(
           operation.outcomeUnknown && !mutationFailureObserved
             ? true
             : isOutcomeUnknownError(cause);
-        markFailed(problem, outcomeUnknown);
+        markFailed(cause, outcomeUnknown);
       } finally {
         optimisticProcessorBusyRef.current = false;
         if (targetKeyRef.current === ownedTargetKey) {
