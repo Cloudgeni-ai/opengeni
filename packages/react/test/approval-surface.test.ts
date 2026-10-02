@@ -67,7 +67,33 @@ describe("ApprovalSurface", () => {
     );
 
     expect(mounted.container.textContent).toContain("projects › update");
-    expect(mounted.container.textContent).toContain('"projectId": "project-1"');
+    const terms = [...mounted.container.querySelectorAll("dt")].map((node) => node.textContent);
+    const values = [...mounted.container.querySelectorAll("dd")].map((node) => node.textContent);
+    expect(terms).toEqual(["Project ID"]);
+    expect(values).toEqual(["project-1"]);
+    expect(mounted.container.textContent).not.toContain('"projectId"');
+
+    const toggle = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Show exact arguments",
+    );
+    await act(async () => toggle!.click());
+    expect(mounted.container.querySelector("pre")?.textContent).toContain(
+      '"projectId": "project-1"',
+    );
+  });
+
+  test("keeps nested arguments as exact JSON instead of a lossy summary", async () => {
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [
+          { ...approval, arguments: { projectId: "project-1", patch: { name: "Renamed" } } },
+        ],
+        onApprove: () => undefined,
+        onReject: () => undefined,
+      }),
+    );
+    expect(mounted.container.querySelector("dl")).toBeNull();
+    expect(mounted.container.querySelector("pre")?.textContent).toContain('"name": "Renamed"');
   });
 
   test("supports host copy and presentation while returning the native approval", async () => {

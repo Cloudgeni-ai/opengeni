@@ -304,6 +304,8 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerFailureCode?: string;
   /** Persist the no-replay setup marker, not a new provider/setup attempt. */
   sandboxSetupOutcomeUnknown?: true;
+  /** Preserve the exhausted budget for a command proven not dispatched. */
+  sandboxSetupRecoveryExhausted?: true;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";

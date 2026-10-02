@@ -20,7 +20,6 @@ import type {
   SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { interactionControlFailureFromError } from "@opengeni/sdk/interaction";
-import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   BugIcon,
   ArchiveIcon,
@@ -71,7 +70,10 @@ import { useSiteAuthConnections } from "../hooks/use-site-auth-connections";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
-import { isSourcePlacementChangedError } from "../lib/interaction-errors";
+import {
+  isInteractionControlUnavailable,
+  isSourcePlacementChangedError,
+} from "../lib/interaction-errors";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
@@ -434,7 +436,7 @@ export function BrowserViewer({
   }, [frameIsLive]);
   const supportsLiveFrames =
     (browser.session ?? selectedRegistrySession)?.capabilities.liveFrames === true;
-  const controlUnavailable = isBrowserControlUnavailable(browser.error);
+  const controlUnavailable = isInteractionControlUnavailable(browser.error);
   const connectionError = controlUnavailable ? browser.error : (frames.error ?? browser.error);
   // A managed controller can reject a stale attachment while the same browser
   // remains healthy. Only extension-attached Chrome requires a new browser on
@@ -3278,12 +3280,6 @@ function attachedChromeGenerationLoss(
       session.placement.kind === "attached_device",
   );
   return lost?.placement.kind === "attached_device" ? { deviceId: lost.placement.deviceId } : null;
-}
-
-function isBrowserControlUnavailable(error: Error | null): boolean {
-  // Receiving pixels proves only the media channel. A failed control request
-  // must not leave a frozen screenshot presented as an interactive live page.
-  return error instanceof OpenGeniApiError && (error.status >= 500 || error.status === 0);
 }
 
 function isAttachedChromeGenerationLossError(error: Error | null): boolean {

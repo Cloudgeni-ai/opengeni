@@ -1,7 +1,8 @@
-/* Embedded OpenGeniChat with fixture data: the docs landing screenshot
-   (docs-site/images/embedded-conversation.png, captured by
+/* Embedded OpenGeniChat with fixture data inside a plain host product: the docs
+   screenshots (docs-site/images/embedded-conversation*.png, captured by
    scripts/capture-embedded-conversation-screenshot.ts). Real components, the
-   real timeline projection, and a scripted client; nothing is mocked in UI. */
+   real timeline projection, and a scripted client; nothing is mocked in UI.
+   `?theme=dark` renders the dark variant. */
 import { createRoot } from "react-dom/client";
 import type { Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
 import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
@@ -178,10 +179,81 @@ const client = fakeClient({
   },
 });
 
-createRoot(document.getElementById("root")!).render(
-  <div data-og-theme="light" style={{ height: "100vh" }}>
-    <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-      <OpenGeniChat defaultSessionId={SELECTED} />
-    </OpenGeniProvider>
-  </div>,
-);
+const params = new URLSearchParams(window.location.search);
+const theme = params.get("theme") === "dark" ? "dark" : "light";
+document.body.style.background = theme === "dark" ? "#161616" : "#f3f3f1";
+
+/** A plain host product around the stock component, as a customer would ship it. */
+function HostApp() {
+  const dark = theme === "dark";
+  const ink = dark ? "#ececec" : "#1d1d1b";
+  const muted = dark ? "#a3a3a3" : "#6b6b66";
+  const line = dark ? "#2e2e2e" : "#e4e4df";
+  const nav = ["Inbox", "Tickets", "Customers", "Billing"];
+  return (
+    <div
+      style={{
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        color: ink,
+      }}
+    >
+      <header
+        style={{
+          height: 52,
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 28,
+          padding: "0 20px",
+          borderBottom: `1px solid ${line}`,
+          background: dark ? "#1b1b1b" : "#fbfbf9",
+          fontSize: 13,
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 600 }}>
+          <span
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              background: "linear-gradient(135deg, #1f8a74, #9fe3d3)",
+            }}
+          />
+          Acme Support
+        </span>
+        <nav style={{ display: window.innerWidth < 640 ? "none" : "flex", gap: 20, color: muted }}>
+          {nav.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+          <span style={{ color: ink, fontWeight: 500 }}>Assistant</span>
+        </nav>
+        <span
+          style={{
+            marginLeft: "auto",
+            width: 28,
+            height: 28,
+            borderRadius: 999,
+            background: dark ? "#3a3a3a" : "#e8e6df",
+            display: "grid",
+            placeItems: "center",
+            fontSize: 11,
+            fontWeight: 600,
+            color: muted,
+          }}
+        >
+          MB
+        </span>
+      </header>
+      <div data-og-theme={theme} style={{ flex: 1, minHeight: 0 }}>
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <OpenGeniChat defaultSessionId={SELECTED} />
+        </OpenGeniProvider>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<HostApp />);

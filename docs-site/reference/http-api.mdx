@@ -16,19 +16,23 @@ OpenGeni's public contract is a workspace-scoped HTTP API. Most integrations sho
 
 ## Main route families
 
-| Family              | Routes                                                                                                    |
-| ------------------- | --------------------------------------------------------------------------------------------------------- |
-| Organizations       | `/v1/organizations/:organizationId/...`: API keys, members, workspaces, organization-wide session lists   |
-| External workspaces | `PUT /v1/workspaces/external` (idempotent `ensureWorkspace`)                                              |
-| Sessions            | `POST /v1/workspaces/:workspaceId/sessions`, `GET .../sessions/:sessionId`                                |
-| Events              | `GET .../sessions/:sessionId/events` (replay), `POST .../events` (messages, decisions, control)           |
-| Live stream         | `GET .../sessions/:sessionId/events/stream` (Server-Sent Events, resumable by sequence)                   |
-| Goals               | `GET`, `PATCH`, and `DELETE` on `.../sessions/:sessionId/goal`                                            |
-| Files               | Upload begin and complete, download URLs                                                                  |
-| Scheduled tasks     | `/v1/workspaces/:workspaceId/scheduled-tasks/...`                                                         |
-| Automations         | `/v1/workspaces/:workspaceId/automations/...`, and the public `POST /v1/webhooks/automations/:endpointId` |
-| Integrations        | `/v1/workspaces/:workspaceId/integrations/...` (preview, install, uninstall)                              |
-| Connected Machines  | `/v1/workspaces/:workspaceId/enrollments/...`                                                             |
+| Family                | Routes                                                                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations         | `/v1/organizations/:organizationId/...`: API keys, members, workspaces, organization-wide session lists                               |
+| External workspaces   | `PUT /v1/workspaces/external` (idempotent `ensureWorkspace`)                                                                          |
+| Sessions              | `POST /v1/workspaces/:workspaceId/sessions`, `GET .../sessions/:sessionId`                                                            |
+| Events                | `GET .../sessions/:sessionId/events` (replay), `POST .../events` (messages, approvals, answers)                                       |
+| Control               | `POST .../sessions/:sessionId/steer`, `POST .../sessions/:sessionId/control` (pause, resume, cancel)                                  |
+| Live stream           | `GET .../sessions/:sessionId/events/stream` (Server-Sent Events, resumable by sequence)                                               |
+| Goals                 | `GET`, `PATCH`, and `DELETE` on `.../sessions/:sessionId/goal`                                                                        |
+| Files                 | Upload begin and complete, download URLs                                                                                              |
+| Scheduled tasks       | `/v1/workspaces/:workspaceId/scheduled-tasks/...`                                                                                     |
+| Automations           | `/v1/workspaces/:workspaceId/automations/...`, and the public `POST /v1/webhooks/automations/:endpointId`                             |
+| Integrations          | `/v1/workspaces/:workspaceId/integrations/...` (preview, install, uninstall)                                                          |
+| Connected Machines    | `/v1/workspaces/:workspaceId/enrollments/...`                                                                                         |
+| Webhooks, credentials | `/v1/workspaces/:workspaceId/webhooks/...` and `.../credential-provider`, plus the same under `/v1/organizations/:organizationId/...` |
+| Usage allowances      | `.../allowance`, `.../usage/me` on a workspace (or `/v1/workspaces/external/:source/:externalId`)                                     |
+| History import        | `POST /v1/workspaces/:workspaceId/session-imports` (or `/v1/workspaces/external/:source/:externalId/session-imports`)                 |
 
 ## Streaming
 

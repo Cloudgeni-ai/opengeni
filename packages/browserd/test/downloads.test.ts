@@ -195,7 +195,7 @@ describe("BrowserDownloadStore", () => {
     await store.close();
   });
 
-  test("publishes exact bytes idempotently without persisting signed authority", async () => {
+  test("publishes exact synthetic CSV bytes idempotently without persisting signed authority", async () => {
     const rootDirectory = await newRoot();
     const store = await BrowserDownloadStore.open({
       rootDirectory,
@@ -204,13 +204,14 @@ describe("BrowserDownloadStore", () => {
       createId: () => firstDownloadId,
       now: () => new Date("2026-08-10T12:00:00.000Z"),
     });
-    await store.begin({ guid: "exported", targetId: null, suggestedFilename: "report.bin" });
-    await writeFile(join(store.filesDirectory, "exported"), "export me");
+    const csv = Buffer.from('item,total\r\n"Generated ""fixture"" æ",12.50\r\n');
+    await store.begin({ guid: "exported", targetId: null, suggestedFilename: "synthetic.csv" });
+    await writeFile(join(store.filesDirectory, "exported"), csv);
     await store.progress({
       guid: "exported",
       state: "completed",
-      receivedBytes: 9,
-      totalBytes: 9,
+      receivedBytes: 46,
+      totalBytes: 46,
     });
     const operationId = "44444444-4444-4444-8444-444444444444";
     const uploads: string[] = [];
@@ -229,10 +230,10 @@ describe("BrowserDownloadStore", () => {
       expected: { sizeBytes: number; sha256: string },
     ) => {
       uploads.push(grant.url);
-      expect(await readFile(path, "utf8")).toBe("export me");
+      expect(await readFile(path)).toEqual(csv);
       expect(expected).toEqual({
-        sizeBytes: 9,
-        sha256: "cab2b47a987c2db44dda774d9a594af4e5cadad9ba7ec27d2d8571b9c97d0350",
+        sizeBytes: 46,
+        sha256: "0e9ba0cd29d7b88fa02b369c70aee7080847a6efe176dce34ac598b84097c52c",
       });
     };
 

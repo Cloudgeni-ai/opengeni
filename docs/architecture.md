@@ -475,7 +475,9 @@ supervision. See [command supervision](command-supervision.md).
 Modal `TaskExecStart` recovery requires read-only task/router lookup or local
 channel-readiness failure before any Start RPC, for native and pinned-SDK
 setup/filesystem/archive commands alike. Typed proof permits finite
-five-replacement same-turn recovery; server DNS text and post-dispatch errors
+five-replacement same-turn recovery. Exhaustion parks proven non-dispatch as
+`sandboxSetupRecoveryExhausted`, retaining count five; peek and claim refuse
+automatic replay. Server DNS text and post-dispatch errors
 never prove non-execution. Uncertain Starts return typed outcome-unknown
 results, never transport retries, and block replay. An unwound setup parks its
 turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse
@@ -1351,6 +1353,8 @@ full observations; Code Mode receives local image handles. Human computer contro
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
+
+Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
 
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 

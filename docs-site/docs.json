@@ -133,6 +133,10 @@
     {
       "source": "/guides/integrate-your-product",
       "destination": "/embed-manually"
+    },
+    {
+      "source": "/guides/coding-agents",
+      "destination": "/guides/developer-plugin"
     }
   ]
 }

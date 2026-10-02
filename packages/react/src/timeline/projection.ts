@@ -2017,8 +2017,19 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
     } else {
-      groups.push({ kind: "item", item });
       const current = turns.get(currentTurn)?.work;
+      // A live approval wait is carried by the turn header ("Waiting for you")
+      // and decided in the host's approval surface; a second in-timeline banner
+      // only repeats it. Once resolved it returns as the quiet recorded marker.
+      const liveApprovalWait =
+        item.kind === "notice" &&
+        item.tone === "waiting" &&
+        !item.recordedOutcome &&
+        !item.resolvedAt &&
+        item.text.startsWith("Approval needed") &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&

@@ -367,7 +367,12 @@ export function postClaimDatabaseRecoveryDetail(
   if (
     (detail.sandboxSetupOutcomeUnknown !== undefined &&
       detail.sandboxSetupOutcomeUnknown !== true) ||
-    (detail.sandboxSetupOutcomeUnknown === true && hasProviderRecoveryCount) ||
+    (detail.sandboxSetupRecoveryExhausted !== undefined &&
+      detail.sandboxSetupRecoveryExhausted !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && detail.sandboxSetupRecoveryExhausted === true) ||
+    ((detail.sandboxSetupOutcomeUnknown === true ||
+      detail.sandboxSetupRecoveryExhausted === true) &&
+      hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||
