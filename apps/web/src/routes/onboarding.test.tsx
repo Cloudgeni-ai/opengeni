@@ -404,7 +404,11 @@ describe("organization onboarding UI", () => {
     try {
       await act(async () =>
         root.render(
-          <OrganizationOnboardingPanel previewState="required" onComplete={onComplete} />,
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            previewState="required"
+            onComplete={onComplete}
+          />,
         ),
       );
       expect(container.textContent).toContain("Create your organization");
@@ -428,6 +432,7 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
+            initialUseCase="cloud"
             client={setupClient as never}
             billingMode="stripe"
             codexEnabled
@@ -479,6 +484,7 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
+            initialUseCase="cloud"
             client={setupClient as never}
             previewState="required"
             onComplete={() => undefined}
@@ -877,6 +883,7 @@ describe("organization onboarding UI", () => {
         await act(async () =>
           root.render(
             <OrganizationOnboardingPanel
+              initialUseCase="cloud"
               client={{ ...setupClient, getWorkspaceModelCatalog } as never}
               billingMode="stripe"
               modelDefaults={modelDefaults}
@@ -934,10 +941,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.querySelector("h1")!.textContent).toBe(
-        "Start chatting with Opengeni credits",
-      );
-      expect(container.textContent).toContain("$7.25 of Opengeni credits included.");
+      expect(container.querySelector("h1")!.textContent).toBe("You got $7.25 in free credits");
+      expect(container.textContent).toContain("You can start right now.");
       expect(container.textContent).toContain(
         "New chats use Credits Model with extra high reasoning.",
       );
@@ -983,7 +988,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.textContent).toContain("Opengeni credits are included with your account.");
+      expect(container.querySelector("h1")!.textContent).toBe("You got free Opengeni credits");
       expect(container.textContent).toContain("New chats use Credits Model.");
       // Without a free default there is nothing to name for after the credits.
       expect(container.textContent).not.toContain("When your credits run out");
@@ -1028,7 +1033,7 @@ describe("organization onboarding UI", () => {
         modelDefaults: freeModelDefaults,
         defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
         balanceMicros: 10_000_000,
-        heading: "Start chatting with Opengeni credits",
+        heading: "You got $10 in free credits",
         billingRead: true,
       },
       {
@@ -1086,6 +1091,7 @@ describe("organization onboarding UI", () => {
         await act(async () =>
           root.render(
             <OrganizationOnboardingPanel
+              initialUseCase="cloud"
               client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
               billingMode={scenario.billingMode}
               modelDefaults={scenario.modelDefaults}
@@ -1115,8 +1121,8 @@ describe("organization onboarding UI", () => {
         } else {
           expect(getBilling).not.toHaveBeenCalled();
         }
-        if (scenario.heading === "Start chatting with Opengeni credits") {
-          expect(container.textContent).toContain("$10.00 of Opengeni credits included.");
+        if (scenario.heading === "You got $10 in free credits") {
+          expect(container.textContent).toContain("You can start right now.");
           expect(container.textContent).toContain(
             "New chats use Credits Model with low reasoning.",
           );
@@ -1125,9 +1131,9 @@ describe("organization onboarding UI", () => {
           );
         } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
-          expect(container.textContent).not.toContain("of Opengeni credits included");
+          expect(container.textContent).not.toContain("in free credits");
         } else {
-          expect(container.textContent).not.toContain("of Opengeni credits included");
+          expect(container.textContent).not.toContain("in free credits");
           expect(container.textContent).not.toContain("free to use");
         }
       } finally {
@@ -1223,6 +1229,270 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("signup asks how to use Opengeni first, and the cloud path ends at home", async () => {
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async () => {
+      throw new Error("the cloud path creates no key");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createOrganizationApiKey } as never}
+            previewState="required"
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+      const choices = Array.from(container.querySelectorAll("li button")).map(
+        (button) => button.querySelector("span.font-medium")?.textContent,
+      );
+      expect(choices).toEqual(["Add AI agents to my product", "Run agents in the cloud"]);
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      // Back returns to the question without creating anything.
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Back")!
+          .click(),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Start chatting for free")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete.mock.calls[0]).toEqual([]);
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("adding agents to a product creates one setup key and opens a setup chat without it in history", async () => {
+    const token = "ogk_setup12_secret-token-value";
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async (_organizationId: string, _request: unknown) => ({
+      apiKey: { id: "key-1", prefix: "ogk_setup12" },
+      token,
+    }));
+    const createWorkspace = mock(async (_request: unknown) => ({ id: "setup-workspace" }));
+    const createVariableSet = mock(async (_workspaceId: string, _request: unknown) => ({
+      id: "variable-set-1",
+    }));
+    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => ({
+      id: "setup-session",
+    }));
+    const writeText = mock(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={
+              {
+                ...setupClient,
+                createOrganizationApiKey,
+                createWorkspace,
+                createVariableSet,
+                createSession,
+              } as never
+            }
+            previewState="required"
+            billingMode="stripe"
+            startingCredits={{
+              balance: { balanceMicros: 10_000_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+          .click(),
+      );
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue")!
+          .click(),
+      );
+      await flush();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.querySelector("h1")!.textContent).toBe("Add AI agents to your product");
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+      expect(createOrganizationApiKey.mock.calls[0]).toEqual([
+        "preview-organization",
+        {
+          name: "Developer setup",
+          description: "Created at signup to add Opengeni agents to your product.",
+          access: "developer_setup",
+        },
+      ]);
+      expect(container.textContent).toContain(token);
+      // The prompt preview never shows the key.
+      expect(container.querySelector("pre")!.textContent).not.toContain(token);
+      expect(container.querySelector("pre")!.textContent).toContain("ogk_setup12…");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.includes("Copy prompt for your coding agent"))!
+          .click(),
+      );
+      await flush();
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const prompt = writeText.mock.calls[0]![0];
+      expect(prompt).toContain(
+        `Developer setup API key (expires in 24 hours, can't create other keys): ${token}`,
+      );
+      expect(prompt).toContain("claude plugin install opengeni@opengeni");
+      expect(prompt).toContain("Never print, log, commit or repeat it");
+      expect(prompt.split(token)).toHaveLength(2);
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.includes("Let Opengeni implement it"))!
+          .click(),
+      );
+      await flush();
+      expect(createWorkspace.mock.calls).toEqual([
+        [{ accountId: "preview-organization", name: "Opengeni setup" }],
+      ]);
+      expect(createVariableSet.mock.calls[0]![0]).toBe("setup-workspace");
+      expect(createVariableSet.mock.calls[0]![1]).toMatchObject({
+        name: "Opengeni developer setup",
+        variables: [{ name: "DEVELOPER_SETUP_API_KEY", value: token }],
+      });
+      expect(createSession).toHaveBeenCalledTimes(1);
+      const [sessionWorkspaceId, sessionRequest] = createSession.mock.calls[0]!;
+      expect(sessionWorkspaceId).toBe("setup-workspace");
+      expect(sessionRequest.initialMessage).toBe(
+        "I want to add AI agents to my product. Help me set it up.",
+      );
+      expect(sessionRequest.variableSetIds).toEqual(["variable-set-1"]);
+      expect(String(sessionRequest.idempotencyKey)).toStartWith("onboarding-developer-setup:");
+      const context = String(sessionRequest.modelContext);
+      expect(context).toContain("I chose to let Opengeni implement it.");
+      expect(context).toContain("Organization: Northwind (ID preview-organization)");
+      expect(context).toContain("builtin:opengeni-client");
+      expect(context).toContain("DEVELOPER_SETUP_API_KEY");
+      expect(context).toContain("GitHub");
+      // The key is in the sandbox variable set, never in model-visible history.
+      expect(JSON.stringify(sessionRequest)).not.toContain(token);
+      expect(onComplete.mock.calls).toEqual([
+        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  test("a failed setup chat retries without a second workspace or key", async () => {
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async () => ({
+      apiKey: { id: "key-1", prefix: "ogk_retry123" },
+      token: "ogk_retry123_secret",
+    }));
+    const createWorkspace = mock(async () => ({ id: "setup-workspace" }));
+    const createVariableSet = mock(async () => {
+      throw new Error("variable sets unavailable");
+    });
+    let sessionAttempts = 0;
+    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => {
+      sessionAttempts += 1;
+      if (sessionAttempts === 1) throw new Error("temporarily unavailable");
+      return { id: "setup-session" };
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={
+              {
+                ...setupClient,
+                createOrganizationApiKey,
+                createWorkspace,
+                createVariableSet,
+                createSession,
+              } as never
+            }
+            previewState="required"
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            initialUseCase="embed"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue")!
+          .click(),
+      );
+      await flush();
+      const implement = () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+          button.textContent?.includes("Let Opengeni implement it"),
+        )!;
+      await act(async () => implement().click());
+      await flush();
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => implement().click());
+      await flush();
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+      expect(createWorkspace).toHaveBeenCalledTimes(1);
+      expect(createVariableSet).toHaveBeenCalledTimes(1);
+      expect(createSession).toHaveBeenCalledTimes(2);
+      const [first, second] = createSession.mock.calls.map(([, request]) => request);
+      expect(second!.idempotencyKey).toBe(first!.idempotencyKey);
+      // Without the variable set the chat says so instead of claiming a key.
+      expect(second!.variableSetIds).toBeUndefined();
+      expect(String(second!.modelContext)).toContain("No API key is attached to this chat.");
+      expect(onComplete.mock.calls).toEqual([
+        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("an organization-setup status failure offers Retry instead of spinning forever", async () => {
     onboardingStatus.mockImplementationOnce(async () => {
       throw new Error("Service unavailable");
@@ -1252,7 +1522,7 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       await flush();
-      expect(container.textContent).toContain("Create your organization");
+      expect(container.textContent).toContain("How do you want to use Opengeni?");
       expect(container.textContent).toContain("Signed in as ada@example.test");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))

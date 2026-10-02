@@ -7,12 +7,14 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
+import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
+import { Disclosure } from "@/components/ui/disclosure";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
+import { validTopupAmount } from "@/lib/format";
 import { userErrorText } from "@/lib/api-error";
 import { analyticsAction } from "@/lib/analytics-actions";
 import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
@@ -24,6 +26,7 @@ import {
   type ConnectedModelFamily,
 } from "@/lib/model-access-onboarding";
 import type { StartingCreditsOnboarding } from "@/lib/onboarding-starting-credits";
+import { formatCreditAmount } from "@/lib/onboarding-use-case";
 import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,
@@ -115,6 +118,7 @@ export function ModelAccessOnboardingPanel({
   supergrokEnabled = false,
   includedModel = null,
   startingCredits = null,
+  continueToNextStep = false,
   onComplete,
 }: {
   client?: OpenGeniBrowserClient;
@@ -127,6 +131,11 @@ export function ModelAccessOnboardingPanel({
   supergrokEnabled?: boolean;
   includedModel?: IncludedOnboardingModel | null;
   startingCredits?: StartingCreditsOnboarding | null;
+  /**
+   * Another onboarding step follows (the developer setup for "Add AI agents to
+   * my product"), so the primary action reads Continue instead of naming chat.
+   */
+  continueToNextStep?: boolean;
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -579,17 +588,19 @@ export function ModelAccessOnboardingPanel({
 
   if (startingCredits) {
     const freeAfterCredits = includedModel?.free ? includedModel : null;
+    const amount = startingCredits.balance
+      ? formatCreditAmount(startingCredits.balance.balanceMicros, startingCredits.balance.currency)
+      : null;
     return (
-      <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
+      <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
+        <CelebrationBurst />
         <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
           <h1 className="text-xl font-semibold tracking-tight">
-            Start chatting with Opengeni credits
+            {amount ? `You got ${amount} in free credits` : "You got free Opengeni credits"}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            {startingCredits.balance
-              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of Opengeni credits included.`
-              : "Opengeni credits are included with your account."}{" "}
-            New chats use {describeCreditsModel(startingCredits.model)}. No card or API key needed.
+            You can start right now. New chats use {describeCreditsModel(startingCredits.model)}. No
+            card or API key needed.
           </p>
           {freeAfterCredits ? (
             <p className="mt-2 text-xs leading-relaxed text-fg-muted">
@@ -598,24 +609,23 @@ export function ModelAccessOnboardingPanel({
           ) : null}
           <Button
             type="button"
-            className="mt-6 h-10 w-full"
+            size="lg"
+            className="mt-6 w-full"
             disabled={busy}
             onClick={leaveOnboarding}
           >
-            Start chatting
+            {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
 
-          <div className="mt-8 border-t border-border pt-6">
-            <h2 className="text-sm font-medium">Prefer your own subscription or key? (optional)</h2>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or buy more Opengeni credits" : ""}. You can also do
-              this later.
-            </p>
-            <div className="mt-3">{connectOptions}</div>
+          <Disclosure
+            className="mt-6 border-t border-border pt-3"
+            title="Use your own subscription or key"
+            summary={`Optional${billingMode === "stripe" ? ", or buy more credits" : ""}. You can also do this later.`}
+          >
+            <div className="pt-1">{connectOptions}</div>
             {selectionRetryNotice}
             {credits}
-          </div>
+          </Disclosure>
         </div>
       </section>
     );
@@ -639,7 +649,11 @@ export function ModelAccessOnboardingPanel({
             disabled={busy}
             onClick={leaveOnboarding}
           >
-            {includedModel.free ? "Start chatting for free" : "Start chatting"}
+            {continueToNextStep
+              ? "Continue"
+              : includedModel.free
+                ? "Start chatting for free"
+                : "Start chatting"}
           </Button>
 
           <div className="mt-8 border-t border-border pt-6">

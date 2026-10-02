@@ -46,8 +46,10 @@ browser; I’ll handle the organization and developer setup.”** Let the person
 complete sign-in/sign-up, email verification and MFA. Do not request their
 password in chat or automate a verification challenge.
 
-After authentication, complete the organization-name step using the product's
-name, or reuse the exact intended existing organization. A bound invitation
+After authentication, if onboarding first asks how to use Opengeni, choose
+**Run agents in the cloud**: the other path shows a key on screen, and this
+setup creates its key below instead. Complete the organization-name step using
+the product's name, or reuse the exact intended existing organization. A bound invitation
 takes precedence; do not create a second organization. Skip optional model or
 purchase onboarding when an authorized billing path already exists. A key does
 not buy credits or make an unavailable model usable.

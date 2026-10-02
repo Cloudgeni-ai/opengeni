@@ -83,6 +83,24 @@ const previewMethods = {
   async saveNewSessionDraft() {
     return previewMethods.getNewSessionDraft();
   },
+  // Developer setup ("Add AI agents to my product"). Nothing real is created.
+  async createOrganizationApiKey() {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return {
+      apiKey: { id: crypto.randomUUID(), prefix: "ogk_preview12" },
+      token: "ogk_preview12_NOT-A-REAL-KEY-local-preview-only",
+    };
+  },
+  async createWorkspace() {
+    return { id: "preview-setup-workspace" };
+  },
+  async createVariableSet() {
+    return { id: "preview-variable-set" };
+  },
+  async createSession() {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { id: "preview-setup-session" };
+  },
 };
 const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
 
@@ -153,7 +171,7 @@ function previewStartingCredits() {
 }
 
 function ModelPreview({ organization = false }: { organization?: boolean }) {
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState<false | { sessionId?: string }>(false);
   const includedModel = previewIncludedModel();
   const startingCredits = previewStartingCredits();
   if (completed)
@@ -163,8 +181,9 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
           <p className="text-xs text-fg-subtle">LOCAL PREVIEW</p>
           <h1 className="text-xl font-semibold">Onboarding complete</h1>
           <p className="text-sm text-fg-muted">
-            In the app, you now arrive in your Personal workspace. The connected model is selected
-            for your next chat.
+            {completed.sessionId
+              ? "In the app, you now arrive in the setup chat, in the Opengeni setup workspace."
+              : "In the app, you now arrive in your Personal workspace. The connected model is selected for your next chat."}
           </p>
           <Button onClick={() => setCompleted(false)}>Try another option</Button>
           <Button asChild variant="ghost">
@@ -184,7 +203,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       previewState="required"
       activeEmail="preview@example.test"
       onSignOut={() => window.location.assign("/dev/onboarding")}
-      onComplete={() => setCompleted(true)}
+      onComplete={(destination) => setCompleted(destination ?? {})}
     />
   ) : (
     <ModelAccessOnboardingPanel
@@ -197,7 +216,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       supergrokEnabled
       includedModel={includedModel}
       startingCredits={startingCredits}
-      onComplete={() => setCompleted(true)}
+      onComplete={() => setCompleted({})}
     />
   );
 }

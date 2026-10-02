@@ -1,6 +1,6 @@
 // Consent-gated onboarding journey (PostHog through `captureAnalyticsEvent`)
-// for the post-sign-in setup in organization-onboarding-panel.tsx and
-// model-access-onboarding.tsx:
+// for the post-sign-in setup in organization-onboarding-panel.tsx,
+// model-access-onboarding.tsx and onboarding/developer-setup-step.tsx:
 //
 //   onboarding_step_viewed{step, variant?}
 //   onboarding_step_completed{step, via}
@@ -14,14 +14,22 @@ import { useEffect } from "react";
 
 import { captureAnalyticsEvent } from "./analytics-observer";
 
-export const ONBOARDING_STEPS = ["organization_name", "invitation", "model_access"] as const;
+export const ONBOARDING_STEPS = [
+  "use_case",
+  "organization_name",
+  "invitation",
+  "model_access",
+  "developer_setup",
+] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 /** How a step was completed. */
 export const ONBOARDING_COMPLETIONS = {
+  use_case: ["embed", "cloud"],
   organization_name: ["created"],
   invitation: ["joined"],
   model_access: ["start_chatting", "skipped", "connected_model", "checkout"],
+  developer_setup: ["implement_with_opengeni", "copied_prompt", "skipped"],
 } as const satisfies Record<OnboardingStep, readonly string[]>;
 export type OnboardingCompletion<Step extends OnboardingStep> =
   (typeof ONBOARDING_COMPLETIONS)[Step][number];
@@ -29,7 +37,13 @@ export type OnboardingCompletion<Step extends OnboardingStep> =
 /** The model-access screen variant, by what the organization already has. */
 export type ModelAccessVariant = "credits" | "included" | "choose";
 
-const FINAL_STEPS: ReadonlySet<OnboardingStep> = new Set(["invitation", "model_access"]);
+// `model_access` is final unless the person chose to embed Opengeni, whose
+// developer setup step follows it.
+const FINAL_STEPS: ReadonlySet<OnboardingStep> = new Set([
+  "invitation",
+  "model_access",
+  "developer_setup",
+]);
 
 type Capture = (
   name: "onboarding_step_viewed" | "onboarding_step_completed" | "onboarding_abandoned",
@@ -50,6 +64,7 @@ export function createOnboardingJourney(
   const completed = new Set<OnboardingStep>();
   let lastStep: OnboardingStep | null = null;
   let finished = false;
+  let developerSetupFollows = false;
   const send: Capture = (name, properties) => {
     try {
       capture(name, properties);
@@ -68,7 +83,10 @@ export function createOnboardingJourney(
     completed(step, via) {
       if (finished || completed.has(step)) return;
       completed.add(step);
-      if (FINAL_STEPS.has(step)) finished = true;
+      if (step === "use_case") developerSetupFollows = via === "embed";
+      if (FINAL_STEPS.has(step) && !(step === "model_access" && developerSetupFollows)) {
+        finished = true;
+      }
       send("onboarding_step_completed", { step, via });
     },
     left() {
