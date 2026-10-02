@@ -41,18 +41,23 @@ const original = { ...fs };
 const ghost = "2147483647";
 const code = process.argv[2];
 let ownedForStatRace;
-let ownedStatReads = 0;
+let ownedWasSignaled = false;
+const originalKill = process.kill.bind(process);
+process.kill = (pid, signal) => {
+  if (ownedForStatRace && pid === ownedForStatRace.pid && signal === "SIGTERM") ownedWasSignaled = true;
+  return originalKill(pid, signal);
+};
 mock.module("node:fs/promises", () => ({
   ...original,
   readdir: async (path, options) => path === "/proc"
     ? [{ name: ghost, isDirectory: () => true }, ...await original.readdir(path, options)]
     : original.readdir(path, options),
   readFile: async (path, ...args) => {
-    if (code === "ESRCH" && ownedForStatRace && path === "/proc/" + ownedForStatRace.pid + "/stat" && ++ownedStatReads > 1) {
+    if (code === "ESRCH" && ownedWasSignaled && path === "/proc/" + ownedForStatRace.pid + "/stat") {
       await ownedForStatRace.exited;
       throw Object.assign(new Error("process exited after procfs open"), { code });
     }
-    if (path === "/proc/" + ghost + "/cmdline") {
+    if (path === "/proc/" + ghost + "/stat" || path === "/proc/" + ghost + "/cmdline") {
       throw Object.assign(new Error("synthetic procfs read failure"), { code });
     }
     return original.readFile(path, ...args);

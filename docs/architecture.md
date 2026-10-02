@@ -1356,6 +1356,9 @@ Lightpanda is semantic-only.
 
 Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
 
+Linux managed-browser cleanup and recovery share exact profile/executable and
+process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
+
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
