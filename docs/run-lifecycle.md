@@ -829,7 +829,11 @@ permits numeric-PID fallback or another possibly dispatched helper Start.
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Preparation-independent
+terminal model response does not join that background work. Configured agents
+decide router visibility from authorized pending server identities without
+joining preparation. Once exposed, that router stays in the request tool prefix
+even if background discovery returns no tools; an already-settled empty catalog
+does not introduce a router. Preparation-independent
 tools such as `skill_read` execute without joining it. Other local
 function calls join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and

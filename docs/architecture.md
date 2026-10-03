@@ -962,6 +962,10 @@ The closed always-visible first-request local tool set is `exec_command`,
 [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 require progressive search.
 
+Configured-agent router visibility does not gate inference on non-eager MCP
+preparation; tool execution still joins the exact catalog fence. Once exposed,
+the router stays in the tool prefix, including an eventually empty catalog.
+
 Repository descriptors use sandbox-bound `repository_skill_read`, separate
 from managed `skill_read`: [run lifecycle](run-lifecycle.md).
 
