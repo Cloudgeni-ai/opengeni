@@ -412,6 +412,13 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
+Model display: outside Models settings a model is its clean name plus its maker's
+logo, never a routing prefix, connection id or organization/workspace scope.
+`packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported
+by `@opengeni/sdk/model-display`) and `@opengeni/react`'s `ModelName`/`ModelMark` are
+the one source; the console's `apps/web/src/components/model-identity.tsx` adds the
+logo tile and payer hint. The picker merges org- and workspace-connected copies.
+
 Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
 ([design](design/agent-configuration.md)).
 
@@ -1259,18 +1266,16 @@ See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
-`@opengeni/tool-gateway` owns protocol-neutral catalogs, validation, authorization,
-approval classification, and execution. Runtime builds one enabled first-party
-and integration MCP catalog. Model, exact-attempt Codemode, current-human MCP,
-and workspace HTTP/SDK adapters share its executor closures. Friendly names and
-JavaScript paths project opaque `{serverId, toolName}` identities, never authority.
-Bounded MCP aliases preserve readable actions; historical hashes resolve only
-against the current authorized catalog. Event display metadata never changes
-call identity or approval authority.
-Normalized paths receive identity-derived suffixes, remaining stable across
-neighbor changes. Allocation rejects namespace/tool-prefix and exact collisions
-before publication. Local model tools bind only to the final combined local/MCP
-attempt environment used by Codemode, never a provisional local-only gateway.
+`@opengeni/tool-gateway` owns catalogs, validation, authorization, approvals, and
+execution. Identity-derived paths/aliases represent
+`{serverId, toolName}`, never authority. Historical hashes require current
+authorization; namespace/tool-prefix and exact collisions block publication.
+Event metadata preserves identity and approvals. Local tools use the
+final combined attempt environment.
+
+First-party contract projection, opacity checks, omission preservation:
+`apps/api/src/mcp/contract-input.ts`. Union diagnostics:
+`packages/tool-gateway/src/input-issues.ts`; [MCP surfaces](mcp-surfaces.md).
 
 Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
 Mid-turn home repair fences client-only preparation to the exact replacement

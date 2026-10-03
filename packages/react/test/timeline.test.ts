@@ -1586,6 +1586,171 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("expected rotation waits through preparation and becomes successful after recovery", () => {
+    reset();
+    const first = {
+      turnId: "c70c65ea-2798-4a76-888c-c99e71f98f96",
+      turnAttemptId: "5732e7a3-67de-45d8-ace5-5ddbb49914f4",
+    };
+    const recovered = {
+      turnId: first.turnId,
+      turnAttemptId: "8d927168-de88-4c42-8269-243aa02c279f",
+    };
+    const waiting = [
+      event("turn.startup.phase.started", { phase: "model_preparation" }, first),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, first),
+      event(
+        "sandbox.operation.failed",
+        {
+          name: "sandbox.provision",
+          retryable: true,
+          failureCode: "rotation_in_progress",
+          failureStage: "lifecycle_wait",
+          failureCategory: "drain_capture_wait",
+          expectedTransition: true,
+        },
+        first,
+      ),
+      // Older preparation receipts omit the sandbox lifecycle diagnostic.
+      event("turn.startup.phase.failed", { phase: "model_preparation", durationMs: 3_000 }, first),
+    ];
+    const diagnostics = JSON.stringify(waiting);
+    expect(buildTimeline(waiting)).toEqual([
+      expect.objectContaining({
+        phase: "model_preparation",
+        status: "cancelled",
+        blockedReason: "rotation_in_progress",
+        durationMs: 3_000,
+      }),
+      expect.objectContaining({
+        phase: "sandbox",
+        status: "cancelled",
+        blockedReason: "rotation_in_progress",
+      }),
+    ]);
+    expect(
+      buildTimeline(waiting.map(({ turnAttemptId: _attemptId, ...receipt }) => receipt))[0],
+    ).toMatchObject({ status: "cancelled", blockedReason: "rotation_in_progress" });
+    const phases = buildTimeline([
+      ...waiting,
+      event("turn.recovery.requested", { reason: "sandbox_deadline_rotation" }, first),
+      event("turn.started", {}, recovered),
+      event("turn.startup.phase.started", { phase: "model_preparation" }, recovered),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, recovered),
+      event(
+        "sandbox.operation.completed",
+        { name: "sandbox.provision", origin: "resumed" },
+        recovered,
+      ),
+      event(
+        "turn.startup.phase.completed",
+        { phase: "model_preparation", durationMs: 500 },
+        recovered,
+      ),
+      event("agent.model.request", { phase: "started" }, recovered),
+      event("agent.model.request", { phase: "first_byte", durationMs: 125 }, recovered),
+      event("turn.completed", { output: "Ready." }, recovered),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(phases).toHaveLength(3);
+    expect(phases.every((phase) => phase.status === "complete")).toBe(true);
+    expect(phases.every((phase) => phase.blockedReason === undefined)).toBe(true);
+    expect(JSON.stringify(waiting)).toBe(diagnostics);
+  });
+
+  test("explicit lifecycle preparation diagnostics work without the sandbox event page", () => {
+    for (const failureCode of [
+      "rotation_in_progress",
+      "capture_in_progress",
+      "provider_recovery_in_progress",
+    ]) {
+      reset();
+      expect(
+        buildTimeline([
+          event("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 750,
+            retryable: true,
+            failureCode,
+            failureStage: "lifecycle_wait",
+            failureCategory: "drain_capture_wait",
+            expectedTransition: true,
+          }),
+        ]),
+      ).toEqual([
+        expect.objectContaining({
+          phase: "model_preparation",
+          status: "cancelled",
+          blockedReason: failureCode,
+          durationMs: 750,
+        }),
+      ]);
+    }
+  });
+
+  test("rotation waits cannot hide real preparation or provider failures", () => {
+    const first = {
+      turnId: "8957c2bb-8219-4d38-8d48-867a2e6f38f3",
+      turnAttemptId: "205fa41a-8631-4f8a-86d3-471c5b9b1c15",
+    };
+    const failures: Array<{
+      turnId: string;
+      turnAttemptId: string | null;
+      expectedTransition?: boolean;
+    }> = [
+      { ...first, turnId: "a82e371e-4dc7-463d-8145-17ed492a8d28" },
+      { ...first, turnAttemptId: "a979e120-b829-4b05-81d0-e3edcb9f14a3" },
+      { ...first, turnAttemptId: null },
+      { ...first, expectedTransition: false },
+    ];
+    for (const failure of failures) {
+      reset();
+      const phases = buildTimeline([
+        event(
+          "sandbox.operation.failed",
+          {
+            name: "sandbox.provision",
+            expectedTransition: true,
+            failureCode: "rotation_in_progress",
+            failureStage: "lifecycle_wait",
+            failureCategory: "drain_capture_wait",
+          },
+          first,
+        ),
+        event("turn.startup.phase.started", { phase: "model_preparation" }, failure),
+        event(
+          "turn.startup.phase.failed",
+          {
+            phase: "model_preparation",
+            ...(failure.expectedTransition === false ? { expectedTransition: false } : {}),
+          },
+          failure,
+        ),
+        event("agent.model.request", { phase: "started" }, failure),
+        event("agent.model.request", { phase: "failed", durationMs: 250 }, failure),
+      ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+      expect(phases.find((phase) => phase.phase === "model_preparation")).toMatchObject({
+        status: "failed",
+        blockedReason: undefined,
+      });
+      expect(phases.find((phase) => phase.phase === "provider_first_byte")).toMatchObject({
+        status: "failed",
+        blockedReason: undefined,
+      });
+    }
+
+    reset();
+    const phases = buildTimeline([
+      event("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        expectedTransition: true,
+        failureCode: "rotation_in_progress",
+      }),
+      event("turn.recovery.requested", { reason: "sandbox_deadline_rotation" }),
+      event("turn.startup.phase.failed", { phase: "model_preparation" }),
+    ]).filter((item): item is StartupPhaseItem => item.kind === "startup-phase");
+    expect(phases.find((phase) => phase.phase === "model_preparation")?.status).toBe("failed");
+  });
+
   test("keeps every context compaction visible with its before and after size", () => {
     reset();
     const items = buildTimeline([

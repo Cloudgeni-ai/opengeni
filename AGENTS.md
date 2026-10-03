@@ -125,6 +125,13 @@ Preserve repository-file discovery independently; it still uses the sandbox SDK
 instruction source.
 See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
+First-party MCP structured inputs must reuse native contracts. The registration
+check in `apps/api/src/mcp/contract-input.ts` rejects opaque named inputs and
+array elements while permitting arbitrary metadata dictionaries. Contract
+projection must preserve supplied arguments until application parsing, because
+omitted fields can carry inheritance or authority semantics. See
+`docs/mcp-surfaces.md` for schema and validation-error boundaries.
+
 Non-null session agent configurations use the shared contracts tool-family gate
 at worker/runtime attachment and Codemode SDK routing. Never restore disabled
 families from legacy columns. Null configurations retain legacy behavior.

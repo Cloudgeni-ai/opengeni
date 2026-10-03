@@ -16721,10 +16721,20 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         .array(z.enum(["google", "github"]))
         .max(2)
         .default([]),
+      // False while the deployment has paused new account creation (launch-load
+      // safety switch). Sign-in for existing accounts stays available.
+      newSignupsEnabled: z.boolean().default(true),
     }),
   ]),
 );
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
+
+/**
+ * Error code returned (HTTP 403, `{ code, message }`) when a managed deployment
+ * has paused new account creation. OAuth sign-up refusals redirect with
+ * Better Auth's `error=signup_disabled` instead.
+ */
+export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as const;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always

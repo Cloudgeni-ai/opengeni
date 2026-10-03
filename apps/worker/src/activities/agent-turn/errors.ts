@@ -524,6 +524,23 @@ export function sandboxLifecycleTransitionDiagnostic(
   return null;
 }
 
+export function modelPreparationFailureEventPayload(error: unknown, durationMs: number) {
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: transition !== null,
+    ...(transition
+      ? {
+          failureCategory: "drain_capture_wait",
+          failureStage: "lifecycle_wait",
+          failureCode: transition.reason,
+          retryable: true,
+        }
+      : {}),
+  };
+}
+
 /**
  * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine

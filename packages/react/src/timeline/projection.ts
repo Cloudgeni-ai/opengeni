@@ -437,11 +437,39 @@ export function buildTimeline(
           : null;
     if (setupPhase && setupStatus) {
       closeStreamingTail();
+      let blockedReason: StartupPhaseItem["blockedReason"];
+      if (setupPhase === "model_preparation" && setupStatus === "failed") {
+        blockedReason = startupLifecycleWaitReason(payload);
+        // Older preparation events omit the typed lifecycle fields. The
+        // sandbox span can supply them only inside the same turn attempt.
+        const sandbox = startupPhases.get(`${startupTurnId}:sandbox`);
+        const sameAttempt =
+          sandbox?.[1] || startupAttemptId
+            ? Boolean(startupAttemptId && sandbox?.[1] === startupAttemptId)
+            : sandbox?.[2] === startupRecoveryRevision;
+        if (
+          !blockedReason &&
+          payload.expectedTransition === undefined &&
+          payload.failureCode === undefined &&
+          payload.failureStage === undefined &&
+          payload.failureCategory === undefined &&
+          payload.error === undefined &&
+          startupTurnId &&
+          sameAttempt &&
+          sandbox?.[0].status === "cancelled"
+        ) {
+          blockedReason = sandbox[0].blockedReason;
+        }
+      }
       settleStartupPhase(
         setupPhase,
-        setupStatus,
+        blockedReason ? "cancelled" : setupStatus,
         numberOrNull(payload.durationMs),
         event.type === "rig.setup.skipped" ? "skipped" : null,
+        0,
+        undefined,
+        undefined,
+        blockedReason,
       );
       continue;
     }
@@ -910,8 +938,11 @@ export function buildTimeline(
             0,
             undefined,
             undefined,
-            status === "cancelled" && payload.failureCode === "rotation_in_progress"
-              ? "rotation_in_progress"
+            status === "cancelled"
+              ? (startupLifecycleWaitReason(payload) ??
+                  (payload.failureCode === "rotation_in_progress"
+                    ? "rotation_in_progress"
+                    : undefined))
               : undefined,
           );
           break;
@@ -3034,6 +3065,24 @@ function startupPhaseFromPayload(value: unknown): StartupPhase | null {
   return typeof value === "string" && STARTUP_PHASES.has(value as StartupPhase)
     ? (value as StartupPhase)
     : null;
+}
+
+function startupLifecycleWaitReason(
+  payload: Record<string, unknown>,
+): StartupPhaseItem["blockedReason"] {
+  if (
+    payload.expectedTransition !== true ||
+    payload.failureStage !== "lifecycle_wait" ||
+    payload.failureCategory !== "drain_capture_wait"
+  ) {
+    return undefined;
+  }
+  const code = payload.failureCode;
+  return code === "capture_in_progress" ||
+    code === "rotation_in_progress" ||
+    code === "provider_recovery_in_progress"
+    ? code
+    : undefined;
 }
 
 const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {

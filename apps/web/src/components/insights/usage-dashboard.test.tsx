@@ -142,7 +142,7 @@ describe("Insights usage dashboard", () => {
     const view = await render();
     try {
       const titles = breakdownTitles(view.container);
-      expect(titles).toContain("GPT 6.1 Sol");
+      expect(titles).toContain("GPT-6.1 Sol");
       expect(titles).toContain("Claude Opus 5.5");
       expect(titles).toContain("Grok 4.6");
       const text = view.container.textContent ?? "";
@@ -172,7 +172,7 @@ describe("Insights usage dashboard", () => {
   test("selecting a row filters to it and drills one level down", async () => {
     const view = await render();
     try {
-      await act(async () => rowAction(view.container, "GPT 6.1 Sol")?.click());
+      await act(async () => rowAction(view.container, "GPT-6.1 Sol")?.click());
       expect(view.changes.at(-1)).toEqual({
         group: "rootSession",
         model: "codex-subscription/codex/gpt-6.1-sol",
@@ -354,7 +354,7 @@ describe("Insights usage dashboard", () => {
   test("a different workspace never shows the previous one's numbers", async () => {
     const view = await render();
     try {
-      expect(breakdownTitles(view.container)).toContain("GPT 6.1 Sol");
+      expect(breakdownTitles(view.container)).toContain("GPT-6.1 Sol");
     } finally {
       await view.unmount();
     }
@@ -422,7 +422,7 @@ describe("Insights usage dashboard", () => {
     const view = await render({ payer: "own_key" });
     try {
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
-      expect(breakdownTitles(view.container)).toEqual(["GPT 6.1 Sol"]);
+      expect(breakdownTitles(view.container)).toEqual(["GPT-6.1 Sol"]);
       expect(view.container.textContent).toContain("~$2.50");
       // The older endpoint can't filter by payer, and the page says so.
       expect(view.container.textContent).toContain("can't filter by paid with yet");

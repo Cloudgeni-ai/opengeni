@@ -1,5 +1,7 @@
 import { ClaudeMark } from "./claude-mark";
 import { GrokMark } from "./grok-mark";
+import { ChatGptMark, ModelMark, modelHasMark } from "./model-mark";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -19,7 +21,6 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
-  type SVGProps,
 } from "react";
 import { cn } from "../lib/cn";
 import { MENU_CHEVRON_CLASS } from "../lib/menu-styles";
@@ -29,6 +30,7 @@ import {
   findPickerRow,
   labelReasoningEffort,
   projectClientModelRows,
+  scopedBillingClassLabel,
   type PickerBillingClass,
   type PickerModelRow,
 } from "../model-policy";
@@ -104,8 +106,8 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
     claude_subscription: "Claude plan",
-    byok: "Billed to the workspace provider account",
-    organization_byok: "Billed to the organization provider account",
+    byok: "Billed to the connected provider account",
+    organization_byok: "Billed to the connected provider account",
   },
 };
 
@@ -135,6 +137,13 @@ export type ModelPolicyPickerProps = {
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
+  /**
+   * Default true: show models the way people choose them, with clean names,
+   * maker marks, one "API keys" group for organization- and workspace-connected
+   * keys, and one row for identical copies. Models settings passes false to
+   * keep its scope-aware presentation (raw catalog labels, scoped groups).
+   */
+  collapseScopes?: boolean | undefined;
   /** Hide latency controls on surfaces whose saved policy does not include latency. */
   allowLatencyMode?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
@@ -161,14 +170,6 @@ export type ModelPolicyPickerProps = {
 
 const SLIDE_EASE = [0.22, 1, 0.36, 1] as const;
 
-function ChatGptMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3653-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8414 3.3698-2.02 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.783-2.7622a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
-    </svg>
-  );
-}
-
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
   presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
@@ -181,8 +182,8 @@ export function BillingClassMark(props: {
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
     claude_subscription: "Claude",
-    byok: "Workspace provider account",
-    organization_byok: "Organization provider account",
+    byok: "API key",
+    organization_byok: "API key",
   };
   if (props.presentation?.icon === null) return null;
   const label = props["aria-label"] ?? props.presentation?.label ?? labels[props.billingClass];
@@ -257,12 +258,101 @@ function applyCodexOnly(
   );
 }
 
+/**
+ * The trigger shows who makes the chosen model. Subscription rails already
+ * carry their maker's mark (ChatGPT, Claude, Grok), and explicit host branding
+ * for a payment group always wins; otherwise API-key and deployment models show
+ * the maker's logo instead of a generic key, falling back to the group mark.
+ */
+function SelectedModelMark(input: {
+  props: ModelPolicyPickerProps;
+  selected: ClientPickerModelRow | null;
+}) {
+  const billingClass =
+    input.selected?.billingClass ?? billingClassForMissingSelection(input.props.model);
+  const presentation = groupPresentationFor(input.props, billingClass);
+  const model = input.selected?.catalog ?? input.props.model;
+  if (input.props.collapseScopes === false) {
+    return (
+      <BillingClassMark
+        billingClass={billingClass}
+        presentation={presentation}
+        aria-label={presentation?.label ?? SCOPED_MARK_LABELS[billingClass]}
+        className="text-og-fg"
+      />
+    );
+  }
+  if (
+    presentation?.icon !== undefined ||
+    BRANDED_BILLING_CLASSES.has(billingClass) ||
+    !modelHasMark(model)
+  ) {
+    return (
+      <BillingClassMark
+        billingClass={billingClass}
+        presentation={presentation}
+        className="text-og-fg"
+      />
+    );
+  }
+  return <ModelMark model={model} className="text-og-fg" />;
+}
+
+const SCOPED_MARK_LABELS: Partial<Record<PickerBillingClass, string>> = {
+  byok: "Workspace provider account",
+  organization_byok: "Organization provider account",
+};
+
+/** Models settings keeps naming who is billed for a key. */
+export const SCOPED_BILLING_HINTS: Partial<Record<PickerBillingClass, string>> = {
+  byok: "Billed to the workspace provider account",
+  organization_byok: "Billed to the organization provider account",
+};
+
+/**
+ * Host branding for a payment group. While scopes are collapsed, API keys are
+ * one group, so either API-key presentation serves both.
+ */
+export function groupPresentationFor(
+  props: Pick<ModelPolicyPickerProps, "groupPresentation" | "collapseScopes">,
+  billingClass: PickerBillingClass,
+): ModelPolicyPickerGroupPresentation[PickerBillingClass] {
+  const own = props.groupPresentation?.[billingClass];
+  if (own !== undefined || props.collapseScopes === false) return own;
+  if (billingClass === "byok") return props.groupPresentation?.organization_byok;
+  if (billingClass === "organization_byok") return props.groupPresentation?.byok;
+  return undefined;
+}
+
+/** A selection the catalog no longer lists: its clean name (settings keep the id). */
+function fallbackName(props: ModelPolicyPickerProps): string {
+  return props.collapseScopes === false ? props.model : modelDisplayName(props.model);
+}
+
+const BRANDED_BILLING_CLASSES: ReadonlySet<PickerBillingClass> = new Set([
+  "codex_subscription",
+  "claude_subscription",
+  "supergrok_subscription",
+]);
+
 export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
   return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
-    const label = props.groupPresentation?.[row.billingClass]?.label;
-    return label === undefined ? row : { ...row, billingClassLabel: label };
+    const scoped =
+      props.collapseScopes === false
+        ? {
+            ...row,
+            label: row.catalog.label,
+            billingClassLabel: scopedBillingClassLabel(row.billingClass),
+          }
+        : row;
+    if (props.collapseScopes === false) {
+      if (row.catalog.shortLabel) scoped.shortLabel = row.catalog.shortLabel;
+      else delete scoped.shortLabel;
+    }
+    const label = groupPresentationFor(props, row.billingClass)?.label;
+    return label === undefined ? scoped : { ...scoped, billingClassLabel: label };
   });
 }
 
@@ -409,18 +499,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           {needsModel ? (
             <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
           ) : (
-            <BillingClassMark
-              billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
-              presentation={
-                props.groupPresentation?.[
-                  selected?.billingClass ?? billingClassForMissingSelection(props.model)
-                ]
-              }
-              className="text-og-fg"
-            />
+            <SelectedModelMark props={props} selected={selected} />
           )}
           <span className="min-w-0 truncate font-medium">
-            {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
+            {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
           </span>
           {props.triggerMeta && !needsModel ? (
             <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">
@@ -468,23 +550,15 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         {needsModel ? (
           <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
         ) : (
-          <BillingClassMark
-            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
-            presentation={
-              props.groupPresentation?.[
-                selected?.billingClass ?? billingClassForMissingSelection(props.model)
-              ]
-            }
-            className="text-og-fg"
-          />
+          <SelectedModelMark props={props} selected={selected} />
         )}
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
-          {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
+          {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
         </span>
         <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
           {needsModel
             ? messages.connectTitle
-            : (selected?.shortLabel ?? selected?.label ?? props.model)}
+            : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}
         </span>
         {selected &&
         !needsModel &&

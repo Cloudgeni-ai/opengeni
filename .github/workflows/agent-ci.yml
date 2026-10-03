@@ -11,15 +11,7 @@ name: Agent CI
 # macOS leg.
 
 on:
-  pull_request:
-    paths:
-      - "agent/**"
-      - ".github/workflows/agent-ci.yml"
-      - "packages/browserd/src/cua/**"
-      - "packages/browserd/scripts/stage-cua-runtime.ts"
-      - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
-      - "packages/browserd/test/fixtures/cua/PackagedProbe.ts"
-      - "packages/browserd/package.json"
+  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore with OPE-652.
   push:
     branches:
       - main

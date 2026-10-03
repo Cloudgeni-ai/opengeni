@@ -1,11 +1,11 @@
 /**
- * How Insights names models and providers: product names and provider marks,
- * never raw ids ("codex/gpt-6.1-sol" reads "GPT 6.1 Sol" with the ChatGPT mark).
- *
- * Swap point: when the app-wide model display helper lands, route
- * `modelDisplayName` and `modelMark` through it and keep these signatures.
- * The catalog labels (when loaded) win over the heuristics.
+ * How Insights names models and providers. Models use the app-wide clean name
+ * and maker logo (`components/model-identity`): "codex/gpt-6.1-sol" reads
+ * "GPT-6.1 Sol" with the OpenAI mark. Providers read as the Models page names
+ * the connection, with no workspace/organization difference.
  */
+import { modelDisplayName as sharedModelDisplayName } from "@opengeni/sdk/model-display";
+
 import type { ModelProviderId } from "@/components/models/provider-mark";
 
 /** A connection's raw provider id as model_call_facts records it. */
@@ -82,87 +82,19 @@ export function providerMark(provider: RawProvider): MarkId {
   return PROVIDER_MARKS[provider] ?? null;
 }
 
-/** The model's own slug: without the connection prefix and without a gateway vendor. */
-export function modelSlug(provider: RawProvider, model: string): string {
-  let slug = model;
-  if (slug.startsWith(`${provider}/`)) slug = slug.slice(provider.length + 1);
-  if (slug.startsWith("codex/")) slug = slug.slice("codex/".length);
-  const slash = slug.lastIndexOf("/");
-  return slash >= 0 ? slug.slice(slash + 1) : slug;
-}
-
-/** "5-5" → "5.5" inside a slug, so versions read as versions. */
-function joinVersion(parts: string[]): string[] {
-  const out: string[] = [];
-  for (const part of parts) {
-    const previous = out[out.length - 1];
-    if (previous !== undefined && /^\d+(\.\d+)*$/.test(previous) && /^\d+$/.test(part)) {
-      if (part.length <= 2 && !/\.\d+$/.test(previous)) {
-        out[out.length - 1] = `${previous}.${part}`;
-        continue;
-      }
-    }
-    out.push(part);
-  }
-  return out;
-}
-
-const SPECIAL_WORDS: Readonly<Record<string, string>> = {
-  gpt: "GPT",
-  oss: "OSS",
-  ai: "AI",
-  deepseek: "DeepSeek",
-  openai: "OpenAI",
-  xai: "xAI",
-};
-
-/** A product name from a model slug. Exported for tests. */
-export function humanizeModelSlug(slug: string): string {
-  const lower = slug.toLowerCase();
-  const gpt = /^gpt-(\d+(?:\.\d+)?)(?:-(.+))?$/.exec(lower);
-  if (gpt) {
-    const rest = gpt[2] ? ` ${gpt[2].split("-").filter(Boolean).map(titleWord).join(" ")}` : "";
-    return `GPT ${gpt[1]}${rest}`;
-  }
-  const grok = /^grok-(.+)$/.exec(lower);
-  if (grok) return `Grok ${joinVersion(grok[1]!.split("-")).map(titleWord).join(" ")}`;
-  const parts = joinVersion(lower.split(/[-_]+/).filter(Boolean));
-  return parts.map((part) => SPECIAL_WORDS[part] ?? titleWord(part)).join(" ");
-}
-
-export type ModelLabelSource = ReadonlyMap<string, string>;
-
 /**
- * The model's display name. `catalog` maps catalog model ids (and their bare
- * slugs) to the label the model picker shows.
+ * The model's display name: the app-wide clean name (`@opengeni/sdk/model-display`
+ * via `components/model-identity`), preferring a curated catalog label.
  */
 export function modelDisplayName(
-  provider: RawProvider,
+  _provider: RawProvider,
   model: string,
   catalog?: ModelLabelSource,
 ): string {
-  const slug = modelSlug(provider, model);
-  const fromCatalog = catalog?.get(model) ?? catalog?.get(slug);
-  if (fromCatalog) return fromCatalog;
-  return humanizeModelSlug(slug);
+  return sharedModelDisplayName({ id: model, label: catalog?.get(model) ?? null });
 }
 
-/** The model family's mark when it's recognizable, else what served it. */
-export function modelMark(provider: RawProvider, model: string): MarkId {
-  const slug = modelSlug(provider, model).toLowerCase();
-  if (slug.startsWith("claude")) {
-    return provider.includes("claude-subscription") ? "claude_subscription" : "anthropic";
-  }
-  if (slug.startsWith("gpt") || /^o\d/.test(slug)) {
-    return provider === "azure-openai"
-      ? "azure_openai"
-      : provider === "openai"
-        ? "openai"
-        : "codex";
-  }
-  if (slug.startsWith("grok")) return "supergrok";
-  return providerMark(provider);
-}
+export type ModelLabelSource = ReadonlyMap<string, string>;
 
 /** Catalog labels keyed by full id and bare slug. */
 export function catalogLabels(

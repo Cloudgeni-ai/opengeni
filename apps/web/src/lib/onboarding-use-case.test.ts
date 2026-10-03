@@ -33,12 +33,16 @@ describe("onboarding use case text", () => {
     expect(withKey).toContain("DEVELOPER_SETUP_API_KEY environment variable");
     expect(withKey).toContain("never write it into this chat");
     expect(withKey).toContain("builtin:opengeni-client");
-    // Connecting GitHub gives the setup chat no Git credentials: it lists the
-    // repositories, asks which one, and implements in a worker that has it attached.
+    // Connecting GitHub gives the setup chat no Git credentials: the person
+    // attaches a repository with the card's Use button and the chat implements
+    // there; a repository-attached worker is only the fallback.
+    expect(withKey).toContain('"Use" button');
+    expect(withKey).toContain("don't ask me again in a separate question");
     expect(withKey).toContain("call github_repositories_list");
-    expect(withKey).toContain("request_human_input");
     expect(withKey).toContain("session_create, passing that repository's returned resource");
-    expect(withKey).toContain("give me its pull request link");
+    expect(withKey).toContain("give me the worker's pull request link");
+    expect(withKey).toContain("the card still appears and lists my repositories");
+    expect(withKey).toContain("tell me in one short line what it is building");
     expect(withKey).not.toMatch(/ogk_/);
     const withoutKey = developerSetupModelContext({ ...facts, keyInSandbox: false });
     expect(withoutKey).toContain("No API key is attached to this chat.");

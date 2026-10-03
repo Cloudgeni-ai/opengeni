@@ -130,6 +130,10 @@
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"

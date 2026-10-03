@@ -14,7 +14,6 @@ import {
 } from "./usage-contract";
 import {
   modelDisplayName,
-  modelMark,
   providerDisplayName,
   providerMark,
   type MarkId,
@@ -74,6 +73,8 @@ export type BreakdownRow = {
   /** Muted words after the title ("ChatGPT plan", "Ada Lovelace"). */
   detail?: string;
   mark: MarkId;
+  /** Model rows wear the maker's logo (`ModelTile`) instead of a connection mark. */
+  modelId?: string;
   kind: UsageGroup["kind"];
   you?: boolean;
   /** Filter values a click applies; null when the row can't be filtered (private, deleted, other). */
@@ -89,7 +90,7 @@ function rowLabel(
   group: UsageGroup,
   groupBy: UsageGroupBy,
   catalog?: ModelLabelSource,
-): { label: string; detail?: string; mark: MarkId } {
+): { label: string; detail?: string; mark: MarkId; modelId?: string } {
   switch (group.kind) {
     case "private":
       return {
@@ -121,7 +122,8 @@ function rowLabel(
     return {
       label: modelDisplayName(group.provider, group.model, catalog),
       detail: providerDisplayName(group.provider),
-      mark: modelMark(group.provider, group.model),
+      mark: null,
+      modelId: group.model,
     };
   }
   if (groupBy === "provider" && group.provider) {
@@ -147,7 +149,7 @@ export function breakdownRows(
   >();
   const field = FILTER_FIELD_OF[response.groupBy];
   for (const group of response.groups) {
-    const { label, detail, mark } = rowLabel(group, response.groupBy, catalog);
+    const { label, detail, mark, modelId } = rowLabel(group, response.groupBy, catalog);
     const filterable =
       group.kind === "item" || (group.kind === "unfiled" && response.groupBy === "project");
     const filterValue =
@@ -170,6 +172,7 @@ export function breakdownRows(
         label,
         ...(detail ? { detail } : {}),
         mark,
+        ...(modelId ? { modelId } : {}),
         kind: group.kind,
         ...(group.you ? { you: true } : {}),
         filter: filterable ? { field, values: [filterValue] } : null,

@@ -1,6 +1,7 @@
 import { CalendarIcon, LockIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { ModelTile } from "@/components/model-identity";
 import { OpenGeniCreditsTile, ProviderTile } from "@/components/models/provider-mark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -33,7 +34,6 @@ import { cn } from "@/lib/utils";
 import {
   catalogLabels,
   modelDisplayName,
-  modelMark,
   providerDisplayName,
   type MarkId,
   type ModelLabelSource,
@@ -982,7 +982,12 @@ function sortValue(row: BreakdownRow, column: SortColumn): number | string {
   return row.measures.tokensTotal !== undefined ? -1 : row.measures.tokens[column];
 }
 
-function RowMark(props: { mark: MarkId; kind: BreakdownRow["kind"] }) {
+function RowMark(props: {
+  mark: MarkId;
+  modelId?: string | undefined;
+  kind: BreakdownRow["kind"];
+}) {
+  if (props.modelId) return <ModelTile model={props.modelId} />;
   if (props.kind === "private") return <LogoTile icon={<LockIcon />} />;
   if (props.kind === "deleted") return <LogoTile icon={<Trash2Icon />} />;
   if (props.mark === "opengeni") return <OpenGeniCreditsTile />;
@@ -1107,7 +1112,11 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
-                  leading={marks ? <RowMark mark={row.mark} kind={row.kind} /> : undefined}
+                  leading={
+                    marks ? (
+                      <RowMark mark={row.mark} modelId={row.modelId} kind={row.kind} />
+                    ) : undefined
+                  }
                   title={row.label}
                   titleAddon={
                     row.you ? <span className="text-xs text-fg-subtle">You</span> : undefined
@@ -1275,7 +1284,6 @@ function RecentCalls(props: {
             : call.sessionKind === "deleted"
               ? "Deleted chat"
               : (call.sessionTitle ?? "Untitled session");
-        const mark = modelMark(call.provider, call.model);
         const cost: UsageMeasures = {
           calls: 1,
           tokenKnownCalls: call.tokens ? 1 : 0,
@@ -1320,11 +1328,7 @@ function RecentCalls(props: {
             cells={{
               model: (
                 <span className="inline-flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-                  {mark === "opengeni" ? (
-                    <OpenGeniCreditsTile size="sm" />
-                  ) : mark ? (
-                    <ProviderTile provider={mark} size="sm" />
-                  ) : null}
+                  <ModelTile model={call.model} size="sm" />
                   <span className="truncate">
                     {modelDisplayName(call.provider, call.model, props.labels)}
                   </span>

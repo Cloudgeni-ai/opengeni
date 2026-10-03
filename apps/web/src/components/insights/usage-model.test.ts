@@ -1,13 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
-import {
-  catalogLabels,
-  humanizeModelSlug,
-  modelDisplayName,
-  modelMark,
-  providerDisplayName,
-} from "./model-display";
+import { catalogLabels, modelDisplayName, providerDisplayName } from "./model-display";
 import { workspaceUsageFromSnapshot } from "./usage-adapter";
 import { emptyMeasures, parseModelFilterKey, type UsageGroup } from "./usage-contract";
 import { niceScale } from "./usage-chart";
@@ -16,8 +10,8 @@ import { cacheHitRate, costMicros, formatMoney, relativeChange } from "./usage-f
 import { nextUsageSearch, parseUsageSearch, usageQuery } from "./usage-search";
 
 describe("model display", () => {
-  test("product names from raw ids, with the connection prefix gone", () => {
-    expect(modelDisplayName("codex-subscription", "codex/gpt-6.1-sol")).toBe("GPT 6.1 Sol");
+  test("clean names from raw ids, with the connection prefix gone", () => {
+    expect(modelDisplayName("codex-subscription", "codex/gpt-6.1-sol")).toBe("GPT-6.1 Sol");
     expect(
       modelDisplayName(
         "organization-claude-subscription",
@@ -28,13 +22,12 @@ describe("model display", () => {
       "Claude Sonnet 4.6",
     );
     expect(modelDisplayName("supergrok-subscription", "grok-4.6")).toBe("Grok 4.6");
-    expect(humanizeModelSlug("kimi-k3")).toBe("Kimi K3");
   });
 
-  test("catalog labels win over the heuristics", () => {
-    const labels = catalogLabels([{ id: "codex/gpt-6.1-sol", label: "GPT‑6.1 Sol (fast)" }]);
+  test("a curated catalog label wins", () => {
+    const labels = catalogLabels([{ id: "codex/gpt-6.1-sol", label: "GPT-6.1 Sol (fast)" }]);
     expect(modelDisplayName("codex-subscription", "codex/gpt-6.1-sol", labels)).toBe(
-      "GPT‑6.1 Sol (fast)",
+      "GPT-6.1 Sol (fast)",
     );
   });
 
@@ -42,15 +35,6 @@ describe("model display", () => {
     expect(providerDisplayName("workspace-claude-subscription")).toBe("Claude plan");
     expect(providerDisplayName("organization-claude-subscription")).toBe("Claude plan");
     expect(providerDisplayName("codex-subscription")).toBe("ChatGPT plan");
-  });
-
-  test("marks follow the model family", () => {
-    expect(modelMark("codex-subscription", "codex/gpt-6.1-sol")).toBe("codex");
-    expect(modelMark("opengeni-gateway", "anthropic/claude-sonnet-5-5")).toBe("anthropic");
-    expect(modelMark("organization-claude-subscription", "x/claude-opus-5-5")).toBe(
-      "claude_subscription",
-    );
-    expect(modelMark("supergrok-subscription", "grok-4.6")).toBe("supergrok");
   });
 });
 

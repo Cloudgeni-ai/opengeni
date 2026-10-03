@@ -220,6 +220,14 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "./model-display";
+export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
   ModelContextInstructionLayer,

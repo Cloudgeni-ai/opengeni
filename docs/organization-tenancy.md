@@ -883,6 +883,14 @@ No session is created until normal sign-in, no temporary or plaintext password
 exists, and the user has only the inviting organization, their canonical
 Personal workspace, and the invitation's selected shared-workspace grants.
 
+This invitation-bound setup is independent of public sign-up. When an operator
+pauses new account sign-ups (the 0585 runtime switch or the
+`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` ceiling, see
+[New account sign-up switch](deployment.md#new-account-sign-up-switch-0585)),
+ordinary email and implicit social sign-up are refused, but an invited person
+can still create their account here and an already-registered invitee can
+still sign in and accept.
+
 0348 is a drained maintenance protocol cutover, not a rolling migration. Stop
 every old API, control worker, and turn worker; provide the exact old/new
 application database role list through
