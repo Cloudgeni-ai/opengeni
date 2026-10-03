@@ -16,7 +16,11 @@ Core must supply authenticated detail authority, not wire fields: workspace
 routes pass their sessions:read-authorized workspace; organization routes pass
 their actual same-account/same-subject workspace grants. Shared-all must come
 only from the existing stamped account-scoped API-key authority proof with
-sessions:read. Billing/account administration alone grants no detail access.
+sessions:read and an all-workspaces scope. Selected keys pass exactly their
+canonical selected IDs instead; explicit workspace:admin never substitutes for
+literal sessions:read. Workspace endpoint permission gates are unchanged,
+but detail authority is independently intersected. Billing/account administration
+alone grants no detail access.
 Shared-all never admits Personal workspaces. The cursor binds these flags.
 
 Live session/root/project/person/schedule metadata is projected only after

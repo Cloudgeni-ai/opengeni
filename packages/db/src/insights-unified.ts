@@ -271,6 +271,19 @@ export class InvalidInsightsCallsCursorError extends Error {
   }
 }
 
+/** Date.parse alone normalizes impossible calendar days and 24:00 into another day. */
+function validCursorTimestamp(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !/^(?!0000)\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(value)
+  )
+    return false;
+  const parsed = Date.parse(value);
+  return (
+    Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 19) === value.slice(0, 19)
+  );
+}
+
 /** Visible details only; cursor and all filters are inside the bounded raw read. */
 export async function readInsightsCalls(
   db: Database,
@@ -295,10 +308,8 @@ export async function readInsightsCalls(
       if (
         value.v !== 1 ||
         value.scope !== scope ||
-        typeof value.at !== "string" ||
+        !validCursorTimestamp(value.at) ||
         typeof value.id !== "string" ||
-        !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(value.at) ||
-        !Number.isFinite(Date.parse(value.at)) ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.id)
       )
         throw new Error("cursor shape");

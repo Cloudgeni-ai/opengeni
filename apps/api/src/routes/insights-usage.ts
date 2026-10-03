@@ -54,6 +54,22 @@ export function organizationInsightsScope(
   accountId: string,
 ): InsightsQueryScope {
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  if (authority?.accountId === accountId) {
+    const readable = hasPermission(
+      authority.permissions,
+      "sessions:read",
+      authority.permissionMode,
+    );
+    return {
+      accountId,
+      workspaceId: null,
+      detailsWorkspaceIds:
+        readable && authority.workspaceScope.kind === "selected"
+          ? [...authority.workspaceScope.workspaceIds].sort()
+          : [],
+      detailsSharedWorkspaces: readable && authority.workspaceScope.kind === "all",
+    };
+  }
   return {
     accountId,
     workspaceId: null,
@@ -64,13 +80,12 @@ export function organizationInsightsScope(
             (grant) =>
               grant.accountId === accountId &&
               grant.subjectId === context.subjectId &&
-              hasPermission(grant.permissions, "sessions:read"),
+              hasPermission(grant.permissions, "sessions:read", grant.permissionMode),
           )
           .map((grant) => grant.workspaceId),
       ),
     ].sort(),
-    detailsSharedWorkspaces:
-      authority?.accountId === accountId && hasPermission(authority.permissions, "sessions:read"),
+    detailsSharedWorkspaces: false,
   };
 }
 
@@ -95,7 +110,13 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = WorkspaceInsightsUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
-    const scope = { accountId: grant.accountId, workspaceId, detailsWorkspaceIds: [workspaceId] };
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      detailsWorkspaceIds: hasPermission(grant.permissions, "sessions:read", grant.permissionMode)
+        ? [workspaceId]
+        : [],
+    };
     // The API's workspace middleware already binds/revalidates this grant's RLS actor.
     const response = await usage.run(
       insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
@@ -110,7 +131,13 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = WorkspaceInsightsCallsQuery.safeParse(insightsQueryParameters(c.req.queries()));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
-    const scope = { accountId: grant.accountId, workspaceId, detailsWorkspaceIds: [workspaceId] };
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      detailsWorkspaceIds: hasPermission(grant.permissions, "sessions:read", grant.permissionMode)
+        ? [workspaceId]
+        : [],
+    };
     const response = await calls.run(
       insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
       () => callsWithValidation(() => listInsightsCalls(deps.db, { ...scope, query: parsed.data })),

@@ -1022,30 +1022,17 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
-Usage is normalized at the provider boundary and recorded per authoritative
-model call. Admission limits and entitlements are domain policy; provider
-telemetry, comparison pricing, and dashboards do not independently debit or
-grant capacity. The durable `agent.model.usage` event carries the accepted
-billing path and any validated Gateway endpoint provider so the additive
-Insights fact can be repaired exactly after a soft writer failure; repair
-prefers those authorities over the logical Gateway provider and legacy
-inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
-Each new fact also freezes provider cost and equivalent OpenGeni credit price as
-separate nullable comparisons, while `priced_cost_micros` remains the actual
-credits-path price and is zero for externally billed calls.
+Provider-normalized calls freeze nullable provider/equivalent-credit comparisons.
+`priced_cost_micros` is requested price, not debit; external calls record zero.
+Telemetry/comparison prices cannot authorize capacity/debits. `agent.model.usage`
+preserves accepted billing/Gateway authority; repair prefers it over legacy inference.
 
-Insights counts every ledger row, including private/missing/deleted sessions;
-`privateChats` exposes person-only amounts. Details/samples remain actor-visible;
-debits remain unchanged.
-Unified workspace/organization GET `insights/usage` and `insights/calls` use
-`@opengeni/contracts/insights-usage`. Raw readers preserve live metadata,
-actual-debit residuals, all-payer estimates and coverage; rollup performance is
-follow-up. Workspace requires `workspace:admin`, organization `billing:read`;
-details additionally require workspace read grants and actor visibility.
-Masking precedes identity filters. Hidden sessions/titles and other Personal
-identities never become facets. Unknown counters/classes remain unknown;
-historical allocation must conserve captured totals. Comparison pricing never
-authorizes debits. See [the checkpoint](insights-raw-usage-api.md).
+Insights retains private/deleted/unmatched amounts. Details require actor
+visibility and canonical selected-key/explicit-permission ceilings. Mask before
+identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
+conserve totals. Unified GET usage/calls use `@opengeni/contracts/insights-usage`;
+the [checkpoint](insights-raw-usage-api.md) documents gates, residuals, privacy and
+interim performance.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and

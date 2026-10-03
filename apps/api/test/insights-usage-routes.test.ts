@@ -322,6 +322,12 @@ describe("unified Insights route discipline", () => {
     expect(organizationInsightsScope(context, accountId).detailsWorkspaceIds).toEqual([
       workspaceId,
     ]);
+    context.workspaceGrants[0]!.permissionMode = "explicit";
+    expect(organizationInsightsScope(context, accountId).detailsWorkspaceIds).toEqual([]);
+    context.workspaceGrants[0]!.permissions.push("sessions:read");
+    expect(organizationInsightsScope(context, accountId).detailsWorkspaceIds).toEqual([
+      workspaceId,
+    ]);
   });
 
   test("same-subject billing-only and readable-workspace requests do not share in-flight results", async () => {

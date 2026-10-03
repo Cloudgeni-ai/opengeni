@@ -4,7 +4,9 @@ import { InsightsCallsResponse, InsightsUsageResponse } from "@opengeni/contract
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   applyCreditLedgerEntry,
+  createApiKey,
   createDb,
+  createOrganizationApiKey,
   createSession,
   ensureManagedAccessForUser,
   recordModelCallFact,
@@ -18,6 +20,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 
@@ -109,6 +112,149 @@ test("all four endpoints return validated HTTP 200 for genuinely empty data in a
         nextCursor: null,
       });
     }
+  }
+}, 120_000);
+
+test("canonical selected-workspace organization keys never inherit Shared-all detail authority", async () => {
+  const scope = await fixture();
+  const other = { ...scope, workspaceId: crypto.randomUUID() };
+  await shared.admin`insert into workspaces(id,account_id,name)
+    values (${other.workspaceId},${scope.accountId},'Outside selected key scope')`;
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id)
+    values (${other.workspaceId},${scope.accountId})`;
+  await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
+    values (${scope.accountId},${other.workspaceId},${scope.subjectId},'owner','[]'::jsonb)`;
+  const sessions = [];
+  for (const selected of [scope, other]) {
+    const session = await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      createSession(client.db, {
+        accountId: scope.accountId,
+        workspaceId: selected.workspaceId,
+        initialMessage: "Selected key fixture",
+        resources: [],
+        metadata: {},
+        model: "fixture-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: scope.subjectId },
+        createdByContext: {},
+      }),
+    );
+    sessions.push(session);
+    await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      recordModelCallFact(client.db, {
+        accountId: scope.accountId,
+        workspaceId: selected.workspaceId,
+        sessionId: session.id,
+        turnId: crypto.randomUUID(),
+        sourceKey: crypto.randomUUID(),
+        provider: selected === scope ? "selected-provider" : "outside-provider",
+        providerApi: "responses",
+        model: "fixture-model",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: 13,
+        pricingSource: "configured_list_price",
+      }),
+    );
+  }
+  async function key(
+    workspaceIds: string[] | null,
+    permissions: Permission[] = ["billing:read", "workspace:read", "sessions:read"],
+  ) {
+    const raw = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const input = {
+      accountId: scope.accountId,
+      name: "Selected Insights test key",
+      prefix: raw.slice(0, 14),
+      keyHash: createHash("sha256").update(raw).digest("hex"),
+      permissions,
+    };
+    // The separate policy writer currently inserts an empty values() batch for
+    // all/empty scopes. Do not change authorization code in this Insights task:
+    // install those valid fixture rows, then use real canonical authentication.
+    if (workspaceIds === null || workspaceIds.length === 0) {
+      const created = await createApiKey(client.db, { ...input, credentialKind: "organization" });
+      await shared.admin`update api_keys set permission_mode='explicit',workspace_scope=${workspaceIds === null ? "all" : "selected"}
+        where id=${created.id} and account_id=${scope.accountId}`;
+    } else
+      await createOrganizationApiKey(client.db, {
+        ...input,
+        policy: {
+          preset: "custom",
+          permissions,
+          workspaceScope:
+            workspaceIds === null ? { kind: "all" } : { kind: "selected", workspaceIds },
+        },
+      });
+    return `Bearer ${raw}`;
+  }
+  const app = api();
+  const selectedKey = await key([scope.workspaceId]);
+  const allKey = await key(null);
+  const adminOnlyKey = await key(
+    [scope.workspaceId],
+    ["billing:read", "workspace:read", "workspace:admin"],
+  );
+  for (const [authorization, expectedIds] of [
+    [selectedKey, [scope.workspaceId]],
+    [allKey, [scope.workspaceId, other.workspaceId]],
+    [await key([]), []],
+    [await key([scope.workspaceId], ["billing:read"]), []],
+    [adminOnlyKey, []],
+  ] as const) {
+    const response = await app.request(
+      path(scope, true, "usage", "range=ytd&groupBy=rootSession"),
+      {
+        headers: { authorization },
+      },
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = InsightsUsageResponse.parse(await response.json());
+    // Account billing authority still includes unattributed amounts; detail ceiling is independent.
+    expect(body.totals).toMatchObject({ calls: 2, listMicros: 26 });
+    expect(body.facets.workspaces.map((item) => item.id).sort()).toEqual([...expectedIds].sort());
+    const calls = await app.request(path(scope, true, "calls"), { headers: { authorization } });
+    expect(calls.status, await calls.clone().text()).toBe(200);
+    expect(
+      InsightsCallsResponse.parse(await calls.json())
+        .calls.map((call) => call.workspaceId)
+        .sort(),
+    ).toEqual([...expectedIds].sort());
+  }
+  for (const leaf of ["usage", "calls"] as const) {
+    const response = await app.request(path(scope, false, leaf), {
+      headers: { authorization: adminOnlyKey },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = await response.json();
+    if (leaf === "calls")
+      expect(InsightsCallsResponse.parse(body)).toEqual({ calls: [], nextCursor: null });
+    else expect(InsightsUsageResponse.parse(body).facets.workspaces).toEqual([]);
+    const denied = await app.request(path(other, false, leaf), {
+      headers: { authorization: adminOnlyKey },
+    });
+    expect(denied.status).toBe(403);
+  }
+  for (const query of [
+    "provider=outside-provider",
+    `rootSessionId=${sessions[1]!.id}`,
+    `workspaceId=${other.workspaceId}&provider=outside-provider`,
+  ]) {
+    const response = await app.request(path(scope, true, "usage", `range=ytd&${query}`), {
+      headers: { authorization: selectedKey },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(InsightsUsageResponse.parse(await response.json()).totals.calls).toBe(0);
+    const calls = await app.request(path(scope, true, "calls", `range=ytd&${query}`), {
+      headers: { authorization: selectedKey },
+    });
+    expect(calls.status, await calls.clone().text()).toBe(200);
+    expect(InsightsCallsResponse.parse(await calls.json())).toEqual({
+      calls: [],
+      nextCursor: null,
+    });
   }
 }, 120_000);
 

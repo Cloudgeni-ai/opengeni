@@ -19,6 +19,7 @@ import {
   ensureManagedAccessForUser,
   readInsightsUsage,
   readInsightsCalls,
+  InvalidInsightsCallsCursorError,
   insightsUsageWindow,
   recordModelCallFact,
   withSessionRlsActorContext,
@@ -182,8 +183,8 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   expect(org.totals.chargedMicros).toBe(31);
 });
 
-test("frozen pre-0601 runtime and provisioner accept the complete migrated inventory", async () => {
-  const revision = "00000d75ec520007a318637c22d74f23fdc4deb1";
+test("frozen pre-0602 runtime and provisioner accept the complete migrated inventory", async () => {
+  const revision = "3cc26b5b3d316cde28ba51fd8b266395f6108f5e";
   const repoRoot = new URL("../../..", import.meta.url).pathname;
   const root = await mkdtemp(`${repoRoot}/.insights-0601-old-runtime-`);
   const directory = `${root}/${revision}`;
@@ -326,6 +327,51 @@ test("forward classes conserve frozen total and visible cursor pagination preser
   } while (cursor);
   expect(ids.length).toBe(4);
   expect(new Set(ids).size).toBe(4);
+});
+
+test("impossible calendar cursors are rejected before PostgreSQL without normalizing days", async () => {
+  const input = {
+    accountId,
+    workspaceId,
+    now,
+    detailsWorkspaceIds: [workspaceId],
+  };
+  const query = { range: "month", model: "cursor-provider/model/with/slashes", limit: 1 };
+  const first = await actor(() =>
+    readInsightsCalls(client.db, { ...input, query: InsightsCallsQuery.parse(query) }),
+  );
+  expect(first.nextCursor).not.toBeNull();
+  const envelope = JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8"));
+  for (const at of [
+    "2026-02-30T00:00:00Z",
+    "1900-02-29T00:00:00Z",
+    "2026-04-31T00:00:00Z",
+    "2026-09-06T24:00:00Z",
+    "0000-01-01T00:00:00Z",
+    "2026-13-01T00:00:00Z",
+    "2026-09-00T00:00:00Z",
+  ]) {
+    const cursor = Buffer.from(JSON.stringify({ ...envelope, at })).toString("base64url");
+    await expect(
+      actor(() =>
+        readInsightsCalls(client.db, {
+          ...input,
+          query: InsightsCallsQuery.parse({ ...query, cursor }),
+        }),
+      ),
+    ).rejects.toBeInstanceOf(InvalidInsightsCallsCursorError);
+  }
+  const leap = Buffer.from(
+    JSON.stringify({ ...envelope, at: "2024-02-29T00:00:00.000001+00:00" }),
+  ).toString("base64url");
+  expect(
+    await actor(() =>
+      readInsightsCalls(client.db, {
+        ...input,
+        query: InsightsCallsQuery.parse({ ...query, cursor: leap }),
+      }),
+    ),
+  ).toEqual({ calls: [], nextCursor: null });
 });
 
 test("same actor billing-only ceiling masks metadata before filters and omits detail calls", async () => {
