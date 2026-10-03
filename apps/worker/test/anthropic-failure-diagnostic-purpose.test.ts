@@ -10,6 +10,7 @@ import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRetryAfterMs,
   safeErrorDiagnostic,
+  classifyClaudeCredentialFailure,
 } from "../src/activities/agent-turn/errors";
 import {
   settleTurnFailure,
@@ -80,6 +81,206 @@ function failureDeps(error: Error) {
 }
 
 describe("Anthropic failure diagnostic purpose", () => {
+  test("a first rejected token may renew after unrelated provider recoveries", async () => {
+    const diagnostic = new AnthropicRequestError(
+      "Synthetic authentication failure",
+      401,
+      "anthropic_http_error",
+      { type: "authentication_error", message: "Fixture" },
+      new Headers({ "request-id": "req_auth_fixture" }),
+    );
+    const { deps, settle } = failureDeps(diagnostic);
+    deps.billingState.isClaudeTurn = true;
+    deps.settings = { environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64") } as never;
+    deps.attempt.providerRecoveryCount = 3;
+    Object.assign(deps.providerTurn, {
+      effectiveClaudeCredentialId: "11111111-1111-4111-8111-111111111111",
+      effectiveClaudeCredentialVersion: 3,
+      claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeUpstreamModelId: "claude-opus-fixture",
+      latestClaudeUsage: new Map([
+        [
+          "fixture",
+          {
+            scope: "workspace",
+            token: "sk-ant-oat01-before",
+            expectedConnectionId: "11111111-1111-4111-8111-111111111111",
+            expectedCredentialVersion: 3,
+            responseStatus: 401,
+            requestId: "req_auth_fixture",
+          },
+        ],
+      ]),
+    });
+    Object.assign(deps.leases, {
+      claude: {
+        lost: false,
+        held: true,
+        subjectId: "user-fixture",
+        holderId: "holder-fixture",
+        generation: 7,
+      },
+    });
+    const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null);
+    const renew = spyOn(opengeniDb, "resolveClaudeAccountCredential").mockResolvedValue({
+      secret: { token: "sk-ant-oat01-after" },
+      version: 3,
+    } as never);
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    try {
+      expect(await settleTurnFailure(deps)).toMatchObject({ status: "recovering" });
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(recovery.mock.calls[0]![2]).toMatchObject({
+        claudeAuthRecovery: {
+          credentialId: "11111111-1111-4111-8111-111111111111",
+          credentialVersion: 3,
+        },
+      });
+      expect(recovery.mock.calls[0]![2]).not.toHaveProperty("providerRecoveryCount");
+      expect(settle).not.toHaveBeenCalled();
+    } finally {
+      goal.mockRestore();
+      renew.mockRestore();
+      recovery.mockRestore();
+    }
+  });
+
+  test("Claude rotates only typed authentication and rate limits, never permission, safety or tool failures", () => {
+    const error = (status: number) =>
+      new AnthropicRequestError(
+        "Synthetic provider failure",
+        status,
+        "anthropic_http_error",
+        { type: "fixture_error", message: "Fixture" },
+        new Headers({ "retry-after": "120" }),
+      );
+    expect(classifyClaudeCredentialFailure(error(401))).toEqual({ kind: "auth", cooldownMs: null });
+    expect(classifyClaudeCredentialFailure(new Error("Wrapped", { cause: error(429) }))).toEqual({
+      kind: "rate_limit",
+      cooldownMs: 120_000,
+    });
+    for (const status of [400, 403, 503, 529])
+      expect(classifyClaudeCredentialFailure(error(status))).toBeNull();
+    expect(
+      classifyClaudeCredentialFailure(
+        Object.assign(new Error("Tool rate limited"), { status: 429 }),
+      ),
+    ).toBeNull();
+  });
+
+  for (const resumed of [true, false])
+    test(`Claude 429 checkpoints and ${resumed ? "rotates" : "waits"} on the same accepted turn`, async () => {
+      const diagnostic = new AnthropicRequestError(
+        "Synthetic provider failure",
+        429,
+        "anthropic_http_error",
+        { type: "rate_limit_error", message: "Fixture" },
+        new Headers({ "retry-after": "120", "request-id": "req_exact_fixture" }),
+      );
+      const { deps, settle } = failureDeps(diagnostic);
+      deps.billingState.isClaudeTurn = true;
+      deps.settings = {
+        environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
+      } as never;
+      Object.assign(deps.providerTurn, {
+        effectiveClaudeCredentialId: "credential-fixture",
+        effectiveClaudeCredentialVersion: 3,
+        claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeUpstreamModelId: "claude-opus-fixture",
+        latestClaudeUsage: new Map([
+          [
+            "fixture",
+            {
+              scope: "workspace",
+              token: "sk-ant-oat01-fixture",
+              expectedConnectionId: "credential-fixture",
+              expectedCredentialVersion: 3,
+              responseStatus: 429,
+              requestId: "req_exact_fixture",
+              upstreamModelId: "claude-opus-fixture",
+            },
+          ],
+          [
+            "unrelated",
+            {
+              scope: "workspace",
+              token: "sk-ant-oat01-other-request",
+              expectedConnectionId: "credential-fixture",
+              expectedCredentialVersion: 3,
+              responseStatus: 429,
+              requestId: "req_other_fixture",
+              upstreamModelId: "claude-sonnet-fixture",
+            },
+          ],
+        ]),
+      });
+      Object.assign(deps.leases, {
+        claude: {
+          lost: false,
+          held: true,
+          subjectId: "user-fixture",
+          holderId: "holder-fixture",
+          generation: 7,
+        },
+      });
+      const history = mock(async () => undefined);
+      deps.historySink.reconcileConversationTruth = history;
+      const waiter = {
+        id: "waiter-fixture",
+        generation: 2,
+        nextCheckAt: new Date(Date.now() + 120_000),
+        wakeRevision: 1,
+      };
+      const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null);
+      const record = spyOn(opengeniDb, "recordClaudeAccountUsage").mockResolvedValue({} as never);
+      const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockResolvedValue({
+        action: "waiting",
+        waiter,
+        events: [],
+      } as never);
+      const reconcile = spyOn(opengeniDb, "reconcileClaudeCapacityWait").mockResolvedValue({
+        action: resumed ? "resumed" : "waiting",
+        waiter,
+        events: [],
+      } as never);
+      try {
+        expect(await settleTurnFailure(deps)).toMatchObject({
+          status: resumed ? "recovering" : "waiting_capacity",
+          turnId: "turn-1",
+        });
+        expect(history).toHaveBeenCalledWith({ requireDurable: true });
+        expect(record).toHaveBeenCalledWith(
+          {},
+          expect.objectContaining({
+            credentialId: "credential-fixture",
+            authoritySnapshot: { version: 1, scope: "workspace" },
+          }),
+          expect.objectContaining({
+            expectedCredentialVersion: 3,
+            token: "sk-ant-oat01-fixture",
+            modelCooldown: expect.objectContaining({ upstreamModelId: "claude-opus-fixture" }),
+          }),
+        );
+        expect(arm.mock.calls[0]![1]).toMatchObject({
+          turnId: "turn-1",
+          expectedCredentialVersion: 3,
+          leaseFence: { holderId: "holder-fixture", generation: 7 },
+        });
+        expect(arm.mock.calls[0]![1]).not.toHaveProperty("credentialQuarantine");
+        expect(reconcile).toHaveBeenCalledTimes(1);
+        expect(settle).not.toHaveBeenCalled();
+        expect(deps.leases.claude.held).toBe(false);
+      } finally {
+        goal.mockRestore();
+        record.mockRestore();
+        arm.mockRestore();
+        reconcile.mockRestore();
+      }
+    });
+
   for (const [status, type, failureCode, wrapped] of [
     [429, "rate_limit_error", "provider_rate_limited", false],
     [503, "api_error", "provider_unavailable", false],

@@ -1,3 +1,10 @@
+import type {
+  ClaudeSubscriptionAccountsResponse,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionOAuthStartRequest,
+  ClaudeSubscriptionSetupTokenRequest,
+  SubscriptionPoolSettings,
+} from "@opengeni/contracts";
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
   SessionMessageSearchRequest,
@@ -4782,14 +4789,183 @@ export class OpenGeniClient {
     );
   }
 
+  async listClaudeSubscriptionAccounts(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionAccountsResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/claude/accounts`);
+  }
+  async activateClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<{ activated: boolean; accountId: string }> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/activate`,
+      {},
+    );
+  }
+  async setClaudeSubscriptionRotationSettings(
+    workspaceId: string,
+    request: { rotationEnabled: boolean },
+  ): Promise<SubscriptionPoolSettings> {
+    return this.requestJson("PATCH", `/v1/workspaces/${workspaceId}/claude/settings`, request);
+  }
+  async setClaudeSubscriptionAccountAllocator(
+    workspaceId: string,
+    accountId: string,
+    request: { enabled: boolean; expectedVersion: number },
+  ): Promise<unknown> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/allocator`,
+      request,
+    );
+  }
+  async renameClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<ClaudeSubscriptionAccount> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      { label },
+    );
+  }
+  async disconnectClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<unknown> {
+    return this.requestJson(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}`,
+    );
+  }
+  async getClaudeSubscriptionAccountUsage(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/usage`,
+    );
+  }
+  async refreshClaudeSubscriptionAccountUsage(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
+      {},
+    );
+  }
+
+  async listOrganizationClaudeSubscriptionAccounts(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionAccountsResponse> {
+    return this.requestJson("GET", `/v1/organizations/${organizationId}/claude/accounts`);
+  }
+  async activateOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ updated: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/activate`,
+      {},
+    );
+  }
+  async setOrganizationClaudeSubscriptionRotationSettings(
+    organizationId: string,
+    request: { rotationEnabled: boolean },
+  ): Promise<SubscriptionPoolSettings> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/settings`,
+      request,
+    );
+  }
+  async setOrganizationClaudeSubscriptionAccountAllocator(
+    organizationId: string,
+    accountId: string,
+    request: { enabled: boolean; expectedVersion: number },
+  ): Promise<unknown> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/allocator`,
+      request,
+    );
+  }
+  async renameOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<{ updated: boolean }> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      { label },
+    );
+  }
+  async disconnectOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<unknown> {
+    return this.requestJson(
+      "DELETE",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}`,
+    );
+  }
+  async getOrganizationClaudeSubscriptionAccountUsage(
+    organizationId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage`,
+    );
+  }
+  async refreshOrganizationClaudeSubscriptionAccountUsage(
+    organizationId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
+      {},
+    );
+  }
+
+  async connectClaudeSubscriptionSetupToken(
+    workspaceId: string,
+    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope"> & { scope?: "workspace" | "user" },
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/setup-token`,
+      request,
+    );
+  }
+  async connectOrganizationClaudeSubscriptionSetupToken(
+    organizationId: string,
+    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope">,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/setup-token`,
+      request,
+    );
+  }
   /** Sign in with model and profile access; no inference request is made. */
   async startWorkspaceClaudeSubscriptionOAuth(
     workspaceId: string,
+    request: Partial<ClaudeSubscriptionOAuthStartRequest> = {},
   ): Promise<ClaudeSubscriptionOAuthStartResponse> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/start`,
-      {},
+      request,
     );
   }
 
@@ -4806,11 +4982,12 @@ export class OpenGeniClient {
 
   async startOrganizationClaudeSubscriptionOAuth(
     organizationId: string,
+    request: Pick<ClaudeSubscriptionOAuthStartRequest, "reconnectAccountId"> = {},
   ): Promise<ClaudeSubscriptionOAuthStartResponse> {
     return this.requestJson(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/start`,
-      {},
+      request,
     );
   }
 

@@ -587,7 +587,14 @@ function credentialReadinessFor(input: {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
     const active =
-      source.provider === "xai" ? input.xaiSubscriptionActive : input.codexSubscriptionActive;
+      source.provider === "xai"
+        ? input.xaiSubscriptionActive
+        : source.provider === "claude"
+          ? (input.model.providerId === claudeProviderId("claude_subscription", "workspace")
+              ? input.workspaceClaudeConnections
+              : input.claudeConnections
+            )?.claude_subscription?.active === true
+          : input.codexSubscriptionActive;
     return active
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {

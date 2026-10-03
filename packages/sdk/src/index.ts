@@ -1,3 +1,10 @@
+export {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionSetupTokenRequest,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "@opengeni/contracts";
 export type {
   ArtifactCatalogKind,
   ArtifactCatalogItem,

@@ -21,7 +21,12 @@ function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   if (model.cost === "credits") return "Opengeni credits";
   if (model.cost === "workspace") return "Workspace AI Gateway";
   if (model.cost === "subscription") {
-    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription"
+      : model.source === "supergrok"
+        ? "SuperGrok subscription"
+        : "Codex subscription";
   }
   if (model.source === "codex") return "Codex subscription";
   if (model.source === "supergrok") return "SuperGrok subscription";
@@ -31,9 +36,12 @@ function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   }
   if (model.billing?.upstreamPayer === "connected_subscription") {
     return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "xai"
-      ? "SuperGrok subscription"
-      : "Codex subscription";
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription"
+      : model.credentialSource?.kind === "connected_subscription" &&
+          model.credentialSource.provider === "xai"
+        ? "SuperGrok subscription"
+        : "Codex subscription";
   }
   if (model.billing?.upstreamPayer === "workspace") return "Workspace AI Gateway";
   return "External provider";

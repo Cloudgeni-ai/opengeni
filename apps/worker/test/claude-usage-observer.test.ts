@@ -47,6 +47,32 @@ test("worker observations retain their captured identity and merge partial model
     [30, 60],
   );
 });
+
+test("one account's parallel model calls retain separate failure receipts", async () => {
+  const latest = new Map<string, CapturedClaudeUsage>();
+  const observe = await createClaudeUsageObserver(providers, latest, async () => ({
+    token: "sk-ant-oat01-fixture",
+    connectionId: "original",
+    credentialVersion: 7,
+  }));
+  observe(
+    "workspace-claude-subscription",
+    new Response(null, { status: 429 }),
+    "claude-opus-fixture",
+  );
+  observe(
+    "workspace-claude-subscription",
+    new Response(null, { headers: { "anthropic-ratelimit-unified-5h-utilization": ".2" } }),
+    "claude-sonnet-fixture",
+  );
+  expect(latest.size).toBe(2);
+  expect(
+    [...latest.values()].find((value) => value.upstreamModelId === "claude-opus-fixture"),
+  ).toMatchObject({ responseStatus: 429, expectedCredentialVersion: 7 });
+  expect(
+    [...latest.values()].find((value) => value.upstreamModelId === "claude-sonnet-fixture"),
+  ).toMatchObject({ responseStatus: 200 });
+});
 test("failed or mismatched telemetry binding never observes a replacement credential", async () => {
   for (const read of [
     async () => {

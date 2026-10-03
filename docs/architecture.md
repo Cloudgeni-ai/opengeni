@@ -1832,3 +1832,12 @@ API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
 
 [Headless-shell](headless-shell.md).
+
+Claude subscription accounts reuse the scoped SuperGrok repository, individual
+account UI, credential lease and durable provider-capacity wait/resume seams.
+The encrypted account bundle owns token/account/device identity; public account
+rows expose only permitted display metadata. Acceptance freezes workspace,
+organization or explicit user authority independently of the current browser
+user. Execution rechecks that frozen pool, live owner authority and the exact
+serving account generation before every physical request. See the native Claude
+section in model-providers.md and the maintenance activation in deployment.md.

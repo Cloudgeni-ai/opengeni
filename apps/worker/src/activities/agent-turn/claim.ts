@@ -218,6 +218,21 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  const authRecovery = turn.metadata?.claudeAuthRecovery;
+  attempt.claudeAuthRecovery =
+    authRecovery &&
+    typeof authRecovery === "object" &&
+    "credentialId" in authRecovery &&
+    typeof authRecovery.credentialId === "string" &&
+    "credentialVersion" in authRecovery &&
+    typeof authRecovery.credentialVersion === "number" &&
+    Number.isSafeInteger(authRecovery.credentialVersion) &&
+    authRecovery.credentialVersion > 0
+      ? {
+          credentialId: authRecovery.credentialId,
+          credentialVersion: authRecovery.credentialVersion,
+        }
+      : undefined;
   attempt.triggerEventId = turn.triggerEventId;
   // The durable attempt UUID is stable for a Temporal retry of this activity
   // input and freshly generated for worker-death redispatch/continue-as-new.
@@ -358,6 +373,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
+  billingState.isClaudeTurn =
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-workspace" ||
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization";
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);

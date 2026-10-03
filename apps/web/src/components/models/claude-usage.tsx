@@ -28,6 +28,7 @@ export function useClaudeUsage({
   credentialVersion,
   canManage,
   onCredentialChanged,
+  accountPool = false,
 }: {
   client: OpenGeniBrowserClient;
   scope: "workspace" | "organization";
@@ -37,6 +38,7 @@ export function useClaudeUsage({
   credentialId?: string | null;
   credentialVersion?: number | null;
   canManage: boolean;
+  accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
   const key = `${scope}:${scopeId}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
@@ -64,13 +66,21 @@ export function useClaudeUsage({
       }
       try {
         const result =
-          scope === "workspace"
-            ? await (refresh
-                ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
-                : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
-            : await (refresh
-                ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
-                : client.getOrganizationClaudeSubscriptionUsage(scopeId));
+          accountPool && credentialId
+            ? scope === "workspace"
+              ? await (refresh
+                  ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
+                  : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
+              : await (refresh
+                  ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
+                  : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
+            : scope === "workspace"
+              ? await (refresh
+                  ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
+                  : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
+              : await (refresh
+                  ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
+                  : client.getOrganizationClaudeSubscriptionUsage(scopeId));
         if (currentKey.current !== key || generation.current !== request) return;
         if (
           !result.connected ||
@@ -96,7 +106,18 @@ export function useClaudeUsage({
         if (refresh && refreshingKey.current?.request === request) refreshingKey.current = null;
       }
     },
-    [client, scope, scopeId, key, enabled, connected, canManage, credentialVersion],
+    [
+      client,
+      scope,
+      scopeId,
+      key,
+      enabled,
+      connected,
+      canManage,
+      credentialVersion,
+      credentialId,
+      accountPool,
+    ],
   );
   useEffect(() => {
     setState({ key, value: null, error: false, loading: enabled && connected, refreshing: false });

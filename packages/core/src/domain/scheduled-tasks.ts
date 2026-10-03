@@ -1,4 +1,8 @@
 import {
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+} from "@opengeni/db";
+import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -21,6 +25,7 @@ import type {
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
   XaiProviderAccountAuthoritySnapshotV1,
+  ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -460,6 +465,18 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
+  const claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 =
+    creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          input.db,
+          input.grant.workspaceId,
+          creationInitiator.actor.sessionId,
+          creationInitiator.actor.turnId,
+        )
+      : await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(input.db, {
+          workspaceId: input.grant.workspaceId,
+          subjectId: input.grant.subjectId,
+        });
   const beforeCreateCommit =
     input.payload.runMode !== "existing_session"
       ? workspaceCustomModelCommitGuard({
@@ -488,6 +505,7 @@ export async function createValidatedScheduledTask(input: {
         createdByActor: creationInitiator.actor ?? null,
         ...(captureLinkAuthority ? { captureLinkAuthority } : {}),
         xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,

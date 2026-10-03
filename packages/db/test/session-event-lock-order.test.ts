@@ -2255,6 +2255,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
                 personalConnectionDelegations: [],
                 mcpAccountBindings: [],
                 xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+                claudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
               });
           }
         };

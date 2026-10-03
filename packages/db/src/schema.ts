@@ -31,8 +31,12 @@ import type {
   ToolGatewayIdentity,
   UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
+  ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
-import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
+import {
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
 import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
@@ -4432,6 +4436,45 @@ export const {
   capacityWaiters: xaiCapacityWaiters,
 } = xaiPoolTables;
 
+// Claude uses the same account allocation contract, with separate credentials
+// and complete provider-reported quota windows per account.
+const claudePoolTables = createSubscriptionPoolTables("claude", { managedAccounts, workspaces });
+export const {
+  credentials: claudeSubscriptionCredentials,
+  rotationSettings: claudeRotationSettings,
+  credentialLeases: claudeCredentialLeases,
+  sessionAccountPins: claudeSessionAccountPins,
+  capacityWaiters: claudeCapacityWaiters,
+} = claudePoolTables;
+export const claudeSubscriptionAccountUsage = pgTable(
+  "claude_subscription_account_usage",
+  {
+    credentialId: uuid("credential_id")
+      .primaryKey()
+      .references(() => claudeSubscriptionCredentials.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    credentialVersion: integer("credential_version").notNull(),
+    snapshot: jsonb("snapshot")
+      .$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>()
+      .notNull(),
+    modelCooldowns: jsonb("model_cooldowns").$type<Record<string, string>>().notNull().default({}),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    generationValid: check(
+      "claude_subscription_account_usage_generation_chk",
+      sql`${table.credentialVersion} > 0`,
+    ),
+    credentialAccount: foreignKey({
+      name: "claude_subscription_account_usage_account_fk",
+      columns: [table.accountId, table.credentialId],
+      foreignColumns: [claudeSubscriptionCredentials.accountId, claudeSubscriptionCredentials.id],
+    }).onDelete("cascade"),
+  }),
+);
+
 // One allocation serialization row per organization, workspace, or exact user pool.
 
 // Workspace-shared channels organize root sessions ("workstreams") by work
@@ -4639,6 +4682,12 @@ export const sessions = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    initialClaudeProviderAccountAuthoritySnapshot: jsonb(
+      "initial_claude_provider_account_authority_snapshot",
+    )
+      .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // Durable tool-policy origin. Migration 0136 removes the old null/legacy
     // representation so every session has one explicit policy mode.
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
@@ -6986,6 +7035,10 @@ export const sessionTurns = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    claudeProviderAccountAuthoritySnapshot: jsonb("claude_provider_account_authority_snapshot")
+      .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Leftover unused counter from the removed per-turn Codemode call cap
@@ -8384,6 +8437,10 @@ export const sessionSystemUpdates = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    claudeProviderAccountAuthoritySnapshot: jsonb("claude_provider_account_authority_snapshot")
+      .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // Private scheduled-occurrence authority linkage. Public update/event
     // projections intentionally omit this producer identifier.
     scheduledTaskRunId: uuid("scheduled_task_run_id"),
@@ -8484,6 +8541,10 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    claudeProviderAccountAuthoritySnapshot: jsonb("claude_provider_account_authority_snapshot")
+      .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -11350,6 +11411,10 @@ export const scheduledTasks = pgTable(
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
       .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
+    claudeProviderAccountAuthoritySnapshot: jsonb("claude_provider_account_authority_snapshot")
+      .$type<ClaudeProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     authorityRevision: bigint("authority_revision", { mode: "number" }).notNull().default(1),
     // The migration-owned BEFORE INSERT/UPDATE trigger replaces this client
     // placeholder with the canonical whole-row execution digest.

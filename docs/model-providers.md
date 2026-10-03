@@ -1390,7 +1390,7 @@ are disabled, and subscription setup is hidden from model settings. Stored crede
 are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
 
 Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
-:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under
 `workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
 `organization-anthropic/` and `organization-claude-subscription/`. Custom models use
@@ -1515,18 +1515,34 @@ provider readings when available.
 Sign-in attempts reuse encrypted, expiring OAuth pending states. They bind the exact
 human, browser session, scope and current connection generation. The one-use code
 is spent once; a committed connection has a secret-free, generation-fenced replay
-receipt. Authority is freshly checked after exchange, before native connection writes.
+receipt. Authority is freshly checked after exchange, before individual account writes.
 Organization attempts require organization administration and are not readable from
 a shared workspace's runtime scope.
 
-`packages/db/src/claude-subscription-tokens.ts` serializes renewal across replicas,
+`packages/db/src/claude-subscription-account-tokens.ts` resolves the selected account;
+shared subscription repositories serialize renewal across replicas,
 re-reads the captured generation and writes only encrypted token material. Renewal
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
 dispatch, including title and compaction requests; replacement credentials are never
 lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
-the previously captured token is never used as a fallback. Claude currently has
-one connection per scope and no Codex-style account pool or quota failover.
+the previously captured token is never used as a fallback. Claude supports multiple independent accounts in workspace, organization and
+explicit private user pools. Account rows, naming, primary selection, rotation
+settings and access policy reuse the Codex/SuperGrok settings experience. Browser
+sign-in discovers the provider account UUID, email and plan; setup tokens remain
+inference-only and do not expose profile details. Replacing a token targets one
+exact account generation and preserves its access policy.
+
+The worker reuses SuperGrok's scoped account selection, credential leases and
+durable same-turn capacity wait/resume protocol. Quotas and cooldowns apply to
+the exact upstream model: an Opus restriction need not block Sonnet. A manual
+pin or primary-only pool never silently borrows another subscription. Typed
+401 authentication failures permit one serialized rejected-token renewal per
+account generation on the accepted turn; persistent authentication failures
+require reconnect. Typed 429 refusals record the exact response/token/model
+and wait or select another permitted account. Permission, suspension, safety,
+validation and ambiguous transport errors never rotate the pool. Tool results
+and conversation history remain on the same accepted logical turn.
 Catalog loading is offline, so Claude renewal failures do not
 block turns using another provider. Invalid refresh grants require sign-in again;
 transient failures retain credentials and existing usage readings.

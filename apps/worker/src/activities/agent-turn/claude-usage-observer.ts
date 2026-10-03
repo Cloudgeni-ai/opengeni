@@ -28,6 +28,9 @@ export type CapturedClaudeUsage = {
   expectedConnectionId: string;
   expectedCredentialVersion: number;
   observation?: ClaudeUsageObservation;
+  responseStatus?: number;
+  upstreamModelId?: string;
+  requestId?: string;
   refresh?: { status: "reconnect"; checkedAt: string };
 };
 
@@ -103,7 +106,7 @@ export async function createClaudeUsageObserver(
     // Same-generation OAuth renewal can overlap an older request. Never attach
     // its authentication failure to the newly renewed token or merge the two.
     const tokenKey = createHash("sha256").update(identity.token).digest("hex");
-    const captureKey = `${scope}:${identity.expectedConnectionId}:${identity.expectedCredentialVersion}:${tokenKey}`;
+    const captureKey = `${scope}:${identity.expectedConnectionId}:${identity.expectedCredentialVersion}:${tokenKey}:${upstreamModelId ?? "unknown"}`;
     const previous = latest.get(captureKey);
     let observation = parseClaudeUsageHeaders(response.headers, new Date(), upstreamModelId);
     if (observation && previous?.observation) {
@@ -119,9 +122,14 @@ export async function createClaudeUsageObserver(
         requestRestrictions: merged.requestRestrictions ?? [],
       };
     }
-    if (observation || response.status === 401)
+    if (observation || response.status === 401 || response.status === 429)
       latest.set(captureKey, {
         scope,
+        responseStatus: response.status,
+        ...(response.headers.get("request-id") && response.headers.get("request-id")!.length <= 256
+          ? { requestId: response.headers.get("request-id")! }
+          : {}),
+        ...(upstreamModelId ? { upstreamModelId } : {}),
         ...identity,
         ...(previous?.observation && !observation ? { observation: previous.observation } : {}),
         ...(observation ? { observation } : {}),

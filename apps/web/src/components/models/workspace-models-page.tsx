@@ -1,3 +1,14 @@
+import { useClaudeSubscriptions } from "./use-claude-subscriptions";
+import {
+  ClaudeAccountRows,
+  ClaudeAccountPage,
+  ClaudeAccessPage,
+  ClaudeConnectPage,
+  ClaudeSettingRows,
+  claudeListedCount,
+  type ClaudePlaces,
+  type OrganizationClaudePool,
+} from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
@@ -155,6 +166,12 @@ export function useOrganizationModelAccounts({
     canManage: true,
     enabled,
   });
+  const orgClaude = useClaudeSubscriptions({
+    client,
+    organizationId: orgId,
+    canManage: true,
+    enabled: enabled && claudeEnabled,
+  });
   const organizationGateway = (id: GatewayId, on = true) => ({
     client,
     organizationId: orgId,
@@ -165,13 +182,18 @@ export function useOrganizationModelAccounts({
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
-    claude_subscription: useOrganizationProviderConnection(
-      organizationGateway("claude_subscription", claudeEnabled),
-    ),
+    claude_subscription: useOrganizationProviderConnection({
+      ...organizationGateway("claude_subscription", claudeEnabled),
+      catalogConnection: {
+        connected: orgClaude.accounts.some((account) => account.status === "active"),
+        loaded: !orgClaude.loading,
+        error: orgClaude.loadError ? new Error(orgClaude.loadError) : null,
+      },
+    }),
   };
   // Which workspaces can use what is being connected, per provider.
   const [audiences, setAudiences] = useState<Partial<Record<string, ConnectAudience>>>({});
-  return { orgCodex, orgGrok, orgGateways, audiences, setAudiences };
+  return { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences };
 }
 
 export type OrganizationModelAccounts = ReturnType<typeof useOrganizationModelAccounts>;
@@ -252,6 +274,12 @@ export function WorkspaceModelsPageBody({
   /* This workspace's view of every provider. */
   const codex = useCodexSubscriptions({ client, workspaceId, canManage: canManageConnections });
   const grok = useSuperGrokSubscriptions({ client, workspaceId, canManage: canManageConnections });
+  const claude = useClaudeSubscriptions({
+    client,
+    workspaceId,
+    canManage: canManageConnections,
+    enabled: claudeEnabled,
+  });
   const workspaceGateway = (id: GatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
@@ -265,14 +293,20 @@ export function WorkspaceModelsPageBody({
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
-    claude_subscription: useProviderConnection(
-      workspaceGateway("claude_subscription", claudeEnabled),
-    ),
+    claude_subscription: useProviderConnection({
+      ...workspaceGateway("claude_subscription", claudeEnabled),
+      catalogConnection: {
+        connected: claude.accounts.some((account) => account.status === "active"),
+        loaded: !claude.loading,
+        error: claude.loadError ? new Error(claude.loadError) : null,
+      },
+    }),
   };
 
   /* The organization's own accounts: read only for people who manage them. */
   const orgId = organizationId ?? "";
-  const { orgCodex, orgGrok, orgGateways, audiences, setAudiences } = organizationAccounts;
+  const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
+    organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
 
@@ -314,6 +348,33 @@ export function WorkspaceModelsPageBody({
     openAccess: (id) => nav.openView("model-access", accountKey("supergrok", id, true)),
     backToList,
   };
+  const claudePlaces: ClaudePlaces = {
+    scopeName: workspaceName,
+    organizationName,
+    scope: labels,
+    openAccount: (id) => nav.openAccount(accountKey("claude", id)),
+    openConnect: (id) =>
+      nav.openView("connect:claude_subscription", id ? accountKey("claude", id) : undefined),
+    openAccess: (id) => nav.openView("model-access", accountKey("claude", id)),
+    backToList,
+  };
+  const orgClaudePlaces: ClaudePlaces = {
+    scopeName: organizationName,
+    organizationName,
+    scope: labels,
+    openAccount: (id) => nav.openAccount(accountKey("claude", id, true)),
+    openConnect: (id) =>
+      nav.openView(
+        "connect-org:claude_subscription",
+        id ? accountKey("claude", id, true) : undefined,
+      ),
+    openAccess: (id) => nav.openView("model-access", accountKey("claude", id, true)),
+    backToList,
+  };
+  const claudePool: OrganizationClaudePool | null =
+    organizationAdmin && claudeEnabled && !orgClaude.unavailable
+      ? { pool: orgClaude, workspace: here, openAccount: orgClaudePlaces.openAccount }
+      : null;
   const codexPool: OrganizationCodexPool | null = organizationAdmin
     ? { codex: orgCodex, workspace: here, openAccount: orgCodexPlaces.openAccount }
     : null;
@@ -322,7 +383,38 @@ export function WorkspaceModelsPageBody({
       ? { grok: orgGrok, workspace: here, openAccount: orgGrokPlaces.openAccount }
       : null;
 
-  const key = accountKeyOf(account);
+  const requestedKey = accountKeyOf(account);
+  const legacyClaude =
+    requestedKey?.provider === "gateway" && requestedKey.id === "claude_subscription";
+  const legacyPool = requestedKey?.organization ? orgClaude : claude;
+  const legacyAccountId = legacyPool.activeAccountId ?? legacyPool.accounts[0]?.id;
+  const key =
+    legacyClaude && legacyAccountId
+      ? {
+          provider: "claude" as const,
+          id: legacyAccountId,
+          organization: requestedKey.organization,
+        }
+      : requestedKey;
+  useEffect(() => {
+    if (!legacyClaude || !claudeEnabled || legacyPool.loading || legacyPool.loadError) return;
+    if (!legacyAccountId) {
+      nav.openAccount(undefined);
+      return;
+    }
+    const canonical = accountKey("claude", legacyAccountId, requestedKey.organization);
+    if (view) nav.openView(view, canonical);
+    else nav.openAccount(canonical);
+  }, [
+    legacyClaude,
+    claudeEnabled,
+    legacyPool.loading,
+    legacyPool.loadError,
+    legacyAccountId,
+    requestedKey?.organization,
+    view,
+    nav,
+  ]);
   const step = connectStepOf(view);
   const orgWorkspaces = useOrganizationWorkspaces(
     client,
@@ -362,6 +454,13 @@ export function WorkspaceModelsPageBody({
         (!grok.inherited && grok.accounts.some((each) => each.status !== "active"))
       );
     }
+    if (provider === "claude_subscription") {
+      return (
+        !claude.inherited &&
+        key?.provider === "claude" &&
+        claude.accounts.some((each) => each.id === key.id)
+      );
+    }
     return (GATEWAYS as readonly string[]).includes(provider)
       ? gateways[provider as GatewayId].connected
       : false;
@@ -371,8 +470,10 @@ export function WorkspaceModelsPageBody({
       ? codex.loading
       : provider === "supergrok"
         ? !grok.unavailable && grok.loading
-        : (GATEWAYS as readonly string[]).includes(provider) &&
-          !gateways[provider as GatewayId].settled;
+        : provider === "claude_subscription"
+          ? claude.loading
+          : (GATEWAYS as readonly string[]).includes(provider) &&
+            !gateways[provider as GatewayId].settled;
   // Once a sign-in-again step opens it stays open, even after the account
   // turns active again while its page is still being opened.
   const workspaceStep = step && !step.organization ? step : null;
@@ -399,7 +500,8 @@ export function WorkspaceModelsPageBody({
   } else if (
     !claudeEnabled &&
     (step?.provider === "claude_subscription" ||
-      (key?.provider === "gateway" && key.id === "claude_subscription"))
+      (key?.provider === "gateway" && key.id === "claude_subscription") ||
+      key?.provider === "claude")
   ) {
     page = (
       <DetailPage
@@ -407,6 +509,28 @@ export function WorkspaceModelsPageBody({
         className={FLUSH_DETAIL_PAGE_CLASS}
       >
         <DetailPageHeader title="Claude subscriptions are not enabled" />
+      </DetailPage>
+    );
+  } else if (legacyClaude && (legacyPool.loading || legacyPool.loadError || !legacyAccountId)) {
+    page = (
+      <DetailPage
+        back={{ label: listLabel, onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        {legacyPool.loadError ? (
+          <>
+            <DetailPageHeader title="Couldn’t load Claude accounts" />
+            <button
+              type="button"
+              className="mt-4 text-sm underline"
+              onClick={() => void legacyPool.refresh()}
+            >
+              Try again
+            </button>
+          </>
+        ) : (
+          <DetailSkeleton />
+        )}
       </DetailPage>
     );
   } else if (
@@ -452,6 +576,7 @@ export function WorkspaceModelsPageBody({
         subtitle={`Connect it once for ${organizationName}, then choose which workspaces can use it.`}
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
+        claude={claudeEnabled ? "available" : "hidden"}
         gateways={orgGateways}
         personal={workspacePage && personal}
         onClose={backToList}
@@ -524,7 +649,9 @@ export function WorkspaceModelsPageBody({
         const target =
           provider === "codex" || provider === "supergrok"
             ? accountKey(provider, connectionId, true)
-            : accountKey("gateway", provider, true);
+            : provider === "claude_subscription"
+              ? accountKey("claude", connectionId, true)
+              : accountKey("gateway", provider, true);
         toast.error("Connected, but it couldn't be limited to those workspaces", {
           description: "Every workspace can use it until you change Available in.",
           action: {
@@ -556,6 +683,18 @@ export function WorkspaceModelsPageBody({
           onAccountConnected={(id) => limitAfterConnect(id)}
         />
       );
+    } else if (provider === "claude_subscription") {
+      page = (
+        <ClaudeConnectPage
+          claude={orgClaude}
+          onClose={backToList}
+          onConnected={(id) => (id ? orgClaudePlaces.openAccount(id) : backToList())}
+          fields={fields}
+          blockedReason={blockedReason}
+          afterSave={(id) => limitAfterConnect(id ?? null)}
+          footerStart={false}
+        />
+      );
     } else {
       page = (
         <ProviderConnectPage
@@ -579,6 +718,13 @@ export function WorkspaceModelsPageBody({
         <OrgCodexConnectPage codex={orgCodex} places={orgCodexPlaces} onClose={back} />
       ) : provider === "supergrok" ? (
         <SuperGrokConnectPage grok={orgGrok} places={orgGrokPlaces} onClose={back} />
+      ) : provider === "claude_subscription" ? (
+        <ClaudeConnectPage
+          claude={orgClaude}
+          reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
+          onClose={back}
+          onConnected={(id) => (id ? orgClaudePlaces.openAccount(id) : backToList())}
+        />
       ) : (
         <ProviderConnectPage
           key={`org:${provider}`}
@@ -606,16 +752,21 @@ export function WorkspaceModelsPageBody({
         <CodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} fields={note} />
       ) : provider === "supergrok" ? (
         <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} fields={note} />
+      ) : provider === "claude_subscription" ? (
+        <ClaudeConnectPage
+          claude={claude}
+          reconnectAccountId={key?.provider === "claude" ? key.id : undefined}
+          scopeName={workspaceName}
+          allowPrivate={!personal}
+          onClose={account ? () => nav.openAccount(account) : backToList}
+          onConnected={(id) => (id ? claudePlaces.openAccount(id) : backToList())}
+          fields={note}
+        />
       ) : (
         <ProviderConnectPage
           key={provider}
           state={gateways[provider]}
-          onClose={
-            // Reconnecting a Claude subscription returns to its page.
-            provider === "claude_subscription" && gateways[provider].connected
-              ? () => nav.openAccount(accountKey("gateway", provider))
-              : backToList
-          }
+          onClose={backToList}
           onConnected={() => nav.openAccount(accountKey("gateway", provider))}
           fields={note}
         />
@@ -637,6 +788,8 @@ export function WorkspaceModelsPageBody({
           <OrgCodexAccessPage codex={orgCodex} accountId={key.id} onClose={back} />
         ) : key.provider === "supergrok" ? (
           <SuperGrokAccessPage grok={orgGrok} accountId={key.id} client={client} onClose={back} />
+        ) : key.provider === "claude" ? (
+          <ClaudeAccessPage claude={orgClaude} accountId={key.id} onClose={back} />
         ) : (
           <ProviderAccessPage state={orgGateways[key.id as GatewayId]} onClose={back} />
         );
@@ -646,6 +799,8 @@ export function WorkspaceModelsPageBody({
           <CodexAccessPage codex={codex} accountId={key.id} onClose={back} />
         ) : key.provider === "supergrok" ? (
           <SuperGrokAccessPage grok={grok} accountId={key.id} client={client} onClose={back} />
+        ) : key.provider === "claude" ? (
+          <ClaudeAccessPage claude={claude} accountId={key.id} onClose={back} />
         ) : (
           <ProviderAccessPage state={gateways[key.id as GatewayId]} onClose={back} />
         );
@@ -688,6 +843,26 @@ export function WorkspaceModelsPageBody({
       />
     ) : (
       <SuperGrokAccountPage grok={grok} accountId={key.id} places={grokPlaces} client={client} />
+    );
+  } else if (key?.provider === "claude") {
+    page = (
+      <ClaudeAccountPage
+        claude={key.organization ? orgClaude : claude}
+        accountId={key.id}
+        places={key.organization ? orgClaudePlaces : claudePlaces}
+        models={key.organization ? orgGateways.claude_subscription : gateways.claude_subscription}
+        readOnlyCatalog={
+          !key.organization && claude.inherited
+            ? {
+                models: catalog.models.filter(
+                  (model) => model.provider === "organization-claude-subscription",
+                ),
+                loading: catalog.loading,
+                error: catalog.error,
+              }
+            : undefined
+        }
+      />
     );
   } else if (key?.provider === "gateway") {
     page = key.organization ? (
@@ -732,6 +907,7 @@ export function WorkspaceModelsPageBody({
         anchorWorkspaceId={anchorWorkspaceId}
         orgCodex={orgCodex}
         orgGrok={orgGrok}
+        orgClaude={orgClaude}
         orgGateways={orgGateways}
         liveCodexUsage={Object.fromEntries(
           codex.accounts
@@ -762,6 +938,7 @@ export function WorkspaceModelsPageBody({
       credits.visible ? 1 : 0,
       codexListedCount(codex, codexPool),
       superGrokListedCount(grok, grokPool),
+      claudeEnabled ? claudeListedCount(claude, claudePool) : 0,
       listedGateways.length,
       listedOrgGateways.length,
       readyOrgKeys.length,
@@ -769,6 +946,7 @@ export function WorkspaceModelsPageBody({
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
+      (claudeEnabled && (claude.loading || (organizationAdmin && orgClaude.loading))) ||
       (organizationAdmin && orgCodex.loading) ||
       (!organizationAdmin && catalog.loading) ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
@@ -817,6 +995,13 @@ export function WorkspaceModelsPageBody({
                 />
                 <CodexAccountRows codex={codex} places={codexPlaces} organization={codexPool} />
                 <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ClaudeAccountRows
+                    claude={claude}
+                    places={claudePlaces}
+                    organization={claudePool}
+                  />
+                ) : null}
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -881,6 +1066,11 @@ export function WorkspaceModelsPageBody({
                         />
                       }
                     />
+                  </Section>
+                ) : null}
+                {claudeEnabled && !claude.inherited && claude.accounts.length > 1 ? (
+                  <Section title="Claude">
+                    <ClaudeSettingRows claude={claude} />
                   </Section>
                 ) : null}
                 {superGrokSectionVisible(grok) ? (
@@ -1026,10 +1216,10 @@ function workspaceOwnedNote(
   if (provider === "codex") {
     return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect account.`;
   }
-  if (where.personal && provider !== "supergrok") {
+  if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
     return "This key will belong to your Personal workspace, so only you use it. Organization API keys can't be used in Personal workspaces.";
   }
-  return `This ${provider === "supergrok" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect account.`;
+  return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect account.`;
 }
 
 /**
@@ -1201,6 +1391,7 @@ export function ConnectPickerPage({
   codexAvailable,
   codexNote,
   grok,
+  claude = "hidden",
   gateways,
   personal = false,
   backLabel = "Models",
@@ -1221,6 +1412,7 @@ export function ConnectPickerPage({
    * connect one for Personal workspaces). "hidden": the viewer can't connect it.
    */
   grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
+  claude?: "available" | "hidden";
   gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
   /** In a Personal workspace, organization keys serve shared workspaces only. */
   personal?: boolean;
@@ -1261,6 +1453,15 @@ export function ConnectPickerPage({
                 : grok === "not_in_personal"
                   ? "Only owners and admins can add it for Personal workspaces"
                   : undefined,
+          },
+        ]
+      : []),
+    ...(claude === "available"
+      ? [
+          {
+            id: "claude_subscription" as const,
+            title: "Claude subscription",
+            summary: "Pay with your Claude plan",
           },
         ]
       : []),

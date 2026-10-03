@@ -307,6 +307,99 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/claude/accounts",
+      "sdk": [
+        "OpenGeniClient.listOrganizationClaudeSubscriptionAccounts"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setOrganizationClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectOrganizationClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/settings",
+      "sdk": [
+        "OpenGeniClient.setOrganizationClaudeSubscriptionRotationSettings"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionPoolSettings"
+      ]
+    },
+    {
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
@@ -600,7 +693,9 @@
       "sdk": [
         "OpenGeniClient.startOrganizationClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -2073,6 +2168,103 @@
       ],
       "response": [
         "Channel"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts",
+      "sdk": [
+        "OpenGeniClient.listClaudeSubscriptionAccounts",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccount"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/settings",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionRotationSettings",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionPoolSettings"
       ]
     },
     {
@@ -4725,7 +4917,9 @@
       "sdk": [
         "OpenGeniClient.startWorkspaceClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -10071,6 +10265,44 @@
         "$.workspaceId": "string!"
       }
     },
+    "ClaudeSubscriptionAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.active": "boolean!",
+        "$.allocatorEnabled": "boolean!",
+        "$.allocatorUpdatedAt": "string! null",
+        "$.allocatorVersion": "integer!",
+        "$.email": "string! null",
+        "$.expiresAt": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.lastError": "string! null",
+        "$.lastRefreshAt": "string! null",
+        "$.plan": "string! null",
+        "$.scope": "ref(VariableSetScope)!",
+        "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
+        "$.subject": "string!",
+        "$.usage": "ref(ClaudeSubscriptionUsage)?",
+        "$.version": "integer!"
+      }
+    },
+    "ClaudeSubscriptionAccountsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ClaudeSubscriptionAccount)",
+        "$.activeAccountId": "string! null",
+        "$.organizationId": "string!",
+        "$.settings": "ref(SubscriptionPoolSettings)!",
+        "$.source": "ref(VariableSetScope)!"
+      }
+    },
     "ClaudeSubscriptionOAuthCompleteRequest": {
       "io": [
         "input"
@@ -10087,8 +10319,20 @@
       ],
       "shape": {
         "$": "object",
+        "$.accountId": "string!",
         "$.connected": "const!=[\"true\"]",
-        "$.credentialVersion": "integer!"
+        "$.credentialVersion": "integer!",
+        "$.scope": "ref(VariableSetScope)!"
+      }
+    },
+    "ClaudeSubscriptionOAuthStartRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "ClaudeSubscriptionOAuthStartResponse": {
@@ -10100,6 +10344,19 @@
         "$.attemptId": "string!",
         "$.authorizationUrl": "string!",
         "$.expiresAt": "string!"
+      }
+    },
+    "ClaudeSubscriptionSetupTokenRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedCredentialVersion": "integer?",
+        "$.label": "string? null",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.token": "string!"
       }
     },
     "ClaudeSubscriptionUsage": {
@@ -16649,7 +16906,7 @@
         "$|kind=deployment.mechanism": "enum!=[\"\\\"api_key\\\"\",\"\\\"azure_ad_bearer\\\"\"]",
         "$|kind=connected_subscription": "object",
         "$|kind=connected_subscription.kind": "const!=[\"\\\"connected_subscription\\\"\"]",
-        "$|kind=connected_subscription.provider": "enum!=[\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
+        "$|kind=connected_subscription.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
         "$|kind=workspace_connection": "object",
         "$|kind=workspace_connection.kind": "const!=[\"\\\"workspace_connection\\\"\"]",
         "$|kind=workspace_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]",
@@ -21491,6 +21748,17 @@
         "$.turn": "ref(SessionTurn)!"
       }
     },
+    "SubscriptionPoolSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activeCredentialId": "string! null",
+        "$.rotationEnabled": "boolean!",
+        "$.rotationStrategy": "const!=[\"\\\"sharded\\\"\"]"
+      }
+    },
     "SupersedePreferenceRegistryRequest": {
       "io": [
         "input"
@@ -24943,9 +25211,12 @@
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
       "Chats": "type",
+      "ClaudeSubscriptionAccount": "value",
+      "ClaudeSubscriptionAccountsResponse": "value",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
+      "ClaudeSubscriptionSetupTokenRequest": "value",
       "ClaudeSubscriptionUsage": "type",
       "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
@@ -26006,6 +26277,8 @@
       "SubmitComposerDraftResponse": "type",
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
+      "SubscriptionAccountSummary": "value",
+      "SubscriptionPoolSettings": "value",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",
       "SuperGrokAccountsResponse": "type",
@@ -28998,9 +29271,11 @@
       "acknowledgeStream",
       "actInBrowser",
       "actInComputer",
+      "activateClaudeSubscriptionAccount",
       "activateCodexAccount",
       "activateCodexRealtimeConnection",
       "activateCompanyProfileRevision",
+      "activateOrganizationClaudeSubscriptionAccount",
       "activateOrganizationSuperGrokAccount",
       "activatePreferenceRegistryRevision",
       "activateRigVersion",
@@ -29049,6 +29324,8 @@
       "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
+      "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "controlSession",
       "correctPreferenceRegistry",
@@ -29127,8 +29404,10 @@
       "disableCapability",
       "disableOrganizationRecoveryPolicy",
       "discardTranscriptionRecording",
+      "disconnectClaudeSubscriptionAccount",
       "disconnectCodexAccount",
       "disconnectGoogleDriveConnection",
+      "disconnectOrganizationClaudeSubscriptionAccount",
       "disconnectOrganizationSuperGrokAccount",
       "disconnectPersonalGitHub",
       "disconnectSocialConnection",
@@ -29170,6 +29449,7 @@
       "getBrowserIdentity",
       "getBrowserSession",
       "getBrowserTargetState",
+      "getClaudeSubscriptionAccountUsage",
       "getClientConfig",
       "getCompanyProfileAgentPolicy",
       "getCompanyProfileRevision",
@@ -29196,6 +29476,7 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationClaudeSubscriptionAccountUsage",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
@@ -29278,6 +29559,7 @@
       "listBrowserTargets",
       "listCapabilities",
       "listChannels",
+      "listClaudeSubscriptionAccounts",
       "listCodexAccounts",
       "listCompanyProfile",
       "listComputerSessions",
@@ -29306,6 +29588,7 @@
       "listOpenGeniSlackReactionChannels",
       "listOrganizationAdministrationMembers",
       "listOrganizationApiKeys",
+      "listOrganizationClaudeSubscriptionAccounts",
       "listOrganizationInvitations",
       "listOrganizationInvitationsForOrganization",
       "listOrganizationMembers",
@@ -29402,7 +29685,9 @@
       "reconnectPersonalGitHub",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
+      "refreshClaudeSubscriptionAccountUsage",
       "refreshCodexUsage",
+      "refreshOrganizationClaudeSubscriptionAccountUsage",
       "refreshOrganizationClaudeSubscriptionUsage",
       "refreshScheduledTaskAccess",
       "refreshWorkspaceClaudeSubscriptionUsage",
@@ -29413,7 +29698,9 @@
       "removeIntegrationFacet",
       "removeWorkspaceMember",
       "removeWorkspaceSkill",
+      "renameClaudeSubscriptionAccount",
       "renameCodexAccount",
+      "renameOrganizationClaudeSubscriptionAccount",
       "renameOrganizationSuperGrokAccount",
       "renameSuperGrokAccount",
       "reorderChannels",
@@ -29458,9 +29745,13 @@
       "sendEvent",
       "sendMessage",
       "setAtlassianLifecycle",
+      "setClaudeSubscriptionAccountAllocator",
+      "setClaudeSubscriptionRotationSettings",
       "setCodexAccountAllocator",
       "setCodexRotationSettings",
       "setEnvironmentVariable",
+      "setOrganizationClaudeSubscriptionAccountAllocator",
+      "setOrganizationClaudeSubscriptionRotationSettings",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setSuperGrokAccountAllocator",

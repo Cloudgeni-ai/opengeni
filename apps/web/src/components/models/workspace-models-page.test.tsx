@@ -132,6 +132,31 @@ const client = {
     }),
   ),
   listConnections: mock(async (): Promise<ConnectionMetadata[]> => []),
+  listClaudeSubscriptionAccounts: mock(
+    async (): Promise<unknown> => ({
+      accounts: [],
+      activeAccountId: null,
+      source: "workspace",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+    }),
+  ),
+  listOrganizationClaudeSubscriptionAccounts: mock(
+    async (): Promise<unknown> => ({
+      accounts: [],
+      activeAccountId: null,
+      source: "organization",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+    }),
+  ),
+  getClaudeSubscriptionAccountUsage: mock(async () => ({
+    connected: true,
+    credentialVersion: 1,
+    windows: [],
+    observedAt: null,
+    source: null,
+    refreshStatus: "not_checked",
+    refreshCheckedAt: null,
+  })),
   getWorkspaceClaudeSubscriptionUsage: mock(async () => ({
     connected: true,
     credentialVersion: 1,
@@ -328,6 +353,12 @@ beforeEach(() => {
   }));
   client.requestJson.mockImplementation(async () => ({}));
   client.listConnections.mockImplementation(async () => []);
+  client.listClaudeSubscriptionAccounts.mockImplementation(async () => ({
+    accounts: [],
+    activeAccountId: null,
+    source: "workspace",
+    settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+  }));
   context.clientConfig.claudeSubscriptionEnabled = false;
 });
 
@@ -645,29 +676,33 @@ describe("Models list", () => {
 
 test("Claude workspace reauthentication returns Back and Cancel to its account", async () => {
   context.clientConfig.claudeSubscriptionEnabled = true;
-  const now = new Date().toISOString();
-  client.listConnections.mockImplementation(async () => [
-    {
-      id: "11111111-1111-4111-8111-111111111111",
-      accountId: "organization-a",
-      workspaceId: "workspace-a",
-      subjectId: null,
-      providerDomain: "api.anthropic.com",
-      kind: "api_key",
-      status: "active",
-      version: 1,
-      metadata: { credentialRole: "claude_subscription" },
-      grantedScopes: [],
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastUsedAt: null,
-      lastError: null,
-      createdBySubjectId: "user:owner",
-      updatedBySubjectId: "user:owner",
-      createdAt: now,
-      updatedAt: now,
+  client.listClaudeSubscriptionAccounts.mockImplementation(async () => ({
+    accounts: [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        scope: "workspace",
+        subject: "fixture-account",
+        email: "claude@example.test",
+        label: "Claude subscription",
+        plan: "claude_max",
+        status: "needs_relogin",
+        active: true,
+        allocatorEnabled: true,
+        allocatorVersion: 1,
+        version: 1,
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastError: "Sign in to Claude again.",
+      },
+    ],
+    activeAccountId: "11111111-1111-4111-8111-111111111111",
+    source: "workspace",
+    settings: {
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      activeCredentialId: "11111111-1111-4111-8111-111111111111",
     },
-  ]);
+  }));
   const view = await render();
   try {
     await act(async () => navigateTo({ account: "gateway:claude_subscription" }));
@@ -678,7 +713,7 @@ test("Claude workspace reauthentication returns Back and Cancel to its account",
       expect(view.container.querySelector("h1")?.textContent).toBe("Reconnect Claude subscription");
       await act(async () => button(view.container, label)!.click());
       await flush();
-      expect(lastNavigation?.search.account).toBe("gateway:claude_subscription");
+      expect(lastNavigation?.search.account).toBe("claude:11111111-1111-4111-8111-111111111111");
       expect(view.container.querySelector("h1")?.textContent).toBe("Claude subscription");
     }
   } finally {

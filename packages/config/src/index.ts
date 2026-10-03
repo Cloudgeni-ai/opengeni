@@ -2109,7 +2109,7 @@ export type ModelExecutionLimitsV1 = {
 
 export type CredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
-  | { kind: "connected_subscription"; provider: "codex" | "xai" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
 
@@ -5018,16 +5018,17 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
       return { kind: "connected_subscription", provider: "codex" };
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      return { kind: "connected_subscription", provider: "claude" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
-    case "claude-subscription-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
-    case "claude-subscription-organization":
     case "openrouter-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
@@ -5048,17 +5049,17 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
       return { upstreamPayer: "deployment", metering: "external" };
     case "codex-subscription":
     case "xai-subscription":
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
-    case "claude-subscription-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
-    case "claude-subscription-organization":
     case "openrouter-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
@@ -6029,6 +6030,39 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!resolved) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // The individual-account cutover corrects subscription accounting labels.
+  // Preserve an already accepted legacy policy only if its complete original
+  // executable digest matches; this exception cannot compose with other drift.
+  const legacyClaudeScope =
+    resolved.provider.kind === "claude-subscription-workspace"
+      ? "workspace"
+      : resolved.provider.kind === "claude-subscription-organization"
+        ? "organization"
+        : null;
+  const legacyClaudeAccountingMatches =
+    legacyClaudeScope !== null &&
+    parsed.providerId === resolved.provider.id &&
+    parsed.upstreamModelId === resolved.model.upstreamModelId &&
+    parsed.wireApi === resolved.model.api &&
+    canonicalJson(parsed.credentialSource) ===
+      canonicalJson({
+        kind: `${legacyClaudeScope}_connection`,
+        mechanism: "api_key",
+      }) &&
+    canonicalJson(parsed.billing) ===
+      canonicalJson({
+        upstreamPayer: legacyClaudeScope,
+        metering: "external",
+      }) &&
+    parsed.definitionVersion ===
+      definitionVersionFor(
+        {
+          ...resolved.model,
+          credentialSource: parsed.credentialSource,
+          billing: parsed.billing,
+        },
+        resolved.provider,
+      );
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
@@ -6051,10 +6085,10 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   // Identity/source changes must never enter a rollout-retry classification,
   // even when their definition digest also differs.
-  if (identityMismatched) {
+  if (identityMismatched && !legacyClaudeAccountingMatches) {
     throw new Error("Turn execution policy does not match the current provider definition");
   }
-  if (!definitionVersionMatches) {
+  if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };

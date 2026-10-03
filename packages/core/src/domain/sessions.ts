@@ -120,6 +120,7 @@ import {
   type TurnExecutionPolicyV1,
   type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   assertExactNewSessionDraftInTransaction,
@@ -153,6 +154,7 @@ import {
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
@@ -979,6 +981,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -1215,6 +1218,12 @@ export async function createAndStartSessionWithOutcome(input: {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
           }
         : {}),
+      ...(input.claudeProviderAccountAuthoritySnapshot
+        ? {
+            initialClaudeProviderAccountAuthoritySnapshot:
+              input.claudeProviderAccountAuthoritySnapshot,
+          }
+        : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -1314,6 +1323,12 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.xaiProviderAccountAuthoritySnapshot
         ? {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+          }
+        : {}),
+      ...(input.claudeProviderAccountAuthoritySnapshot
+        ? {
+            initialClaudeProviderAccountAuthoritySnapshot:
+              input.claudeProviderAccountAuthoritySnapshot,
           }
         : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
@@ -2680,6 +2695,15 @@ async function createSessionForRequestInFileScope(
           creationInitiator.actor.turnId,
         )
       : undefined;
+  const claudeProviderAccountAuthoritySnapshot =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.turnId,
+        )
+      : undefined;
   const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
   const inheritedPersonalConnectionDelegations =
     connectionDelegationSource.kind === "turn"
@@ -2996,6 +3020,9 @@ async function createSessionForRequestInFileScope(
       subjectId: personalResourceSubjectId ?? grant.subjectId,
       ...(xaiProviderAccountAuthoritySnapshot
         ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
+        : {}),
+      ...(claudeProviderAccountAuthoritySnapshot
+        ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
         : {}),
     });
     if (!admissibleWorkspaceModel(selections, model)) {
@@ -3670,6 +3697,7 @@ async function createSessionForRequestInFileScope(
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
+      ...(claudeProviderAccountAuthoritySnapshot ? { claudeProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       selectedInstalledSkillIds,

@@ -34,10 +34,10 @@ test("subscription is disabled by deployment flag while API keys remain availabl
       { claudeSubscriptionEnabled: true },
       connection("claude_subscription"),
     ),
-  ).not.toThrow();
+  ).toThrow("individual Claude subscription accounts");
 });
 test("Claude credentials cannot enter the model lane under a personal owner or different endpoint", () => {
-  for (const role of ["anthropic", "claude_subscription"] as const) {
+  for (const role of ["anthropic"] as const) {
     for (const change of [
       { subjectId: "person" },
       { providerDomain: "evil.example" },
@@ -98,18 +98,14 @@ test("token-only setup creates an encrypted-bundle identity stable across retrie
       prepareClaudeSubscriptionCredential(settings, "organization:one", "sk-ant-oat01-token"),
     ).identity,
   ).not.toEqual(bundle.identity);
-  const payload = prepareClaudeWorkspaceCredential(
-    settings,
-    "one",
-    { credentialRole: "claude_subscription" },
-    { apiKey: "sk-ant-oat01-token" },
-  );
   expect(() =>
-    assertClaudeWorkspaceCredential(settings, {
-      ...connection("claude_subscription"),
-      credential: payload,
-    }),
-  ).not.toThrow();
+    prepareClaudeWorkspaceCredential(
+      settings,
+      "one",
+      { credentialRole: "claude_subscription" },
+      { apiKey: "sk-ant-oat01-token" },
+    ),
+  ).toThrow("individual Claude subscription accounts");
 });
 test("legacy explicit identity remains valid and API keys are unchanged", () => {
   const settings = testSettings({
@@ -117,14 +113,14 @@ test("legacy explicit identity remains valid and API keys are unchanged", () => 
     environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
   });
   const credential = connection("claude_subscription").credential;
-  expect(
+  expect(() =>
     prepareClaudeWorkspaceCredential(
       settings,
       "one",
       { credentialRole: "claude_subscription" },
       credential,
     ),
-  ).toEqual(credential);
+  ).toThrow("individual Claude subscription accounts");
   expect(
     JSON.parse(
       prepareClaudeSubscriptionCredential(

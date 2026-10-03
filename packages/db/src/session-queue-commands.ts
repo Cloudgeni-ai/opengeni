@@ -1,3 +1,8 @@
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
+import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
 import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { ArchivedSessionImportError } from "./archived-session-imports";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
@@ -411,8 +416,9 @@ async function personalConnectionDelegationsForAgentActor(
   return { delegations, mcpAccountBindings, connectionAuthoritySubjectId };
 }
 
-async function xaiAuthorityForAgentActor(
+async function subscriptionAuthorityForAgentActor(
   db: Database,
+  provider: "xai" | "claude",
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
 ): Promise<{
@@ -421,7 +427,10 @@ async function xaiAuthorityForAgentActor(
 }> {
   const [row] = await db
     .select({
-      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+      snapshot:
+        provider === "xai"
+          ? schema.sessionTurns.xaiProviderAccountAuthoritySnapshot
+          : schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
       initiatorKind: schema.sessionTurns.initiatorKind,
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -447,6 +456,17 @@ async function xaiAuthorityForAgentActor(
       (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
   };
 }
+
+const xaiAuthorityForAgentActor = (
+  db: Database,
+  workspaceId: string,
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
+) => subscriptionAuthorityForAgentActor(db, "xai", workspaceId, actor);
+const claudeAuthorityForAgentActor = (
+  db: Database,
+  workspaceId: string,
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
+) => subscriptionAuthorityForAgentActor(db, "claude", workspaceId, actor);
 
 async function lockSession(
   db: Database,
@@ -747,17 +767,19 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           eq(schema.codexCapacityWaiters.status, "waiting"),
         ),
       );
-    await db
-      .update(schema.xaiCapacityWaiters)
-      .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
-      .where(
-        and(
-          eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-          eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
-          eq(schema.xaiCapacityWaiters.blockedTurnId, current.id),
-          eq(schema.xaiCapacityWaiters.status, "waiting"),
-        ),
-      );
+    for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
+      await db
+        .update(waiters)
+        .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
+        .where(
+          and(
+            eq(waiters.workspaceId, input.workspaceId),
+            eq(waiters.sessionId, input.sessionId),
+            eq(waiters.blockedTurnId, current.id),
+            eq(waiters.status, "waiting"),
+          ),
+        );
+    }
   }
   return {
     interruptionCount: 0,
@@ -2110,6 +2132,15 @@ export async function submitHumanPromptInTransaction(
           workspaceId: input.workspaceId,
         })
       : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
+    ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
+        editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
+      )
+    : input.actor.type === "human"
+      ? await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
+          workspaceId: input.workspaceId,
+        })
+      : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -2203,6 +2234,7 @@ export async function submitHumanPromptInTransaction(
             ? editedSourceTurn.mcpAccountBindings
             : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
           xaiProviderAccountAuthoritySnapshot,
+          claudeProviderAccountAuthoritySnapshot,
           createdAt: now,
           updatedAt: now,
         },
@@ -2682,6 +2714,7 @@ export async function sendAgentMessageInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const claudeAuthority = await claudeAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const sourceInitiator = await frozenInitiatorForCommandActor(
     db as Database,
     input.workspaceId,
@@ -2740,10 +2773,14 @@ export async function sendAgentMessageInTransaction(
                   }
                 : {}),
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(claudeAuthority.subjectId
+                ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
             state: "pending",
           },
           "summary",
@@ -2949,6 +2986,7 @@ export async function steerAgentSessionInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const claudeAuthority = await claudeAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const sourceInitiator = await frozenInitiatorForCommandActor(
     db as Database,
     input.workspaceId,
@@ -3042,10 +3080,14 @@ export async function steerAgentSessionInTransaction(
                   }
                 : {}),
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(claudeAuthority.subjectId
+                ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
             state: "pending",
           },
           "summary",
