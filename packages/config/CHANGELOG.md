@@ -1,5 +1,33 @@
 # @opengeni/config
 
+## 3.3.0
+
+### Minor Changes
+
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+
+### Patch Changes
+
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- 4a63d4f: A Modal box kept warm only by legacy background commands (a dev server, a command whose large output is still draining, a stopped command the provider no longer answers for) is no longer held until the provider deadline kills it uncaptured, which left the session unable to restore. Once every session of the sandbox group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default 30 minutes; above the idle grace, below the rotation lead, and before an explicit Modal idle timeout), the reaper checkpoints the current workspace excluding exactly those commands, stops the box, and settles the commands `lost` with reason `idle_containment`. The next turn restores the saved workspace. "Unused" comes from durable facts only: no open turn or pending approval or human-input request, no pending quiescence, no `wait_for_input` or unclaimed turn-starting input within the window (counted from the wait deadline and the input creation), no other holder or writer, and the newest turn, holder change and write older than the window. A command the agent is waiting on keeps running until the provider-deadline backstop. That backstop now also captures behind a cancelled, failed or superseded owner without a quiescence receipt, instead of letting the box die uncaptured. Rolling migration 0547 stamps holder changes on the lease and adds a health-independent containment inventory, replacing the separate unobservable-command and stopping-with-provider-errors predicates; pre-0547 workers keep their unchanged inventory. Commands settled by containment, by provider-deadline rotation (`provider_deadline_containment`), by provider loss during that drain, by provider loss seen while routing, or by the operator cold-loss reconciliation now get `session.command.finished` and the agent notice in the same transaction, for example "`bun run dev` was stopped because nobody used this session for 30 minutes and nothing was waiting on it; the workspace was saved. Restart it if you still need it." Previously those settlements were silent. Supervised commands keep their own proof gate. The reaper exports `opengeni_sandbox_command_containment_total{outcome}`.
+- 91cc03e: Correct native Claude model effort levels and defaults, apply per-model context
+  and output limits, and preserve terminal provider rejections and prompt stream
+  cancellation.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/codex@0.2.32
+
 ## 3.2.1
 
 ### Patch Changes

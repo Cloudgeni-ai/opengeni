@@ -22,6 +22,7 @@ import {
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
+  lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -1256,9 +1257,15 @@ async function apiKeyAccessContext(
     }
     let identity: ExternalIdentity;
     try {
-      identity = await ensureExternalIdentity(deps.db, {
-        accountId: apiKey.accountId,
-        ...selection.identity,
+      identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
+        // Provisioning locks the live membership after its identity lock.
+        // Claim the lifecycle prefix first so a membership-fenced session
+        // writer can recheck that identity without a lock inversion.
+        await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
+        return await ensureExternalIdentity(tx, {
+          accountId: apiKey.accountId,
+          ...selection.identity,
+        });
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {

@@ -297,6 +297,10 @@ describe("independent native consent for delegated provider setup", () => {
     const rls = spyOn(db, "withWorkspaceSubjectRls").mockImplementation(async (_, __, ___, use) =>
       use(deps.db),
     );
+    const accountRls = spyOn(db, "withAccountRls").mockImplementation(async (_, accountId, use) => {
+      expect(accountId).toBe(organizationId);
+      return use(deps.db);
+    });
     const statementTimeout = spyOn(db, "withDatabaseStatementTimeout").mockImplementation(
       async (_, __, use) => use(deps.db),
     );
@@ -351,6 +355,7 @@ describe("independent native consent for delegated provider setup", () => {
       validation,
       apiKeys,
       rls,
+      accountRls,
       statementTimeout,
       lifecycle,
       grants,

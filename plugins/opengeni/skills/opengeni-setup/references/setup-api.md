@@ -300,6 +300,17 @@ the saved source id/name; creation has no idempotency key. Save the returned
 {"sourceId":"00000000-0000-4000-8000-000000000004","name":"Acme report changed","eventTypes":["report.changed"],"status":"paused","configuration":{},"parameters":{},"sessionTemplate":{"prompt":"Summarize the changed report.","instructions":null,"resources":[],"skills":[],"tools":[{"kind":"mcp","id":"<installed serverId>"}],"firstPartyMcpTools":[],"firstPartyMcpPermissions":[],"model":null,"reasoningEffort":null,"sandboxBackend":"none","policyRole":null,"metadata":{}}}
 ```
 
+Keep `firstPartyMcpTools: []` and `firstPartyMcpPermissions: []` for this
+product-only automation. Automation templates also default omitted arrays to
+`[]`; neither form inherits OpenGeni permissions. Startup skips remote
+OpenGeni-delegated MCP preparation without minting a token or calling its
+endpoint. Requested first-party tools or dedicated `files`/`docs` remain
+unavailable with an `insufficient_scope` advisory. Do not pad the grant with
+`sessions:read`. The installed product server keeps its separately authorized
+connection or host credentials; external-host servers and already-authorized
+native runtime mechanics are not disabled by this ceiling. See
+`docs/automations.md` for the exact boundary.
+
 ```bash
 ogcurl GET "/v1/workspaces/$WORKSPACE_ID/automations/triggers"
 ogcurl POST "/v1/workspaces/$WORKSPACE_ID/automations/triggers" .opengeni-setup/trigger.json

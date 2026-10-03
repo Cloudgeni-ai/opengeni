@@ -1,5 +1,46 @@
 # @opengeni/react
 
+## 7.7.0
+
+### Minor Changes
+
+- 351cd79: Add `includePinned: false` to session-page reads so callers loading the pinned section separately can skip repeated pin hydration. The default response and ordinary-page pin exclusion are unchanged.
+
+  Bound the browser event working set to 16 MiB or 20,000 events, with durable history accessible through existing navigation. Avoid copying the event window when no additional question evidence is needed.
+
+### Patch Changes
+
+- 9f0f7d3: Anchor the conversation's floating navigation in one stable place. Jump to latest and Back to your message now stack centered at the bottom of the timeline, with the later-activity status above them, instead of measuring the rows beneath them and sliding sideways or dropping below toolbars as content streamed or the host resized. The pills no longer wander on narrow, embedded, or mobile layouts, and both keep a 44px touch target on coarse pointers.
+- 45e1b4f: Advertise background window input separately from background semantic controls. The CUA pilot viewer accepts targeted clicks and typing without offering unsupported foreground focus; existing native backends retain their focus guard.
+- b786e5c: Keep failed or unconfirmed browser input visible while live frames continue. An explicit fresh check of the same browser clears the notice without replaying input.
+- f336d3e: Show a pending approval once: readable turns no longer repeat the live "Approval needed" banner when the turn header already says "Waiting for you". `ApprovalSurface` lists flat arguments as labeled fields with an "exact arguments" toggle (nested arguments stay JSON), and the composer no longer shows a default keyboard hint (shortcuts stay in the send button title).
+- 110bcb7: Fit computer frames to the dock, including small window captures, while preserving aspect ratio, capture resolution, and pointer coordinates. Refit on dock and frame size changes without measuring every incoming frame.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- c7be92c: Keep desktop IME candidate text and selection keys local until the person commits the text, then send that text once.
+- 065316d: Keep desktop controls unavailable after a control service failure even while frames continue arriving. Reconnect refreshes the same desktop's control and media channels. App inspection failures, target refusals, and uncertain input outcomes remain separate from service outages.
+- 946f6c3: Keep OAuth completion polling active when browser isolation detaches the provider window, and discover authentication for custom MCP connection setup from the live endpoint. Resolve tool-permission discovery for selectors with a single matching account, refusing ambiguous account choices.
+- 5dacdd7: Add brand-neutral SDK error presentation and a shared native React host error-copy override, preserving diagnostic errors and delivery/retry state.
+
+  Keep NewChat's full-height composer contained when using shipped CSS without a host reset.
+
+- 8a5f977: Show named desktop actions and editable values in App controls. Structural accessibility nodes no longer crowd out usable controls, and the control count matches the available actions.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- Updated dependencies [7798558]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [946f6c3]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+  - @opengeni/sdk@7.7.0
+  - @opengeni/connect@0.3.2
+
 ## 7.6.1
 
 ### Patch Changes

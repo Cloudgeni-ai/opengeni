@@ -1253,13 +1253,20 @@ const SettingsSchema = z.object({
   // idle grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
-  // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
-  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // the deadline path has to act. Set 0 to disable new idle enrollments without
+  // disabling provider-deadline containment or cancelling an enrolled drain.
+  // A positive window must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit positive value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
   // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
   // plus this window plus the drain capture budget must fit before it.
   // getSettings derives the unset default between those two for short-lived
   // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
-  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().optional(),
+  sandboxIdleCommandContainmentMs: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .transform((value) => (value === 0 ? undefined : value)),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -8549,3 +8556,5 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./subscription-account-selection";
+export * from "./claude-subscription-capacity";

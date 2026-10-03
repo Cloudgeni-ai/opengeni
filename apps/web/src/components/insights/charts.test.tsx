@@ -151,6 +151,55 @@ describe("AreaChart", () => {
     }
   });
 
+  test("renders unknown buckets as gaps instead of zero points", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["09-01", "09-02", "09-03"]}
+            valueSuffix="%"
+            series={[{ id: "cache", label: "Cache hit", values: [40, null, 60], className: "" }]}
+          />,
+        );
+      });
+      expect(container.querySelectorAll("circle").length).toBe(2);
+      const line = container.querySelectorAll("path")[1]?.getAttribute("d") ?? "";
+      expect(line.match(/M/g)?.length).toBe(2);
+      const slider = container.querySelector('[role="slider"]') as SVGSVGElement;
+      await act(async () => {
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      });
+      expect(slider.getAttribute("aria-valuetext")).toBe("09-02. Cache hit: Unknown");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("renders nothing measurable as an empty state", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["09-01", "09-02"]}
+            series={[{ id: "cache", label: "Cache hit", values: [null, null], className: "" }]}
+          />,
+        );
+      });
+      expect(container.querySelector("svg")).toBeNull();
+      expect(container.textContent).toContain("No usage in this window.");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("uses nearest-point hover cells without translating them a second time", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -174,9 +223,9 @@ describe("AreaChart", () => {
 
       const labels = container.querySelectorAll("button");
       for (const [index, expected] of [
-        [0, { x: "36", width: "168" }],
-        [1, { x: "204", width: "336" }],
-        [2, { x: "540", width: "168" }],
+        [0, { x: "52", width: "164" }],
+        [1, { x: "216", width: "328" }],
+        [2, { x: "544", width: "164" }],
       ] as const) {
         await act(async () => {
           labels[index]?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -223,10 +272,10 @@ describe("AreaChart", () => {
 
       const band = container.querySelector('[data-chart-hover-band="aligned"]');
       const activeGuide = [...container.querySelectorAll("svg line")].at(-1);
-      expect(band?.getAttribute("x")).toBe("36");
-      expect(band?.getAttribute("width")).toBe("672");
-      expect(activeGuide?.getAttribute("x1")).toBe("372");
-      expect(container.querySelector("circle")?.getAttribute("cx")).toBe("372");
+      expect(band?.getAttribute("x")).toBe("52");
+      expect(band?.getAttribute("width")).toBe("656");
+      expect(activeGuide?.getAttribute("x1")).toBe("380");
+      expect(container.querySelector("circle")?.getAttribute("cx")).toBe("380");
       expect(
         container
           .querySelector('[data-chart-tooltip="aligned"]')
@@ -300,19 +349,19 @@ describe("AreaChart", () => {
       const middleLabel = labels[1] as HTMLButtonElement;
       const firstLabel = labels[0] as HTMLButtonElement;
       await act(async () => middleLabel.focus());
-      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("372");
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("380");
 
       await act(async () => {
         firstLabel.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
       });
-      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("36");
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("52");
 
       await act(async () => {
         firstLabel.dispatchEvent(
           new MouseEvent("mouseout", { bubbles: true, relatedTarget: container.firstElementChild }),
         );
       });
-      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("372");
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("380");
       expect(document.activeElement).toBe(middleLabel);
     } finally {
       await act(async () => root.unmount());
@@ -346,7 +395,7 @@ describe("AreaChart", () => {
       await act(async () => {
         firstLabel.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
       });
-      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("36");
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("52");
 
       await act(async () => {
         slider.focus();

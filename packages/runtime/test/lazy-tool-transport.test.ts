@@ -439,6 +439,146 @@ describe("query-independent tool discovery", () => {
     expect(JSON.stringify(model.requests[1]!.input)).toContain("without namePrefix");
     expect(JSON.stringify(model.requests[2]!.input)).toContain(WEATHER_TOOL);
   });
+
+  test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+    "%s: an image keyword prefix recovers deferred runtime generation without widening authority",
+    async (transport) => {
+      let executions = 0;
+      let approvals = 0;
+      const image = tool({
+        name: "generate_image",
+        description: "Generate or edit exactly one image",
+        parameters: {
+          type: "object",
+          properties: { prompt: { type: "string" } },
+          required: ["prompt"],
+          additionalProperties: false,
+        },
+        strict: false,
+        needsApproval: () => {
+          approvals++;
+          return false;
+        },
+        execute: () => {
+          executions++;
+          return "synthetic-image-result";
+        },
+      }) as unknown as Tool;
+      const agent = agentWith(image);
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const exact = { query: "", names: ["generate_image", "unauthorized__image"] };
+      const search =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "image-search",
+              name: "tool_search",
+              arguments: JSON.stringify(exact),
+            }
+          : {
+              type: "tool_search_call",
+              call_id: "image-search",
+              execution: "client",
+              status: "completed",
+              arguments: exact,
+            };
+      const generate =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "generate",
+              name: "tool_invoke",
+              arguments: JSON.stringify({
+                name: "generate_image",
+                arguments: { prompt: "A blue circle on a white background" },
+              }),
+            }
+          : {
+              type: "function_call",
+              callId: "generate",
+              name: "generate_image",
+              arguments: '{"prompt":"A blue circle on a white background"}',
+            };
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "image-prefix",
+            name: "tool_list",
+            arguments: '{"namePrefix":"image"}',
+          },
+        ],
+        [search as never],
+        [generate as never],
+        [finalMessage("done")],
+      ]);
+      const result = await runStreamed(agent, model, runtime);
+      expect(result.finalOutput).toBe("done");
+      expect(model.requests[0]!.tools.some((entry) => entry.name === "generate_image")).toBe(false);
+      const input = model.requests[1]!.input;
+      if (typeof input === "string") throw new Error("Expected structured model input");
+      const listResult = input.find(
+        (entry) => entry.type === "function_call_result" && entry.callId === "image-prefix",
+      );
+      if (listResult?.type !== "function_call_result") throw new Error("Missing list result");
+      const listing = JSON.parse((listResult.output as { text: string }).text);
+      expect(listing).toMatchObject({ tools: [], total: 0, nextCursor: null });
+      expect(listing.suggestions).toEqual([
+        { name: "generate_image", description: "Generate or edit exactly one image" },
+      ]);
+      expect(JSON.stringify(listing)).not.toContain("parameters");
+      expect(JSON.stringify(listing)).not.toContain("unauthorized__image");
+      expect(runtime.search(exact)).toEqual([image]);
+      expect(executions).toBe(1);
+      expect(approvals).toBe(1);
+    },
+  );
+
+  test("unmatched-prefix recovery hints stay bounded and disappear with removed tools", async () => {
+    const images = Array.from({ length: 12 }, (_, i) =>
+      firstPartyTool(`provider${i}__generate_image`, "文".repeat(1000)),
+    );
+    const agent = new Agent({ name: "browse", tools: images, model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "image-prefix",
+          name: "tool_list",
+          arguments: '{"namePrefix":"image","limit":40}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    const input = model.requests[1]!.input;
+    if (typeof input === "string") throw new Error("Expected structured model input");
+    const result = input.find(
+      (entry) => entry.type === "function_call_result" && entry.callId === "image-prefix",
+    );
+    if (result?.type !== "function_call_result") throw new Error("Missing list result");
+    const listing = JSON.parse((result.output as { text: string }).text);
+    expect(listing.suggestions).toHaveLength(8);
+    expect(Buffer.byteLength(JSON.stringify(listing))).toBeLessThanOrEqual(16 * 1024);
+    expect(Array.from(listing.suggestions[0].description)).toHaveLength(160);
+
+    agent.tools.length = 0;
+    const removed = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "removed-prefix",
+          name: "tool_list",
+          arguments: '{"namePrefix":"image"}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, removed, runtime);
+    expect(runtime.inspectSearchableTools()).toEqual([]);
+    expect(JSON.stringify(removed.requests[1]!.input)).not.toContain("generate_image");
+  });
 });
 
 describe("application-owned Agents SDK history", () => {

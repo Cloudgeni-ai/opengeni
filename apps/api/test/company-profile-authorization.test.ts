@@ -675,6 +675,13 @@ describe("Phase2 legacy OAuth browser actor", () => {
 
   test("verified external actors retain the provider-specific continuation refusal", async () => {
     track(
+      spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockImplementation(
+        async (_, scopeAccountId) => {
+          expect(scopeAccountId).toBe(accountId);
+        },
+      ),
+    );
+    track(
       spyOn(db, "ensureExternalIdentity").mockResolvedValue({
         id: keyId,
         accountId,

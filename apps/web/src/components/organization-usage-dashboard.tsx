@@ -8,18 +8,21 @@ import { UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { AreaChart } from "@/components/insights/charts";
+import { OrganizationModelUsagePanel } from "@/components/organization-model-usage";
 import { useOptionalOrganizationDirectory } from "@/components/organization/organization-directory";
 import { memberName } from "@/components/organization/organization-people-model";
 import { RowButton } from "@/components/ui/page-actions";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { LockGlyph } from "@/components/insights/lock-glyph";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { formatDate } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
 import { inAppClick } from "@/lib/in-app-click";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -36,7 +39,7 @@ const periods: Array<{ value: OrganizationUsagePeriod; label: string }> = [
   { value: "ytd", label: "This year" },
 ];
 const WORKSPACE_COLUMNS: RowListColumn[] = [
-  { id: "total", label: "Total", width: 132, align: "end", hideLabel: true },
+  { id: "total", label: "Total", width: 132, align: "end", hideLabel: true, leadsWhenFolded: true },
 ];
 const metricKey = (total: Pick<Total, "eventType" | "unit">) =>
   JSON.stringify([total.eventType, total.unit]);
@@ -145,6 +148,48 @@ export function organizationUsageRows(input: {
   });
 }
 
+/** One person's private-chat spend in one shared workspace: a name and an amount, nothing else. */
+export interface OrganizationPrivateRow {
+  key: string;
+  person: string;
+  workspace: string;
+  quantity: string;
+}
+
+/**
+ * Other people's Only me chats as amounts for the selected metric, largest
+ * first. An older API replica omits them; the list is then empty.
+ */
+export function organizationPrivateRows(input: {
+  summary: OrganizationUsageSummary;
+  selected: Pick<Total, "eventType" | "unit">;
+  members: readonly Member[];
+  workspaceNames: ReadonlyMap<string, string>;
+}): { rows: OrganizationPrivateRow[]; truncated: boolean } {
+  const { summary } = input;
+  const members = new Map(input.members.map((member) => [member.id, member]));
+  // The SDK does not apply the contract defaults: an older replica omits both.
+  const rows = (summary.privateChats ?? [])
+    .map((entry) => {
+      const member = entry.membershipId ? members.get(entry.membershipId) : undefined;
+      return {
+        key: `private:${entry.workspaceId}:${entry.membershipId ?? entry.name ?? "unknown"}`,
+        person: member ? memberName(member) : (entry.name ?? "Organization member"),
+        workspace: input.workspaceNames.get(entry.workspaceId) ?? "a workspace",
+        quantity:
+          entry.totals.find((total) => metricKey(total) === metricKey(input.selected))?.quantity ??
+          "0",
+      };
+    })
+    .filter((row) => row.quantity !== "0")
+    .sort((a, b) => {
+      const difference = BigInt(b.quantity) - BigInt(a.quantity);
+      if (difference !== 0n) return difference > 0n ? 1 : -1;
+      return a.person.localeCompare(b.person);
+    });
+  return { rows, truncated: summary.privateChatsTruncated ?? false };
+}
+
 /** Says only what the rows can back: a link hint when one opens, the Personal rule when one shows. */
 function breakdownDescription(rows: readonly OrganizationUsageRow[]): string | undefined {
   const parts = [
@@ -168,6 +213,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
   const directory = useOptionalOrganizationDirectory();
   const navigate = useNavigate();
   const [period, setPeriod] = useState<OrganizationUsagePeriod>("month");
+  const longerPeriod = periods[periods.findIndex((option) => option.value === period) + 1];
   const [revision, setRevision] = useState(0);
   const [metric, setMetric] = useState("");
   const [state, setState] = useState<{
@@ -261,6 +307,20 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           accessContext,
         })
       : [];
+  const { rows: privateRows, truncated: privateTruncated } =
+    data && selected
+      ? organizationPrivateRows({
+          summary: data,
+          selected,
+          members: directory?.members.value ?? [],
+          workspaceNames: new Map(
+            [...data.workspaces, ...pages.flatMap((page) => page.workspaces)].map((workspace) => [
+              workspace.workspaceId,
+              workspace.name ?? "a workspace",
+            ]),
+          ),
+        })
+      : { rows: [], truncated: false };
   const unlistedPersonal = data
     ? Math.max(0, (data.personalWorkspaceCount ?? 0) - (data.personalWorkspaces?.length ?? 0))
     : 0;
@@ -282,7 +342,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
       <SectionStack>
         <Section
           title="Usage"
-          description="Every workspace, Personal workspaces included. Not an invoice."
+          description="Every workspace, private chats included. Not an invoice."
           action={
             <SegmentedControl<OrganizationUsagePeriod>
               size="sm"
@@ -312,14 +372,25 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 {apiErrorAdvice(error)}
               </ErrorMessage>
             ) : !data ? (
-              <p role="status" className="text-xs leading-[18px] text-fg-muted">
-                Loading period usage
-              </p>
+              <div role="status" aria-label="Loading period usage" className="flex flex-col gap-4">
+                <div aria-hidden="true" className="flex min-w-0 flex-col gap-1">
+                  <Skeleton className="h-7 w-28 rounded-md" />
+                  <Skeleton className="h-[18px] w-56 max-w-full rounded-full" />
+                </div>
+                <Skeleton aria-hidden="true" className="h-[220px] rounded-lg" />
+              </div>
             ) : data.totals.length === 0 ? (
               <EmptyState
                 variant="inline"
                 title="No usage recorded in this period."
                 description={range ?? undefined}
+                action={
+                  longerPeriod ? (
+                    <EmptyStateLink onClick={() => setPeriod(longerPeriod.value)}>
+                      Show {longerPeriod.label.toLowerCase()}
+                    </EmptyStateLink>
+                  ) : undefined
+                }
               />
             ) : (
               <>
@@ -388,6 +459,20 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
             )}
           </div>
         </Section>
+        {props.enabled ? (
+          <OrganizationModelUsagePanel
+            accountId={props.accountId}
+            period={period}
+            revision={revision}
+            ledgerCreditMicros={
+              data
+                ? (data.totals.find(
+                    (total) => total.eventType === "model.cost" && total.unit === "usd_micros",
+                  )?.quantity ?? "0")
+                : undefined
+            }
+          />
+        ) : null}
         {props.enabled && data && data.totals.length > 0 && selected ? (
           <div className="flex min-w-0 flex-col gap-3">
             <Section title="By workspace" description={breakdownDescription(rows)}>
@@ -466,10 +551,43 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 {data.personalWorkspaces.length} that spent the most.
               </p>
             ) : null}
-            <p className="text-xs leading-[18px] text-fg-muted">
-              Usage from other people's Only me chats isn't included.
-            </p>
           </div>
+        ) : null}
+        {props.enabled && data && selected && privateRows.length > 0 ? (
+          <Section
+            title="Private chats"
+            description="Other people's Only me chats, already counted above. Amounts only."
+          >
+            <RowList
+              label="Private chats by person"
+              columns={WORKSPACE_COLUMNS}
+              nameLabel="Person"
+              flush
+            >
+              {/* Plain rows: no link, button or drilldown. The workspace sits in
+                  the title so on a phone the amount leads the second line. */}
+              {privateRows.map((row) => (
+                <ListRow
+                  key={row.key}
+                  leading={<LogoTile icon={<LockGlyph />} name={row.person} />}
+                  title={`${row.person} in ${row.workspace}`}
+                  cells={{
+                    total: (
+                      <span
+                        className="text-fg tabular-nums"
+                        title={formatExactUsage(row.quantity, selected.unit)}
+                      >
+                        {formatUsageAmount(row.quantity, selected.unit)}
+                      </span>
+                    ),
+                  }}
+                />
+              ))}
+            </RowList>
+            {privateTruncated ? (
+              <p className="pt-2 text-xs leading-[18px] text-fg-muted">Showing the largest 200.</p>
+            ) : null}
+          </Section>
         ) : null}
       </SectionStack>
     </section>

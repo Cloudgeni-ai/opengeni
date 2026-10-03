@@ -13,6 +13,7 @@ import { rigModule, workspaceEnvironmentModule } from "./modules/environment";
 import { goalsModule } from "./modules/goals";
 import { knowledgeModule } from "./modules/knowledge";
 import { connectedMachineModule } from "./modules/machines";
+import { mediaModule } from "./modules/media";
 import { rendererMarkdownModule } from "./modules/renderer-markdown";
 import { repositoriesModule } from "./modules/repositories";
 import { sandboxModule } from "./modules/sandbox";
@@ -33,6 +34,7 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   workspaceEnvironmentModule,
   rigModule,
   artifactsModule,
+  mediaModule,
   goalsModule,
   subagentsModule,
   knowledgeModule,

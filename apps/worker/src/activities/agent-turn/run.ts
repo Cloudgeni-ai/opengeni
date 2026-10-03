@@ -946,24 +946,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
-              return claudeUsageObserver.prepareRequest(providerId, headers, async (binding) => {
-                const credential = await resolveClaudeSubscriptionCredential(
-                  db,
-                  settings,
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    scope: binding.scope,
-                  },
-                  {
-                    expectedConnectionId: binding.expectedConnectionId,
-                    expectedCredentialVersion: binding.expectedCredentialVersion,
-                  },
-                );
-                if (credential && "reconnectRequired" in credential)
-                  throw new ClaudeSubscriptionReconnectRequired();
-                return credential;
-              });
+              return claudeUsageObserver.prepareRequestWithObserver(
+                providerId,
+                headers,
+                async (binding) => {
+                  const credential = await resolveClaudeSubscriptionCredential(
+                    db,
+                    settings,
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      scope: binding.scope,
+                    },
+                    {
+                      expectedConnectionId: binding.expectedConnectionId,
+                      expectedCredentialVersion: binding.expectedCredentialVersion,
+                    },
+                  );
+                  if (credential && "reconnectRequired" in credential)
+                    throw new ClaudeSubscriptionReconnectRequired();
+                  return credential;
+                },
+              );
             });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();

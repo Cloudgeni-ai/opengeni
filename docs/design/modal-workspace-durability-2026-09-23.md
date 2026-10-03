@@ -74,3 +74,7 @@ agent-facing notice. It replaced the separate unobservable and
 stopping-with-provider-errors enrollment predicates. Deadline-contained
 commands settle `provider_deadline_containment` with the same notice. See
 [`run-lifecycle.md`](../run-lifecycle.md).
+
+Set `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` to disable new idle
+enrollments. The existing deadline backstop and already enrolled drains remain
+active; unset and positive windows keep their existing behavior.

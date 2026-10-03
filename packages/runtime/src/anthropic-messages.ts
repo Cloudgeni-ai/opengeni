@@ -10,6 +10,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
@@ -307,7 +308,9 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
  * replies. Anthropic's system beta requires a system message after a user and
  * before an assistant (or at the end), not user -> system -> user. Coalesce each
  * user phase and its system blocks at that boundary, retaining their own roles,
- * exact content and relative order. Never move a system across an assistant.
+ * exact content and relative order. A machine-only continuation after an
+ * assistant needs a request-local input anchor; it is not a new human message.
+ * Never move a system across an assistant.
  */
 function placeConversationSystems(messages: Message[]): Message[] {
   const result: Message[] = [];
@@ -315,7 +318,15 @@ function placeConversationSystems(messages: Message[]): Message[] {
   const flush = () => {
     if (!systems.length) return;
     if (result.at(-1)?.role !== "user")
-      throw new AnthropicProtocolError("Claude system messages require a preceding user message");
+      result.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "OpenGeni continuation (machine-origin input; no new human message).",
+          },
+        ],
+      });
     result.push({ role: "system", content: systems });
     systems = [];
   };
@@ -633,12 +644,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();

@@ -48,9 +48,12 @@ export class OpenGeniAutomationsClient {
   }
 
   async disableSource(workspaceId: string, sourceId: string): Promise<void> {
-    await this.client.requestJson(
+    await this.client.requestJson<void>(
       "DELETE",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/automations/sources/${encodeURIComponent(sourceId)}`,
+      undefined,
+      {},
+      { responseType: "void" },
     );
   }
 
@@ -90,9 +93,12 @@ export class OpenGeniAutomationsClient {
     triggerId: string,
     expectedRevision: number,
   ): Promise<void> {
-    await this.client.requestJson(
+    await this.client.requestJson<void>(
       "DELETE",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/automations/triggers/${encodeURIComponent(triggerId)}?expectedRevision=${expectedRevision}`,
+      undefined,
+      {},
+      { responseType: "void" },
     );
   }
 
