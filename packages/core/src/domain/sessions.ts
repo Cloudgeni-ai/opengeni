@@ -1123,6 +1123,7 @@ export async function createAndStartSessionWithOutcome(input: {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               reference,
+              claudeAuthority: { sessionId },
             });
             if (!active) {
               throw modelUnavailableHttpException(input.model);
@@ -1988,7 +1989,10 @@ export async function postUserMessageTurn(
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
               ...(freshWorkspaceCustomModel
                 ? {
-                    beforeFreshPromptCommit: async (tx: Database): Promise<void> => {
+                    beforeFreshPromptCommit: async (
+                      tx: Database,
+                      { claudeProviderAccountAuthoritySnapshot },
+                    ): Promise<void> => {
                       const reference = workspaceCustomModelReference(
                         settings,
                         freshWorkspaceCustomModel,
@@ -2000,6 +2004,9 @@ export async function postUserMessageTurn(
                         accountId,
                         workspaceId,
                         reference,
+                        claudeAuthority: {
+                          authoritySnapshot: claudeProviderAccountAuthoritySnapshot,
+                        },
                       });
                       if (!active) {
                         throw modelUnavailableHttpException(freshWorkspaceCustomModel);

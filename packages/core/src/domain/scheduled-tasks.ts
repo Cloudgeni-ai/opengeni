@@ -1,5 +1,6 @@
 import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
 } from "@opengeni/db";
 import {
@@ -151,6 +152,7 @@ function workspaceCustomModelCommitGuard(input: {
   accountId: string;
   workspaceId: string;
   modelId: string;
+  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
 }): ((tx: Database) => Promise<void>) | undefined {
   const reference = workspaceCustomModelReference(input.settings, input.modelId);
   if (!reference) return undefined;
@@ -159,6 +161,9 @@ function workspaceCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
+      ...(input.claudeAuthoritySnapshot
+        ? { claudeAuthority: { authoritySnapshot: input.claudeAuthoritySnapshot } }
+        : {}),
     });
     if (!active) {
       throw modelUnavailableHttpException(input.modelId);
@@ -484,6 +489,7 @@ export async function createValidatedScheduledTask(input: {
           accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
           modelId: agentConfig.model ?? input.settings.openaiModel,
+          claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot,
         })
       : undefined;
   return await withScheduledTaskAuthorityWriteErrors(() =>
@@ -1447,6 +1453,11 @@ export async function validatedScheduledTaskUpdate(input: {
       accountId: input.existing.accountId,
       workspaceId: input.existing.workspaceId,
       modelId: nextAgentConfig.model ?? input.settings.openaiModel,
+      claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
+        input.db,
+        input.existing.workspaceId,
+        input.existing.id,
+      ),
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
   }

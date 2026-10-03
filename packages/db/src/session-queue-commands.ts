@@ -1792,7 +1792,12 @@ export async function submitHumanPromptInTransaction(
     }>;
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
-    beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    beforeFreshPromptCommit?: (
+      tx: Database,
+      authority: {
+        claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+      },
+    ) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
     captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
 
@@ -1903,8 +1908,6 @@ export async function submitHumanPromptInTransaction(
       receipt: reserved.receipt,
     });
   }
-  await input.beforeFreshPromptCommit?.(db);
-
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
   });
@@ -2141,6 +2144,7 @@ export async function submitHumanPromptInTransaction(
           workspaceId: input.workspaceId,
         })
       : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
