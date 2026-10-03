@@ -1290,10 +1290,16 @@ async function resolveDelegatedHumanAccessContext(
     throw new HTTPException(403, { message: "delegated native person authority is unavailable" });
   }
   const verifiedPermissions = [...proof.permissions];
+  // The person's own role expands as usual; the connection's access setting is
+  // literal, and so is the result: workspace:admin in a Custom setting is never
+  // a wildcard for the permissions the person left out.
   const intersectWorkspacePermissions = (permissions: Permission[]) =>
-    Permission.options.filter(
-      (permission) =>
-        hasPermission(permissions, permission) && hasPermission(verifiedPermissions, permission),
+    explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasPermission(permissions, permission) &&
+          hasPermission(verifiedPermissions, permission, "explicit"),
+      ),
     );
   const accountGrant: AccountGrant = {
     ...accounts[0]!,
@@ -1314,6 +1320,7 @@ async function resolveDelegatedHumanAccessContext(
     .map((grant) => ({
       ...grant,
       permissions: intersectWorkspacePermissions(grant.permissions),
+      permissionMode: "explicit" as const,
     }));
   // Proof-bearing authority cannot be changed in place and then reused as if
   // the resolver had authenticated a different subject, scope or ceiling.

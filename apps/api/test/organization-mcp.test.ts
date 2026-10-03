@@ -15,7 +15,11 @@ import {
   registeredApiRoutes,
 } from "../../../scripts/public-api/action-catalog";
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
-import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "../src/organization-mcp";
+import {
+  buildOrganizationMcpServer,
+  READ_ONLY_POST_ACTIONS,
+  type OrganizationMcpCaller,
+} from "../src/organization-mcp";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -80,6 +84,8 @@ describe("organization MCP action catalog", () => {
     expect(missing).toEqual([]);
     expect(new Set(ACTION_CATALOG.map((entry) => entry.id)).size).toBe(ACTION_CATALOG.length);
     for (const entry of ACTION_CATALOG) expect(isActionCatalogExempt(entry.path)).toBe(false);
+    // Every read-only POST exception names a real POST action.
+    for (const path of READ_ONLY_POST_ACTIONS) expect(listed.has(`POST ${path}`)).toBe(true);
     // UI actions that live outside the SDK are included too.
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
@@ -173,6 +179,15 @@ describe("organization MCP server", () => {
       kind: "selected",
       workspaceIds: [workspaceId],
     });
+    // Searching sends the query as a POST body, but only reads: it runs.
+    const search = await call("opengeni_action_call", {
+      id: "POST /v1/workspaces/:workspaceId/knowledge/search",
+      pathParameters: { workspaceId },
+      body: { query: "release notes" },
+    });
+    expect(search.isError).toBe(false);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.method).toBe("POST");
   });
 
   test("an organization API key forwards its own credential and carries no person proof", async () => {

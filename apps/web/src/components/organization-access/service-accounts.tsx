@@ -536,7 +536,13 @@ function ServiceAccountPage({
                   title={key.name}
                   description={[
                     key.prefix,
-                    key.policy ? policySummary(key.policy) : "Full access",
+                    key.policy
+                      ? policySummary(key.policy)
+                      : key.access === "read"
+                        ? "Read only"
+                        : key.access === "developer_setup"
+                          ? "Developer setup"
+                          : "Full access",
                   ].join(" · ")}
                 />
               ))}
