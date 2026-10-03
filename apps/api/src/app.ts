@@ -1431,10 +1431,16 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceMemoryPromptMode,
         sessionMemory,
       });
-      await mcp.connect(transport);
       // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
       // worker that drops the call (Steer/Pause) aborts a blocking tool here.
-      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      // Each POST builds a fresh server; close it once the JSON response is
+      // ready, like the gateway paths above, so it can't outlive the request.
+      try {
+        await mcp.connect(transport);
+        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      } finally {
+        await mcp.close().catch(() => undefined);
+      }
     });
   });
 
