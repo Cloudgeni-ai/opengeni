@@ -1,6 +1,6 @@
-// Deterministic session scenarios for the native design lab. They use the same durable
-// event shapes a live session produces, so they render through the official projection
-// (`buildTimeline` → `groupTimeline`) with no model calls.
+// Deterministic session scenarios for visual harnesses (web dev gallery and native lab).
+// They use the same durable event shapes a live session produces, so every renderer
+// replays identical input through the official projection with no model calls.
 import type { SessionEvent } from "@opengeni/sdk";
 
 export type LabScenarioId = "answer" | "working" | "needs-you" | "history";

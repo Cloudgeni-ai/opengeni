@@ -22,10 +22,6 @@
     "./ui": {
       "types": "./src/ui/index.ts",
       "default": "./src/ui/index.ts"
-    },
-    "./lab": {
-      "types": "./src/lab/fixtures.ts",
-      "default": "./src/lab/fixtures.ts"
     }
   },
   "scripts": {

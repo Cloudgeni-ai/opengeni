@@ -18,9 +18,6 @@
       "@opengeni/react-native/ui": [
         "../../packages/react-native/src/ui/index.ts"
       ],
-      "@opengeni/react-native/lab": [
-        "../../packages/react-native/src/lab/fixtures.ts"
-      ],
       "@opengeni/react-native/expo": [
         "../../packages/react-native/src/expo.ts"
       ],
@@ -30,6 +27,9 @@
       "*": [
         "./node_modules/@types/*",
         "./node_modules/*"
+      ],
+      "@opengeni/react/testing": [
+        "../../packages/react/src/testing/session-scenarios.ts"
       ]
     }
   },

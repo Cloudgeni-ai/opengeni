@@ -50,7 +50,15 @@ export default function SessionsScreen() {
     if (!workspaceId || !text || creating) return;
     setCreating(true);
     try {
-      const created = await client.createSession(workspaceId, { initialMessage: text });
+      const created = await client.createSession(workspaceId, {
+        initialMessage: text,
+        ...(process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL
+          ? { model: process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL }
+          : {}),
+        ...(process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING
+          ? { reasoningEffort: process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING as "low" }
+          : {}),
+      });
       setDraft("");
       router.push(`/session/${created.id}`);
     } catch (caught) {

@@ -7,7 +7,7 @@ import {
   projectPendingApprovals,
   projectPendingHumanInputRequests,
 } from "@opengeni/react/session";
-import { labScenarios, type LabScenarioId } from "@opengeni/react-native/lab";
+import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
 import {
   AgentAttentionTray,
   AgentComposer,

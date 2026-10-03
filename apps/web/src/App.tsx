@@ -180,6 +180,10 @@ const LazyComposerChromeGalleryRoute = lazyRouteComponent(
   () => import("@/routes/composer-chrome"),
   "ComposerChromeGalleryRoute",
 );
+const LazyDevSessionTimelineRoute = lazyRouteComponent(
+  () => import("@/routes/dev-session-timeline"),
+  "DevSessionTimelineRoute",
+);
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
@@ -282,6 +286,12 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+// DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
+const devSessionTimelineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/session-timeline",
+  component: LazyDevSessionTimelineRoute,
 });
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
@@ -674,7 +684,9 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, onboardingPreviewRoute] : []),
+  ...(import.meta.env.DEV
+    ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
+    : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
