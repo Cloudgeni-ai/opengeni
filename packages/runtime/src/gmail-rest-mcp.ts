@@ -427,7 +427,10 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   readonly bridge: LocalMcpBridgeDescriptor = GMAIL_REST_MCP_BRIDGE_DESCRIPTOR;
   private readonly fetchImpl: FetchLike;
   private pinnedConnectionId?: string;
-  private readonly requestSignals = new AsyncLocalStorage<AbortSignal>();
+  private readonly requestContext = new AsyncLocalStorage<{
+    signal: AbortSignal | undefined;
+    mutationSubmitted: boolean;
+  }>();
 
   constructor(private readonly options: GmailRestMcpServerOptions) {
     this.name = `opengeni-gmail-rest-${safeIdentity(options.serverId)}`;
@@ -466,13 +469,12 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
+    const requestContext = { signal: options?.signal, mutationSubmitted: false };
     try {
       const input = args ?? {};
       if (options?.signal?.aborted) throw new GmailRestInputError("Gmail operation cancelled");
       const operation = async () => await this.execute(toolName, input, meta, options?.signal);
-      const output = options?.signal
-        ? await this.requestSignals.run(options.signal, operation)
-        : await operation();
+      const output = await this.requestContext.run(requestContext, operation);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         structuredContent: output,
@@ -483,16 +485,16 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         error instanceof GmailRestOutcomeUnknownError
       )
         throw error;
+      const refused =
+        error instanceof GmailRestProviderError && error.status !== undefined && error.status < 500;
+      if (requestContext.mutationSubmitted && !refused)
+        throw new GmailRestOutcomeUnknownError(
+          "Gmail mutation was submitted but its result could not be delivered; outcome is uncertain",
+        );
       return {
         isError: true,
         content: [{ type: "text", text: safeErrorMessage(error) }],
-        ...(error instanceof GmailRestInputError ||
-        error instanceof GmailRestAuthError ||
-        (error instanceof GmailRestProviderError &&
-          error.status !== undefined &&
-          error.status < 500)
-          ? { structuredContent: { error: { connectorActionOutcome: "not_executed" } } }
-          : {}),
+        structuredContent: { error: { connectorActionOutcome: "not_executed" } },
       };
     }
   }
@@ -1465,23 +1467,25 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       this.pinnedConnectionId = result.connectionId;
       return result;
     };
-    const send = async (headers: Record<string, string>) =>
-      await this.fetchImpl(url, {
+    const send = async (headers: Record<string, string>) => {
+      const context = this.requestContext.getStore();
+      const request: RequestInit = {
         ...init,
         headers: { ...headers, ...headersRecord(init.headers) },
         redirect: "error",
         signal: AbortSignal.any([
-          ...(init.signal || this.requestSignals.getStore()
-            ? [init.signal || this.requestSignals.getStore()!]
-            : []),
+          ...(init.signal || context?.signal ? [init.signal || context!.signal!] : []),
           AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         ]),
-      });
+      };
+      if (!replaySafe && context) context.mutationSubmitted = true;
+      return await this.fetchImpl(url, request);
+    };
     const sendBounded = async (credential: Extract<ResolveCredentialResult, { status: "ok" }>) => {
+      if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
+        throw new GmailRestAuthError("Authentication required for Gmail");
+      }
       try {
-        if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest())) {
-          throw new GmailRestAuthError("Authentication required for Gmail");
-        }
         return await send(credential.headers);
       } catch (error) {
         if (error instanceof GmailRestAuthError) throw error;
