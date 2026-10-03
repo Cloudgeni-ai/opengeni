@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createHmac } from "node:crypto";
@@ -9,6 +9,7 @@ import {
   type SessionProxyHandlerOptions,
 } from "../src/index";
 import {
+  deriveToolTokenKey,
   mintToolToken,
   TOOL_TOKEN_ISSUER,
   TOOL_TOKEN_KEY_LABEL,
@@ -22,6 +23,17 @@ const API = "https://api.example.test";
 const TOOL_URL = `${PRODUCT}/api/mcp`;
 const SECRET = "og_org_key_for_tests";
 const OTHER_SESSION = "33333333-3333-4333-8333-333333333333";
+
+// Both sides read the tool server URL from the environment by default.
+let previousToolServerUrl: string | undefined;
+beforeAll(() => {
+  previousToolServerUrl = process.env.OPENGENI_TOOL_SERVER_URL;
+  process.env.OPENGENI_TOOL_SERVER_URL = TOOL_URL;
+});
+afterAll(() => {
+  if (previousToolServerUrl === undefined) delete process.env.OPENGENI_TOOL_SERVER_URL;
+  else process.env.OPENGENI_TOOL_SERVER_URL = previousToolServerUrl;
+});
 
 const identity = {
   audience: TOOL_URL,
@@ -85,7 +97,6 @@ describe("tool tokens", () => {
       workspaceId: WORKSPACE_ID,
       source: "northwind",
     });
-    expect(verified.expiresAt.getTime()).toBeGreaterThan(Date.now() + 3500_000);
     // Express: originalUrl keeps the mount path; query strings are ignored.
     const node = await verifyToolRequest(
       {
@@ -174,29 +185,12 @@ describe("tool tokens", () => {
     expect(response.headers.get("www-authenticate")).toContain("Bearer");
   });
 
-  test("audience binds the token to the tool server endpoint", async () => {
+  test("audience is the exact tool server URL, from the option or OPENGENI_TOOL_SERVER_URL", async () => {
     const token = await mintToolToken(identity);
+    // The request URL does not matter (tunnels rewrite hosts); the configured URL does.
     expect(
-      await rejectionCode(
-        verifyToolRequest(bearer(token, `${PRODUCT}/api/admin`), {
-          secret: SECRET,
-        }),
-      ),
-    ).toBe("token_audience");
-    // A tunnel or load balancer may rewrite the host; the path still matches.
-    expect(
-      (await verifyToolRequest(bearer(token, "http://127.0.0.1:3000/api/mcp"), { secret: SECRET }))
-        .user,
+      (await verifyToolRequest(bearer(token, "http://127.0.0.1:3000/x"), { secret: SECRET })).user,
     ).toBe("u_42");
-    // An explicit audience is an exact URL match.
-    expect(
-      await rejectionCode(
-        verifyToolRequest(bearer(token), {
-          secret: SECRET,
-          audience: "https://other.example.test/api/mcp",
-        }),
-      ),
-    ).toBe("token_audience");
     expect(
       (
         await verifyToolRequest(bearer(token), {
@@ -205,11 +199,40 @@ describe("tool tokens", () => {
         })
       ).user,
     ).toBe("u_42");
+    for (const audience of [`${PRODUCT}/api/admin`, "https://other.example.test/api/mcp"]) {
+      expect(
+        await rejectionCode(verifyToolRequest(bearer(token), { secret: SECRET, audience })),
+      ).toBe("token_audience");
+    }
+    const other = await mintToolToken({ ...identity, audience: `${PRODUCT}/api/other` });
+    expect(await rejectionCode(verifyToolRequest(bearer(other), { secret: SECRET }))).toBe(
+      "token_audience",
+    );
+    delete process.env.OPENGENI_TOOL_SERVER_URL;
+    try {
+      await expect(verifyToolRequest(bearer(token), { secret: SECRET })).rejects.toBeInstanceOf(
+        TypeError,
+      );
+    } finally {
+      process.env.OPENGENI_TOOL_SERVER_URL = TOOL_URL;
+    }
+  });
+
+  test("deriveToolTokenKey is the key non-Node verifiers use, not the org key", async () => {
+    const hex = await deriveToolTokenKey(SECRET);
+    expect(hex).toBe(createHmac("sha256", SECRET).update(TOOL_TOKEN_KEY_LABEL).digest("hex"));
+    const [head, payload, signature] = (await mintToolToken(identity)).split(".");
     expect(
-      await rejectionCode(
-        verifyToolRequest({ headers: { authorization: `Bearer ${token}` } }, { secret: SECRET }),
-      ),
-    ).toBe("token_audience");
+      createHmac("sha256", Buffer.from(hex, "hex"))
+        .update(`${head}.${payload}`)
+        .digest("base64url"),
+    ).toBe(signature!);
+  });
+
+  test("a token too large for OpenGeni's header limit fails at mint time", async () => {
+    await expect(mintToolToken({ ...identity, user: "u".repeat(4000) })).rejects.toThrow(
+      /header limit/,
+    );
   });
 
   describe("secret defaults", () => {
@@ -241,9 +264,13 @@ describe("tool tokens", () => {
     });
   });
 
-  test("ttl is bounded", async () => {
+  test("ttl defaults to 24 hours and is bounded", async () => {
+    const { expiresAt } = await verifyToolRequest(bearer(await mintToolToken(identity)), {
+      secret: SECRET,
+    });
+    expect(expiresAt.getTime()).toBeGreaterThan(Date.now() + 23 * 3600_000);
     await expect(mintToolToken({ ...identity, ttlSeconds: 0 })).rejects.toBeInstanceOf(TypeError);
-    await expect(mintToolToken({ ...identity, ttlSeconds: 90_000 })).rejects.toBeInstanceOf(
+    await expect(mintToolToken({ ...identity, ttlSeconds: 700_000 })).rejects.toBeInstanceOf(
       TypeError,
     );
   });
@@ -253,6 +280,7 @@ type Recorded = { method: string; path: string; body: any };
 
 function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
   const requests: Recorded[] = [];
+  let currentUser = "u_42";
   const upstream = async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
@@ -268,6 +296,7 @@ function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
       return Response.json({
         id,
         workspaceId: WORKSPACE_ID,
+        createdBy: { kind: "subject", subjectId: "subject-u42" },
         mcpServers:
           id === SESSION_ID
             ? [
@@ -279,6 +308,13 @@ function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
                 },
               ]
             : [],
+      });
+    }
+    if (path === "/v1/access/me") {
+      return Response.json({
+        subjectId: currentUser === "u_42" ? "subject-u42" : `subject-${currentUser}`,
+        accountGrants: [],
+        workspaceGrants: [],
       });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
@@ -298,7 +334,7 @@ function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
   const handler = createSessionProxyHandler(service, {
     resolve: () => ({
       workspaceId: WORKSPACE_ID,
-      user: "u_42",
+      user: currentUser,
       source: "northwind",
     }),
     createSession: ({ initialMessage }) => ({ initialMessage }),
@@ -314,7 +350,10 @@ function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
     fetch: async (input, init) => await handler(new Request(input, init)),
   });
   const writes = () => requests.filter((request) => request.method !== "GET");
-  return { requests, writes, browser, handler };
+  const signInAs = (user: string) => {
+    currentUser = user;
+  };
+  return { requests, writes, browser, handler, signInAs };
 }
 
 function tokenOf(headers: Record<string, string> | undefined): string {
@@ -434,8 +473,18 @@ describe("session proxy toolServer", () => {
       });
       expect(verified.user).toBe("u_42");
     }
-    // The attachment lookup is cached per session.
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
+    // The attachment lookup and the creator subject are cached.
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+  });
+
+  test("in a shared chat, tools keep acting as the chat's creator", async () => {
+    const { writes, browser, signInAs } = proxySetup({ chats: "shared" });
+    signInAs("u_7");
+    await browser.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi from a teammate" });
+    expect(writes()[0]!.body.payload.mcpCredentialUpdates).toBeUndefined();
+    signInAs("u_42");
+    await browser.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi from the creator" });
+    expect(writes()[1]!.body.payload.mcpCredentialUpdates).toHaveLength(1);
   });
 
   test("sessions without this tool server are not rotated; host rotations win", async () => {

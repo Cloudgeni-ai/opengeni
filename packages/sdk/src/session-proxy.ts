@@ -103,24 +103,28 @@ export type SessionProxyMessageExtras = {
 
 /**
  * Your product's own MCP tool server, attached to every session this proxy
- * creates with a short-lived per-user bearer token. Verify it on every MCP
- * request with `verifyToolRequest` from `@opengeni/sdk/tool-auth`.
+ * creates with a per-user bearer token. Verify it on every MCP request with
+ * `verifyToolRequest` from `@opengeni/sdk/tool-auth`. Tools always act as the
+ * chat's creator: in a shared chat, other members' messages do not change it.
  */
 export type SessionProxyToolServer = {
-  /** Public HTTPS URL of your MCP endpoint, e.g. `https://app.example.com/api/mcp`. */
-  url: string;
+  /**
+   * Public HTTPS URL of your MCP endpoint, e.g. `https://app.example.com/api/mcp`.
+   * Defaults to `OPENGENI_TOOL_SERVER_URL`, which `verifyToolRequest` also reads.
+   */
+  url?: string | undefined;
   /** Session MCP server id (model-facing tool prefix). Defaults to `"app"`. */
   id?: string | undefined;
   /** Display name. */
   name?: string | undefined;
   /**
-   * Tools the user must approve before each call: unprefixed MCP tool names,
-   * or `true` for every tool. Other tools run without asking.
+   * Tools the user must approve before each call: list your write tools here
+   * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
    */
   approvals?: { ask: string[] | true } | undefined;
   /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
   secret?: string | undefined;
-  /** Token lifetime in seconds. Defaults to 3600; refreshed on every message, approval, and answer. */
+  /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
   ttlSeconds?: number | undefined;
 };
 
@@ -311,7 +315,7 @@ export function createSessionProxyHandler(
   const defaults = chatDefaults(chats);
   const toolServer = options.toolServer ? normalizeToolServer(options.toolServer) : undefined;
   // Whether a session carries this proxy's tool server (attachments are immutable).
-  const toolSessions = new Map<string, Promise<boolean>>();
+  const toolSessions = new Map<string, Promise<string | null>>();
   // Canonical subject per external user, for the "mine" list filter.
   const subjects = new Map<string, Promise<string>>();
   const subjectOf = (client: ProxyClient, key: string): Promise<string> => {
@@ -391,7 +395,8 @@ export function createSessionProxyHandler(
           secret: toolServer!.secret,
           ttlSeconds: toolServer!.ttlSeconds,
         });
-      const hasToolServer = (sessionId: string): Promise<boolean> => {
+      /** The creator's subject when the session carries this tool server, else null. */
+      const toolServerOwner = (sessionId: string): Promise<string | null> => {
         const key = `${workspaceId}\u0000${sessionId}`;
         let attached = toolSessions.get(key);
         if (!attached) {
@@ -400,7 +405,9 @@ export function createSessionProxyHandler(
             .then((session) =>
               (session.mcpServers ?? []).some(
                 (server) => server.id === toolServer!.id && server.url === toolServer!.url,
-              ),
+              )
+                ? (session.createdBy?.subjectId ?? null)
+                : null,
             );
           attached.catch(() => toolSessions.delete(key));
           if (toolSessions.size >= 1_000) toolSessions.delete(toolSessions.keys().next().value!);
@@ -419,7 +426,11 @@ export function createSessionProxyHandler(
         // A host-supplied rotation for the same id wins; sessions created
         // without this tool server (or for an older URL) are left alone.
         if (updates.some((update) => update.id === toolServer.id)) return extras;
-        if (!(await hasToolServer(input.sessionId))) return extras;
+        // Only the chat's creator refreshes: tools keep acting as that user.
+        const owner = await toolServerOwner(input.sessionId);
+        if (!owner || owner !== (await subjectOf(client, `${source}\u0000${resolved.user}`))) {
+          return extras;
+        }
         return {
           ...extras,
           mcpCredentialUpdates: [
@@ -831,16 +842,23 @@ export function createSessionProxyHandler(
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type NormalizedToolServer = SessionProxyToolServer & {
+  url: string;
   id: string;
   secret: string;
 };
 
 function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedToolServer {
+  const configured =
+    toolServer.url ??
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+      ?.OPENGENI_TOOL_SERVER_URL;
   let url: URL;
   try {
-    url = new URL(toolServer.url);
+    url = new URL(configured ?? "");
   } catch {
-    throw new TypeError("toolServer.url must be an absolute https:// URL.");
+    throw new TypeError(
+      "toolServer.url (or OPENGENI_TOOL_SERVER_URL) must be an absolute https:// URL.",
+    );
   }
   if (url.protocol !== "https:") {
     // OpenGeni calls the tool server from its own network; use a tunnel locally.
@@ -857,6 +875,7 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
     ...toolServer,
+    url: configured!,
     id,
     secret: resolveToolTokenSecret(toolServer.secret),
   };

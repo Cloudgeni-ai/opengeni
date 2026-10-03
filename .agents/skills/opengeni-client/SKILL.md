@@ -159,7 +159,8 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   // Acme's own tools as the signed-in user: the proxy attaches this MCP endpoint to
   // every chat with a short-lived per-user token and refreshes it on every message,
   // approval, and answer. Writes listed in `ask` wait for the user's approval.
-  toolServer: { url: `${PUBLIC_BASE_URL}/api/mcp`, approvals: { ask: ["update_ticket"] } },
+  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS), also read by verifyToolRequest.
+  toolServer: { approvals: { ask: ["update_ticket"] } }, // list the write tools
   // Every forwarded message: server-owned page context.
   beforeForwardMessage: () => ({
     modelContext: `Today ${new Date().toISOString().slice(0, 10)}, time zone ${tz}`,

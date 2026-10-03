@@ -7,20 +7,26 @@
  * endpoint calls {@link verifyToolRequest} on every request and scopes all data
  * access to the returned identity, never to ids the model supplied.
  *
- * Wire format (for non-Node verifiers): an HS256 JWT in `Authorization: Bearer`.
- * The HMAC key is `HMAC-SHA256(key = secret, message = "opengeni-tool-token:v1")`,
- * where `secret` is `OPENGENI_API_KEY` unless one was configured explicitly.
- * Claims: `iss` = `"opengeni-session-proxy"`, `aud` = the tool server URL, `sub` =
- * the external user id, `workspace_id`, `source`, optional `tenant`, `iat`, `exp`.
+ * Wire format (for non-Node verifiers): an HS256 JWT in `Authorization: Bearer`,
+ * signed with the hex key from {@link deriveToolTokenKey} (`HMAC-SHA256(key =
+ * secret, message = "opengeni-tool-token:v1")`, where `secret` is
+ * `OPENGENI_API_KEY` unless configured). Give a non-Node verifier that derived
+ * key, never the organization key. Claims: `iss` = `"opengeni-session-proxy"`,
+ * `aud` = the tool server URL, `sub` = the external user id, `workspace_id`,
+ * `source`, optional `tenant`, `iat`, `exp`.
  */
 
 /** `iss` of every tool token. */
 export const TOOL_TOKEN_ISSUER = "opengeni-session-proxy";
 /** HMAC message used to derive the signing key from the secret. */
 export const TOOL_TOKEN_KEY_LABEL = "opengeni-tool-token:v1";
-/** Default token lifetime: one hour, refreshed on every message. */
-export const TOOL_TOKEN_DEFAULT_TTL_SECONDS = 60 * 60;
-const MAX_TTL_SECONDS = 24 * 60 * 60;
+/** Default token lifetime: 24 hours, refreshed on every message, approval, and answer. */
+export const TOOL_TOKEN_DEFAULT_TTL_SECONDS = 24 * 60 * 60;
+const MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
+/** OpenGeni's per-value limit for session MCP credential headers. */
+const MAX_HEADER_VALUE_LENGTH = 4096;
+/** Default `toolServer.url` and `verifyToolRequest` audience. */
+export const TOOL_SERVER_URL_ENV = "OPENGENI_TOOL_SERVER_URL";
 const CLOCK_SKEW_SECONDS = 60;
 
 /** The user a verified tool request acts for. */
@@ -39,8 +45,8 @@ export type VerifyToolRequestOptions = {
   /** Signing secret. Defaults to `OPENGENI_API_KEY`; must match the proxy's. */
   secret?: string | undefined;
   /**
-   * Exact tool server URL the token must be issued for (`toolServer.url`).
-   * Defaults to matching the token audience's path against this request's path.
+   * Exact tool server URL the token must be issued for (the proxy's
+   * `toolServer.url`). Defaults to `OPENGENI_TOOL_SERVER_URL`.
    */
   audience?: string | undefined;
 };
@@ -87,7 +93,13 @@ export async function verifyToolRequest(
   options: VerifyToolRequestOptions = {},
 ): Promise<ToolRequestIdentity> {
   const key = await signingKey(resolveToolTokenSecret(options.secret));
-  const { authorization, path } = requestParts(request);
+  const audience = options.audience ?? environment(TOOL_SERVER_URL_ENV);
+  if (!audience) {
+    throw new TypeError(
+      `verifyToolRequest needs the tool server URL: pass { audience } or set ${TOOL_SERVER_URL_ENV}.`,
+    );
+  }
+  const authorization = requestAuthorization(request);
   const match = /^Bearer[ ]+([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(
     authorization?.trim() ?? "",
   );
@@ -127,7 +139,7 @@ export async function verifyToolRequest(
   if (typeof iat !== "number" || iat > now + CLOCK_SKEW_SECONDS) {
     throw new ToolRequestError("token_invalid");
   }
-  if (typeof aud !== "string" || !audienceMatches(aud, options.audience, path)) {
+  if (aud !== audience) {
     throw new ToolRequestError("token_audience");
   }
   if (
@@ -182,15 +194,28 @@ export async function mintToolToken(input: {
     key,
     new TextEncoder().encode(`${header}.${payload}`),
   );
-  return `${header}.${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
+  const token = `${header}.${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
+  if (`Bearer ${token}`.length > MAX_HEADER_VALUE_LENGTH) {
+    throw new TypeError(
+      `Tool token exceeds OpenGeni's ${MAX_HEADER_VALUE_LENGTH}-character header limit; shorten the user, tenant, or URL.`,
+    );
+  }
+  return token;
+}
+
+/**
+ * The hex HS256 key tool tokens are signed with. Give this (not the
+ * organization key) to a tool server written in Python, Ruby, Go, and so on.
+ */
+export async function deriveToolTokenKey(secret?: string): Promise<string> {
+  return [...(await derivedKeyBytes(resolveToolTokenSecret(secret)))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /** The configured secret, else `OPENGENI_API_KEY`. Throws when neither is set. */
 export function resolveToolTokenSecret(secret: string | undefined): string {
-  const resolved =
-    secret ??
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-      ?.OPENGENI_API_KEY;
+  const resolved = secret ?? environment("OPENGENI_API_KEY");
   if (!resolved) {
     throw new TypeError(
       "Tool tokens need a signing secret: set OPENGENI_API_KEY, or pass the same `secret` to the session proxy's toolServer and verifyToolRequest.",
@@ -199,33 +224,41 @@ export function resolveToolTokenSecret(secret: string | undefined): string {
   return resolved;
 }
 
+function environment(name: string): string | undefined {
+  return (
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+      name
+    ] || undefined
+  );
+}
+
+async function derivedKeyBytes(secret: string): Promise<Uint8Array<ArrayBuffer>> {
+  const root = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return new Uint8Array(
+    await crypto.subtle.sign("HMAC", root, new TextEncoder().encode(TOOL_TOKEN_KEY_LABEL)),
+  );
+}
+
 const keys = new Map<string, Promise<CryptoKey>>();
 
 /** HS256 key derived from the secret, so the raw secret never signs tokens itself. */
 function signingKey(secret: string): Promise<CryptoKey> {
   let key = keys.get(secret);
   if (!key) {
-    key = (async () => {
-      const root = await crypto.subtle.importKey(
+    key = (async () =>
+      await crypto.subtle.importKey(
         "raw",
-        new TextEncoder().encode(secret),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"],
-      );
-      const derived = await crypto.subtle.sign(
-        "HMAC",
-        root,
-        new TextEncoder().encode(TOOL_TOKEN_KEY_LABEL),
-      );
-      return await crypto.subtle.importKey(
-        "raw",
-        derived,
+        await derivedKeyBytes(secret),
         { name: "HMAC", hash: "SHA-256" },
         false,
         ["sign", "verify"],
-      );
-    })();
+      ))();
     key.catch(() => keys.delete(secret));
     if (keys.size >= 16) keys.delete(keys.keys().next().value!);
     keys.set(secret, key);
@@ -233,45 +266,16 @@ function signingKey(secret: string): Promise<CryptoKey> {
   return key;
 }
 
-function requestParts(request: ToolRequestLike): {
-  authorization: string | undefined;
-  path: string | undefined;
-} {
+function requestAuthorization(request: ToolRequestLike): string | undefined {
   if (typeof Request !== "undefined" && request instanceof Request) {
-    return {
-      authorization: request.headers.get("authorization") ?? undefined,
-      path: new URL(request.url).pathname,
-    };
+    return request.headers.get("authorization") ?? undefined;
   }
-  const node = request as Exclude<ToolRequestLike, Request>;
-  const headers = node.headers as unknown;
+  const headers = (request as Exclude<ToolRequestLike, Request>).headers as unknown;
   const raw =
     headers && typeof (headers as Headers).get === "function"
       ? ((headers as Headers).get("authorization") ?? undefined)
       : (headers as Record<string, string | string[] | undefined>)?.authorization;
-  const authorization = Array.isArray(raw) ? undefined : raw;
-  const target = node.originalUrl ?? node.url;
-  return {
-    authorization,
-    path: target === undefined ? undefined : new URL(target, "http://localhost").pathname,
-  };
-}
-
-function audienceMatches(
-  aud: string,
-  expected: string | undefined,
-  requestPath: string | undefined,
-): boolean {
-  if (expected !== undefined) return aud === expected;
-  if (requestPath === undefined) return false;
-  let audiencePath: string;
-  try {
-    audiencePath = new URL(aud).pathname;
-  } catch {
-    return false;
-  }
-  const trim = (path: string) => path.replace(/\/+$/, "") || "/";
-  return trim(audiencePath) === trim(requestPath);
+  return Array.isArray(raw) ? undefined : raw;
 }
 
 function base64UrlJson(value: unknown): string {

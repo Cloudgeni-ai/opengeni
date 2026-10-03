@@ -80,7 +80,7 @@ runtime mechanics keep their own authorization paths.
 ## Per-user tool tokens
 
 On a Node backend that mounts `createSessionProxyHandler`, this is one option:
-`toolServer: { url, approvals?: { ask: [...] } }` attaches the product's MCP
+`toolServer: { url, approvals: { ask: [writeTools] } }` attaches the product's MCP
 endpoint to every session the `createSession` hook creates, mints the
 per-user token from the `resolve` result, and rotates it on every send, steer,
 submit, approval, and answer. The endpoint calls `verifyToolRequest(request)`

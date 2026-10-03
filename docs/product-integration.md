@@ -848,9 +848,12 @@ server as a per-session `mcpServers` entry with an HS256 bearer token for the
 user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
 explicit list). It rotates that token through `mcpCredentialUpdates` on every
 send, steer, composer submit, approval decision, and human-input answer, only
-for sessions that carry this exact server. The signing key is derived from
-`OPENGENI_API_KEY` (or an explicit `secret` on both sides); `aud` binds the token
-to the tool URL. Members need `mcp_servers:attach`. A non-Node tool server
+for sessions that carry this exact server, and only when the chat's creator acts
+(tools act as the creator, also in shared chats). Tokens last 24 hours by default.
+The signing key is derived from `OPENGENI_API_KEY` (or an explicit `secret` on
+both sides; `deriveToolTokenKey()` gives non-Node verifiers that key); `aud` is
+the full tool URL, which `OPENGENI_TOOL_SERVER_URL` can supply to both sides.
+List write tools in `approvals.ask`. Members need `mcp_servers:attach`. A non-Node tool server
 verifies the same documented JWT (`docs-site/integrate/your-data.mdx`); runnable
 reference: [`examples/tool-server`](../examples/tool-server/README.md).
 

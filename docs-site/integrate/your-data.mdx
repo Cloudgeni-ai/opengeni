@@ -29,12 +29,12 @@ Build an MCP endpoint with any MCP library and let the session proxy handle the 
       createSession,
       toolServer: {
         url: "https://app.example.com/api/mcp", // public HTTPS: OpenGeni calls it
-        approvals: { ask: ["rename_post"] }, // the user approves these before they run
+        approvals: { ask: ["rename_post"] }, // list your write tools: the user approves each call
       },
     });
     ```
 
-    Tools not listed in `approvals.ask` run without asking (`ask: true` gates every tool). The token is signed with a key derived from `OPENGENI_API_KEY`; to use another secret, pass the same `secret` to `toolServer` and `verifyToolRequest`.
+    Or set `OPENGENI_TOOL_SERVER_URL` once and omit `url`: both the proxy and `verifyToolRequest` read it. Tools not listed in `approvals.ask` run without asking (`ask: true` gates every tool). Tokens last 24 hours and refresh on every message, approval, and answer. Tools act as the user who started the chat, also in a shared chat. The token is signed with a key derived from `OPENGENI_API_KEY`; nothing else to configure.
 
   </Step>
   <Step title="Serve your tools, scoped to the verified user">
@@ -49,7 +49,7 @@ Build an MCP endpoint with any MCP library and let the session proxy handle the 
     export async function mcp(request: Request): Promise<Response> {
       let user: string;
       try {
-        ({ user } = await verifyToolRequest(request)); // also: tenant, workspaceId
+        ({ user } = await verifyToolRequest(request)); // checks aud = OPENGENI_TOOL_SERVER_URL; or pass { audience }
       } catch (error) {
         if (error instanceof ToolRequestError) return error.toResponse(); // 401
         throw error;
@@ -75,16 +75,14 @@ Build an MCP endpoint with any MCP library and let the session proxy handle the 
 A runnable Express version, with a cloudflared tunnel and an end-to-end script, is in [`examples/tool-server`](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/tool-server).
 
 <Accordion title="How the token works (verify it from Python, Rails, Go...)">
-  It is a standard HS256 JWT in `Authorization: Bearer`. The HMAC key is `HMAC-SHA256(key = OPENGENI_API_KEY, message = "opengeni-tool-token:v1")`. Claims: `iss` `"opengeni-session-proxy"`, `aud` the exact `toolServer.url`, `sub` the user id `resolve` returned, optional `tenant`, `workspace_id`, `source`, `iat`, `exp` (one hour by default, `ttlSeconds` to change).
+  It is a standard HS256 JWT in `Authorization: Bearer`. Claims: `iss` `"opengeni-session-proxy"`, `aud` the exact tool server URL, `sub` the user id `resolve` returned, optional `tenant`, `workspace_id`, `source`, `iat`, `exp` (24 hours by default, `ttlSeconds` to change). Print the signing key once on the Node side with `await deriveToolTokenKey()` from `@opengeni/sdk/tool-auth` and store it as `OPENGENI_TOOL_TOKEN_KEY` in the other service; never give it the organization key.
 
 ```python
-key = hmac.new(OPENGENI_API_KEY.encode(), b"opengeni-tool-token:v1", hashlib.sha256).digest()
+key = bytes.fromhex(os.environ["OPENGENI_TOOL_TOKEN_KEY"])
 claims = jwt.decode(token, key, algorithms=["HS256"], issuer="opengeni-session-proxy",
                     audience="https://app.example.com/api/mcp")  # PyJWT
 user, tenant = claims["sub"], claims.get("tenant")
 ```
-
-The token rotates only when the user sends a message, approves, or answers. A turn that runs past `exp` without one gets `401` from your tools; raise `ttlSeconds` (up to 24 hours) for long-running agents. In a shared chat the token carries whoever last sent a message.
 
 </Accordion>
 

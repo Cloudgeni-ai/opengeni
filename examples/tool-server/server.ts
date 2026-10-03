@@ -69,7 +69,7 @@ const og = new OpenGeniClient({
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 const proxy = createSessionProxyHandler(og, {
-  chats: "shared",
+  chats: "private",
   // Demo auth: a real product reads its own session cookie here.
   resolve: (request) => {
     const user = request.headers.get("x-demo-user");
@@ -87,10 +87,9 @@ const proxy = createSessionProxyHandler(og, {
     firstPartyMcpTools: [],
     sandboxBackend: "none",
   }),
-  toolServer: {
-    url: `${process.env.PUBLIC_BASE_URL}/api/mcp`, // OpenGeni must reach it over HTTPS
-    approvals: { ask: ["rename_post"] }, // writes wait for the user's approval
-  },
+  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS; OpenGeni calls it),
+  // which verifyToolRequest also checks as the token audience.
+  toolServer: { approvals: { ask: ["rename_post"] } }, // list your write tools here
 });
 
 const app = express();

@@ -12,8 +12,8 @@ or a second auth system.
 createSessionProxyHandler(og, {
   resolve, createSession, // unchanged; the token carries what resolve returns
   toolServer: {
-    url: `${process.env.PUBLIC_BASE_URL}/api/mcp`, // public HTTPS; tunnel locally
-    approvals: { ask: ["rename_post"] }, // writes: the user approves each call
+    // url: defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS; tunnel locally)
+    approvals: { ask: ["rename_post"] }, // list your write tools: the user approves each call
   },
 });
 ```
@@ -29,7 +29,7 @@ import { z } from "zod";
 export async function mcp(request: Request): Promise<Response> {
   let user: string;
   try {
-    ({ user } = await verifyToolRequest(request)); // also tenant, workspaceId
+    ({ user } = await verifyToolRequest(request)); // aud = OPENGENI_TOOL_SERVER_URL, or pass { audience }
   } catch (error) {
     if (error instanceof ToolRequestError) return error.toResponse(); // 401
     throw error;
@@ -56,15 +56,18 @@ send, steer, composer submit, approval decisions, and human-input answers, and
 only for sessions that carry this exact server and URL. Members need
 `mcp_servers:attach`.
 
-Token facts: HS256 JWT, key `HMAC-SHA256(key = OPENGENI_API_KEY, message =
-"opengeni-tool-token:v1")` (or the same explicit `secret` on both sides),
-`iss` `"opengeni-session-proxy"`, `aud` the exact tool URL, `sub` the external
-user id, optional `tenant`, `workspace_id`, `source`, `exp` one hour by default
-(`ttlSeconds`, at most 24 h). A non-Node tool server verifies it with any JWT
-library, for example PyJWT `jwt.decode(token, key, algorithms=["HS256"],
-issuer=..., audience=...)`. `verifyToolRequest` checks the audience path
-against the request path by default (tunnels rewrite the host); pass
-`audience` for an exact URL match. Missing secret is a startup `TypeError`.
+Token facts: HS256 JWT, `iss` `"opengeni-session-proxy"`, `aud` the exact tool
+URL (`toolServer.url` or `OPENGENI_TOOL_SERVER_URL`; `verifyToolRequest` compares
+the full URL), `sub` the external user id, optional `tenant`, `workspace_id`,
+`source`, `exp` 24 hours by default (`ttlSeconds`, at most 7 days), refreshed on
+every message, approval, and answer. The key derives from `OPENGENI_API_KEY`, so
+Node needs no extra configuration. A non-Node tool server gets the hex key from
+`await deriveToolTokenKey()` (store it as its own secret, never the organization
+key) and verifies with any JWT library, for example PyJWT
+`jwt.decode(token, bytes.fromhex(key), algorithms=["HS256"], issuer=..., audience=...)`.
+Tools act as the user who started the chat, also in shared chats. Approvals are
+opt-in: list every write tool in `approvals.ask`. A missing secret or URL is a
+startup `TypeError`.
 
 Still authorize per call: the token proves who the user is, not what they may
 touch now. Scope every query to the verified user and tenant, treat model-sent

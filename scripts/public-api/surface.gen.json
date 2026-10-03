@@ -27654,8 +27654,10 @@
       "WorkspaceIdTarget": "type"
     },
     "@opengeni/sdk/tool-auth": {
+      "deriveToolTokenKey": "value",
       "mintToolToken": "value",
       "resolveToolTokenSecret": "value",
+      "TOOL_SERVER_URL_ENV": "value",
       "TOOL_TOKEN_DEFAULT_TTL_SECONDS": "value",
       "TOOL_TOKEN_ISSUER": "value",
       "TOOL_TOKEN_KEY_LABEL": "value",

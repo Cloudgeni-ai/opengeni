@@ -224,10 +224,13 @@ const { user, tenant, workspaceId } = await verifyToolRequest(request); // or To
 ```
 
 Scope every tool to the verified `user` and `tenant`; never trust ids the model
-sends. Members need `mcp_servers:attach`. Tokens are HS256 JWTs signed with a key
-derived from `OPENGENI_API_KEY` (or the same `secret` on both sides), bound to
-the tool URL by `aud`, and valid for `ttlSeconds` (default 3600); the format is
-documented in `src/tool-auth.ts` for non-Node verifiers. See
+sends; list write tools in `approvals.ask`. Tools act as the chat's creator, also
+in shared chats. Members need `mcp_servers:attach`. Tokens are HS256 JWTs signed
+with a key derived from `OPENGENI_API_KEY` (or the same `secret` on both sides),
+bound to the full tool URL by `aud` (set `OPENGENI_TOOL_SERVER_URL` to configure
+both sides at once), and valid for `ttlSeconds` (default 24 hours). Non-Node
+verifiers use the hex key from `deriveToolTokenKey()`, never the organization key;
+the format is documented in `src/tool-auth.ts`. See
 `examples/tool-server` for a runnable Express version.
 
 `beforeForwardMessage(message, context)` runs before every forwarded user

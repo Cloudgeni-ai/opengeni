@@ -13,7 +13,7 @@ message and approval, and `verifyToolRequest` checks it on every MCP call.
 # OPENGENI_API_KEY=ogk_...          # full-access organization key, server only
 bun run setup                       # prints OPENGENI_WORKSPACE_ID=...; add it to .env.local
 cloudflared tunnel --url http://localhost:4101   # OpenGeni must reach /api/mcp over HTTPS
-# add PUBLIC_BASE_URL=https://<name>.trycloudflare.com to .env.local
+# add OPENGENI_TOOL_SERVER_URL=https://<name>.trycloudflare.com/api/mcp to .env.local
 bun run dev                         # http://localhost:4101
 bun run e2e ada                     # chat through the proxy as "ada"
 ```
