@@ -10,6 +10,7 @@ import {
 import { hasPermission, requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireNotAgent } from "../http/acting-person";
 import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "./codex";
@@ -98,6 +99,7 @@ async function requireOrganizationPerson(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<{ context: AccessContext; organizationId: string; admin: boolean }> {
+  requireNotAgent(c, "Managing connected agents");
   if (
     deps.settings.productAccessMode !== "managed" ||
     !c.req.header("cookie") ||

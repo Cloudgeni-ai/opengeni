@@ -52,6 +52,8 @@ describe("organization MCP server end to end", () => {
         betterAuthSecret: "organization-mcp-e2e-secret-32-bytes-long",
         publicBaseUrl: origin,
         mcpOauthEnabled: true,
+        claudeSubscriptionEnabled: true,
+        integrationsEnabled: true,
       }),
       db: client.db,
       bus: new MemoryEventBus(),
@@ -274,6 +276,49 @@ describe("organization MCP server end to end", () => {
     });
     expect(settings.value).toMatchObject({ status: 200 });
 
+    // Organization work too, as the person, without a browser: create a
+    // workspace, read the organization and its members.
+    const createdWorkspace = await mcp("opengeni_action_call", {
+      id: "POST /v1/organizations/:organizationId/workspaces",
+      pathParameters: { organizationId },
+      body: { name: "Agent workspace", operationId: crypto.randomUUID() },
+    });
+    expect(createdWorkspace.isError).toBe(false);
+    expect((createdWorkspace.value as { status: number }).status).toBeLessThan(300);
+    const overview = await mcp("opengeni_action_call", {
+      id: "GET /v1/organizations/:organizationId/overview",
+      pathParameters: { organizationId },
+    });
+    expect(overview.value).toMatchObject({ status: 200 });
+    expect(overview.text).toContain("Agent workspace");
+    const members = await mcp("opengeni_action_call", {
+      id: "GET /v1/organizations/:organizationId/members",
+      pathParameters: { organizationId },
+    });
+    expect(members.value).toMatchObject({ status: 200 });
+    expect(members.text).toContain(email);
+    // Another organization reads as not found.
+    const elsewhere = await mcp("opengeni_action_call", {
+      id: "GET /v1/organizations/:organizationId/overview",
+      pathParameters: { organizationId: crypto.randomUUID() },
+    });
+    expect(elsewhere.value).toMatchObject({ status: 404 });
+    // Provider sign-in stays with the person in the browser.
+    const providerSignIn = await mcp("opengeni_action_call", {
+      id: "POST /v1/organizations/:organizationId/model-providers/claude_subscription/oauth/start",
+      pathParameters: { organizationId },
+      body: {},
+    });
+    expect(providerSignIn.value).toMatchObject({ status: 403 });
+    expect(providerSignIn.text).toContain("in a browser");
+    const integrationSignIn = await mcp("opengeni_action_call", {
+      id: "POST /v1/workspaces/:workspaceId/connections/oauth/start",
+      pathParameters: { workspaceId: personalWorkspaceId },
+      body: {},
+    });
+    expect(integrationSignIn.value).toMatchObject({ status: 403 });
+    expect(integrationSignIn.text).toContain("in a browser");
+
     // Narrowing to selected workspaces takes effect on the next call.
     const narrowed = await app.request(
       `/v1/organizations/${organizationId}/mcp-connections/${connections[0]!.id}`,
@@ -283,7 +328,7 @@ describe("organization MCP server end to end", () => {
         body: JSON.stringify({
           access: {
             preset: "custom",
-            permissions: ["account:read", "workspace:read"],
+            permissions: ["account:read", "workspace:read", "sessions:create"],
             workspaceScope: { kind: "selected", workspaceIds: [] },
           },
         }),
@@ -295,6 +340,22 @@ describe("organization MCP server end to end", () => {
       pathParameters: { workspaceId: personalWorkspaceId },
     });
     expect(outside.isError).toBe(true);
+    // Custom without account:admin: reading the organization works, changing it doesn't.
+    expect(
+      (
+        await mcp("opengeni_action_call", {
+          id: "GET /v1/organizations/:organizationId/overview",
+          pathParameters: { organizationId },
+        })
+      ).value,
+    ).toMatchObject({ status: 200 });
+    const notAdmin = await mcp("opengeni_action_call", {
+      id: "POST /v1/organizations/:organizationId/workspaces",
+      pathParameters: { organizationId },
+      body: { name: "Not allowed", operationId: crypto.randomUUID() },
+    });
+    expect(notAdmin.value).toMatchObject({ status: 403 });
+    expect(notAdmin.text).toContain("account:admin");
 
     // Disconnect: the token is refused right away.
     const disconnected = await app.request(

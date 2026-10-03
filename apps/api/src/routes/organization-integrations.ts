@@ -21,6 +21,7 @@ import {
   requireCanonicalLocalAccountAdministrator,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  isVerifiedDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import {
   createOrganizationWebhook,
@@ -89,7 +90,11 @@ export function requireOrganizationIntegrationAdmin(
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     if (
       !authorization ||
-      !(authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) ||
+      !(
+        authorization.canonicalManagedHumanSession ||
+        authorization.canonicalLocalHumanSession ||
+        isVerifiedDelegatedHumanAuthorization(authorization)
+      ) ||
       authorization.grant.accountId !== organizationId ||
       authorization.authenticatedSubjectId !== context.subjectId ||
       context.workspaceGrants.some((candidate) => candidate.metadata?.delegated === true)

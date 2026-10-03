@@ -1,4 +1,4 @@
-import { knowledgeContextForGateway } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -137,6 +137,7 @@ export function requireWorkspaceToolGatewayAuthorization(
   if (
     !authorization.canonicalManagedHumanSession &&
     !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization) &&
     !externalActorContinuationForAuthorization(authorization)
   ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
