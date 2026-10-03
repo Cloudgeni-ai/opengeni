@@ -381,8 +381,9 @@ machine-continuation anchor when needed, without changing canonical roles/conten
 `anthropic-request-error.ts` provides bounded durable diagnostics; transport
 exception text stays structural.
 
-Cross-boundary enums are additive within major releases unless the release
-train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
+Model admission overlaps pooled metadata, preserving authority;
+transaction handles stay serial. Enums remain additive within major releases;
+parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 `packages/core/src/model-catalog.ts`, `packages/core/src/default-session-model.ts`,

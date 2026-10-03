@@ -3564,6 +3564,12 @@ keyed and unkeyed shell insertion. Conditional work emits a child only when it
 runs: an explicit model omits default resolution, while Site origin without
 headers does no persistence work. These boundaries do not cover every internal
 selection check; gaps and parent/child spans must not be added as sequential costs.
+Fresh model selection overlaps the existing policy/readiness batch with independent
+Claude catalog metadata reads on pooled connections. Subscription activation still
+joins its exact subject's readiness read; both batches are observed before admission
+continues, with input-batch errors taking precedence. Transaction handles retain
+serial batch ordering. No mutable authority is cached or query omitted; removed
+serialization is structural evidence, not measured first-token savings.
 The existing
 `core.session_start.initialize|event_fanout|workflow_wake|session_reload`
 children still cover atomic initialization, post-commit fanout,
