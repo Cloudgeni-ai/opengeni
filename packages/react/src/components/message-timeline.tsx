@@ -341,7 +341,9 @@ const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Floating timeline navigation: two identical small round arrow buttons at fixed
  * spots, centered on the conversation. Back to your message floats just below
- * the top edge, Jump to latest just above the bottom edge. They never measure or
+ * the pinned work-header strip (32px, 44px on coarse pointers) so that strip
+ * stays a full-width target; Jump to latest floats just above the bottom edge.
+ * They never measure or
  * dodge the content beneath them (floating over a sliver of text is fine), so
  * they cannot wander as rows stream in or the host resizes. Coarse pointers get
  * a larger invisible hit area instead of a larger button.
@@ -2594,7 +2596,7 @@ export function MessageTimeline({
 
                       <div
                         data-og-timeline-nav="top"
-                        className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center"
+                        className="pointer-events-none absolute inset-x-0 top-10 z-10 flex justify-center pointer-coarse:top-13"
                       >
                         <AnimatePresence>
                           {questionNav ? (

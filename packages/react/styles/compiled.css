@@ -6215,6 +6215,11 @@
       }
     }
   }
+:where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {
+    @media (pointer: coarse) {
+      top: calc(var(--spacing) * 13);
+    }
+  }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {
     @media (pointer: coarse) {
       margin-inline: calc(19px * -1);
