@@ -665,7 +665,7 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
-3. Initial NATS fanout/immediate Temporal wake overlap post-commit;
+3. Child spans time creation; fanout/wake overlap post-commit;
    both settle before response reload. Notifications never prove admission:
    queued turns/pending Agent Steer cannot acknowledge durable wakes without
    attempt-fenced Postgres claims.

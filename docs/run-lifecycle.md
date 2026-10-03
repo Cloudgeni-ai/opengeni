@@ -3513,8 +3513,19 @@ where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
 critical path. Initial session creation adds content-free
+`api.session_create.authorization|body_read|site_origin|core_create|response_projection`
+child spans within the existing HTTP span. Authorization still precedes body
+handling and creation; response policy projection remains outside the create
+rejection envelope, after committed creation. Core children
+`workspace_read|model_catalog_initial|default_model|model_catalog_effective|capability_settings|initiator_freeze|allowance|shell_insert`
+attribute existing pre-initialization reads and admission work, including both
+keyed and unkeyed shell insertion. Conditional work emits a child only when it
+runs: an explicit model omits default resolution, while Site origin without
+headers does no persistence work. These boundaries do not cover every internal
+selection check; gaps and parent/child spans must not be added as sequential costs.
+The existing
 `core.session_start.initialize|event_fanout|workflow_wake|session_reload`
-child spans around the existing atomic initialization, post-commit fanout,
+children still cover atomic initialization, post-commit fanout,
 immediate workflow signal plus wake-ledger acknowledgement, and response reload.
 The initial turn, authority, event log and wake outbox still commit atomically
 before either notification. Initial live fanout and the immediate durable-revision
