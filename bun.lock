@@ -816,6 +816,7 @@
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch",
   },
   "overrides": {
     "@codemirror/state": "6.7.1",
