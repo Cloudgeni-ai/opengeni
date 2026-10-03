@@ -500,6 +500,10 @@ describe("Insights response contracts", () => {
   });
 
   test("truly empty priors stay null and zero-length priors still reject ledger money", () => {
+    const normalPrior = measures();
+    expect(InsightsUsageResponse.parse({ ...response(), prior: normalPrior }).prior).toEqual(
+      normalPrior,
+    );
     expect(InsightsUsageResponse.parse({ ...response(), prior: null }).prior).toBeNull();
     expect(InsightsUsageResponse.safeParse({ ...response(), prior: emptyMeasures() }).success).toBe(
       false,
