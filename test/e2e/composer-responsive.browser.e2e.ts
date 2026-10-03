@@ -167,10 +167,12 @@ describe("container-responsive public composer demo", () => {
         const styles = await reply.evaluate((element) => {
           const conversation = element.closest("[data-og-conversation]")!;
           return {
+            theme: conversation.closest("[data-og-theme]")?.getAttribute("data-og-theme"),
             foreground: getComputedStyle(element).color,
             background: getComputedStyle(conversation).backgroundColor,
           };
         });
+        expect(styles.theme).toBe(theme);
         expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
         expect(styles.foreground).not.toBe(styles.background);
         colors.push(styles.foreground);

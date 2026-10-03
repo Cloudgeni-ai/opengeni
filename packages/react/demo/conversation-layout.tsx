@@ -78,10 +78,11 @@ function append() {
 }
 function App() {
   const [height, setHeight] = useState(500);
+  const requestedTheme = new URLSearchParams(location.search).get("theme");
   return (
     <main
       data-og-theme={
-        new URLSearchParams(location.search).get("theme") === "light" ? "light" : undefined
+        requestedTheme === "light" || requestedTheme === "dark" ? requestedTheme : undefined
       }
       style={{ width: "min(760px,100%)", background: "#fffdf9", padding: 16 }}
     >

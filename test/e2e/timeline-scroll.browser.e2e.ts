@@ -864,6 +864,26 @@ describe("timeline scroll ownership browser regression", () => {
     expect(after.gap).toBeCloseTo(atTop.gap, 0);
     expect(after.pin).toBe("false");
     expect(afterAnchorTop).toBeCloseTo(beforeAnchorTop, 0);
+
+    // Reader ownership stays unpinned, but the restored gap is inside the
+    // near-tip threshold. Wait for the exit fade instead of counting its DOM.
+    await page.locator("[data-og-jump-to-latest]").waitFor({ state: "detached", timeout: 5_000 });
+    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(0);
+
+    // New content can move that same stationary reader meaningfully away
+    // from the live tip. The control must return without changing the anchor.
+    await page.evaluate(() => window.timelineScrollHarness!.append());
+    await page.locator("[data-og-jump-to-latest]").waitFor({ timeout: 5_000 });
+    const afterAppend = await scroller.evaluate((node) => ({
+      gap: node.scrollHeight - node.clientHeight - node.scrollTop,
+      pin: node.getAttribute("data-og-bottom-follow"),
+    }));
+    expect(afterAppend.gap).toBeGreaterThan(48);
+    expect(afterAppend.pin).toBe("false");
+    expect(await anchor.evaluate((node) => node.getBoundingClientRect().top)).toBeCloseTo(
+      beforeAnchorTop,
+      0,
+    );
     expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(1);
   }, 30_000);
 
