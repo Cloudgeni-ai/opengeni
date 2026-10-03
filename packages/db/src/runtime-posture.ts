@@ -44,6 +44,14 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
+    "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+    "Insights unified usage projection is missing or unsafe",
+  ],
+  [
+    "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+    "Insights unified visible calls projection is missing or unsafe",
+  ],
+  [
     "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
     "Insights complete usage amount projection is missing or unsafe",
   ],

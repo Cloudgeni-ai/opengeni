@@ -810,6 +810,7 @@ export * from "./integration-facets";
 export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
+export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
@@ -5380,6 +5381,14 @@ export async function recordModelCallFact(
     pricedCostMicros: number;
     estimatedProviderCostMicros?: number | null;
     equivalentCreditCostMicros?: number | null;
+    /** Captured classes must conserve the already-recorded provider total. */
+    listByClassMicros?: {
+      uncachedInput: number;
+      cacheRead: number;
+      cacheWrite: number;
+      output: number;
+    } | null;
+    listByClassApprox?: boolean;
     pricingSource?: "configured_list_price" | "gateway_reported" | null;
     contextContributions?: readonly ModelContextContributionSummary[] | null;
     inputTokens?: number | null;
@@ -5426,6 +5435,18 @@ export async function recordModelCallFact(
     input.contextContributions == null
       ? null
       : ModelContextContributionSummaries.parse(input.contextContributions);
+  const classes = input.listByClassMicros;
+  if (
+    classes != null &&
+    (Object.values(classes).some((value) => !Number.isSafeInteger(value) || value < 0) ||
+      input.estimatedProviderCostMicros == null ||
+      Object.values(classes).reduce((total, value) => total + BigInt(value), 0n) !==
+        BigInt(input.estimatedProviderCostMicros))
+  ) {
+    throw new Error(
+      "recordModelCallFact: list classes must be non-negative safe integers conserving the recorded total",
+    );
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -5480,6 +5501,11 @@ export async function recordModelCallFact(
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
           equivalentCreditCostMicros: input.equivalentCreditCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
+          listUncachedInputCostMicros: classes?.uncachedInput ?? null,
+          listCacheReadCostMicros: classes?.cacheRead ?? null,
+          listCacheWriteCostMicros: classes?.cacheWrite ?? null,
+          listOutputCostMicros: classes?.output ?? null,
+          listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
           occurredAt,
         })
@@ -5498,6 +5524,11 @@ export async function recordModelCallFact(
             estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
             equivalentCreditCostMicros: sql`coalesce(${schema.modelCallFacts.equivalentCreditCostMicros}, excluded.equivalent_credit_cost_micros)`,
             pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
+            listUncachedInputCostMicros: sql`coalesce(${schema.modelCallFacts.listUncachedInputCostMicros}, excluded.list_uncached_input_cost_micros)`,
+            listCacheReadCostMicros: sql`coalesce(${schema.modelCallFacts.listCacheReadCostMicros}, excluded.list_cache_read_cost_micros)`,
+            listCacheWriteCostMicros: sql`coalesce(${schema.modelCallFacts.listCacheWriteCostMicros}, excluded.list_cache_write_cost_micros)`,
+            listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
+            listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
           },
         })

@@ -142,7 +142,9 @@ describe("release schema contract", () => {
     );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
-        sourceContract.migrations.some(
+        sourceContract.migrations.some((migration) => migration.path === "0599_insights_raw_usage_api.sql")
+          ? "0599_insights_raw_usage_api.sql"
+          : sourceContract.migrations.some(
           (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
         )
           ? (sourceContract.migrations.find(
@@ -943,6 +945,9 @@ describe("release schema contract", () => {
     const organizationMcpConnections = completeSourceContract.migrations.some(
       (migration) => migration.path === "0601_organization_mcp_connections.sql",
     );
+    const insightsRawUsageApi = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0599_insights_raw_usage_api.sql",
+    );
     const slackApiRateLimits = completeSourceContract.migrations.some(
       (migration) => migration.path === "0597_slack_api_rate_limits.sql",
     );
@@ -1235,6 +1240,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (organizationMcpConnections ? 1 : 0) +
+        (insightsRawUsageApi ? 1 : 0) +
         (organizationApiKeyAccessPolicy ? 1 : 0) +
         (pausedRecoveryCommandContainment ? 1 : 0) +
         (claudeSubscriptionAccountPools ? 1 : 0) +
@@ -1864,6 +1870,7 @@ describe("release schema contract", () => {
       ...(organizationMcpConnections
         ? { latestMigration: "0601_organization_mcp_connections.sql" }
         : {}),
+      ...(insightsRawUsageApi ? { latestMigration: "0599_insights_raw_usage_api.sql" } : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1957,6 +1964,7 @@ describe("release schema contract", () => {
             "0599_paused_recovery_command_containment.sql",
             "0600_organization_api_key_access_policy.sql",
             "0601_organization_mcp_connections.sql",
+            "0599_insights_raw_usage_api.sql",
           ].includes(migration.path),
       ),
     };
@@ -3267,7 +3275,9 @@ describe("release schema contract", () => {
     // Assert the current rollout frontier before the historical hash probes
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
-      unfilteredSourceContract.migrations.some(
+      unfilteredSourceContract.migrations.some((migration) => migration.path === "0599_insights_raw_usage_api.sql")
+        ? "0599_insights_raw_usage_api.sql"
+        : unfilteredSourceContract.migrations.some(
         (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
       )
         ? (unfilteredSourceContract.migrations.find(
@@ -3793,6 +3803,7 @@ describe("release schema contract", () => {
       "0599_paused_recovery_command_containment.sql",
       "0600_organization_api_key_access_policy.sql",
       "0601_organization_mcp_connections.sql",
+      "0599_insights_raw_usage_api.sql",
     ]);
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
       (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
@@ -4342,6 +4353,7 @@ describe("release schema contract", () => {
       "0599_paused_recovery_command_containment.sql",
       "0600_organization_api_key_access_policy.sql",
       "0601_organization_mcp_connections.sql",
+      "0599_insights_raw_usage_api.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
