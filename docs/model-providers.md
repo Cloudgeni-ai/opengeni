@@ -1272,6 +1272,26 @@ product routes without adding comparison-only prices to debit authority or
 changing frozen execution-definition hashes. Registry prices and explicit
 product-ID overrides still win. External metering never becomes a credit debit.
 
+Forward fact writers may use `calculateModelListUsageCostSnapshot` with
+`priceContextKnown: true` only after establishing the request's price provenance
+(including geography and service tier). Its nullable `listByClassMicros`
+contains integer `uncachedInput`, `cacheRead`, `cacheWrite`, and `output` costs
+summing to **upstream** `providerCostMicros`, before markup. The separate
+`creditCostMicros` remains an equivalent-credit comparison, not charged-class
+attribution. Existing debit/totals-only helpers keep their result shapes.
+
+Class snapshots require observed input/output/read/write counters on every
+provider request. Positive native Claude writes additionally require preserved
+`inputTokensDetails.cache_write_tokens_5m` and `cache_write_tokens_1h` counters
+whose sum equals `cache_write_tokens`. Reviewed native default rates support
+mixed TTLs; a single explicit override supports only its declared TTL, not an
+inferred second price. Unknown counters, TTL, dedicated positive-class prices,
+or latency modifiers produce a null split. Fractional latency scaling uses
+deterministic largest-remainder rounding to preserve the total and sets
+`listByClassApprox: true`. Gateway-reported scalar cost has no authoritative
+class attribution and must retain a null split in the writer. Never run this
+forward helper to reprice historical facts lacking captured class costs.
+
 The added Standard rates were reviewed on 2026-10-03 against
 [OpenAI pricing](https://developers.openai.com/api/docs/pricing),
 [xAI model pricing](https://docs.x.ai/developers/models/grok-4.7),

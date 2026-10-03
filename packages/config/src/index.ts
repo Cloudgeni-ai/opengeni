@@ -1946,6 +1946,20 @@ export type ModelUsageCostBreakdown = {
   creditCostMicros: number;
 };
 
+export type ModelListCostClassesMicros = {
+  uncachedInput: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+};
+
+export type ModelListUsageCostSnapshot = ModelUsageCostBreakdown & {
+  /** Captured upstream list costs, summing to providerCostMicros, never debits. */
+  listByClassMicros: ModelListCostClassesMicros | null;
+  /** True only when a returned class split includes latency rounding allocation. */
+  listByClassApprox: boolean;
+};
+
 export type StaticUsageLimitsConfig = StaticUsageLimits;
 export type EntitlementsConfig = Entitlements;
 
@@ -6456,6 +6470,212 @@ export function calculateModelListUsageCostBreakdown(
 ): ModelUsageCostBreakdown {
   const schedule = configuredModelListPricingSchedules(settings)[model];
   return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+/**
+ * Forward-only list comparison snapshot for the model-call fact writer.
+ * Callers must establish request price provenance (including geography/service
+ * tier) and retain per-request counters. Unknown counters/TTL/modifiers yield
+ * no class split, not invented zeros. Historical facts must not use this helper.
+ * Native Claude details preserve cache_write_tokens_5m and cache_write_tokens_1h.
+ */
+export function calculateModelListUsageCostSnapshot(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode; priceContextKnown?: boolean },
+): ModelListUsageCostSnapshot {
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  const fallback = calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+  const unknown = { ...fallback, listByClassMicros: null, listByClassApprox: false };
+  if (!schedule || !options?.priceContextKnown) return unknown;
+  const entries = usage.requestUsageEntries?.length ? usage.requestUsageEntries : [usage];
+  const classes: ModelListCostClassesMicros = {
+    uncachedInput: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+  };
+  const rawCostByPricing = new Map<ModelPricing, number>();
+  const native = nativeClaudeListWriteContext(settings, model);
+  for (const entry of entries) {
+    if (!knownTokenCounter(entry.inputTokens) || !knownTokenCounter(entry.outputTokens))
+      return unknown;
+    const cached = knownDetailTokenCounter(entry, [
+      "cached_tokens",
+      "cachedInputTokens",
+      "cached_input_tokens",
+    ]);
+    const writes = knownDetailTokenCounter(entry, ["cache_write_tokens", "cacheWriteTokens"], true);
+    if (cached === undefined || writes === undefined || cached + writes > entry.inputTokens)
+      return unknown;
+    const pricing = selectModelPricing(schedule, entry.inputTokens);
+    if (cached > 0 && pricing.cachedInputMicrosPerMillionTokens === undefined) return unknown;
+    if (writes > 0 && pricing.cacheWriteMicrosPerMillionTokens === undefined) return unknown;
+    const costs: ModelListCostClassesMicros = {
+      uncachedInput: Math.ceil(
+        ((entry.inputTokens - cached - writes) * pricing.inputMicrosPerMillionTokens) / 1_000_000,
+      ),
+      cacheRead: Math.ceil((cached * (pricing.cachedInputMicrosPerMillionTokens ?? 0)) / 1_000_000),
+      cacheWrite: Math.ceil((writes * (pricing.cacheWriteMicrosPerMillionTokens ?? 0)) / 1_000_000),
+      output: Math.ceil((entry.outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000),
+    };
+    if (native && writes > 0) {
+      const fiveMinute = knownDetailTokenCounter(entry, ["cache_write_tokens_5m"]);
+      const oneHour = knownDetailTokenCounter(entry, ["cache_write_tokens_1h"]);
+      if (fiveMinute === undefined || oneHour === undefined || fiveMinute + oneHour !== writes)
+        return unknown;
+      if (native.publishedRates) {
+        costs.cacheWrite =
+          Math.ceil((fiveMinute * native.publishedRates.fiveMinute) / 1_000_000) +
+          Math.ceil((oneHour * native.publishedRates.oneHour) / 1_000_000);
+      } else if (
+        !(
+          (native.declaredTtl === "5m" && oneHour === 0) ||
+          (native.declaredTtl === "1h" && fiveMinute === 0)
+        )
+      ) {
+        // A single explicit override cannot establish two different TTL prices.
+        return unknown;
+      }
+    }
+    const raw = sumListCostClasses(costs);
+    rawCostByPricing.set(pricing, (rawCostByPricing.get(pricing) ?? 0) + raw);
+    for (const key of MODEL_LIST_COST_CLASS_KEYS) classes[key] += costs[key];
+  }
+  let providerCostMicros = sumListCostClasses(classes);
+  let creditCostMicros = 0;
+  for (const [pricing, raw] of rawCostByPricing) {
+    creditCostMicros += Math.ceil((raw * (10_000 + (pricing.marginBps ?? 0))) / 10_000);
+  }
+  let listByClassApprox = false;
+  const latencyMode = options.latencyMode ?? "standard";
+  if (latencyMode !== "standard") {
+    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+    const resolved = resolveModelProvider(
+      catalogSettings,
+      canonicalizeConfiguredModelId(catalogSettings, model),
+    );
+    const multiplier = resolved?.model.capabilities.latencyModes.find(
+      (mode) => mode.id === latencyMode && mode.runnable,
+    )?.billingMultiplierBps;
+    if (multiplier === undefined || multiplier <= 0) return unknown;
+    providerCostMicros = Math.ceil((providerCostMicros * multiplier) / 10_000);
+    creditCostMicros = Math.ceil((creditCostMicros * multiplier) / 10_000);
+    const scaled = allocateLatencyListCostClasses(classes, multiplier, providerCostMicros);
+    if (!scaled) return unknown;
+    Object.assign(classes, scaled.classes);
+    listByClassApprox = scaled.approximate;
+  }
+  if (![providerCostMicros, creditCostMicros, ...Object.values(classes)].every(knownTokenCounter))
+    return unknown;
+  return { providerCostMicros, creditCostMicros, listByClassMicros: classes, listByClassApprox };
+}
+
+const MODEL_LIST_COST_CLASS_KEYS = ["uncachedInput", "cacheRead", "cacheWrite", "output"] as const;
+
+function sumListCostClasses(costs: ModelListCostClassesMicros): number {
+  return MODEL_LIST_COST_CLASS_KEYS.reduce((total, key) => total + costs[key], 0);
+}
+
+function knownTokenCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function knownDetailTokenCounter(
+  entry: ModelUsageInput,
+  keys: readonly string[],
+  firstOnly = false,
+): number | undefined {
+  const details = Array.isArray(entry.inputTokensDetails)
+    ? entry.inputTokensDetails
+    : entry.inputTokensDetails
+      ? [entry.inputTokensDetails]
+      : [];
+  if (details.length === 0) return undefined;
+  let total = 0;
+  for (const detail of details) {
+    const present = keys.filter((key) => detail[key] !== undefined);
+    if (present.length === 0) return undefined;
+    for (const key of firstOnly ? present.slice(0, 1) : present) {
+      if (!knownTokenCounter(detail[key])) return undefined;
+      total += detail[key]!;
+    }
+  }
+  return knownTokenCounter(total) ? total : undefined;
+}
+
+function nativeClaudeListWriteContext(
+  settings: Settings,
+  modelId: string,
+):
+  | {
+      declaredTtl: "off" | "5m" | "1h" | undefined;
+      publishedRates?: { fiveMinute: number; oneHour: number };
+    }
+  | undefined {
+  for (const provider of configuredRegistryProviders(settings)) {
+    const model = provider.models.find((candidate) => candidate.id === modelId);
+    if (!model || provider.api !== "anthropic-messages") continue;
+    const result = { declaredTtl: provider.anthropic?.cacheTtl };
+    const upstream = model.upstreamModelId ?? model.id;
+    const overrides = parseModelPricingJson(settings.modelPricingJson);
+    const official =
+      provider.kind === "anthropic-workspace" ||
+      provider.kind === "anthropic-organization" ||
+      provider.kind === "claude-subscription-workspace" ||
+      provider.kind === "claude-subscription-organization" ||
+      (provider.kind === "api-key" &&
+        provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1");
+    const published = defaultModelPricing[upstream]?.default;
+    if (
+      !official ||
+      !claudeNativeModelProfile(upstream) ||
+      !published?.cacheWriteMicrosPerMillionTokens ||
+      model.pricing ||
+      overrides[modelId] !== undefined ||
+      overrides[upstream] !== undefined
+    )
+      return result;
+    return {
+      ...result,
+      publishedRates: {
+        fiveMinute: published.cacheWriteMicrosPerMillionTokens,
+        oneHour: published.inputMicrosPerMillionTokens * 2,
+      },
+    };
+  }
+  return undefined;
+}
+
+/** Deterministic largest-remainder allocation; disclose any fractional scaling. */
+function allocateLatencyListCostClasses(
+  classes: ModelListCostClassesMicros,
+  multiplier: number,
+  target: number,
+): { classes: ModelListCostClassesMicros; approximate: boolean } | undefined {
+  if (
+    !knownTokenCounter(multiplier) ||
+    !knownTokenCounter(target) ||
+    !Object.values(classes).every(knownTokenCounter)
+  )
+    return undefined;
+  const rows = MODEL_LIST_COST_CLASS_KEYS.map((key, index) => {
+    const numerator = BigInt(classes[key]) * BigInt(multiplier);
+    return { key, index, value: Number(numerator / 10_000n), remainder: numerator % 10_000n };
+  });
+  const remaining = target - rows.reduce((total, row) => total + row.value, 0);
+  if (remaining < 0 || remaining > rows.length) return undefined;
+  const ranked = [...rows].sort((a, b) =>
+    a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1,
+  );
+  for (let index = 0; index < remaining; index++) ranked[index]!.value += 1;
+  return {
+    classes: Object.fromEntries(
+      rows.map((row) => [row.key, row.value]),
+    ) as ModelListCostClassesMicros,
+    approximate: rows.some((row) => row.remainder !== 0n),
+  };
 }
 
 function calculateUsageCostBreakdown(
