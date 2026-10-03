@@ -18,6 +18,8 @@ export type HumanInputSurfaceProps = {
   className?: string | undefined;
   /** Forwarded to the active form. Defaults true. */
   autoFocus?: boolean | undefined;
+  /** Forwarded to the active form: yes/no decisions as two buttons. */
+  decisionButtons?: boolean | undefined;
 };
 
 /**
@@ -35,6 +37,7 @@ export function HumanInputSurface({
   messages,
   className,
   autoFocus = true,
+  decisionButtons,
 }: HumanInputSurfaceProps) {
   const batchTotalRef = useRef(0);
 
@@ -75,6 +78,7 @@ export function HumanInputSurface({
     error: error ?? null,
     progressLabel,
     autoFocus,
+    decisionButtons,
     ...(messages ? { messages } : {}),
     onSubmit: (response) => onSubmit(active.id, response),
   };

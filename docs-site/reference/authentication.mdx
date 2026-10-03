@@ -88,11 +88,11 @@ and Personal IDs are rejected. Neither scope includes Personal workspaces.
 
 For existing integrations, the legacy creation selectors remain supported:
 
-| `access`            | Use                                                                                                                                                                         |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"full"` (default)  | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys                                                     |
-| `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                                                               |
-| `"developer_setup"` | What the `opengeni-setup` skill creates while you build: workspaces, members, sessions, and usage allowances, but no key management and only limited permissions for agents |
+| `access`            | Use                                                                                                                                      |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `"full"` (default)  | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys                  |
+| `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                            |
+| `"developer_setup"` | A restricted tier: workspaces, members, sessions, and usage allowances, but no key management. Setup flows use a full-access key instead |
 
 Omitting policy and legacy selectors keeps full legacy semantics. The top-level
 `preset: "developer_setup"` alias also remains available. Do not combine an

@@ -108,7 +108,6 @@ import {
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
   resolveSlackInteractionFirstTaskHint,
-  saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
   settleSlackAppHomeRefresh,
@@ -152,6 +151,7 @@ import {
   type SlackMessageBlock,
   SlackBotOperationConflictError,
   SlackBotProviderError,
+  slackHistoryRateLimited,
 } from "./slack-bot";
 import { slackMrkdwnFromMarkdown } from "./slack-mrkdwn";
 import {
@@ -2571,7 +2571,52 @@ export type SlackInvocationMessageContext = {
   messages: Awaited<ReturnType<OpenGeniSlackBotClient["threadReplies"]>>["messages"];
   nextCursor: string | null;
   kind: "thread" | "channel";
+  unavailable?: "rate_limited" | "attachments_only";
 };
+
+/** Context is optional; only Slack's explicit history throttling may be omitted. */
+export async function loadSlackInvocationMessageContext(
+  client: Pick<OpenGeniSlackBotClient, "threadReplies" | "channelHistory">,
+  entry: Pick<SlackInteractionInboxEntry, "slackChannelId" | "slackThreadTs" | "slackMessageTs">,
+  authorizeRead?: () => Promise<void>,
+  exactMessageOnly = false,
+): Promise<SlackInvocationMessageContext> {
+  const kind = entry.slackThreadTs ? "thread" : "channel";
+  try {
+    const context = entry.slackThreadTs
+      ? await client.threadReplies({
+          channelId: entry.slackChannelId,
+          threadTimestamp: entry.slackThreadTs,
+          limit: exactMessageOnly ? 1 : MAX_SLACK_INVOCATION_CONTEXT_MESSAGES,
+          ...(exactMessageOnly
+            ? {
+                oldest: entry.slackMessageTs,
+                latest: entry.slackMessageTs,
+                inclusive: true,
+              }
+            : {}),
+          ...(authorizeRead ? { authorizeRead } : {}),
+        })
+      : await client.channelHistory({
+          channelId: entry.slackChannelId,
+          latest: entry.slackMessageTs,
+          inclusive: true,
+          limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
+          ...(authorizeRead ? { authorizeRead } : {}),
+        });
+    return {
+      messages: context.messages,
+      nextCursor: context.nextCursor,
+      kind,
+      ...(exactMessageOnly && kind === "thread"
+        ? { unavailable: "attachments_only" as const }
+        : {}),
+    };
+  } catch (error) {
+    if (!slackHistoryRateLimited(error)) throw error;
+    return { messages: [], nextCursor: null, kind, unavailable: "rate_limited" };
+  }
+}
 
 async function prepareSlackInvocationEntry(
   deps: ApiRouteDeps,
@@ -2586,32 +2631,30 @@ async function prepareSlackInvocationEntry(
   attachments: PreparedSlackReactionTask;
   modelContext: string | null;
 }> {
-  const context = entry.slackThreadTs
-    ? await client.threadReplies({
+  // In an unlisted app, the exact attachment message gets the one available
+  // thread-read slot before optional surrounding history does.
+  const context = await loadSlackInvocationMessageContext(
+    client,
+    entry,
+    authorizeRead,
+    entry.hasFiles && deps.settings.slackAccessMode === "limited",
+  );
+  let exactMessage = context.messages.find((message) => message.timestamp === entry.slackMessageTs);
+  if (!exactMessage && entry.hasFiles && entry.slackThreadTs && !context.unavailable) {
+    try {
+      const exact = await client.threadReplies({
         channelId: entry.slackChannelId,
         threadTimestamp: entry.slackThreadTs,
-        limit: MAX_SLACK_INVOCATION_CONTEXT_MESSAGES,
-        ...(authorizeRead ? { authorizeRead } : {}),
-      })
-    : await client.channelHistory({
-        channelId: entry.slackChannelId,
+        oldest: entry.slackMessageTs,
         latest: entry.slackMessageTs,
         inclusive: true,
-        limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
+        limit: 1,
         ...(authorizeRead ? { authorizeRead } : {}),
       });
-  let exactMessage = context.messages.find((message) => message.timestamp === entry.slackMessageTs);
-  if (!exactMessage && entry.hasFiles && entry.slackThreadTs) {
-    const exact = await client.threadReplies({
-      channelId: entry.slackChannelId,
-      threadTimestamp: entry.slackThreadTs,
-      oldest: entry.slackMessageTs,
-      latest: entry.slackMessageTs,
-      inclusive: true,
-      limit: 1,
-      ...(authorizeRead ? { authorizeRead } : {}),
-    });
-    exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
+      exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
+    } catch (error) {
+      if (!slackHistoryRateLimited(error)) throw error;
+    }
   }
   const attachments = exactMessage
     ? await prepareSlackMessageAttachments(
@@ -2633,7 +2676,8 @@ async function prepareSlackInvocationEntry(
       ? slackInvocationModelContext(entry.slackMessageTs, {
           messages: context.messages,
           nextCursor: context.nextCursor,
-          kind: entry.slackThreadTs ? "thread" : "channel",
+          kind: context.kind,
+          ...(context.unavailable ? { unavailable: context.unavailable } : {}),
         })
       : null;
   return {
@@ -2683,6 +2727,15 @@ export function slackInvocationModelContext(
   invocationTimestamp: string,
   context: SlackInvocationMessageContext,
 ) {
+  if (context.unavailable) {
+    return [
+      "A linked, authorized Slack user explicitly mentioned OpenGeni.",
+      "The visible user message on this turn is the exact accepted Slack invocation.",
+      context.unavailable === "rate_limited"
+        ? "Slack's rate limit prevented loading surrounding conversation history. Work from the invocation text; ask the user for any missing context instead of assuming it."
+        : "Only the exact invocation message was fetched to authorize its attachments within Slack's history limit. Surrounding thread history was omitted. Work from the invocation text and imported attachments; ask for any missing context instead of assuming it.",
+    ].join("\n");
+  }
   const surroundingLines = context.messages
     .filter((message) => message.timestamp !== invocationTimestamp)
     .slice(0, MAX_SLACK_INVOCATION_CONTEXT_MESSAGES)
@@ -3046,17 +3099,6 @@ async function processSlackReactionInboxEntry(
       slackChannelId: entry.slackChannelId,
       slackMessageTs: entry.slackMessageTs,
     },
-    saveCheckpoint: async (checkpoint) => {
-      if (!entry.claimHolderId) {
-        throw new Error("Slack reaction inbox checkpoint requires an active claim");
-      }
-      const saved = await saveSlackInteractionInboxReactionCheckpoint(deps.db, {
-        entry,
-        claimHolderId: entry.claimHolderId,
-        checkpoint,
-      });
-      if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
-    },
   });
   const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
   const existing = await getSlackInteractionByConnectionRoute(deps.db, {
@@ -3396,8 +3438,9 @@ export function slackReactionTaskText(
     .slice(0, MAX_SLACK_REACTION_CONTEXT_MESSAGES)
     .filter((message) => message.timestamp !== context.reactedMessage.timestamp)
     .map((message) => slackReactionMessageLine(message, false));
-  const truncationNotice =
-    "The containing thread was truncated at the bounded Slack context limit.";
+  const truncationNotice = context.contextUnavailable
+    ? "Slack's rate limit prevented loading surrounding thread history. Work from the exact reacted message and ask for any missing context."
+    : "The containing thread was truncated at the bounded Slack context limit.";
   let prompt = [
     "A linked, authorized Slack user explicitly summoned OpenGeni by reacting to one message.",
     "Use only the exact reacted message and bounded containing-thread context below.",

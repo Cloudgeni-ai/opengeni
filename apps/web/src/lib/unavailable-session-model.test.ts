@@ -129,12 +129,16 @@ describe("sessionModelMissingFromCatalog", () => {
 });
 
 describe("unavailableModelName", () => {
-  test("uses the product label for known ids and a readable segment otherwise", () => {
+  test("uses the shared display name, never the routing id", () => {
     expect(unavailableModelName("gpt-6-luna")).toBe("GPT-6 Luna");
+    expect(unavailableModelName("codex/gpt-6.1-sol")).toBe("GPT-6.1 Sol");
     expect(unavailableModelName("openrouter/nvidia/nemotron-3-super-120b-a12b:free")).toBe(
-      "nemotron-3-super-120b-a12b",
+      "Nemotron 3 Super 120B A12B",
     );
-    expect(unavailableModelName("custom-model")).toBe("custom-model");
+    expect(unavailableModelName("organization-claude-subscription/claude-opus-5-5")).toBe(
+      "Claude Opus 5.5",
+    );
+    expect(unavailableModelName("custom-model")).toBe("Custom Model");
   });
 });
 

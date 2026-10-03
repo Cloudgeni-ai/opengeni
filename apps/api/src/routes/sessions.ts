@@ -291,6 +291,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequest,
@@ -801,6 +802,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.cursor ? { cursor: query.cursor } : {}),
           ...(query.search ? { search: query.search } : {}),
           ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includeTotals ? { includeTotals: true } : {}),
+          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -3625,16 +3628,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result.accepted, 202);
     }
 
-    if (event.type === "user.approvalDecision") {
-      const accepted = await acceptSessionApprovalDecision(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-        respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
-        payload: event.payload,
-        clientEventId: event.clientEventId ?? null,
+    // Responses use the same header-only validation, permission and encryption
+    // boundary as Send/Steer. Persistence belongs to the response transaction,
+    // never a separate rotation that could commit without accepting the reply.
+    const updates = event.payload.mcpCredentialUpdates ?? [];
+    let mcpCredentialUpdates = [] as ReturnType<typeof validateSessionMcpCredentialUpdates>;
+    if (updates.length) {
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+        settings,
+        grant,
+        session,
+        updates,
       });
+    }
+
+    if (event.type === "user.approvalDecision") {
+      const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = event.payload;
+      let accepted;
+      try {
+        accepted = await acceptSessionApprovalDecision(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          payload,
+          mcpCredentialUpdates,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        throw error;
+      }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
           message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
@@ -3667,8 +3696,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
+          mcpCredentialUpdates,
         });
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
         if (error instanceof SkillHumanResponseError) {
           throw new HTTPException(
             error.code === "conflict" ? 409 : error.code === "forbidden" ? 403 : 422,
@@ -5224,6 +5257,8 @@ export function sessionListQuery(
   search: string | undefined;
   pinsOnly: boolean;
   includePinned: boolean;
+  includeTotals: boolean;
+  needsYouOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5273,6 +5308,16 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
+  for (const key of ["includeTotals", "needsYouOnly"]) {
+    if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
+      throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
+  }
+  const includeTotals = query.includeTotals === "true";
+  const needsYouOnly = query.needsYouOnly === "true";
+  if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
+    throw new HTTPException(400, { message: "includeTotals requires a root page" });
+  if (needsYouOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5366,6 +5411,7 @@ export function sessionListQuery(
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
+    needsYouOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5398,6 +5444,8 @@ export function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     includePinned,
+    includeTotals,
+    needsYouOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,

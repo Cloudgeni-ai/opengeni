@@ -1071,7 +1071,19 @@ async function installCapabilityApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (
       "mode" in state &&
@@ -1219,7 +1231,19 @@ async function installLargeCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });
@@ -1325,7 +1349,19 @@ async function installWorkspaceCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (resource === "sessions") {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });

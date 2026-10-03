@@ -51,6 +51,7 @@ import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedComputerInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { DesktopViewer } from "./desktop-viewer";
+import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
@@ -256,6 +257,9 @@ export function ComputerViewer({
     enabled: enabled && selection !== null && controllerReady,
   });
   useEffect(() => {
+    setShowControls(computer.selectedTarget?.kind === "app");
+  }, [sessionId, selection?.sessionId, computer.selectedTarget?.id, computer.selectedTarget?.kind]);
+  useEffect(() => {
     if (!isSourcePlacementChangedError(computer.error, "computer_session")) return;
     void refreshRegistry();
   }, [computer.error, refreshRegistry]);
@@ -295,6 +299,7 @@ export function ComputerViewer({
   const connectionState = controlUnavailable ? "error" : frames.state;
   // RFB has one combined input switch; partial native input stays view-only.
   const rfbInputEnabled =
+    rfbStream?.inputAllowed === true &&
     !machineLocked &&
     !controlUnavailable &&
     computer.session?.capabilities?.pointerInput === true &&
@@ -577,7 +582,7 @@ export function ComputerViewer({
   return (
     <div
       className={cn(
-        "@container/computer-viewer flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
+        "@container/computer-viewer relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
         className,
       )}
     >
@@ -588,6 +593,14 @@ export function ComputerViewer({
         creating={creating}
         refreshing={registry.refreshing}
         interventionCounts={interventionCounts}
+        targets={controllerReady ? computer.targets : []}
+        selectedTargetId={computer.selectedTarget?.id ?? null}
+        targetsLoading={controllerReady && computer.loading}
+        onSelectTarget={(targetId) => {
+          void computer
+            .selectTarget(targetId)
+            .catch((cause) => notifyError(cause, "Could not switch desktop views."));
+        }}
         onSelect={(computerSessionId) =>
           selectComputerSession({ sessionId: computerSessionId, pinned: true })
         }
@@ -630,16 +643,6 @@ export function ComputerViewer({
         />
       ) : (
         <>
-          <ComputerTargetRail
-            targets={computer.targets}
-            selectedTargetId={computer.selectedTarget?.id ?? null}
-            loading={computer.loading}
-            onSelect={(targetId) =>
-              void computer
-                .selectTarget(targetId)
-                .catch((cause) => notifyError(cause, "Could not switch desktop views."))
-            }
-          />
           <div className="flex min-h-0 flex-1 flex-col @xl/computer-viewer:flex-row">
             {rfbStream ? (
               <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
@@ -788,23 +791,31 @@ function ComputerToolbar(props: {
   creating: boolean;
   refreshing: boolean;
   interventionCounts: Map<string, number>;
+  targets: ComputerTarget[];
+  selectedTargetId: string | null;
+  targetsLoading: boolean;
+  onSelectTarget: (id: string) => void;
   onSelect: (id: string) => void;
   onFollow: () => void;
   onCreate?: (() => void) | undefined;
   onRefresh: () => void;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
   const others = props.sessions.filter((session) => !props.relevantSessionIds.has(session.id));
-  const choose = (id: string) => {
-    props.onSelect(id);
+  const closeMenu = (restoreFocus: boolean) => {
     detailsRef.current?.removeAttribute("open");
+    if (restoreFocus) detailsRef.current?.querySelector("summary")?.focus();
+  };
+  const choose = (id: string, restoreFocus: boolean) => {
+    props.onSelect(id);
+    closeMenu(restoreFocus);
   };
   return (
     <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-1 px-2">
-      <details ref={detailsRef} className="relative min-w-0">
-        <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
+      <details ref={detailsRef} className="min-w-0">
+        <summary className="flex h-7 max-w-32 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 @sm/computer-viewer:max-w-52 [&::-webkit-details-marker]:hidden">
           <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
           <span className="truncate font-medium">
             {selected?.name === "Computer" ? "Desktop" : (selected?.name ?? "Desktop")}
@@ -814,27 +825,42 @@ function ComputerToolbar(props: {
           ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-fg-subtle" />
         </summary>
-        <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-          <ComputerSessionGroup
-            label="Current agent"
-            sessions={current}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <ComputerSessionGroup
-            label="Other agents"
-            sessions={others}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
+        <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+          <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
+            <ComputerSessionGroup
+              label="Current agent"
+              sessions={current}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+            <ComputerSessionGroup
+              label="Other agents"
+              sessions={others}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+          </div>
+          <div className="mt-1 flex shrink-0 gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
-              <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
+              <MenuButton
+                onClick={(event) => {
+                  props.onFollow();
+                  closeMenu(event.detail === 0);
+                }}
+              >
+                Follow agent
+              </MenuButton>
             ) : null}
             {props.onCreate ? (
-              <MenuButton onClick={props.onCreate} disabled={props.creating}>
+              <MenuButton
+                onClick={(event) => {
+                  props.onCreate?.();
+                  closeMenu(event.detail === 0);
+                }}
+                disabled={props.creating}
+              >
                 <PlusIcon className="size-3.5" /> New desktop
               </MenuButton>
             ) : null}
@@ -844,6 +870,12 @@ function ComputerToolbar(props: {
       <span className="min-w-0 flex-1 truncate text-og-xs text-og-fg-subtle">
         {selected ? `${platformLabel(selected)} · ${placementLabel(selected)}` : ""}
       </span>
+      <ComputerTargetPicker
+        targets={props.targets}
+        selectedTargetId={props.selectedTargetId}
+        loading={props.targetsLoading}
+        onSelect={props.onSelectTarget}
+      />
       <button
         type="button"
         onClick={props.onRefresh}
@@ -857,7 +889,7 @@ function ComputerToolbar(props: {
           type="button"
           onClick={props.onCreate}
           disabled={props.creating}
-          className="grid size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          className="hidden size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40 @sm/computer-viewer:grid"
           aria-label="Open a new desktop"
         >
           {props.creating ? (
@@ -876,7 +908,7 @@ function ComputerSessionGroup(props: {
   sessions: ComputerSession[];
   selectedId: string | null;
   interventionCounts: Map<string, number>;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, restoreFocus: boolean) => void;
 }) {
   if (props.sessions.length === 0) return null;
   return (
@@ -890,7 +922,8 @@ function ComputerSessionGroup(props: {
           <button
             key={session.id}
             type="button"
-            onClick={() => props.onSelect(session.id)}
+            onClick={(event) => props.onSelect(session.id, event.detail === 0)}
+            aria-pressed={session.id === props.selectedId}
             className={cn(
               "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
               session.id === props.selectedId && "bg-og-surface-2",
@@ -920,7 +953,11 @@ function ComputerSessionGroup(props: {
   );
 }
 
-function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?: boolean }) {
+function MenuButton(props: {
+  children: ReactNode;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -933,52 +970,102 @@ function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?
   );
 }
 
-function ComputerTargetRail(props: {
+function ComputerTargetPicker(props: {
   targets: ComputerTarget[];
   selectedTargetId: string | null;
   loading: boolean;
   onSelect: (id: string) => void;
 }) {
-  const visualTargets = props.targets.filter(isRenderableComputerView);
+  const screens = props.targets.filter((target) => target.kind === "screen");
+  const advancedTargets = props.targets.filter(
+    (target) =>
+      target.kind === "app" || (target.kind === "window" && isRenderableComputerView(target)),
+  );
+  const advancedRef = useViewerMenuDismiss(advancedTargets.length > 0);
+  const selected = props.targets.find((target) => target.id === props.selectedTargetId);
+  const choose = (id: string, restoreFocus = false) => {
+    props.onSelect(id);
+    if (advancedRef.current?.open) {
+      advancedRef.current.removeAttribute("open");
+      if (restoreFocus) advancedRef.current.querySelector("summary")?.focus();
+    }
+  };
   return (
-    <div
-      className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-og-border bg-og-surface-1 px-2"
-      aria-label="Desktop views"
-    >
-      {visualTargets.map((target) => (
-        <button
-          key={target.id}
-          type="button"
-          onClick={() => props.onSelect(target.id)}
-          className={cn(
-            "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-og-sm border px-2 text-og-control transition",
-            target.id === props.selectedTargetId
-              ? "border-og-border-strong bg-og-surface-2 text-og-fg"
-              : "border-transparent text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg",
-          )}
-          aria-pressed={target.id === props.selectedTargetId}
+    <>
+      {screens.length > 1 ? (
+        <select
+          aria-label="Screen"
+          value={selected?.kind === "screen" ? selected.id : ""}
+          onChange={(event) => choose(event.currentTarget.value)}
+          className="h-7 min-w-0 max-w-28 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 text-og-control text-og-fg outline-hidden focus:border-og-accent @sm/computer-viewer:max-w-40"
         >
-          {target.kind === "screen" ? (
-            <MonitorIcon className="size-3.5 shrink-0" />
-          ) : (
-            <PanelsTopLeftIcon className="size-3.5 shrink-0" />
-          )}
-          <span className="truncate">{target.title || target.applicationId || target.kind}</span>
-          {target.focused ? (
-            <span
-              className="size-1.5 shrink-0 rounded-full bg-og-status-running"
-              aria-label="Focused"
-            />
-          ) : null}
+          <option value="" disabled hidden>
+            Screen
+          </option>
+          {screens.map((screen, index) => (
+            <option key={screen.id} value={screen.id}>
+              {screen.title || `Screen ${index + 1}`}
+            </option>
+          ))}
+        </select>
+      ) : screens[0] && selected?.kind !== "screen" ? (
+        <button
+          type="button"
+          onClick={() => choose(screens[0]!.id)}
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+        >
+          <MonitorIcon className="size-3.5" /> Full desktop
         </button>
-      ))}
+      ) : null}
+      {advancedTargets.length > 0 ? (
+        <details ref={advancedRef} className="shrink-0">
+          <summary
+            aria-label="Advanced desktop views"
+            title="Advanced desktop views"
+            className="flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden"
+          >
+            <PanelsTopLeftIcon className="size-3.5" />
+            <span className="hidden @sm/computer-viewer:inline">Advanced</span>
+            <ChevronDownIcon className="size-3" />
+          </summary>
+          <div className="absolute right-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-64 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+            <p className="shrink-0 px-2 py-1 text-og-xs text-og-fg-subtle">Apps and windows</p>
+            <div className="min-h-0 max-h-80 overflow-y-auto overscroll-contain">
+              {advancedTargets.map((target) => (
+                <button
+                  key={target.id}
+                  type="button"
+                  onClick={(event) => choose(target.id, event.detail === 0)}
+                  aria-pressed={target.id === props.selectedTargetId}
+                  className={cn(
+                    "flex w-full min-w-0 items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
+                    target.id === props.selectedTargetId && "bg-og-surface-2",
+                  )}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-og-control text-og-fg">
+                      {target.title || target.applicationId || target.kind}
+                    </span>
+                    <span className="block text-og-xs text-og-fg-subtle">
+                      {target.kind === "app" ? "App controls" : "Window view"}
+                    </span>
+                  </span>
+                  {target.focused ? (
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-og-status-running"
+                      aria-label="Focused"
+                    />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
+      ) : null}
       {props.loading ? (
-        <LoaderCircleIcon className="ml-1 size-3.5 animate-spin text-og-fg-muted" />
+        <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin text-og-fg-muted" />
       ) : null}
-      {!props.loading && visualTargets.length === 0 ? (
-        <span className="text-og-xs text-og-fg-subtle">Waiting for apps and screens…</span>
-      ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1103,6 +1190,7 @@ function ComputerViewport(props: {
   errorRef.current = props.onError;
   const streamFailed = props.connectionState === "error";
   const rawInputEnabled =
+    props.target?.kind !== "app" &&
     !streamFailed &&
     !props.controlUnavailable &&
     !props.machineLocked &&
@@ -1651,6 +1739,7 @@ function ComputerViewportFallback(props: {
       </div>
     );
   }
+  const appControls = props.observation?.target.kind === "app";
   const controlFailure = interactionControlFailureFromError(props.error);
   const interactive = semanticControls(props.observation)
     .filter((node) => semanticAction(node) !== null)
@@ -1661,6 +1750,8 @@ function ComputerViewportFallback(props: {
         <div className="flex items-center gap-2">
           {props.error ? (
             <CircleAlertIcon className="size-4 text-og-danger" />
+          ) : appControls ? (
+            <PanelsTopLeftIcon className="size-4 text-og-fg-muted" />
           ) : (
             <LoaderCircleIcon className="size-4 animate-spin text-og-fg-muted" />
           )}
@@ -1671,7 +1762,9 @@ function ComputerViewportFallback(props: {
                 ? "Desktop controls unavailable"
                 : props.error
                   ? "Live view disconnected"
-                  : computerConnectionLabel(props.connectionState)}
+                  : appControls
+                    ? "App controls"
+                    : computerConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error ? (
@@ -1845,34 +1938,42 @@ function ComputerStatusBar(props: {
       <span>
         {props.controlUnavailable
           ? "Controls unavailable"
-          : props.connectionState === "live"
-            ? "Live"
-            : computerConnectionLabel(props.connectionState)}
+          : props.target?.kind === "app"
+            ? "App controls"
+            : props.connectionState === "live"
+              ? "Live"
+              : computerConnectionLabel(props.connectionState)}
       </span>
       <span className="min-w-0 flex-1 truncate">
         {props.controlUnavailable
           ? "Reconnect to use desktop input"
           : screen
             ? "Full screen · input may move pointer and focus"
-            : props.session?.capabilities?.backgroundInput
-              ? "Window · clicks and typing stay in the background"
-              : props.session?.capabilities?.backgroundActions
-                ? "Window · app controls work in the background"
-                : (props.target?.kind ?? "Desktop")}
+            : props.target?.kind === "app"
+              ? props.session?.capabilities?.backgroundActions
+                ? "App · controls work in the background"
+                : "App controls"
+              : props.session?.capabilities?.backgroundInput
+                ? "Window · clicks and typing stay in the background"
+                : props.session?.capabilities?.backgroundActions
+                  ? "Window · app controls work in the background"
+                  : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
-      <button
-        type="button"
-        onClick={props.onToggleControls}
-        aria-pressed={props.showControls}
-        className={cn(
-          "rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
-          props.showControls && "bg-og-surface-2 text-og-fg",
-        )}
-      >
-        Controls {props.controlCount}
-      </button>
+      {props.controlCount > 0 || props.showControls ? (
+        <button
+          type="button"
+          onClick={props.onToggleControls}
+          aria-pressed={props.showControls}
+          className={cn(
+            "rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
+            props.showControls && "bg-og-surface-2 text-og-fg",
+          )}
+        >
+          Controls {props.controlCount}
+        </button>
+      ) : null}
     </div>
   );
 }

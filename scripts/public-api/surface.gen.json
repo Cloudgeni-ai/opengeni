@@ -132,6 +132,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/billing/checkout/:checkoutSessionId",
+      "sdk": [
+        "OpenGeniClient.getBillingCheckout"
+      ],
+      "request": [],
+      "response": [
+        "BillingCheckoutStatus"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/billing/entitlements",
       "sdk": [
         "OpenGeniClient.getBillingEntitlements"
@@ -160,6 +171,19 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/billing/usage-models",
+      "sdk": [
+        "OpenGeniClient.getOrganizationModelUsage"
+      ],
+      "request": [
+        "OrganizationUsagePeriod"
+      ],
+      "response": [
+        "OrganizationModelUsage"
+      ]
     },
     {
       "method": "GET",
@@ -308,26 +332,95 @@
     },
     {
       "method": "GET",
-      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "path": "/v1/organizations/:organizationId/claude/accounts",
       "sdk": [
-        "OpenGeniClient.getOrganizationApiKey"
+        "OpenGeniClient.listOrganizationClaudeSubscriptionAccounts"
       ],
       "request": [],
       "response": [
-        "ApiKey"
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setOrganizationClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectOrganizationClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
       ]
     },
     {
       "method": "PATCH",
-      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "path": "/v1/organizations/:organizationId/claude/settings",
       "sdk": [
-        "OpenGeniClient.updateOrganizationApiKey"
+        "OpenGeniClient.setOrganizationClaudeSubscriptionRotationSettings"
       ],
-      "request": [
-        "UpdateOrganizationApiKeyRequest"
-      ],
+      "request": [],
       "response": [
-        "ApiKey"
+        "SubscriptionPoolSettings"
       ]
     },
     {
@@ -624,7 +717,9 @@
       "sdk": [
         "OpenGeniClient.startOrganizationClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -2097,6 +2192,103 @@
       ],
       "response": [
         "Channel"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts",
+      "sdk": [
+        "OpenGeniClient.listClaudeSubscriptionAccounts",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccount"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/settings",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionRotationSettings",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionPoolSettings"
       ]
     },
     {
@@ -4749,7 +4941,9 @@
       "sdk": [
         "OpenGeniClient.startWorkspaceClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -7756,6 +7950,7 @@
       "turn.cancelled",
       "turn.capacity_waiting",
       "turn.completed",
+      "turn.dispatch.expired",
       "turn.event.rejected_late",
       "turn.failed",
       "turn.queued",
@@ -7839,9 +8034,7 @@
         "$.effectiveWorkspacePermissions[]": "ref(Permission)",
         "$.kind": "enum!=[\"\\\"organization_api_key\\\"\",\"\\\"workspace_api_key\\\"\"]",
         "$.note": "string!",
-        "$.policy": "unknown?",
-        "$.workspaceId": "string! null",
-        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
+        "$.workspaceId": "string! null"
       }
     },
     "AccessGrant": {
@@ -7853,7 +8046,6 @@
         "$.accountId": "string!",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
-        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.principalKind": "ref(AccessPrincipalKind)?",
@@ -8203,7 +8395,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -8441,15 +8633,12 @@
         "$.id": "string!",
         "$.lastUsedAt": "string! null",
         "$.name": "string!",
-        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
-        "$.policy": "unknown?",
         "$.prefix": "string!",
         "$.revokedAt": "string! null",
         "$.updatedAt": "string!",
-        "$.workspaceId": "string! null",
-        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
+        "$.workspaceId": "string! null"
       }
     },
     "AppendArchivedSessionEventsRequest": {
@@ -9045,6 +9234,34 @@
         "$.model": "ref(SessionRealtimeModel)!",
         "$.operationId": "string!",
         "$.ownerKey": "string!"
+      }
+    },
+    "BillingBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.balanceMicros": "integer!",
+        "$.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.updatedAt": "string!"
+      }
+    },
+    "BillingCheckoutStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.balance": "ref(BillingBalance)! null",
+        "$.checkoutSessionId": "string!",
+        "$.credit": "object!",
+        "$.credit.amountMicros": "integer!",
+        "$.credit.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.credit.free": "boolean!",
+        "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
+        "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
       }
     },
     "BrowserAction": {
@@ -10101,6 +10318,44 @@
         "$.workspaceId": "string!"
       }
     },
+    "ClaudeSubscriptionAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.active": "boolean!",
+        "$.allocatorEnabled": "boolean!",
+        "$.allocatorUpdatedAt": "string! null",
+        "$.allocatorVersion": "integer!",
+        "$.email": "string! null",
+        "$.expiresAt": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.lastError": "string! null",
+        "$.lastRefreshAt": "string! null",
+        "$.plan": "string! null",
+        "$.scope": "ref(VariableSetScope)!",
+        "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
+        "$.subject": "string!",
+        "$.usage": "ref(ClaudeSubscriptionUsage)?",
+        "$.version": "integer!"
+      }
+    },
+    "ClaudeSubscriptionAccountsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ClaudeSubscriptionAccount)",
+        "$.activeAccountId": "string! null",
+        "$.organizationId": "string!",
+        "$.settings": "ref(SubscriptionPoolSettings)!",
+        "$.source": "ref(VariableSetScope)!"
+      }
+    },
     "ClaudeSubscriptionOAuthCompleteRequest": {
       "io": [
         "input"
@@ -10117,8 +10372,20 @@
       ],
       "shape": {
         "$": "object",
+        "$.accountId": "string!",
         "$.connected": "const!=[\"true\"]",
-        "$.credentialVersion": "integer!"
+        "$.credentialVersion": "integer!",
+        "$.scope": "ref(VariableSetScope)!"
+      }
+    },
+    "ClaudeSubscriptionOAuthStartRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "ClaudeSubscriptionOAuthStartResponse": {
@@ -10132,6 +10399,19 @@
         "$.expiresAt": "string!"
       }
     },
+    "ClaudeSubscriptionSetupTokenRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedCredentialVersion": "integer?",
+        "$.label": "string? null",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.token": "string!"
+      }
+    },
     "ClaudeSubscriptionUsage": {
       "io": [
         "output"
@@ -10143,9 +10423,28 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.requestRestrictions": "array?",
+        "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
+        "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageRequestStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string!",
+        "$.overageResetsAt": "string! null",
+        "$.overageStatus": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.representativeClaim": "ref(ClaudeUsageWindowId)! null",
+        "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.upstreamModelId": "string! null"
       }
     },
     "ClaudeUsageWindow": {
@@ -10157,6 +10456,7 @@
         "$.id": "ref(ClaudeUsageWindowId)!",
         "$.observedAt": "string!",
         "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
         "$.usedPercent": "number! null"
       }
@@ -10236,6 +10536,7 @@
         "$.auth|mode=managedSession": "object",
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
+        "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
@@ -10891,6 +11192,7 @@
         "$|kind=direct_websocket.protocols[]": "string",
         "$|kind=direct_websocket.url": "string!",
         "$|kind=direct_rfb": "object",
+        "$|kind=direct_rfb.inputAllowed": "boolean!",
         "$|kind=direct_rfb.kind": "const!=[\"\\\"direct_rfb\\\"\"]",
         "$|kind=direct_rfb.protocols": "array!",
         "$|kind=direct_rfb.protocols[]": "string",
@@ -11615,8 +11917,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string?",
-        "$.amountUsd": "number!",
+        "$.amountUsd": "number?",
         "$.cancelUrl": "string?",
+        "$.promotionCode": "string?",
         "$.successUrl": "string?"
       }
     },
@@ -11626,6 +11929,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.amountUsd": "number?",
         "$.checkoutSessionId": "string!",
         "$.url": "string!"
       }
@@ -11771,7 +12075,6 @@
         "$.description": "string?",
         "$.expiresAt": "string?",
         "$.name": "string!",
-        "$.policy": "ref(OrganizationAccessPolicy)?",
         "$.preset": "enum?=[\"\\\"developer_setup\\\"\"]"
       }
     },
@@ -14493,6 +14796,25 @@
         "$": "enum=[\"\\\"configured_list_price\\\"\",\"\\\"gateway_reported\\\"\"]"
       }
     },
+    "InsightsProjectRow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cacheHitPct": "integer! null",
+        "$.calls": "integer!",
+        "$.creditUsd": "number!",
+        "$.estimatedProviderCostKnownCalls": "integer!",
+        "$.estimatedProviderUsd": "number!",
+        "$.id": "string!",
+        "$.kind": "enum!=[\"\\\"other\\\"\",\"\\\"project\\\"\",\"\\\"unavailable\\\"\",\"\\\"unfiled\\\"\"]",
+        "$.label": "string!",
+        "$.projects": "integer!",
+        "$.rootSessions": "integer!",
+        "$.tokens": "number!"
+      }
+    },
     "InsightsPromptContributionRow": {
       "io": [
         "output"
@@ -16660,7 +16982,7 @@
         "$|kind=deployment.mechanism": "enum!=[\"\\\"api_key\\\"\",\"\\\"azure_ad_bearer\\\"\"]",
         "$|kind=connected_subscription": "object",
         "$|kind=connected_subscription.kind": "const!=[\"\\\"connected_subscription\\\"\"]",
-        "$|kind=connected_subscription.provider": "enum!=[\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
+        "$|kind=connected_subscription.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
         "$|kind=workspace_connection": "object",
         "$|kind=workspace_connection.kind": "const!=[\"\\\"workspace_connection\\\"\"]",
         "$|kind=workspace_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]",
@@ -16938,26 +17260,6 @@
         "$.expiresAt": "string!"
       }
     },
-    "OrganizationAccessPolicy": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.permissions": "array!",
-        "$.permissions[]": "ref(Permission)",
-        "$.preset": "ref(OrganizationAccessPreset)!",
-        "$.workspaceScope": "ref(OrganizationWorkspaceScope)!"
-      }
-    },
-    "OrganizationAccessPreset": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"custom\\\"\",\"\\\"full\\\"\",\"\\\"read_only\\\"\"]"
-      }
-    },
     "OrganizationAdministrationMember": {
       "io": [
         "output"
@@ -17129,6 +17431,73 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
+      }
+    },
+    "OrganizationModelUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.billing": "array!",
+        "$.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.models": "array!",
+        "$.models[]": "object",
+        "$.models[].model": "string!",
+        "$.models[].provider": "string!",
+        "$.models[].totals": "ref(OrganizationModelUsageTotals)!",
+        "$.modelsTruncated": "boolean!",
+        "$.nextWorkspaceCursor": "string! null",
+        "$.payers": "array!",
+        "$.payers[]": "object",
+        "$.payers[].cacheInputTokens": "string!",
+        "$.payers[].cacheKnownCalls": "string!",
+        "$.payers[].cacheWriteTokens": "string!",
+        "$.payers[].cachedTokens": "string!",
+        "$.payers[].calls": "string!",
+        "$.payers[].creditMicros": "string!",
+        "$.payers[].estimatedProviderKnownCalls": "string!",
+        "$.payers[].estimatedProviderMicros": "string!",
+        "$.payers[].inputTokens": "string!",
+        "$.payers[].outputTokens": "string!",
+        "$.payers[].payer": "enum!=[\"\\\"opengeni_credits\\\"\",\"\\\"own_key\\\"\",\"\\\"subscription\\\"\"]",
+        "$.payers[].tokenKnownCalls": "string!",
+        "$.payers[].totalTokens": "string!",
+        "$.period": "ref(InsightsRange)!",
+        "$.personal": "object!",
+        "$.personal.billing": "array!",
+        "$.personal.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.personal.workspacesWithUsage": "string!",
+        "$.since": "string!",
+        "$.until": "string!",
+        "$.workspaces": "array!",
+        "$.workspaces[]": "object",
+        "$.workspaces[].billing": "array!",
+        "$.workspaces[].billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.workspaces[].name": "string! null",
+        "$.workspaces[].workspaceId": "string!"
+      }
+    },
+    "OrganizationModelUsageTotals": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.billingPath": "ref(InsightsBillingPath)!",
+        "$.cacheInputTokens": "string!",
+        "$.cacheKnownCalls": "string!",
+        "$.cacheWriteTokens": "string!",
+        "$.cachedTokens": "string!",
+        "$.calls": "string!",
+        "$.creditMicros": "string!",
+        "$.estimatedProviderKnownCalls": "string!",
+        "$.estimatedProviderMicros": "string!",
+        "$.inputTokens": "string!",
+        "$.outputTokens": "string!",
+        "$.tokenKnownCalls": "string!",
+        "$.totalTokens": "string!"
       }
     },
     "OrganizationPrivateSessionSettings": {
@@ -17397,6 +17766,14 @@
         "$.personalWorkspaceCount": "integer!",
         "$.personalWorkspaces": "array!",
         "$.personalWorkspaces[]": "ref(OrganizationUsagePersonalWorkspace)",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].membershipId": "string! null",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].totals": "array!",
+        "$.privateChats[].totals[]": "ref(OrganizationUsageTotal)",
+        "$.privateChats[].workspaceId": "string!",
+        "$.privateChatsTruncated": "boolean!",
         "$.since": "string!",
         "$.totals": "array!",
         "$.totals[]": "ref(OrganizationUsageTotal)",
@@ -17581,21 +17958,6 @@
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.role": "ref(AssignableWorkspaceMemberRole)!"
-      }
-    },
-    "OrganizationWorkspaceScope": {
-      "io": [
-        "input",
-        "output"
-      ],
-      "shape": {
-        "$": "union=[\"kind=all\",\"kind=selected\"]",
-        "$|kind=all": "object",
-        "$|kind=all.kind": "const!=[\"\\\"all\\\"\"]",
-        "$|kind=selected": "object",
-        "$|kind=selected.kind": "const!=[\"\\\"selected\\\"\"]",
-        "$|kind=selected.workspaceIds": "array!",
-        "$|kind=selected.workspaceIds[]": "string"
       }
     },
     "Permission": {
@@ -20099,7 +20461,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -20360,6 +20722,7 @@
         "$": "object",
         "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
         "$.filtersApplied": "const?=[\"true\"]",
+        "$.needsYouOnly": "const?=[\"true\"]",
         "$.nextCursor": "string! null",
         "$.originSiteId": "string?",
         "$.pinned": "array!",
@@ -20368,7 +20731,8 @@
         "$.projection": "const!=[\"\\\"summary\\\"\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(SessionListEntry)",
-        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
+        "$.totals": "ref(SessionListTotals)?"
       }
     },
     "SessionListResponse": {
@@ -20379,6 +20743,7 @@
         "$": "object",
         "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
         "$.filtersApplied": "const?=[\"true\"]",
+        "$.needsYouOnly": "const?=[\"true\"]",
         "$.nextCursor": "string! null",
         "$.originSiteId": "string?",
         "$.pinned": "array!",
@@ -20386,7 +20751,28 @@
         "$.pinnedTruncated": "boolean?",
         "$.sessions": "array!",
         "$.sessions[]": "ref(Session)",
-        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
+        "$.totals": "ref(SessionListTotals)?"
+      }
+    },
+    "SessionListTotals": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.groups": "array!",
+        "$.groups[]": "object",
+        "$.groups[].active": "integer!",
+        "$.groups[].activeWork": "integer!",
+        "$.groups[].attention": "integer!",
+        "$.groups[].attentionSince": "string! null",
+        "$.groups[].channelId": "string! null",
+        "$.groups[].failed": "integer!",
+        "$.groups[].queued": "integer!",
+        "$.groups[].total": "integer!",
+        "$.groups[].unread": "integer!",
+        "$.needsYouCount": "integer!"
       }
     },
     "SessionMcpApprovalPolicy": {
@@ -21537,6 +21923,17 @@
         "$.turn": "ref(SessionTurn)!"
       }
     },
+    "SubscriptionPoolSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activeCredentialId": "string! null",
+        "$.rotationEnabled": "boolean!",
+        "$.rotationStrategy": "const!=[\"\\\"sharded\\\"\"]"
+      }
+    },
     "SupersedePreferenceRegistryRequest": {
       "io": [
         "input"
@@ -22416,17 +22813,6 @@
         "$.name": "string?",
         "$.operationId": "string!",
         "$.status": "ref(TaskNoteStatus)?"
-      }
-    },
-    "UpdateOrganizationApiKeyRequest": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "object",
-        "$.description": "string? null",
-        "$.name": "string?",
-        "$.policy": "ref(OrganizationAccessPolicy)?"
       }
     },
     "UpdateOrganizationIntegrationPolicyRequest": {
@@ -23820,20 +24206,25 @@
         "$.avgDepth": "number!",
         "$.billableTokenCap": "integer! null",
         "$.billableTokensUsed": "number!",
+        "$.cacheHitPct": "integer!",
         "$.cacheSeriesLabel": "string!",
         "$.creditUsd": "number!",
+        "$.dataThrough": "string! null",
         "$.deepestDepth": "integer!",
         "$.deepestSessionTitle": "string!",
         "$.depth": "array!",
         "$.depth[]": "ref(InsightsDepthBucket)",
+        "$.driverGroups": "integer!",
         "$.drivers": "array!",
         "$.drivers[]": "ref(InsightsSpendDriver)",
+        "$.driversTruncated": "boolean!",
         "$.equivalentCreditCostKnownCalls": "integer!",
         "$.equivalentCreditUsd": "number!",
         "$.estimatedProviderCostKnownCalls": "integer!",
         "$.estimatedProviderUsd": "number!",
         "$.facets": "array!",
         "$.facets[]": "ref(InsightsModelFacet)",
+        "$.facetsTruncated": "boolean!",
         "$.floor": "array!",
         "$.floor[]": "ref(InsightsFloorSession)",
         "$.generatedAt": "string!",
@@ -23858,6 +24249,19 @@
         "$.priorTotalTokens": "number!",
         "$.priorWarmSeconds": "number!",
         "$.priorWorkspaceCreditUsd": "number!",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].calls": "integer!",
+        "$.privateChats[].creditUsd": "number!",
+        "$.privateChats[].estimatedProviderCostKnownCalls": "integer!",
+        "$.privateChats[].estimatedProviderUsd": "number!",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].ownerKey": "string!",
+        "$.privateChats[].tokens": "number!",
+        "$.privateChats[].you": "boolean!",
+        "$.privateChatsTruncated": "boolean!",
+        "$.projects": "array!",
+        "$.projects[]": "ref(InsightsProjectRow)",
         "$.promptContributions": "object!",
         "$.promptContributions.coveredCalls": "integer!",
         "$.promptContributions.estimatedTokens": "integer!",
@@ -23869,9 +24273,13 @@
         "$.rangeLabel": "string!",
         "$.recentCalls": "array!",
         "$.recentCalls[]": "ref(InsightsModelCallRow)",
+        "$.recentCallsTruncated": "boolean!",
         "$.rootSessions": "integer!",
         "$.schedules": "array!",
         "$.schedules[]": "ref(InsightsScheduleRow)",
+        "$.scope": "object!",
+        "$.scope.rootSessionId": "string! null",
+        "$.scope.sessionId": "string! null",
         "$.selfhostedEnabled": "boolean!",
         "$.series": "array!",
         "$.series[]": "ref(InsightsSeriesPoint)",
@@ -24912,6 +25320,7 @@
       "BeginExternalIdentityLinkResponse": "type",
       "BeginSessionRealtimeRequest": "type",
       "BillingBalance": "type",
+      "BillingCheckoutStatus": "type",
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
       "BillingSummary": "type",
@@ -25000,10 +25409,14 @@
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
       "Chats": "type",
+      "ClaudeSubscriptionAccount": "value",
+      "ClaudeSubscriptionAccountsResponse": "value",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
+      "ClaudeSubscriptionSetupTokenRequest": "value",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
@@ -25389,6 +25802,7 @@
       "HumanInputQuestion": "type",
       "HumanInputQuestionKind": "type",
       "HumanInputResponse": "type",
+      "humanizeModelSlug": "value",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InitiatingHuman": "type",
       "InlineOpenApiDocumentSource": "type",
@@ -25400,10 +25814,12 @@
       "InsightsModelFacet": "type",
       "InsightsModelUsageRow": "type",
       "InsightsPricingSource": "type",
+      "InsightsProjectRow": "type",
       "InsightsPromptContributionRow": "type",
       "InsightsPromptContributions": "type",
       "InsightsRange": "type",
       "InsightsScheduleRow": "type",
+      "InsightsScope": "type",
       "InsightsSeriesPoint": "type",
       "InsightsSpendDriver": "type",
       "InsightsWarmGroupRow": "type",
@@ -25460,6 +25876,7 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
       "isSiteCatalogStaleError": "value",
@@ -25584,8 +26001,13 @@
       "ModelCostClassV1": "type",
       "ModelCredentialReadinessV1": "type",
       "ModelCredentialSourceV1": "type",
+      "ModelDisplayInput": "type",
+      "modelDisplayName": "value",
       "ModelPricingScheduleV1": "type",
       "ModelPricingV1": "type",
+      "modelSlug": "value",
+      "modelVendor": "value",
+      "ModelVendor": "type",
       "MoveDocumentRequest": "type",
       "MoveSessionQueueItemRequest": "type",
       "MutateIntegrationFacetRequest": "type",
@@ -25662,9 +26084,6 @@
       "OpenGeniToolsFacade": "type",
       "OpenGeniToolTransport": "type",
       "OpenGeniWorkspaceTools": "type",
-      "OrganizationAccessPolicy": "type",
-      "OrganizationAccessPreset": "type",
-      "OrganizationActor": "type",
       "OrganizationAdministrationMember": "type",
       "OrganizationAdministrationMemberWorkspaceAccess": "type",
       "OrganizationAdministrationOverview": "type",
@@ -25698,7 +26117,6 @@
       "OrganizationWorkspaceAccess": "type",
       "OrganizationWorkspaceAccessMember": "type",
       "OrganizationWorkspaceRoleDefinition": "type",
-      "OrganizationWorkspaceScope": "type",
       "parseBrowserFrameMetadata": "value",
       "parseCodexRealtimeV3Event": "value",
       "parseComputerFrameMetadata": "value",
@@ -25951,6 +26369,7 @@
       "SessionListEntryResponse": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
+      "SessionListTotals": "type",
       "SessionMcpApprovalPolicy": "type",
       "SessionMcpApprovalPolicyTarget": "type",
       "SessionMcpCredentialUpdateInput": "type",
@@ -25971,6 +26390,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
+      "SessionProxyToolServer": "type",
       "SessionQueueMutationResponse": "type",
       "SessionQueueSnapshot": "type",
       "SessionRealtimeEndReason": "type",
@@ -26066,6 +26486,8 @@
       "SubmitComposerDraftResponse": "type",
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
+      "SubscriptionAccountSummary": "value",
+      "SubscriptionPoolSettings": "value",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",
       "SuperGrokAccountsResponse": "type",
@@ -26102,6 +26524,9 @@
       "ToolGatewayIdentity": "type",
       "ToolGatewayResult": "type",
       "ToolRef": "type",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
       "TranscribeAudioInput": "type",
       "TranscribeAudioResponse": "type",
       "TranscriptionAdapter": "type",
@@ -26149,7 +26574,6 @@
       "UpdateMachineOperationPolicyRequest": "type",
       "UpdateMemorySlackPublicationConfigurationRequest": "type",
       "UpdateNetworkRouteRequest": "type",
-      "UpdateOrganizationApiKeyRequest": "type",
       "UpdateOrganizationNameRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationWebhookRequest": "type",
@@ -26205,6 +26629,8 @@
       "VerifyPersonalGitHubRepositorySelectionsRequest": "type",
       "VerifyPublicGitHubRepositoryRefRequest": "type",
       "VerifyPublicGitHubRepositoryRefResponse": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type",
       "verifyWebhookEvent": "value",
       "VideoArtifactPlaybackSource": "type",
       "VideoGenerationAspectRatio": "type",
@@ -27005,6 +27431,15 @@
       "SlackPublicationChannelListResponse": "type",
       "UpdateMemorySlackPublicationConfigurationRequest": "type"
     },
+    "@opengeni/sdk/model-display": {
+      "humanizeModelSlug": "value",
+      "isRawModelLabel": "value",
+      "ModelDisplayInput": "type",
+      "modelDisplayName": "value",
+      "modelSlug": "value",
+      "modelVendor": "value",
+      "ModelVendor": "type"
+    },
     "@opengeni/sdk/model-picker-order": {
       "compareModelPickerOrder": "value",
       "ModelPickerBillingCandidate": "type",
@@ -27168,7 +27603,8 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
-      "SessionProxySiteHtmlTooLargeError": "value"
+      "SessionProxySiteHtmlTooLargeError": "value",
+      "SessionProxyToolServer": "type"
     },
     "@opengeni/sdk/site": {
       "createOpenGeniSiteClient": "value",
@@ -27216,6 +27652,20 @@
       "WorkspaceIdOptions": "type",
       "WorkspaceIdResolverOptions": "type",
       "WorkspaceIdTarget": "type"
+    },
+    "@opengeni/sdk/tool-auth": {
+      "deriveToolTokenKey": "value",
+      "mintToolToken": "value",
+      "resolveToolTokenSecret": "value",
+      "TOOL_SERVER_URL_ENV": "value",
+      "TOOL_TOKEN_DEFAULT_TTL_SECONDS": "value",
+      "TOOL_TOKEN_ISSUER": "value",
+      "TOOL_TOKEN_KEY_LABEL": "value",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type"
     },
     "@opengeni/sdk/usage-allowances": {
       "AllowanceExhaustedRefusal": "type",
@@ -27368,6 +27818,7 @@
       "ChatComposer": "value",
       "ChatComposerMessages": "type",
       "ChatComposerProps": "type",
+      "ChatGptMark": "value",
       "ClaudeMark": "value",
       "ClientOverride": "type",
       "cn": "value",
@@ -27487,6 +27938,7 @@
       "GoalItem": "type",
       "GrokMark": "value",
       "groupPickerRowsByBillingClass": "value",
+      "GroupPickerRowsOptions": "type",
       "groupTimeline": "value",
       "GroupTimelineOptions": "type",
       "hasPermission": "value",
@@ -27504,6 +27956,7 @@
       "HumanInputSurface": "value",
       "HumanInputSurfaceProps": "type",
       "humanizeFailureReason": "value",
+      "humanizeModelSlug": "value",
       "IndexedDbVoiceRecordingStore": "value",
       "INITIAL_TRANSCRIPTION_CONTROL_STATE": "value",
       "initialWorkspaceTab": "value",
@@ -27516,6 +27969,7 @@
       "isLastStartedTurnPolicyEvent": "value",
       "isLineageRefreshEvent": "value",
       "isModelUnavailableSubmissionError": "value",
+      "isRawModelLabel": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
@@ -27581,6 +28035,11 @@
       "MetricSparkline": "value",
       "MetricSparklineProps": "type",
       "MetricWindow": "type",
+      "ModelDisplayInput": "type",
+      "modelDisplayName": "value",
+      "modelHasMark": "value",
+      "ModelMark": "value",
+      "ModelName": "value",
       "ModelPicker": "value",
       "ModelPickerProps": "type",
       "ModelPolicyPicker": "value",
@@ -27588,7 +28047,10 @@
       "ModelPolicyPickerMenu": "value",
       "ModelPolicyPickerMessages": "type",
       "ModelPolicyPickerProps": "type",
+      "modelSlug": "value",
       "modelUsesCredits": "value",
+      "modelVendor": "value",
+      "ModelVendor": "type",
       "Notice": "type",
       "NoticeItem": "type",
       "OlderHistoryLoader": "type",
@@ -27693,6 +28155,7 @@
       "SessionConnectionRequest": "value",
       "SessionConnectionRequestProps": "type",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionDisplayTitle": "value",
       "SessionEventsConnectionState": "type",
@@ -28193,7 +28656,9 @@
       "ComposerModelPickerProps": "type",
       "ComposerPauseButtonProps": "type",
       "ComposerRootProps": "type",
+      "ComposerRunControl": "type",
       "ComposerSendButtonProps": "type",
+      "ComposerStopButtonProps": "type",
       "ComposerSubmitBlocker": "type",
       "ComposerSubmitMode": "type",
       "ComposerSurfaceProps": "type",
@@ -28232,6 +28697,7 @@
       "Root": "value",
       "SendButton": "value",
       "Status": "value",
+      "StopButton": "value",
       "Surface": "value",
       "useChatComposer": "value",
       "useChatComposerController": "value",
@@ -28493,16 +28959,20 @@
       "effortOptionsForModel": "value",
       "findPickerRow": "value",
       "groupPickerRowsByBillingClass": "value",
+      "GroupPickerRowsOptions": "type",
       "labelLatencyMode": "value",
       "labelReasoningEffort": "value",
       "LatencyModeId": "type",
+      "modelDisplayName": "value",
       "modelUsesCredits": "value",
+      "modelVendor": "value",
       "payerSummaryForModel": "value",
       "PickerBillingClass": "type",
       "PickerModelRow": "type",
       "projectClientModelRows": "value",
       "projectPickerRows": "value",
       "runnableLatencyModesForModel": "value",
+      "scopedBillingClassLabel": "value",
       "sortPickerRows": "value"
     },
     "@opengeni/react/realtime": {
@@ -28686,6 +29156,7 @@
       "SessionCommands": "value",
       "SessionCommandsPanel": "value",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionLinkResolver": "value",
       "SessionList": "value",
@@ -29059,9 +29530,11 @@
       "acknowledgeStream",
       "actInBrowser",
       "actInComputer",
+      "activateClaudeSubscriptionAccount",
       "activateCodexAccount",
       "activateCodexRealtimeConnection",
       "activateCompanyProfileRevision",
+      "activateOrganizationClaudeSubscriptionAccount",
       "activateOrganizationSuperGrokAccount",
       "activatePreferenceRegistryRevision",
       "activateRigVersion",
@@ -29110,6 +29583,8 @@
       "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
+      "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "controlSession",
       "correctPreferenceRegistry",
@@ -29188,8 +29663,10 @@
       "disableCapability",
       "disableOrganizationRecoveryPolicy",
       "discardTranscriptionRecording",
+      "disconnectClaudeSubscriptionAccount",
       "disconnectCodexAccount",
       "disconnectGoogleDriveConnection",
+      "disconnectOrganizationClaudeSubscriptionAccount",
       "disconnectOrganizationSuperGrokAccount",
       "disconnectPersonalGitHub",
       "disconnectSocialConnection",
@@ -29224,6 +29701,7 @@
       "getAttachedBrowser",
       "getAuthRun",
       "getBilling",
+      "getBillingCheckout",
       "getBillingEntitlements",
       "getBillingUsage",
       "getBrowserActionReceipt",
@@ -29231,6 +29709,7 @@
       "getBrowserIdentity",
       "getBrowserSession",
       "getBrowserTargetState",
+      "getClaudeSubscriptionAccountUsage",
       "getClientConfig",
       "getCompanyProfileAgentPolicy",
       "getCompanyProfileRevision",
@@ -29257,9 +29736,10 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
-      "getOrganizationApiKey",
+      "getOrganizationClaudeSubscriptionAccountUsage",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
+      "getOrganizationModelUsage",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationUsageSummary",
@@ -29340,6 +29820,7 @@
       "listBrowserTargets",
       "listCapabilities",
       "listChannels",
+      "listClaudeSubscriptionAccounts",
       "listCodexAccounts",
       "listCompanyProfile",
       "listComputerSessions",
@@ -29368,6 +29849,7 @@
       "listOpenGeniSlackReactionChannels",
       "listOrganizationAdministrationMembers",
       "listOrganizationApiKeys",
+      "listOrganizationClaudeSubscriptionAccounts",
       "listOrganizationInvitations",
       "listOrganizationInvitationsForOrganization",
       "listOrganizationMembers",
@@ -29464,7 +29946,9 @@
       "reconnectPersonalGitHub",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
+      "refreshClaudeSubscriptionAccountUsage",
       "refreshCodexUsage",
+      "refreshOrganizationClaudeSubscriptionAccountUsage",
       "refreshOrganizationClaudeSubscriptionUsage",
       "refreshScheduledTaskAccess",
       "refreshWorkspaceClaudeSubscriptionUsage",
@@ -29475,7 +29959,9 @@
       "removeIntegrationFacet",
       "removeWorkspaceMember",
       "removeWorkspaceSkill",
+      "renameClaudeSubscriptionAccount",
       "renameCodexAccount",
+      "renameOrganizationClaudeSubscriptionAccount",
       "renameOrganizationSuperGrokAccount",
       "renameSuperGrokAccount",
       "reorderChannels",
@@ -29520,9 +30006,13 @@
       "sendEvent",
       "sendMessage",
       "setAtlassianLifecycle",
+      "setClaudeSubscriptionAccountAllocator",
+      "setClaudeSubscriptionRotationSettings",
       "setCodexAccountAllocator",
       "setCodexRotationSettings",
       "setEnvironmentVariable",
+      "setOrganizationClaudeSubscriptionAccountAllocator",
+      "setOrganizationClaudeSubscriptionRotationSettings",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setSuperGrokAccountAllocator",
@@ -29586,7 +30076,6 @@
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
-      "updateOrganizationApiKey",
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",
@@ -29728,6 +30217,10 @@
     "SiteAuthConnectionResource": [
       "get",
       "update"
+    ],
+    "ToolRequestError": [
+      "status",
+      "toResponse"
     ]
   }
 }

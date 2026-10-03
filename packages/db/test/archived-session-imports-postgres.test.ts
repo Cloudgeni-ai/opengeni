@@ -180,7 +180,7 @@ describe("archived import PostgreSQL persistence", () => {
     }
   }, 60_000);
 
-  test("archive ledgers stay private while the 0587 maintenance contract rejects the actual pre0555 runtime", async () => {
+  test("archive storage stays compatible with pre0555 while later maintenance cutovers require the current runtime", async () => {
     if (!client || !shared) return;
     const repoRoot = new URL("../../..", import.meta.url).pathname;
     // Exact immutable feature base before 0555; do not substitute new constants
@@ -207,6 +207,11 @@ describe("archived import PostgreSQL persistence", () => {
         organizationTenancyCanonicalActivationEnabled: true,
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
+      // The later 0586 maintenance cutover intentionally requires a new binary
+      // for its runtime-granted quota table. Keep the immutable evaluator and
+      // complete catalog. The organization key scope table is a second later gap.
+      const laterQuotaGap =
+        "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
       const incompatibleScopeTable =
         "RLS tables are absent from the declared contract: organization_api_key_workspaces";
       expect(
@@ -214,7 +219,7 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toContain(incompatibleScopeTable);
+      ).toEqual(expect.arrayContaining([laterQuotaGap, incompatibleScopeTable]));
       await oldProvision.provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -259,7 +264,7 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toContain(incompatibleScopeTable);
+      ).toEqual(expect.arrayContaining([laterQuotaGap, incompatibleScopeTable]));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

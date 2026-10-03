@@ -162,6 +162,11 @@ import {
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
+import {
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  type SlackApiRateLimiter,
+  type SlackRestMcpBridgeContext,
+} from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -202,6 +207,16 @@ export {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  SLACK_REST_API_BASE,
+  SLACK_REST_MCP_TOOLS,
+  SlackRestMcpServer,
+  OFFICIAL_SLACK_MCP_URL,
+  slackRestToolIsMutation,
+  isOfficialSlackMcpConfig,
+  type SlackRestMcpServerOptions,
+  type SlackApiRateLimiter,
+} from "./slack-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -268,6 +283,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+import { gzipSync } from "node:zlib";
 
 import { z } from "zod";
 
@@ -753,10 +769,11 @@ export type {
 
 ensureReadableStreamFrom();
 
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
-  GmailRestMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
+  BuiltInMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2680,6 +2697,9 @@ export function mcpToolErrorOutput(error: unknown): {
 } {
   const text =
     invalidToolArgumentsText(error) ??
+    (isIntegrationInvocationOutcomeUnknownError(error)
+      ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${exactErrorMessage(error)}`
+      : null) ??
     `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
   return { isError: true, content: [{ type: "text", text }] };
 }
@@ -4152,6 +4172,8 @@ export type PrepareToolsOptions = {
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
+  /** Shared Slack workspace/app method quota and provider Retry-After coordination. */
+  slackRateLimit?: SlackApiRateLimiter;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
   /** Exact workspace-designated ChatGPT credential; unrelated to inference. */
   codexAppsAuth?: {
@@ -4486,17 +4508,49 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  // An explicit empty permission ceiling is valid zero authority, not a
+  // request for the default grant. There is no delegated bearer to mint and
+  // no OpenGeni MCP capability to prepare. Host/local adapters and independent
+  // connection credentials do not use that bearer and keep their own authority.
+  const unavailableFirstPartyServers = new Map<string, Settings["mcpServers"][number]>();
+  const refs = tools.filter((tool) => {
+    const config = registry.get(tool.id);
+    if (
+      options.firstPartyPermissions?.length !== 0 ||
+      !config ||
+      config.connectionRef ||
+      localRegistry.has(config.id) ||
+      !isFirstPartyMcpServer(settings, config)
+    ) {
+      return true;
+    }
+    unavailableFirstPartyServers.set(config.id, config);
+    return false;
+  });
+  for (const config of unavailableFirstPartyServers.values()) {
+    if (
+      config.id === "opengeni" &&
+      (options.firstPartyTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS).length === 0
+    ) {
+      continue;
+    }
+    await publishAuthNeeded(options, {
+      serverId: config.id,
+      providerDomain: "opengeni",
+      reason: "insufficient_scope",
+    });
+  }
   const identityTargets = selectedSessionRemoteMcpTargets(
     settings,
     options.sessionAttachedRemoteMcpTargets ?? [],
-    tools,
+    refs,
     options.localMcpServers,
   );
   options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
   options.runMcpCredentials?.assertRemoteTargets(
     settings.mcpServers.filter(
       (config) =>
-        tools.some((tool) => tool.id === config.id) &&
+        refs.some((tool) => tool.id === config.id) &&
         !config.connectionRef &&
         !localRegistry.has(config.id) &&
         !isFirstPartyMcpServer(settings, config) &&
@@ -4514,7 +4568,7 @@ export async function prepareAgentTools(
     options,
     "server_construction",
     async () =>
-      await boundedParallelMap(tools, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
+      await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
         const config = registry.get(tool.id);
         if (!config) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
@@ -4654,7 +4708,7 @@ export async function prepareAgentTools(
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
           GmailRestMcpBridgeConfig,
-          GmailRestMcpBridgeContext
+          BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,
           {
@@ -4678,6 +4732,7 @@ export async function prepareAgentTools(
             onResolvedConnectionId: (connectionId) =>
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
+            ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
           },
         );
         const innerServer =
@@ -11776,6 +11831,7 @@ const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 // Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
 const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
+const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -11917,19 +11973,50 @@ async function stageRigSetupScript(
   const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
   const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
   const encodedPath = `${payloadPath}.b64`;
-  const encoded = Buffer.from(script, "utf8").toString("base64");
-  const commands = [
-    `set -eu\numask 077\nmkdir -p ${shellQuote(payloadRoot)}\n: > ${shellQuote(encodedPath)}`,
-  ];
-  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
-    commands.push(
-      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
-    );
-  }
-  commands.push(
-    `set -eu\nbase64 -d < ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
-  );
+  const bytes = Buffer.from(script, "utf8");
+  const compressed = gzipSync(bytes);
+  const compressionUseful = compressed.length < bytes.length;
   try {
+    // Repeated shell programs compress well. Probe in the existing bootstrap
+    // call, retaining the same bounded transfer on machines without gzip.
+    const bootstrap = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: [
+          "set -eu",
+          "umask 077",
+          `mkdir -p ${shellQuote(payloadRoot)}`,
+          `: > ${shellQuote(encodedPath)}`,
+          ...(compressionUseful
+            ? [
+                `if command -v gzip >/dev/null 2>&1; then printf '%s\\n' ${shellQuote(RIG_SETUP_GZIP_SENTINEL)}; fi`,
+              ]
+            : []),
+        ].join("\n"),
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 4_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(
+      bootstrap,
+      options.label ?? "Sandbox Environment setup payload staging",
+    );
+    const useCompression =
+      compressionUseful &&
+      sandboxCommandOutput(bootstrap).split(/\r?\n/u).includes(RIG_SETUP_GZIP_SENTINEL);
+    const encoded = (useCompression ? compressed : bytes).toString("base64");
+    const commands: string[] = [];
+    for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+      commands.push(
+        `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+      );
+    }
+    commands.push(
+      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+    );
     for (const command of commands) {
       const result = await runSandboxLifecycleCommand(
         session,

@@ -5,6 +5,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
   advanceWorkspaceGeneration,
@@ -79,9 +80,10 @@ afterAll(async () => {
 
 function services(
   observability: Observability = createObservability(SETTINGS, { component: "worker-test" }),
+  settings: Settings = SETTINGS,
 ): () => Promise<ActivityServices> {
   return async () => ({
-    settings: SETTINGS,
+    settings,
     db,
     bus: null as never,
     runtime: null as never,
@@ -331,9 +333,13 @@ async function commandTerminalRecord(fixture: Fixture) {
   return { command, finished, updates, pending };
 }
 
-async function drain(fixture: Fixture, observability?: Observability) {
+async function drain(
+  fixture: Fixture,
+  observability?: Observability,
+  settings: Settings = SETTINGS,
+) {
   const spy = terminateSpy();
-  const activities = createSandboxLeaseActivities(services(observability), {
+  const activities = createSandboxLeaseActivities(services(observability, settings), {
     terminateBox: spy.fn,
   });
   const result = await activities.drainSandboxLease({
@@ -466,6 +472,90 @@ describe("idle command containment", () => {
       await observability.flush();
     }, 180_000);
   }
+
+  for (const [label, environment, expectedMode] of [
+    ["unset", {}, "idle"],
+    ["explicit positive", { OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "2400000" }, "idle"],
+    ["explicit zero", { OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0" }, null],
+  ] as const) {
+    test(`${label} configuration reaches the real reaper without changing command outcomes`, async () => {
+      const configured = getSettings(environment);
+      const settings = testSettings({
+        ...SETTINGS,
+        sandboxIdleCommandContainmentMs: configured.sandboxIdleCommandContainmentMs,
+      });
+      const fixture = await idleFixture();
+      await idleFor(fixture, 45);
+      const activities = createSandboxLeaseActivities(services(undefined, settings));
+      const target = (await activities.prepareSandboxLeaseSweep()).drainable.find(
+        (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+      );
+      expect(Boolean(target)).toBe(expectedMode !== null);
+      const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+      expect(lease?.liveness).toBe(expectedMode === null ? "warm" : "draining");
+      expect(lease?.leaseEpoch).toBe(EPOCH);
+      expect(
+        (
+          await getRetainedProcess(db, {
+            ...fixture,
+            sessionId: fixture.attempt.sessionId,
+            processId: fixture.processId,
+          })
+        )?.state,
+      ).toBe("active");
+      const [parent] = await admin<{ settled: boolean }[]>`
+        select settled_at is not null as settled from sandbox_workspace_mutation_admissions
+        where id = ${fixture.admission.id}`;
+      expect(parent?.settled).toBe(false);
+      const record = await commandTerminalRecord(fixture);
+      expect(record.command).toEqual({
+        state: "running",
+        exit_code: null,
+        settlement_reason: null,
+      });
+      expect(record.finished).toHaveLength(0);
+      expect(record.updates).toHaveLength(0);
+      expect(record.pending).toHaveLength(0);
+      if (expectedMode === null) {
+        expect(
+          await enrollRetainedCommandContainment(db, {
+            ...scope(fixture),
+            idleCommandContainmentMs: configured.sandboxIdleCommandContainmentMs,
+          }),
+        ).toBeNull();
+        expect(lease?.unobservableCommandDrainIds).toBeNull();
+        const [holders] = await admin<{ n: number }[]>`
+          select count(*)::int as n from sandbox_lease_holders where lease_id = ${fixture.leaseId}`;
+        expect(holders?.n).toBeGreaterThan(0);
+      }
+    }, 180_000);
+  }
+
+  test("explicit zero preserves an already enrolled drain and its checkpoint", async () => {
+    const settings = testSettings({
+      ...SETTINGS,
+      sandboxIdleCommandContainmentMs: getSettings({
+        OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0",
+      }).sandboxIdleCommandContainmentMs,
+    });
+    const fixture = await idleFixture();
+    await idleFor(fixture, 31);
+    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    const activities = createSandboxLeaseActivities(services(undefined, settings));
+    expect(
+      (await activities.prepareSandboxLeaseSweep()).drainable.some(
+        (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+      ),
+    ).toBe(true);
+    const { result, persisted } = await drain(fixture, undefined, settings);
+    expect(result.status).toBe("terminated");
+    expect(persisted).toEqual([true]);
+    expect((await commandTerminalRecord(fixture)).command).toEqual({
+      state: "lost",
+      exit_code: null,
+      settlement_reason: "idle_containment",
+    });
+  }, 180_000);
 
   test("no enrollment while any group member is open, viewed, writing, or supervised", async () => {
     // An open turn attempt in another session of the same group.
@@ -727,34 +817,62 @@ describe("idle command containment", () => {
     expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
   }, 180_000);
 
-  test("provider-deadline rotation keeps its two-minute grace and says why it stopped", async () => {
-    const fixture = await idleFixture();
-    await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
+  for (const disabled of [false, true]) {
+    test(`provider-deadline rotation keeps its two-minute grace and says why it stopped${disabled ? " with idle containment disabled" : ""}`, async () => {
+      const settings = disabled
+        ? testSettings({
+            ...SETTINGS,
+            sandboxIdleCommandContainmentMs: getSettings({
+              OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0",
+            }).sandboxIdleCommandContainmentMs,
+          })
+        : SETTINGS;
+      const containmentScope = (fixture: Fixture) => ({
+        ...scope(fixture),
+        idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+      });
+      const activities = createSandboxLeaseActivities(services(undefined, settings));
+      const fixture = await idleFixture();
+      await admin`update sandbox_leases set rotation_requested_at = now() - interval '3 minutes',
       rotation_reason = 'provider_deadline', provider_created_at = now() - interval '23 hours',
       provider_deadline_at = now() + interval '57 minutes' where id = ${fixture.leaseId}`;
-    await admin`update sandbox_retained_processes set reconcile_attempts = 1,
+      await admin`update sandbox_retained_processes set reconcile_attempts = 1,
       started_at = now() - interval '3 minutes',
       cancellation_requested_at = now() - interval '3 minutes', cancellation_reason = 'provider_deadline',
       deadline_cancellation_requested_at = now() - interval '1 minute'
       where id = ${fixture.processId}`;
-    await admin`update session_turn_attempts set closed_at = now() - interval '3 minutes',
+      await admin`update session_turn_attempts set closed_at = now() - interval '3 minutes',
       quiesced_at = now() - interval '3 minutes' where id = ${fixture.attempt.attemptId}`;
-    // Far inside the idle window, and still inside the command stop grace.
-    expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
-    await admin`update sandbox_retained_processes set
+      // Far inside the idle window, and still inside the command stop grace.
+      expect(await enrollRetainedCommandContainment(db, containmentScope(fixture))).toBeNull();
+      expect(
+        (await activities.prepareSandboxLeaseSweep()).drainable.some(
+          (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+        ),
+      ).toBe(false);
+      await admin`update sandbox_retained_processes set
       deadline_cancellation_requested_at = now() - interval '3 minutes'
       where id = ${fixture.processId}`;
-    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("deadline");
-    const { result } = await drain(fixture);
-    expect(result.status).toBe("terminated");
-    const record = await commandTerminalRecord(fixture);
-    expect(record.command?.settlement_reason).toBe("provider_deadline_containment");
-    expect(record.finished).toHaveLength(1);
-    expect(record.updates[0]?.summary).toBe(
-      "`bun run dev --port 3000` was stopped because the sandbox reached its maximum lifetime; " +
-        "the workspace was saved. Restart it if you still need it.",
-    );
-  }, 180_000);
+      expect(
+        (await activities.prepareSandboxLeaseSweep()).drainable.some(
+          (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+        ),
+      ).toBe(true);
+      expect((await enrollRetainedCommandContainment(db, containmentScope(fixture)))?.mode).toBe(
+        "resumed",
+      );
+      const { result, persisted } = await drain(fixture, undefined, settings);
+      expect(result.status).toBe("terminated");
+      expect(persisted).toEqual([true]);
+      const record = await commandTerminalRecord(fixture);
+      expect(record.command?.settlement_reason).toBe("provider_deadline_containment");
+      expect(record.finished).toHaveLength(1);
+      expect(record.updates[0]?.summary).toBe(
+        "`bun run dev --port 3000` was stopped because the sandbox reached its maximum lifetime; " +
+          "the workspace was saved. Restart it if you still need it.",
+      );
+    }, 180_000);
+  }
 
   test("an enrolled box lost before capture settles honestly as provider loss", async () => {
     const fixture = await idleFixture();

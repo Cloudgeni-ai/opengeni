@@ -74,10 +74,10 @@ async function key(
 }
 
 test(
-  "0587 is maintenance-only, preserves legacy permission bytes, and provisions the exact FORCE-RLS join",
+  "0599 is maintenance-only, preserves legacy permission bytes, and provisions the exact FORCE-RLS join",
   async () => {
     const migration = await Bun.file(
-      new URL("../drizzle/0587_organization_api_key_access_policy.sql", import.meta.url),
+      new URL("../drizzle/0599_organization_api_key_access_policy.sql", import.meta.url),
     ).text();
     expect(migration.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
     expect(migration).toContain("opengeni.migration_application_roles");

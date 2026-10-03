@@ -1623,3 +1623,33 @@ async function websocketClosed(websocket: WebSocket): Promise<CloseEvent> {
     );
   });
 }
+
+test("private working-directory intent accepts only managed exact transport without restore or navigation", async () => {
+  await withServer(async ({ server, reference }) => {
+    const post = (body: unknown) =>
+      request(server, "/v1/browser-sessions", { method: "POST", token: adminToken, body });
+    for (const extra of [
+      { recoverExistingWorkingDirectory: false },
+      { recoverExistingWorkingDirectory: true, initialUrl: "https://example.test/" },
+      { recoverExistingWorkingDirectory: true, restore: {} },
+    ])
+      expect((await post({ ...createBody(reference), ...extra })).status).toBe(400);
+    expect((await post(createBody(reference))).status).toBe(201);
+    expect(
+      (await post({ ...createBody(reference), recoverExistingWorkingDirectory: true })).status,
+    ).toBe(200);
+    const attached = {
+      ...createBody({ ...reference, browserSessionId: randomUUID() }),
+      headed: true,
+      recoverExistingWorkingDirectory: true,
+      transport: {
+        kind: "attached_chrome",
+        deviceId: randomUUID(),
+        connectionGeneration: "synthetic-connection",
+        browserName: "Chrome",
+        browserVersion: "151",
+      },
+    };
+    expect((await post(attached)).status).toBe(409);
+  });
+});

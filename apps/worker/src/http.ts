@@ -120,6 +120,7 @@ export async function runReadinessChecks(
 export function dbReadyCheck(
   db: Database,
   posture?: RuntimeDatabasePostureOptions,
+  afterDatabaseReady?: () => Promise<void>,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
   return () => {
@@ -130,9 +131,10 @@ export function dbReadyCheck(
     inFlight = (async () => {
       if (posture) {
         await assertRuntimeDatabasePosture(db, posture);
-        return;
+      } else {
+        await db.execute(dbSql`select 1`);
       }
-      await db.execute(dbSql`select 1`);
+      await afterDatabaseReady?.();
     })().finally(() => {
       inFlight = undefined;
     });

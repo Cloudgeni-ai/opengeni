@@ -34,11 +34,13 @@ export function useOrganizationProviderConnection({
   providerKind,
   client,
   enabled = true,
+  catalogConnection,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
   enabled?: boolean;
+  catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -75,7 +77,7 @@ export function useOrganizationProviderConnection({
     };
   }, []);
 
-  const connected = connection?.status === "active";
+  const connected = catalogConnection?.connected ?? connection?.status === "active";
 
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
@@ -91,7 +93,7 @@ export function useOrganizationProviderConnection({
         : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
-    if (!enabled) return undefined;
+    if (!enabled || catalogConnection) return undefined;
     const generation = ++connectionGenerationRef.current;
     try {
       const result = await client.getOrganizationModelProviderConnection(
@@ -109,13 +111,13 @@ export function useOrganizationProviderConnection({
       setLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind, enabled]);
+  }, [client, organizationId, providerKind, enabled, Boolean(catalogConnection)]);
 
   const claudeUsage = useClaudeUsage({
     client,
     scope: "organization",
     scopeId: organizationId,
-    enabled: enabled && providerKind === "claude_subscription",
+    enabled: enabled && !catalogConnection && providerKind === "claude_subscription",
     connected,
     credentialVersion: connection?.version,
     canManage: true,
@@ -151,7 +153,7 @@ export function useOrganizationProviderConnection({
 
   async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
-    if (!key || connectionBusy) return false;
+    if (!key || catalogConnection || connectionBusy) return false;
     const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
@@ -209,6 +211,7 @@ export function useOrganizationProviderConnection({
   }
 
   async function disconnect(): Promise<boolean> {
+    if (catalogConnection) return false;
     if (!connection || connection.status !== "active") return true;
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
@@ -356,12 +359,12 @@ export function useOrganizationProviderConnection({
     scopeLabel: "Organization",
     organization: true,
     accessTarget: { client, organizationId, kind: providerKind, connectionId: "current" },
-    canManageConnection: enabled,
+    canManageConnection: enabled && !catalogConnection,
     canManageCustomModels: enabled,
     connected,
-    settled: !enabled || (loaded && modelsLoaded),
-    hidden: !enabled,
-    error: connectionError,
+    settled: !enabled || ((catalogConnection?.loaded ?? loaded) && modelsLoaded),
+    hidden: !enabled || Boolean(catalogConnection),
+    error: catalogConnection?.error ?? connectionError,
     customModelsError: modelsError,
     customModels: models,
     customModelsLoaded: modelsLoaded,

@@ -18,7 +18,7 @@ export class AnthropicRequestError extends Error {
 
   constructor(
     message: string,
-    readonly status: number,
+    readonly status: number | undefined,
     readonly code: string,
     source: unknown,
     headers: Headers,

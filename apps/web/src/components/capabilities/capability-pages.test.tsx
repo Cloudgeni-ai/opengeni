@@ -243,6 +243,42 @@ describe("CatalogItemPage", () => {
     expect(view.container.textContent).not.toContain("Manage this capability");
     await view.unmount();
   });
+
+  test("workspace-enabled personal Slack does not request permissions for an unconnected viewer", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        health={{ state: "attention", connection: null }}
+        item={item({
+          id: "mcp:slack",
+          name: "Slack",
+          providerDomain: "slack.com",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          endpointUrl: "https://mcp.slack.com/mcp",
+          enabled: true,
+          connectionRef: {
+            providerDomain: "slack.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        })}
+        onAction={() => {}}
+      />,
+    );
+    try {
+      // Rendering a permissions reader here would also require an app client,
+      // then report the saved connector as broken even though this user has
+      // never connected an account.
+      expect(view.container.querySelector('[aria-label="Tool permissions"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("Couldn't load tool permissions");
+      expect(buttons(view.container, "Connect Slack")).toHaveLength(1);
+      expect(view.container.textContent).toContain("Each person connects their own account.");
+      expect(view.container.textContent).not.toContain("Your connection stopped working");
+      expect(view.container.textContent).not.toContain("Needs attention");
+    } finally {
+      await view.unmount();
+    }
+  });
 });
 
 describe("ProviderPage", () => {

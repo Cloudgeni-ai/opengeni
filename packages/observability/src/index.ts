@@ -425,6 +425,8 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "MemorySearchOperationError",
   "NatsAuthCalloutOperationError",
   "OAuthOperationError",
+  "ParallelSessionTitleGenerationError",
+  "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
   "RunStateCompatibilityError",
   "SandboxChannelAOperationError",
@@ -488,6 +490,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "not_found",
   "oauth_operation_failed",
   "otlp_export_failed",
+  "parallel_session_title_generation_failed",
+  "parallel_session_title_persistence_failed",
   "payment_required",
   "provider_verification_failed",
   "sandbox_channel_a_cancelled",
@@ -511,6 +515,12 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "worker_shutdown_request_failed",
   "workspace_control_live_publish_failed",
 ]);
+
+// Human-readable descriptions come only from the reviewed protocol vocabulary,
+// never an exception message or a caller-supplied errorMessage attribute.
+const PUBLIC_TELEMETRY_ERROR_MESSAGES = new Map(
+  [...PUBLIC_TELEMETRY_ERROR_CODES].map((code) => [code, code.replaceAll("_", " ")]),
+);
 
 const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
   "api",
@@ -1683,7 +1693,7 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
         ? errorClass
         : "OperationError",
     ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
-      ? { errorCode }
+      ? { errorCode, errorMessage: PUBLIC_TELEMETRY_ERROR_MESSAGES.get(errorCode)! }
       : {}),
     ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
       ? { status }
@@ -1809,6 +1819,8 @@ async function defaultExporter(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1_000),
   });
+  // Export decisions use only the status; release the ignored response body.
+  await response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);
   }

@@ -2,8 +2,12 @@ import { useCreditExposure } from "@/lib/use-analytics-exposure";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
+import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
+import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +24,7 @@ import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { validTopupAmount } from "@/lib/format";
 import { analyticsAction } from "@/lib/analytics-actions";
+import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -47,6 +52,11 @@ export function CreditRequiredPromptView({
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
+  // A redeemed coupon, celebrated in this dialog with its real amount.
+  const [granted, setGranted] = useState<BillingCheckoutStatus | null>(null);
+  useEffect(() => {
+    if (!open) setGranted(null);
+  }, [open]);
   const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
@@ -76,14 +86,18 @@ export function CreditRequiredPromptView({
       const session = await client.createBillingCheckout({
         amountUsd: Number(topupAmount),
         accountId,
-        successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
-        cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       window.location.assign(session.url);
     } catch (error) {
       toast.error("Checkout failed", { description: userErrorText(error) });
       setBusy(false);
     }
+  }
+
+  if (granted) {
+    return <CreditsCelebrationDialog status={granted} open={open} onOpenChange={onOpenChange} />;
   }
 
   return (
@@ -95,16 +109,13 @@ export function CreditRequiredPromptView({
           </DialogTitle>
           <DialogDescription>
             {purpose === "topup"
-              ? "Choose an amount, then enter a gift code or payment details in Stripe Checkout."
+              ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
               : "This chat uses Opengeni credits and none are currently available. Buy credits, or connect a model you already pay for."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
-            <p className="text-xs text-fg-subtle">
-              For a gift code, select its stated credit value and enter the code in Stripe Checkout.
-            </p>
             <Button
               type="button"
               variant={purpose === "topup" ? "default" : "outline"}
@@ -119,6 +130,17 @@ export function CreditRequiredPromptView({
               )}
               {purpose === "topup" ? "Continue to Stripe" : "Buy credits"}
             </Button>
+            {accountId ? (
+              <div className="border-t border-border pt-3">
+                <CouponRedeem
+                  client={client}
+                  accountId={accountId}
+                  workspaceId={workspaceId}
+                  disabled={busy}
+                  onGranted={setGranted}
+                />
+              </div>
+            ) : null}
           </div>
         ) : !canBuyCredits ? (
           <p className="text-sm text-fg-muted">

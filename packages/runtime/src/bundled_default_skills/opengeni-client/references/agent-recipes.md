@@ -61,10 +61,35 @@ for background API/MCP access, or the product's signed workspace credential
 provider for short-lived managed-sandbox Git/cloud material. See
 [Data tools and credentials](data-tools-and-credentials.md).
 
+`firstPartyMcpTools: []` narrows the broad first-party model-visible selection;
+it does not set a zero permission ceiling. Public `createSession` rejects an
+explicit `firstPartyMcpPermissions: []` with 422, including `asService` calls.
+This recipe omits that override, preserving the top-level default worker
+permission set (or inherited policy for a child), not zero authority. Any
+intentional public permission override must be nonempty and within the
+creator's grant; do not add permissions merely to make startup succeed.
+
+Inbound automation `sessionTemplate` is a different boundary: both first-party
+arrays default to `[]`, and explicit `[]` is supported. That empty effective
+ceiling skips remote OpenGeni-delegated MCP preparation without a token or
+endpoint request. Requested first-party tools or dedicated `files`/`docs` stay
+unavailable with an `insufficient_scope` advisory. Product MCP servers,
+independent connections, host-owned local adapters and already-authorized native
+runtime mechanics keep their own authorization paths.
+
 ## Per-user tool tokens
 
-When the product's MCP server should act as the signed-in user, give each
-session a short-lived per-user bearer and rotate it on every message:
+On a Node backend that mounts `createSessionProxyHandler`, this is one option:
+`toolServer: { url, approvals: { ask: [writeTools] } }` attaches the product's MCP
+endpoint to every session the `createSession` hook creates, mints the
+per-user token from the `resolve` result, and rotates it on every send, steer,
+submit, approval, and answer. The endpoint calls `verifyToolRequest(request)`
+from `@opengeni/sdk/tool-auth` and scopes every tool to the returned `user` and
+`tenant`. See
+[Data tools and credentials](data-tools-and-credentials.md#default-for-node-the-proxy-toolserver).
+
+Without the Node proxy, give each session a short-lived per-user bearer and
+rotate it on every message yourself:
 
 1. Onboard the user with `mcp_servers:attach` among their permissions.
 2. Create the session as that user with

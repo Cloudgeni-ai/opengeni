@@ -44,6 +44,7 @@ import {
   listCreditBalancesByAccount,
   countActiveUsers,
   readCreditGrantTotals,
+  readManagedAuthNewSignupsSwitch,
   readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
@@ -69,6 +70,7 @@ import {
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
+  recoverManagedSessionBackgroundCommand,
   settleClaimedConnectedMachineBackgroundCommand,
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
@@ -176,6 +178,7 @@ import {
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordManagedAuthNewSignupsSwitchGauge,
   recordVerifiedSignupTrialSwitchGauge,
   runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
@@ -1485,6 +1488,32 @@ async function reconcileTerminalRetainedProcesses(
       sessionId: process.sessionId,
       processId: process.id,
     };
+    // Recover a yield whose observation failed before normal receipt adoption.
+    // Do this before provider I/O: an unavailable observer must not fence every
+    // subsequent turn. Physical retention and unknown outcome stay unchanged.
+    if (
+      process.ownerActorKind === "turn" &&
+      process.providerBackend === "modal" &&
+      !proof &&
+      !claim.ownerState.startsWith("background_")
+    ) {
+      try {
+        const command = await recoverManagedSessionBackgroundCommand(db, {
+          ...processScope,
+          expected,
+          reconciliationClaimId: claim.claimId,
+        });
+        if (command) {
+          claim.ownerState = `background_${command.state}`;
+          recordRetainedProcessReconciliation(observability, "background_recovered");
+        }
+      } catch (error) {
+        observability.warn("sandbox reaper: retained-command background recovery failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const storedCommandPersistence = retainedProviderCommandPersistence(
       db,
       processScope,
@@ -2565,6 +2594,19 @@ async function refreshQueueLeaseAndCreditGauges(
         recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);
       } catch (error) {
         observability.warn("sandbox reaper: trial-credit switch gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        const signupsSwitch = await readManagedAuthNewSignupsSwitch(db);
+        recordManagedAuthNewSignupsSwitchGauge(
+          observability,
+          signupsSwitch?.signupsEnabled !== false,
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: new-signups switch gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }

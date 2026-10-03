@@ -1,3 +1,43 @@
+export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import {
+  claudeSubscriptionAccountRepository,
+  claudeSubscriptionTables,
+} from "./claude-subscription-accounts";
+import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
+const claudeProviderAccountAuthoritySnapshotForTurnInTransaction = (
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+) => subscriptionAuthorityForTurnInTransaction(db, "claude", workspaceId, sessionId, turnId);
+export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+) => getAcceptedSubscriptionTaskAuthority(db, "claude", workspaceId, taskId);
+export const getSessionTurnClaudeProviderAccountAuthoritySnapshot = (
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+) => getAcceptedSubscriptionTurnAuthority(db, "claude", workspaceId, sessionId, turnId);
+export const getSessionParentClaudeProviderAccountAuthority = (
+  db: Database,
+  workspaceId: string,
+  childSessionId: string,
+) => getAcceptedSubscriptionParentAuthority(db, "claude", workspaceId, childSessionId);
+import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
+import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
+import {
+  getAcceptedSubscriptionTaskAuthority,
+  getAcceptedSubscriptionTurnAuthority,
+  getAcceptedSubscriptionParentAuthority,
+  subscriptionAuthorityForTurnInTransaction,
+} from "./accepted-subscription-authority";
+export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
+export * from "./claude-subscription-accounts";
+export * from "./claude-subscription-account-usage";
+import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
@@ -87,6 +127,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./scheduled-task-access";
+export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -111,6 +152,7 @@ import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
+export * from "./organization-signup-use-cases";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -133,6 +175,7 @@ import {
   type ModelConnectionTarget,
 } from "./model-connection-access";
 import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
+import { withOrganizationClaudeCapacityMutation } from "./claude-subscription-accounts";
 export {
   assertModelConnectionAllowsTurn,
   modelAllowedByConnections,
@@ -309,6 +352,7 @@ import type {
   SessionScopeSubjectId,
   SessionMemoryScope,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -415,6 +459,7 @@ import {
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
+  ClaudeProviderAccountAuthoritySnapshotV1,
   PersonalResourceAttachmentSummary,
   type TimelineAnnotation,
 } from "@opengeni/contracts";
@@ -729,6 +774,7 @@ export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
 export * from "./verified-signup-trial-switch";
+export * from "./managed-auth-new-signups-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -879,6 +925,7 @@ import {
 } from "./connection-token-resolver";
 import { resolveAcceptedConnectionUse } from "./connection-authority";
 import {
+  xaiSubscriptionRepository,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
   xaiCredentialWorkspacePredicate,
   xaiRotationWorkspacePredicate,
@@ -5464,6 +5511,7 @@ export async function recordModelCallFact(
 }
 
 export {
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   organizationUsageWindow,
@@ -5969,6 +6017,7 @@ export type CreateScheduledTaskInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   /** Trusted frozen creator boundary, never copied from task metadata. */
   creatorPolicy?: ScheduledTaskCreatorPolicy | null;
   targetSessionId?: string | null;
@@ -6784,6 +6833,7 @@ export type EnqueueSessionTurnInput = {
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
 };
@@ -6796,6 +6846,7 @@ export type SessionTurnForExecution = SessionTurn & {
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
 };
 
@@ -17509,6 +17560,9 @@ export async function createScheduledTask(
           xaiProviderAccountAuthoritySnapshot:
             input.xaiProviderAccountAuthoritySnapshot ??
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          claudeProviderAccountAuthoritySnapshot:
+            input.claudeProviderAccountAuthoritySnapshot ??
+            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
@@ -17813,24 +17867,7 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
   workspaceId: string,
   taskId: string,
 ): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        snapshot: schema.scheduledTasks.xaiProviderAccountAuthoritySnapshot,
-      })
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-          isNull(schema.scheduledTasks.deletedAt),
-        ),
-      )
-      .limit(1);
-    return row
-      ? XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot)
-      : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  });
+  return getAcceptedSubscriptionTaskAuthority(db, "xai", workspaceId, taskId);
 }
 
 /**
@@ -21169,6 +21206,10 @@ export async function updateSessionVariableSets(
                 where xai_waiter.workspace_id = ${input.workspaceId}
                   and xai_waiter.session_id = ${input.sessionId}
                   and xai_waiter.status = 'waiting')
+              or exists (select 1 from ${schema.claudeCapacityWaiters} claude_waiter
+                where claude_waiter.workspace_id = ${input.workspaceId}
+                  and claude_waiter.session_id = ${input.sessionId}
+                  and claude_waiter.status = 'waiting')
               then 'capacity_waiter'
             when exists (select 1 from ${schema.sessionRealtimeModes} realtime_mode
                 where realtime_mode.workspace_id = ${input.workspaceId}
@@ -27841,79 +27882,6 @@ export type ReconcileXaiCapacityWaitResult =
   | { action: "superseded"; waiter: XaiCapacityWait; events: SessionEvent[] }
   | { action: "stale"; waiter: XaiCapacityWait | null; events: SessionEvent[] };
 
-function mapXaiCapacityWaiter(row: typeof schema.xaiCapacityWaiters.$inferSelect): XaiCapacityWait {
-  return {
-    id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    sessionId: row.sessionId,
-    goalId: row.goalId,
-    goalVersion: row.goalVersion,
-    blockedTurnId: row.blockedTurnId,
-    blockedTurnGeneration: row.blockedTurnGeneration,
-    workflowId: row.workflowId,
-    authorityScope: row.authorityScope as "workspace" | "user" | "organization",
-    ownerOrganizationMembershipId: row.ownerOrganizationMembershipId,
-    status: row.status as CodexCapacityWaitStatus,
-    generation: row.generation,
-    earliestResetAt: row.earliestResetAt,
-    nextCheckAt: row.nextCheckAt,
-    wakeRevision: row.wakeRevision,
-    observedWakeRevision: row.observedWakeRevision,
-    lastWakeReason: row.lastWakeReason,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
-  return earliestResetAt && earliestResetAt.getTime() > now.getTime()
-    ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
-    : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
-}
-
-export async function resolveXaiWaiterSubject(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{
-  subjectId: string;
-  snapshot: XaiProviderAccountAuthoritySnapshotV1;
-  turnId: string;
-} | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [turn] = await scopedDb
-      .select({
-        id: schema.sessionTurns.id,
-        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-        snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-      })
-      .from(schema.sessions)
-      .innerJoin(
-        schema.sessionTurns,
-        and(
-          eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
-          eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.id, sessionId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "waiting_capacity"),
-        ),
-      )
-      .limit(1);
-    if (!turn) return null;
-    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
-    const subjectId =
-      snapshot.scope === "user" ? turn.initiatingHumanSubjectId : "worker:xai-workspace";
-    if (!subjectId) return null;
-    return { subjectId, snapshot, turnId: turn.id };
-  });
-}
-
 async function withTemporarySubjectRls<T>(
   tx: Database,
   subjectId: string,
@@ -27947,1054 +27915,1165 @@ async function withTemporarySubjectRls<T>(
   return result;
 }
 
-async function getXaiCapacityWaitForSessionInTransaction(
-  tx: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<XaiCapacityWait | null> {
-  const [turn] = await tx
-    .select({
-      id: schema.sessionTurns.id,
-      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-    })
-    .from(schema.sessions)
-    .innerJoin(
-      schema.sessionTurns,
-      and(
-        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
-        eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
-      ),
-    )
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, workspaceId),
-        eq(schema.sessions.id, sessionId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-        eq(schema.sessionTurns.status, "waiting_capacity"),
-      ),
-    )
-    .limit(1);
-  if (!turn) return null;
-  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
-  const subjectId =
-    snapshot.scope === "user" ? turn.initiatingHumanSubjectId : "worker:xai-workspace";
-  if (!subjectId) return null;
-  return await withTemporarySubjectRls(tx, subjectId, async () => {
-    const [row] = await tx
-      .select()
-      .from(schema.xaiCapacityWaiters)
+/** Shared durable scoped-subscription waiter state machine. */
+function createScopedSubscriptionCapacityWaiters(options: {
+  provider: "xai" | "claude";
+  label: string;
+  wireProvider: string;
+  workerSubject: string;
+  snapshotColumn: "xaiProviderAccountAuthoritySnapshot" | "claudeProviderAccountAuthoritySnapshot";
+  resolvePoolFunction: "resolve_xai_authority_pool" | "resolve_claude_authority_pool";
+  tables: import("./subscription-pool-schema").SubscriptionPoolTables;
+  rotationWorkspacePredicate: typeof xaiRotationWorkspacePredicate;
+  credentialWorkspacePredicate: typeof xaiCredentialWorkspacePredicate;
+  selectAvailable: typeof xaiSubscriptionRepository.selectSubscriptionCredentialForUse;
+}) {
+  const { tables } = options;
+  function mapXaiCapacityWaiter(row: typeof tables.capacityWaiters.$inferSelect): XaiCapacityWait {
+    return {
+      id: row.id,
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.sessionId,
+      goalId: row.goalId,
+      goalVersion: row.goalVersion,
+      blockedTurnId: row.blockedTurnId,
+      blockedTurnGeneration: row.blockedTurnGeneration,
+      workflowId: row.workflowId,
+      authorityScope: row.authorityScope as "workspace" | "user" | "organization",
+      ownerOrganizationMembershipId: row.ownerOrganizationMembershipId,
+      status: row.status as CodexCapacityWaitStatus,
+      generation: row.generation,
+      earliestResetAt: row.earliestResetAt,
+      nextCheckAt: row.nextCheckAt,
+      wakeRevision: row.wakeRevision,
+      observedWakeRevision: row.observedWakeRevision,
+      lastWakeReason: row.lastWakeReason,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
+    return earliestResetAt && earliestResetAt.getTime() > now.getTime()
+      ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
+      : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
+  }
+
+  async function resolveXaiWaiterSubject(
+    db: Database,
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{
+    subjectId: string;
+    snapshot: XaiProviderAccountAuthoritySnapshotV1;
+    turnId: string;
+  } | null> {
+    return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+          snapshot: schema.sessionTurns[options.snapshotColumn],
+        })
+        .from(schema.sessions)
+        .innerJoin(
+          schema.sessionTurns,
+          and(
+            eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, sessionId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            eq(schema.sessionTurns.status, "waiting_capacity"),
+          ),
+        )
+        .limit(1);
+      if (!turn) return null;
+      const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
+      const subjectId =
+        snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
+      if (!subjectId) return null;
+      return { subjectId, snapshot, turnId: turn.id };
+    });
+  }
+
+  async function getXaiCapacityWaitForSessionInTransaction(
+    tx: Database,
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<XaiCapacityWait | null> {
+    const [turn] = await tx
+      .select({
+        id: schema.sessionTurns.id,
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        snapshot: schema.sessionTurns[options.snapshotColumn],
+      })
+      .from(schema.sessions)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+          eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+        ),
+      )
       .where(
         and(
-          eq(schema.xaiCapacityWaiters.workspaceId, workspaceId),
-          eq(schema.xaiCapacityWaiters.sessionId, sessionId),
-          eq(schema.xaiCapacityWaiters.blockedTurnId, turn.id),
-          eq(schema.xaiCapacityWaiters.status, "waiting"),
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.status, "waiting_capacity"),
         ),
       )
       .limit(1);
-    return row ? mapXaiCapacityWaiter(row) : null;
-  });
-}
+    if (!turn) return null;
+    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(turn.snapshot);
+    const subjectId =
+      snapshot.scope === "user" ? turn.initiatingHumanSubjectId : options.workerSubject;
+    if (!subjectId) return null;
+    return await withTemporarySubjectRls(tx, subjectId, async () => {
+      const [row] = await tx
+        .select()
+        .from(tables.capacityWaiters)
+        .where(
+          and(
+            eq(tables.capacityWaiters.workspaceId, workspaceId),
+            eq(tables.capacityWaiters.sessionId, sessionId),
+            eq(tables.capacityWaiters.blockedTurnId, turn.id),
+            eq(tables.capacityWaiters.status, "waiting"),
+          ),
+        )
+        .limit(1);
+      return row ? mapXaiCapacityWaiter(row) : null;
+    });
+  }
 
-async function resolveXaiPoolMembershipInTransaction(
-  tx: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-  },
-): Promise<string | null> {
-  if (input.authoritySnapshot.scope !== "user") return null;
-  const rows = await rawRows<{ membership_id: string }>(
-    tx,
-    sql`select organization_membership_id as membership_id
-      from resolve_xai_authority_pool(
+  async function resolveXaiPoolMembershipInTransaction(
+    tx: Database,
+    input: {
+      accountId: string;
+      workspaceId: string;
+      subjectId: string;
+      authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+    },
+  ): Promise<string | null> {
+    if (input.authoritySnapshot.scope !== "user") return null;
+    const rows = await rawRows<{ membership_id: string }>(
+      tx,
+      sql`select organization_membership_id as membership_id
+      from ${sql.identifier(options.resolvePoolFunction)}(
         ${input.accountId}::uuid,
         ${input.workspaceId}::uuid,
         ${input.subjectId},
         ${JSON.stringify(input.authoritySnapshot)}::jsonb
       )`,
-  );
-  return rows[0]?.membership_id ?? null;
-}
-
-function xaiSnapshotMatchesTurn(
-  turn: typeof schema.sessionTurns.$inferSelect,
-  snapshot: XaiProviderAccountAuthoritySnapshotV1,
-  subjectId: string,
-): boolean {
-  const current = XaiProviderAccountAuthoritySnapshotV1.safeParse(
-    turn.xaiProviderAccountAuthoritySnapshot,
-  );
-  return (
-    current.success &&
-    stableJson(current.data) === stableJson(snapshot) &&
-    (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
-  );
-}
-
-/**
- * Atomically close one exact xAI attempt and preserve its logical turn behind a
- * durable provider-capacity waiter. The immutable authority snapshot and, for
- * private pools, exact initiating human are revalidated under FORCE RLS before
- * any session/turn projection changes.
- */
-export async function armXaiCapacityWait(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    workflowId: string;
-    authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-    goalId?: string | null;
-    goalVersion?: number | null;
-    earliestResetAt: Date | null;
-    failurePayload: Record<string, unknown>;
-    leaseFence?: { holderId: string; generation: number };
-    credentialQuarantine?: XaiCredentialLeaseQuarantine;
-    now?: Date;
-  },
-): Promise<ArmXaiCapacityWaitResult> {
-  const now = input.now ?? new Date();
-  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
-  const goalId = input.goalId ?? null;
-  const goalVersion = input.goalVersion ?? null;
-  if (
-    (goalId === null) !== (goalVersion === null) ||
-    (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
-  ) {
-    throw new Error("xAI capacity goal fence must be absent or contain a positive version");
+    );
+    return rows[0]?.membership_id ?? null;
   }
-  if (input.credentialQuarantine && !input.leaseFence) {
-    throw new Error("xAI credential quarantine requires an exact lease fence");
+
+  function xaiSnapshotMatchesTurn(
+    turn: typeof schema.sessionTurns.$inferSelect,
+    snapshot: XaiProviderAccountAuthoritySnapshotV1,
+    subjectId: string,
+  ): boolean {
+    const current = XaiProviderAccountAuthoritySnapshotV1.safeParse(turn[options.snapshotColumn]);
+    return (
+      current.success &&
+      stableJson(current.data) === stableJson(snapshot) &&
+      (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
+    );
   }
-  if (
-    input.credentialQuarantine?.kind === "cooldown" &&
-    (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
-      input.credentialQuarantine.until.getTime() <= now.getTime())
-  ) {
-    throw new Error("xAI credential cooldown must end in the future");
-  }
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (scopedDb) =>
-      await withSessionActivitySavepoint(scopedDb, async (tx) => {
-        const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          authoritySnapshot: snapshot,
-        });
-        if (snapshot.scope === "user" && !ownerOrganizationMembershipId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
-        if (snapshot.scope !== "organization")
-          await tx
-            .insert(schema.xaiRotationSettings)
-            .values({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              authorityScope: snapshot.scope,
-              ownerOrganizationMembershipId,
-            })
-            .onConflictDoNothing();
-        const [rotation] = await tx
-          .select()
-          .from(schema.xaiRotationSettings)
-          .where(
-            and(
-              xaiRotationWorkspacePredicate(input.workspaceId),
-              eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiRotationSettings.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
-                  ),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!rotation || rotation.accountId !== input.accountId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
-        // Child-lifecycle prefix: the parent session is locked with the child
-        // so the capacity-wait notice can be enqueued in this same commit.
-        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          attemptId: input.attemptId,
-        });
-        const session = locks.session;
-        const turn = locks.turns[0];
-        const attempt = locks.attempts[0];
-        const effectiveControl = session
-          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-              workspaceControl: locks.control ?? undefined,
-            })
-          : null;
-        const [goal] = goalId
-          ? await tx
-              .select()
-              .from(schema.sessionGoals)
-              .where(
-                and(
-                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                  eq(schema.sessionGoals.id, goalId),
-                  eq(schema.sessionGoals.sessionId, input.sessionId),
-                ),
-              )
-              .for("update")
-              .limit(1)
-          : [];
-        const [lease] = input.leaseFence
-          ? await tx
-              .select()
-              .from(schema.xaiCredentialLeases)
-              .where(
-                and(
-                  eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-                  eq(schema.xaiCredentialLeases.turnId, input.turnId),
-                  gt(schema.xaiCredentialLeases.leasedUntil, now),
-                ),
-              )
-              .for("update")
-              .limit(1)
-          : [];
-        const [existing] = await tx
-          .select()
-          .from(schema.xaiCapacityWaiters)
-          .where(
-            and(
-              eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
-              eq(schema.xaiCapacityWaiters.authorityScope, snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiCapacityWaiters.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
-                  ),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const exactRowsMatch =
-          session?.accountId === input.accountId &&
-          turn?.accountId === input.accountId &&
-          turn?.sessionId === input.sessionId &&
-          attempt?.accountId === input.accountId &&
-          attempt?.sessionId === input.sessionId &&
-          attempt?.turnId === input.turnId;
-        if (!exactRowsMatch || !turn) {
-          return {
-            action: "stale",
-            waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-            events: [],
-          } as const;
-        }
-        if (
-          existing?.status === "waiting" &&
-          existing.blockedTurnId === input.turnId &&
-          existing.blockedTurnGeneration === turn.executionGeneration &&
-          turn.status === "waiting_capacity" &&
-          session?.status === "waiting_capacity" &&
-          session.activeTurnId === input.turnId
-        ) {
-          return {
-            action: "waiting",
-            waiter: mapXaiCapacityWaiter(existing),
-            events: [],
-          } as const;
-        }
-        const leaseFenceValid =
-          !input.leaseFence ||
-          (lease?.accountId === input.accountId &&
-            lease.workspaceId === input.workspaceId &&
-            lease.authorityScope === snapshot.scope &&
-            lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
-            lease.holderId === input.leaseFence.holderId &&
-            lease.generation === input.leaseFence.generation);
-        if (
-          !session ||
-          !attempt ||
-          effectiveControl?.state !== "active" ||
-          effectiveControl.settlement !== null ||
-          session.activeTurnId !== input.turnId ||
-          session.status !== "running" ||
-          turn.status !== "running" ||
-          turn.activeAttemptId !== input.attemptId ||
-          (goalId !== null &&
-            (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
-          !leaseFenceValid ||
-          !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
-        ) {
-          return {
-            action: "stale",
-            waiter: existing ? mapXaiCapacityWaiter(existing) : null,
-            events: [],
-          } as const;
-        }
 
-        if (input.credentialQuarantine) {
-          if (!lease) throw new Error("xAI credential quarantine lost its lease fence");
-          const updated = await tx
-            .update(schema.xaiSubscriptionCredentials)
-            .set(
-              input.credentialQuarantine.kind === "status"
-                ? {
-                    status: input.credentialQuarantine.status,
-                    lastError: input.credentialQuarantine.lastError,
-                    exhaustedUntil: null,
-                    updatedAt: now,
-                  }
-                : {
-                    exhaustedUntil: input.credentialQuarantine.until,
-                    updatedAt: now,
-                  },
-            )
-            .where(
-              and(
-                eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-                xaiCredentialWorkspacePredicate(input.workspaceId),
-                eq(schema.xaiSubscriptionCredentials.id, lease.credentialId),
-              ),
-            )
-            .returning({ id: schema.xaiSubscriptionCredentials.id });
-          if (updated.length !== 1) {
-            throw new Error("xAI credential quarantine lost its credential fence");
-          }
-        }
-
-        await closeSessionTurnAttemptInTransaction(tx, {
-          id: input.attemptId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: turn.executionGeneration,
-          outcome: "waiting_capacity",
-          closedAt: now,
-        });
-        const generation = (existing?.generation ?? 0) + 1;
-        const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
-        const nextCheckAt = xaiCapacityNextCheckAt(input.earliestResetAt, now);
-        const values = {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          goalId,
-          goalVersion,
-          blockedTurnId: input.turnId,
-          blockedTurnGeneration: turn.executionGeneration,
-          workflowId: input.workflowId,
-          authorityScope: snapshot.scope,
-          ownerOrganizationMembershipId,
-          status: "waiting",
-          generation,
-          earliestResetAt: input.earliestResetAt,
-          nextCheckAt,
-          wakeRevision,
-          observedWakeRevision: wakeRevision,
-          lastWakeReason: "capacity_wait_armed",
-          updatedAt: now,
-        } as const;
-        const [waiterRow] = existing
-          ? await tx
-              .update(schema.xaiCapacityWaiters)
-              .set(values)
-              .where(eq(schema.xaiCapacityWaiters.id, existing.id))
-              .returning()
-          : await tx.insert(schema.xaiCapacityWaiters).values(values).returning();
-        if (!waiterRow) throw new Error("xAI capacity wait arm returned no waiter row");
-
-        let sequence = session.lastSequence;
-        const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          reason: "xai_capacity_wait",
-          sequence,
-          now,
-          preserveInterruptionRows: true,
-        });
-        sequence = closedTools.sequence;
-        const inserted = await tx
-          .insert(schema.sessionEvents)
-          .values(
-            withLosslessContentWriteVersion(
-              [
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "turn.capacity_waiting",
-                  payload: {
-                    ...input.failurePayload,
-                    provider: "supergrok-subscription",
-                    recovery: "provider_capacity",
-                    retryable: true,
-                    waiterId: waiterRow.id,
-                    generation: waiterRow.generation,
-                    goalId,
-                    goalVersion,
-                    blockedTurnGeneration: turn.executionGeneration,
-                    earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
-                    nextCheckAt: nextCheckAt.toISOString(),
-                  },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: ++sequence,
-                  type: "session.status.changed",
-                  payload: {
-                    status: "waiting_capacity",
-                    reason: "xai_capacity",
-                  },
-                  turnId: input.turnId,
-                  turnGeneration: turn.executionGeneration,
-                  turnAttemptId: input.attemptId,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-              ],
-              "payload",
-              "payloadCodecVersion",
-            ),
-          )
-          .returning();
-        const [waitingTurn] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            status: "waiting_capacity",
-            activeAttemptId: null,
-            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-            version: turn.version + 1,
-            finishedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.status, "running"),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-            ),
-          )
-          .returning({ id: schema.sessionTurns.id });
-        if (!waitingTurn) throw new Error("xAI capacity blocked turn changed during atomic arm");
-        const [waitingSession] = await tx
-          .update(schema.sessions)
-          .set({
-            status: "waiting_capacity",
-            activeTurnId: input.turnId,
-            lastSequence: sequence,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.status, "running"),
-              eq(schema.sessions.activeTurnId, input.turnId),
-            ),
-          )
-          .returning({ id: schema.sessions.id });
-        if (!waitingSession) throw new Error("xAI capacity session changed during atomic arm");
-        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
-          turnId: input.turnId,
-          waiterId: waiterRow.id,
-          provider: "xai",
-          nextCheckAt,
-        });
-        if (input.leaseFence) {
-          await tx
-            .delete(schema.xaiCredentialLeases)
-            .where(
-              and(
-                eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-                eq(schema.xaiCredentialLeases.turnId, input.turnId),
-                eq(schema.xaiCredentialLeases.holderId, input.leaseFence.holderId),
-                eq(schema.xaiCredentialLeases.generation, input.leaseFence.generation),
-              ),
-            );
-        }
-        return {
-          action: "waiting",
-          waiter: mapXaiCapacityWaiter(waiterRow),
-          events: [...closedTools.events, ...inserted.map(mapEvent)],
-        } as const;
-      }),
-  );
-}
-
-export async function getXaiCapacityWaitForSession(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<XaiCapacityWait | null> {
-  const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
-  if (!authority) return null;
-  return await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.xaiCapacityWaiters)
-      .where(
-        and(
-          eq(schema.xaiCapacityWaiters.workspaceId, workspaceId),
-          eq(schema.xaiCapacityWaiters.sessionId, sessionId),
-          eq(schema.xaiCapacityWaiters.blockedTurnId, authority.turnId),
-          eq(schema.xaiCapacityWaiters.status, "waiting"),
-        ),
-      )
-      .limit(1);
-    return row ? mapXaiCapacityWaiter(row) : null;
-  });
-}
-
-async function supersedeXaiCapacityWaitInTransaction(
-  tx: SessionActivityDatabase,
-  input: {
-    session: typeof schema.sessions.$inferSelect;
-    blockedTurn: typeof schema.sessionTurns.$inferSelect;
-    waiter: typeof schema.xaiCapacityWaiters.$inferSelect;
-    reason: string;
-    now: Date;
-  },
-): Promise<{ waiter: XaiCapacityWait; events: SessionEvent[] }> {
-  const [updated] = await tx
-    .update(schema.xaiCapacityWaiters)
-    .set({
-      status: "superseded",
-      observedWakeRevision: input.waiter.wakeRevision,
-      lastWakeReason: input.reason,
-      updatedAt: input.now,
-    })
-    .where(
-      and(
-        eq(schema.xaiCapacityWaiters.id, input.waiter.id),
-        eq(schema.xaiCapacityWaiters.status, "waiting"),
-      ),
-    )
-    .returning();
-  if (!updated) return { waiter: mapXaiCapacityWaiter(input.waiter), events: [] };
-  const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
-  const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
-  if (input.blockedTurn.status === "waiting_capacity") {
-    const [settledTurn] = await tx
-      .update(schema.sessionTurns)
-      .set({
-        status: terminalTurnStatus,
-        activeAttemptId: null,
-        cancelledBy: "xai_capacity_reconcile",
-        cancelReason: input.reason,
-        version: input.blockedTurn.version + 1,
-        finishedAt: input.now,
-        updatedAt: input.now,
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-          eq(schema.sessionTurns.id, input.blockedTurn.id),
-          eq(schema.sessionTurns.status, "waiting_capacity"),
-          isNull(schema.sessionTurns.activeAttemptId),
-          eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
-        ),
-      )
-      .returning({ id: schema.sessionTurns.id });
-    if (!settledTurn) throw new Error("xAI capacity blocked turn changed during supersession");
-  }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
-  const nextSessionStatus =
-    input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
-  const values: SessionEventInsertWithPayload[] = [
-    {
-      accountId: input.session.accountId,
-      workspaceId: input.session.workspaceId,
-      sessionId: input.session.id,
-      sequence: input.session.lastSequence + 1,
-      type: "turn.superseded",
-      payload: {
-        provider: "supergrok-subscription",
-        waiterId: updated.id,
-        generation: updated.generation,
-        reason: input.reason,
-      },
-      turnId: updated.blockedTurnId,
-      turnGeneration: input.blockedTurn.executionGeneration,
-      ...(turnWasCurrent ? { turnAssociation: "current" as const } : {}),
-      occurredAt: input.now,
+  /**
+   * Atomically close one exact xAI attempt and preserve its logical turn behind a
+   * durable provider-capacity waiter. The immutable authority snapshot and, for
+   * private pools, exact initiating human are revalidated under FORCE RLS before
+   * any session/turn projection changes.
+   */
+  async function armXaiCapacityWait(
+    db: Database,
+    input: {
+      accountId: string;
+      workspaceId: string;
+      subjectId: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      workflowId: string;
+      authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+      goalId?: string | null;
+      goalVersion?: number | null;
+      earliestResetAt: Date | null;
+      failurePayload: Record<string, unknown>;
+      leaseFence?: { holderId: string; generation: number };
+      credentialQuarantine?: XaiCredentialLeaseQuarantine;
+      expectedCredentialVersion?: number;
+      now?: Date;
     },
-  ];
-  if (turnWasCurrent && input.session.status !== nextSessionStatus) {
-    values.push({
-      accountId: input.session.accountId,
-      workspaceId: input.session.workspaceId,
-      sessionId: input.session.id,
-      sequence: input.session.lastSequence + 2,
-      type: "session.status.changed",
-      payload: { status: nextSessionStatus, reason: input.reason },
-      turnId: updated.blockedTurnId,
-      turnGeneration: input.blockedTurn.executionGeneration,
-      turnAssociation: "current",
-      occurredAt: input.now,
-    });
-  }
-  const inserted = await tx
-    .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
-    .returning();
-  const [updatedSession] = await tx
-    .update(schema.sessions)
-    .set({
-      ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
-      lastSequence: input.session.lastSequence + inserted.length,
-      updatedAt: input.now,
-    })
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.session.workspaceId),
-        eq(schema.sessions.id, input.session.id),
-        ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
-      ),
-    )
-    .returning({ id: schema.sessions.id });
-  if (!updatedSession) throw new Error("xAI capacity session changed during supersession");
-  return {
-    waiter: mapXaiCapacityWaiter(updated),
-    events: inserted.map(mapEvent),
-  };
-}
-
-export async function reconcileXaiCapacityWait(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    waiterId: string;
-    generation: number;
-    now?: Date;
-  },
-): Promise<ReconcileXaiCapacityWaitResult> {
-  const now = input.now ?? new Date();
-  const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
-  if (!authority) return { action: "stale", waiter: null, events: [] };
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    authority.subjectId,
-    async (scopedDb) =>
-      await withSessionActivitySavepoint(scopedDb, async (tx) => {
-        const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: authority.subjectId,
-          authoritySnapshot: authority.snapshot,
-        });
-        if (authority.snapshot.scope === "user" && !ownerOrganizationMembershipId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
-        const [rotation] = await tx
-          .select()
-          .from(schema.xaiRotationSettings)
-          .where(
-            and(
-              xaiRotationWorkspacePredicate(input.workspaceId),
-              eq(schema.xaiRotationSettings.authorityScope, authority.snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiRotationSettings.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
+  ): Promise<ArmXaiCapacityWaitResult> {
+    const now = input.now ?? new Date();
+    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
+    const goalId = input.goalId ?? null;
+    const goalVersion = input.goalVersion ?? null;
+    if (
+      (goalId === null) !== (goalVersion === null) ||
+      (goalVersion !== null && (!Number.isSafeInteger(goalVersion) || goalVersion < 1))
+    ) {
+      throw new Error(
+        options.label + " capacity goal fence must be absent or contain a positive version",
+      );
+    }
+    if (input.credentialQuarantine && !input.leaseFence) {
+      throw new Error(options.label + " credential quarantine requires an exact lease fence");
+    }
+    if (
+      input.credentialQuarantine?.kind === "cooldown" &&
+      (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
+        input.credentialQuarantine.until.getTime() <= now.getTime())
+    ) {
+      throw new Error(options.label + " credential cooldown must end in the future");
+    }
+    return await withWorkspaceSubjectSessionActivityRls(
+      db,
+      input.workspaceId,
+      input.subjectId,
+      async (scopedDb) =>
+        await withSessionActivitySavepoint(scopedDb, async (tx) => {
+          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            authoritySnapshot: snapshot,
+          });
+          if (snapshot.scope === "user" && !ownerOrganizationMembershipId) {
+            return { action: "stale", waiter: null, events: [] } as const;
+          }
+          if (snapshot.scope !== "organization")
+            await tx
+              .insert(tables.rotationSettings)
+              .values({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                authorityScope: snapshot.scope,
+                ownerOrganizationMembershipId,
+              })
+              .onConflictDoNothing();
+          const [rotation] = await tx
+            .select()
+            .from(tables.rotationSettings)
+            .where(
+              and(
+                options.rotationWorkspacePredicate(input.workspaceId),
+                eq(tables.rotationSettings.authorityScope, snapshot.scope),
+                ownerOrganizationMembershipId === null
+                  ? isNull(tables.rotationSettings.ownerOrganizationMembershipId)
+                  : eq(
+                      tables.rotationSettings.ownerOrganizationMembershipId,
+                      ownerOrganizationMembershipId,
+                    ),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!rotation || rotation.accountId !== input.accountId) {
+            return { action: "stale", waiter: null, events: [] } as const;
+          }
+          // Child-lifecycle prefix: the parent session is locked with the child
+          // so the capacity-wait notice can be enqueued in this same commit.
+          const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            attemptId: input.attemptId,
+          });
+          const session = locks.session;
+          const turn = locks.turns[0];
+          const attempt = locks.attempts[0];
+          const effectiveControl = session
+            ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+                workspaceControl: locks.control ?? undefined,
+              })
+            : null;
+          const [goal] = goalId
+            ? await tx
+                .select()
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.id, goalId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
                   ),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!rotation || rotation.accountId !== input.accountId) {
-          return { action: "stale", waiter: null, events: [] } as const;
-        }
-        const prefix = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-        });
-        const [waiterRead] = await tx
-          .select()
-          .from(schema.xaiCapacityWaiters)
-          .where(
-            and(
-              eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.xaiCapacityWaiters.id, input.waiterId),
-              eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
-            ),
-          )
-          .limit(1);
-        if (!waiterRead || waiterRead.generation !== input.generation) {
-          return {
-            action: "stale",
-            waiter: waiterRead ? mapXaiCapacityWaiter(waiterRead) : null,
-            events: [],
-          } as const;
-        }
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "already_locked",
-          workspaceLock: "already_locked",
-          sessionIds: [input.sessionId],
-          turnIds: [waiterRead.blockedTurnId],
-        });
-        const session = locks.sessions[0];
-        const blockedTurn = locks.turns[0];
-        const effectiveControl = session
-          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-              workspaceControl: prefix.control ?? undefined,
-            })
-          : null;
-        const [goal] = waiterRead.goalId
-          ? await tx
-              .select()
-              .from(schema.sessionGoals)
+                )
+                .for("update")
+                .limit(1)
+            : [];
+          const [lease] = input.leaseFence
+            ? await tx
+                .select()
+                .from(tables.credentialLeases)
+                .where(
+                  and(
+                    eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                    eq(tables.credentialLeases.turnId, input.turnId),
+                    gt(tables.credentialLeases.leasedUntil, now),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            : [];
+          const [existing] = await tx
+            .select()
+            .from(tables.capacityWaiters)
+            .where(
+              and(
+                eq(tables.capacityWaiters.workspaceId, input.workspaceId),
+                eq(tables.capacityWaiters.sessionId, input.sessionId),
+                eq(tables.capacityWaiters.authorityScope, snapshot.scope),
+                ownerOrganizationMembershipId === null
+                  ? isNull(tables.capacityWaiters.ownerOrganizationMembershipId)
+                  : eq(
+                      tables.capacityWaiters.ownerOrganizationMembershipId,
+                      ownerOrganizationMembershipId,
+                    ),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const exactRowsMatch =
+            session?.accountId === input.accountId &&
+            turn?.accountId === input.accountId &&
+            turn?.sessionId === input.sessionId &&
+            attempt?.accountId === input.accountId &&
+            attempt?.sessionId === input.sessionId &&
+            attempt?.turnId === input.turnId;
+          if (!exactRowsMatch || !turn) {
+            return {
+              action: "stale",
+              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+              events: [],
+            } as const;
+          }
+          if (
+            existing?.status === "waiting" &&
+            existing.blockedTurnId === input.turnId &&
+            existing.blockedTurnGeneration === turn.executionGeneration &&
+            turn.status === "waiting_capacity" &&
+            session?.status === "waiting_capacity" &&
+            session.activeTurnId === input.turnId
+          ) {
+            return {
+              action: "waiting",
+              waiter: mapXaiCapacityWaiter(existing),
+              events: [],
+            } as const;
+          }
+          const leaseFenceValid =
+            !input.leaseFence ||
+            (lease?.accountId === input.accountId &&
+              lease.workspaceId === input.workspaceId &&
+              lease.authorityScope === snapshot.scope &&
+              lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
+              lease.holderId === input.leaseFence.holderId &&
+              lease.generation === input.leaseFence.generation);
+          if (
+            !session ||
+            !attempt ||
+            effectiveControl?.state !== "active" ||
+            effectiveControl.settlement !== null ||
+            session.activeTurnId !== input.turnId ||
+            session.status !== "running" ||
+            turn.status !== "running" ||
+            turn.activeAttemptId !== input.attemptId ||
+            (goalId !== null &&
+              (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
+            !leaseFenceValid ||
+            !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
+          ) {
+            return {
+              action: "stale",
+              waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+              events: [],
+            } as const;
+          }
+
+          if (input.credentialQuarantine) {
+            if (!lease)
+              throw new Error(options.label + " credential quarantine lost its lease fence");
+            const updated = await tx
+              .update(tables.credentials)
+              .set(
+                input.credentialQuarantine.kind === "status"
+                  ? {
+                      status: input.credentialQuarantine.status,
+                      lastError: input.credentialQuarantine.lastError,
+                      exhaustedUntil: null,
+                      updatedAt: now,
+                    }
+                  : {
+                      exhaustedUntil: input.credentialQuarantine.until,
+                      updatedAt: now,
+                    },
+              )
               .where(
                 and(
-                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                  eq(schema.sessionGoals.id, waiterRead.goalId),
-                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                  eq(tables.credentials.accountId, input.accountId),
+                  options.credentialWorkspacePredicate(input.workspaceId),
+                  eq(tables.credentials.id, lease.credentialId),
+                  ...(input.expectedCredentialVersion === undefined
+                    ? []
+                    : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
                 ),
               )
-              .for("update")
-              .limit(1)
-          : [];
-        const [waiter] = await tx
-          .select()
-          .from(schema.xaiCapacityWaiters)
-          .where(eq(schema.xaiCapacityWaiters.id, input.waiterId))
-          .for("update")
-          .limit(1);
-        if (
-          !session ||
-          !blockedTurn ||
-          !waiter ||
-          session.accountId !== input.accountId ||
-          blockedTurn.accountId !== input.accountId ||
-          blockedTurn.sessionId !== input.sessionId ||
-          waiter.accountId !== input.accountId ||
-          waiter.workspaceId !== input.workspaceId ||
-          waiter.sessionId !== input.sessionId ||
-          waiter.blockedTurnId !== blockedTurn.id ||
-          waiter.generation !== input.generation ||
-          waiter.status !== "waiting"
-        ) {
-          return {
-            action: "stale",
-            waiter: waiter ? mapXaiCapacityWaiter(waiter) : null,
-            events: [],
-          } as const;
-        }
-        if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
-          return {
-            action: "paused",
-            waiter: mapXaiCapacityWaiter(waiter),
-            events: [],
-          } as const;
-        }
-        let supersedeReason: string | null = null;
-        if (session.status === "cancelled") {
-          supersedeReason = "session_cancelled";
-        } else if (
-          waiter.goalId !== null &&
-          (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
-        ) {
-          supersedeReason = "goal_changed";
-        } else if (!xaiSnapshotMatchesTurn(blockedTurn, authority.snapshot, authority.subjectId)) {
-          supersedeReason = "provider_authority_changed";
-        } else if (
-          waiter.authorityScope !== authority.snapshot.scope ||
-          waiter.ownerOrganizationMembershipId !== ownerOrganizationMembershipId
-        ) {
-          supersedeReason = "provider_authority_pool_changed";
-        } else if (session.activeTurnId !== blockedTurn.id) {
-          supersedeReason = "active_turn_changed";
-        } else if (session.status !== "waiting_capacity") {
-          supersedeReason = "session_not_waiting_capacity";
-        } else if (
-          blockedTurn.status !== "waiting_capacity" ||
-          blockedTurn.activeAttemptId !== null ||
-          blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
-        ) {
-          supersedeReason = "blocked_turn_changed";
-        }
-        if (supersedeReason) {
-          const superseded = await supersedeXaiCapacityWaitInTransaction(tx, {
-            session,
-            blockedTurn,
-            waiter,
-            reason: supersedeReason,
-            now,
-          });
-          return { action: "superseded", ...superseded } as const;
-        }
+              .returning({ id: tables.credentials.id });
+            if (updated.length !== 1) {
+              if (input.expectedCredentialVersion !== undefined)
+                return {
+                  action: "stale",
+                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  events: [],
+                } as const;
+              throw new Error(options.label + " credential quarantine lost its credential fence");
+            }
+          }
 
-        await tx
-          .delete(schema.xaiCredentialLeases)
-          .where(
-            and(
-              eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-              lte(schema.xaiCredentialLeases.leasedUntil, now),
-            ),
-          );
-        const candidates = await tx
-          .select({
-            id: schema.xaiSubscriptionCredentials.id,
-            status: schema.xaiSubscriptionCredentials.status,
-            allocatorEnabled: schema.xaiSubscriptionCredentials.allocatorEnabled,
-            expiresAt: schema.xaiSubscriptionCredentials.expiresAt,
-            exhaustedUntil: schema.xaiSubscriptionCredentials.exhaustedUntil,
-            selectionCount: schema.xaiSubscriptionCredentials.selectionCount,
-            lastSelectedAt: schema.xaiSubscriptionCredentials.lastSelectedAt,
-            createdAt: schema.xaiSubscriptionCredentials.createdAt,
-          })
-          .from(schema.xaiSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-              xaiCredentialWorkspacePredicate(input.workspaceId),
-              eq(schema.xaiSubscriptionCredentials.authorityScope, authority.snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
-                  ),
-            ),
-          )
-          .orderBy(
-            asc(schema.xaiSubscriptionCredentials.selectionCount),
-            asc(schema.xaiSubscriptionCredentials.lastSelectedAt),
-            asc(schema.xaiSubscriptionCredentials.createdAt),
-            asc(schema.xaiSubscriptionCredentials.id),
-          );
-        const activeLeases = await tx
-          .select({ credentialId: schema.xaiCredentialLeases.credentialId })
-          .from(schema.xaiCredentialLeases)
-          .where(
-            and(
-              eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-              eq(schema.xaiCredentialLeases.authorityScope, authority.snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiCredentialLeases.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiCredentialLeases.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
-                  ),
-              gt(schema.xaiCredentialLeases.leasedUntil, now),
-            ),
-          );
-        const activeLeaseCountByCredential = new Map<string, number>();
-        for (const lease of activeLeases) {
-          activeLeaseCountByCredential.set(
-            lease.credentialId,
-            (activeLeaseCountByCredential.get(lease.credentialId) ?? 0) + 1,
-          );
-        }
-        const eligible = candidates.filter(
-          (candidate) =>
-            candidate.status === "active" &&
-            candidate.allocatorEnabled &&
-            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
-        );
-        const balancedEligible = [...eligible].sort(
-          (left, right) =>
-            (activeLeaseCountByCredential.get(left.id) ?? 0) -
-            (activeLeaseCountByCredential.get(right.id) ?? 0),
-        );
-        const [pin] = await tx
-          .select()
-          .from(schema.xaiSessionAccountPins)
-          .where(
-            and(
-              eq(schema.xaiSessionAccountPins.workspaceId, input.workspaceId),
-              eq(schema.xaiSessionAccountPins.sessionId, input.sessionId),
-              eq(schema.xaiSessionAccountPins.authorityScope, authority.snapshot.scope),
-              ownerOrganizationMembershipId === null
-                ? isNull(schema.xaiSessionAccountPins.ownerOrganizationMembershipId)
-                : eq(
-                    schema.xaiSessionAccountPins.ownerOrganizationMembershipId,
-                    ownerOrganizationMembershipId,
-                  ),
-            ),
-          )
-          .limit(1);
-        const selected = pin?.pinnedCredentialId
-          ? eligible.find((candidate) => candidate.id === pin.pinnedCredentialId)
-          : rotation.rotationEnabled || rotation.activeCredentialId === null
-            ? balancedEligible[0]
-            : eligible.find((candidate) => candidate.id === rotation.activeCredentialId);
-        if (!selected) {
-          const futureResets = candidates
-            .map((candidate) => candidate.exhaustedUntil)
-            .filter((date): date is Date => date !== null && date > now);
-          const earliestResetAt = futureResets.length
-            ? new Date(Math.min(...futureResets.map((date) => date.getTime())))
-            : null;
-          const [updated] = await tx
-            .update(schema.xaiCapacityWaiters)
+          await closeSessionTurnAttemptInTransaction(tx, {
+            id: input.attemptId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            executionGeneration: turn.executionGeneration,
+            outcome: "waiting_capacity",
+            closedAt: now,
+          });
+          const generation = (existing?.generation ?? 0) + 1;
+          const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+          const nextCheckAt = xaiCapacityNextCheckAt(input.earliestResetAt, now);
+          const values = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            goalId,
+            goalVersion,
+            blockedTurnId: input.turnId,
+            blockedTurnGeneration: turn.executionGeneration,
+            workflowId: input.workflowId,
+            authorityScope: snapshot.scope,
+            ownerOrganizationMembershipId,
+            status: "waiting",
+            generation,
+            earliestResetAt: input.earliestResetAt,
+            nextCheckAt,
+            wakeRevision,
+            observedWakeRevision: wakeRevision,
+            lastWakeReason: "capacity_wait_armed",
+            updatedAt: now,
+          } as const;
+          const [waiterRow] = existing
+            ? await tx
+                .update(tables.capacityWaiters)
+                .set(values)
+                .where(eq(tables.capacityWaiters.id, existing.id))
+                .returning()
+            : await tx.insert(tables.capacityWaiters).values(values).returning();
+          if (!waiterRow)
+            throw new Error(options.label + " capacity wait arm returned no waiter row");
+
+          let sequence = session.lastSequence;
+          const closedTools = await closePendingSessionToolCallsInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reason: options.provider + "_capacity_wait",
+            sequence,
+            now,
+            preserveInterruptionRows: true,
+          });
+          sequence = closedTools.sequence;
+          const inserted = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                [
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "turn.capacity_waiting",
+                    payload: {
+                      ...input.failurePayload,
+                      provider: options.wireProvider,
+                      recovery: "provider_capacity",
+                      retryable: true,
+                      waiterId: waiterRow.id,
+                      generation: waiterRow.generation,
+                      goalId,
+                      goalVersion,
+                      blockedTurnGeneration: turn.executionGeneration,
+                      earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
+                      nextCheckAt: nextCheckAt.toISOString(),
+                    },
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "session.status.changed",
+                    payload: {
+                      status: "waiting_capacity",
+                      reason: options.provider + "_capacity",
+                    },
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                ],
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          const [waitingTurn] = await tx
+            .update(schema.sessionTurns)
             .set({
-              earliestResetAt,
-              nextCheckAt: xaiCapacityNextCheckAt(earliestResetAt, now),
-              observedWakeRevision: waiter.wakeRevision,
+              status: "waiting_capacity",
+              activeAttemptId: null,
+              metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+              version: turn.version + 1,
+              finishedAt: null,
               updatedAt: now,
             })
             .where(
               and(
-                eq(schema.xaiCapacityWaiters.id, waiter.id),
-                eq(schema.xaiCapacityWaiters.status, "waiting"),
-                eq(schema.xaiCapacityWaiters.generation, waiter.generation),
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, input.turnId),
+                eq(schema.sessionTurns.status, "running"),
+                eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              ),
+            )
+            .returning({ id: schema.sessionTurns.id });
+          if (!waitingTurn)
+            throw new Error(options.label + " capacity blocked turn changed during atomic arm");
+          const [waitingSession] = await tx
+            .update(schema.sessions)
+            .set({
+              status: "waiting_capacity",
+              activeTurnId: input.turnId,
+              lastSequence: sequence,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+                eq(schema.sessions.status, "running"),
+                eq(schema.sessions.activeTurnId, input.turnId),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (!waitingSession)
+            throw new Error(options.label + " capacity session changed during atomic arm");
+          await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+            turnId: input.turnId,
+            waiterId: waiterRow.id,
+            provider: options.provider,
+            nextCheckAt,
+          });
+          if (input.leaseFence) {
+            await tx
+              .delete(tables.credentialLeases)
+              .where(
+                and(
+                  eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                  eq(tables.credentialLeases.turnId, input.turnId),
+                  eq(tables.credentialLeases.holderId, input.leaseFence.holderId),
+                  eq(tables.credentialLeases.generation, input.leaseFence.generation),
+                ),
+              );
+          }
+          return {
+            action: "waiting",
+            waiter: mapXaiCapacityWaiter(waiterRow),
+            events: [...closedTools.events, ...inserted.map(mapEvent)],
+          } as const;
+        }),
+    );
+  }
+
+  async function getXaiCapacityWaitForSession(
+    db: Database,
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<XaiCapacityWait | null> {
+    const authority = await resolveXaiWaiterSubject(db, workspaceId, sessionId);
+    if (!authority) return null;
+    return await withWorkspaceSubjectRls(db, workspaceId, authority.subjectId, async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(tables.capacityWaiters)
+        .where(
+          and(
+            eq(tables.capacityWaiters.workspaceId, workspaceId),
+            eq(tables.capacityWaiters.sessionId, sessionId),
+            eq(tables.capacityWaiters.blockedTurnId, authority.turnId),
+            eq(tables.capacityWaiters.status, "waiting"),
+          ),
+        )
+        .limit(1);
+      return row ? mapXaiCapacityWaiter(row) : null;
+    });
+  }
+
+  async function supersedeXaiCapacityWaitInTransaction(
+    tx: SessionActivityDatabase,
+    input: {
+      session: typeof schema.sessions.$inferSelect;
+      blockedTurn: typeof schema.sessionTurns.$inferSelect;
+      waiter: typeof tables.capacityWaiters.$inferSelect;
+      reason: string;
+      now: Date;
+    },
+  ): Promise<{ waiter: XaiCapacityWait; events: SessionEvent[] }> {
+    const [updated] = await tx
+      .update(tables.capacityWaiters)
+      .set({
+        status: "superseded",
+        observedWakeRevision: input.waiter.wakeRevision,
+        lastWakeReason: input.reason,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(tables.capacityWaiters.id, input.waiter.id),
+          eq(tables.capacityWaiters.status, "waiting"),
+        ),
+      )
+      .returning();
+    if (!updated) return { waiter: mapXaiCapacityWaiter(input.waiter), events: [] };
+    const turnWasCurrent = input.session.activeTurnId === input.blockedTurn.id;
+    const terminalTurnStatus = input.session.status === "cancelled" ? "cancelled" : "superseded";
+    if (input.blockedTurn.status === "waiting_capacity") {
+      const [settledTurn] = await tx
+        .update(schema.sessionTurns)
+        .set({
+          status: terminalTurnStatus,
+          activeAttemptId: null,
+          cancelledBy: options.provider + "_capacity_reconcile",
+          cancelReason: input.reason,
+          version: input.blockedTurn.version + 1,
+          finishedAt: input.now,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+            eq(schema.sessionTurns.id, input.blockedTurn.id),
+            eq(schema.sessionTurns.status, "waiting_capacity"),
+            isNull(schema.sessionTurns.activeAttemptId),
+            eq(schema.sessionTurns.executionGeneration, input.waiter.blockedTurnGeneration),
+          ),
+        )
+        .returning({ id: schema.sessionTurns.id });
+      if (!settledTurn)
+        throw new Error(options.label + " capacity blocked turn changed during supersession");
+    }
+    const [queued] = turnWasCurrent
+      ? await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.session.id),
+              eq(schema.sessionTurns.status, "queued"),
+            ),
+          )
+          .limit(1)
+      : [];
+    const nextSessionStatus =
+      input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
+    const values: SessionEventInsertWithPayload[] = [
+      {
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+        sequence: input.session.lastSequence + 1,
+        type: "turn.superseded",
+        payload: {
+          provider: options.wireProvider,
+          waiterId: updated.id,
+          generation: updated.generation,
+          reason: input.reason,
+        },
+        turnId: updated.blockedTurnId,
+        turnGeneration: input.blockedTurn.executionGeneration,
+        ...(turnWasCurrent ? { turnAssociation: "current" as const } : {}),
+        occurredAt: input.now,
+      },
+    ];
+    if (turnWasCurrent && input.session.status !== nextSessionStatus) {
+      values.push({
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+        sequence: input.session.lastSequence + 2,
+        type: "session.status.changed",
+        payload: { status: nextSessionStatus, reason: input.reason },
+        turnId: updated.blockedTurnId,
+        turnGeneration: input.blockedTurn.executionGeneration,
+        turnAssociation: "current",
+        occurredAt: input.now,
+      });
+    }
+    const inserted = await tx
+      .insert(schema.sessionEvents)
+      .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+      .returning();
+    const [updatedSession] = await tx
+      .update(schema.sessions)
+      .set({
+        ...(turnWasCurrent ? { status: nextSessionStatus, activeTurnId: null } : {}),
+        lastSequence: input.session.lastSequence + inserted.length,
+        updatedAt: input.now,
+      })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.session.workspaceId),
+          eq(schema.sessions.id, input.session.id),
+          ...(turnWasCurrent ? [eq(schema.sessions.activeTurnId, input.blockedTurn.id)] : []),
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    if (!updatedSession)
+      throw new Error(options.label + " capacity session changed during supersession");
+    return {
+      waiter: mapXaiCapacityWaiter(updated),
+      events: inserted.map(mapEvent),
+    };
+  }
+
+  async function reconcileXaiCapacityWait(
+    db: Database,
+    input: {
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      waiterId: string;
+      generation: number;
+      now?: Date;
+    },
+  ): Promise<ReconcileXaiCapacityWaitResult> {
+    const now = input.now ?? new Date();
+    const authority = await resolveXaiWaiterSubject(db, input.workspaceId, input.sessionId);
+    if (!authority) return { action: "stale", waiter: null, events: [] };
+    return await withWorkspaceSubjectSessionActivityRls(
+      db,
+      input.workspaceId,
+      authority.subjectId,
+      async (scopedDb) =>
+        await withSessionActivitySavepoint(scopedDb, async (tx) => {
+          const ownerOrganizationMembershipId = await resolveXaiPoolMembershipInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: authority.subjectId,
+            authoritySnapshot: authority.snapshot,
+          });
+          if (authority.snapshot.scope === "user" && !ownerOrganizationMembershipId) {
+            return { action: "stale", waiter: null, events: [] } as const;
+          }
+          const [rotation] = await tx
+            .select()
+            .from(tables.rotationSettings)
+            .where(
+              and(
+                options.rotationWorkspacePredicate(input.workspaceId),
+                eq(tables.rotationSettings.authorityScope, authority.snapshot.scope),
+                ownerOrganizationMembershipId === null
+                  ? isNull(tables.rotationSettings.ownerOrganizationMembershipId)
+                  : eq(
+                      tables.rotationSettings.ownerOrganizationMembershipId,
+                      ownerOrganizationMembershipId,
+                    ),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!rotation || rotation.accountId !== input.accountId) {
+            return { action: "stale", waiter: null, events: [] } as const;
+          }
+          const prefix = await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "share",
+          });
+          const [waiterRead] = await tx
+            .select()
+            .from(tables.capacityWaiters)
+            .where(
+              and(
+                eq(tables.capacityWaiters.workspaceId, input.workspaceId),
+                eq(tables.capacityWaiters.id, input.waiterId),
+                eq(tables.capacityWaiters.sessionId, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (!waiterRead || waiterRead.generation !== input.generation) {
+            return {
+              action: "stale",
+              waiter: waiterRead ? mapXaiCapacityWaiter(waiterRead) : null,
+              events: [],
+            } as const;
+          }
+          const locks = await lockSessionEventWriteRows(tx, {
+            workspaceId: input.workspaceId,
+            controlLock: "already_locked",
+            workspaceLock: "already_locked",
+            sessionIds: [input.sessionId],
+            turnIds: [waiterRead.blockedTurnId],
+          });
+          const session = locks.sessions[0];
+          const blockedTurn = locks.turns[0];
+          const effectiveControl = session
+            ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+                workspaceControl: prefix.control ?? undefined,
+              })
+            : null;
+          const [goal] = waiterRead.goalId
+            ? await tx
+                .select()
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.id, waiterRead.goalId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            : [];
+          const [waiter] = await tx
+            .select()
+            .from(tables.capacityWaiters)
+            .where(eq(tables.capacityWaiters.id, input.waiterId))
+            .for("update")
+            .limit(1);
+          if (
+            !session ||
+            !blockedTurn ||
+            !waiter ||
+            session.accountId !== input.accountId ||
+            blockedTurn.accountId !== input.accountId ||
+            blockedTurn.sessionId !== input.sessionId ||
+            waiter.accountId !== input.accountId ||
+            waiter.workspaceId !== input.workspaceId ||
+            waiter.sessionId !== input.sessionId ||
+            waiter.blockedTurnId !== blockedTurn.id ||
+            waiter.generation !== input.generation ||
+            waiter.status !== "waiting"
+          ) {
+            return {
+              action: "stale",
+              waiter: waiter ? mapXaiCapacityWaiter(waiter) : null,
+              events: [],
+            } as const;
+          }
+          if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
+            return {
+              action: "paused",
+              waiter: mapXaiCapacityWaiter(waiter),
+              events: [],
+            } as const;
+          }
+          let supersedeReason: string | null = null;
+          if (session.status === "cancelled") {
+            supersedeReason = "session_cancelled";
+          } else if (
+            waiter.goalId !== null &&
+            (!goal || goal.status !== "active" || goal.version !== waiter.goalVersion)
+          ) {
+            supersedeReason = "goal_changed";
+          } else if (
+            !xaiSnapshotMatchesTurn(blockedTurn, authority.snapshot, authority.subjectId)
+          ) {
+            supersedeReason = "provider_authority_changed";
+          } else if (
+            waiter.authorityScope !== authority.snapshot.scope ||
+            waiter.ownerOrganizationMembershipId !== ownerOrganizationMembershipId
+          ) {
+            supersedeReason = "provider_authority_pool_changed";
+          } else if (session.activeTurnId !== blockedTurn.id) {
+            supersedeReason = "active_turn_changed";
+          } else if (session.status !== "waiting_capacity") {
+            supersedeReason = "session_not_waiting_capacity";
+          } else if (
+            blockedTurn.status !== "waiting_capacity" ||
+            blockedTurn.activeAttemptId !== null ||
+            blockedTurn.executionGeneration !== waiter.blockedTurnGeneration
+          ) {
+            supersedeReason = "blocked_turn_changed";
+          }
+          if (supersedeReason) {
+            const superseded = await supersedeXaiCapacityWaitInTransaction(tx, {
+              session,
+              blockedTurn,
+              waiter,
+              reason: supersedeReason,
+              now,
+            });
+            return { action: "superseded", ...superseded } as const;
+          }
+
+          await tx
+            .delete(tables.credentialLeases)
+            .where(
+              and(
+                eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                lte(tables.credentialLeases.leasedUntil, now),
+              ),
+            );
+          const [pin] = await tx
+            .select()
+            .from(tables.sessionAccountPins)
+            .where(
+              and(
+                eq(tables.sessionAccountPins.workspaceId, input.workspaceId),
+                eq(tables.sessionAccountPins.sessionId, input.sessionId),
+                eq(tables.sessionAccountPins.authorityScope, authority.snapshot.scope),
+                ownerOrganizationMembershipId === null
+                  ? isNull(tables.sessionAccountPins.ownerOrganizationMembershipId)
+                  : eq(
+                      tables.sessionAccountPins.ownerOrganizationMembershipId,
+                      ownerOrganizationMembershipId,
+                    ),
+              ),
+            )
+            .limit(1);
+          const policy = readTurnExecutionPolicyV1(blockedTurn.metadata);
+          if (options.provider === "claude" && policy.kind !== "valid")
+            throw new Error("Claude capacity reconciliation requires its accepted model policy");
+          const selection = await options.selectAvailable(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: authority.subjectId,
+            authoritySnapshot: authority.snapshot,
+            shardKey: input.sessionId,
+            modelId: policy.kind === "valid" ? policy.policy.productModelId : blockedTurn.model,
+            ...(policy.kind === "valid" ? { upstreamModelId: policy.policy.upstreamModelId } : {}),
+            pinnedCredentialId: pin?.pinnedCredentialId ?? null,
+            pinSource:
+              pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
+            now,
+          });
+          const selected = selection.credentialId;
+          if (!selected) {
+            const earliestResetAt = selection.nextCheckAt ?? null;
+            const [updated] = await tx
+              .update(tables.capacityWaiters)
+              .set({
+                earliestResetAt,
+                nextCheckAt: xaiCapacityNextCheckAt(earliestResetAt, now),
+                observedWakeRevision: waiter.wakeRevision,
+                updatedAt: now,
+              })
+              .where(
+                and(
+                  eq(tables.capacityWaiters.id, waiter.id),
+                  eq(tables.capacityWaiters.status, "waiting"),
+                  eq(tables.capacityWaiters.generation, waiter.generation),
+                ),
+              )
+              .returning();
+            if (!updated) return { action: "stale", waiter: null, events: [] } as const;
+            return {
+              action: "waiting",
+              waiter: mapXaiCapacityWaiter(updated),
+              events: [],
+            } as const;
+          }
+
+          const inserted = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                [
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: "turn.recovery.requested",
+                    payload: {
+                      reason: options.provider + "_capacity_available",
+                      provider: options.wireProvider,
+                      waiterId: waiter.id,
+                      generation: waiter.generation,
+                      wakeRevision: waiter.wakeRevision,
+                    },
+                    turnId: blockedTurn.id,
+                    turnGeneration: blockedTurn.executionGeneration,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2,
+                    type: "session.status.changed",
+                    payload: { status: "recovering", reason: options.provider + "_capacity" },
+                    turnId: blockedTurn.id,
+                    turnGeneration: blockedTurn.executionGeneration,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                ],
+                "payload",
+                "payloadCodecVersion",
               ),
             )
             .returning();
-          if (!updated) return { action: "stale", waiter: null, events: [] } as const;
+          const [updatedWaiter] = await tx
+            .update(tables.capacityWaiters)
+            .set({
+              status: "resumed",
+              observedWakeRevision: waiter.wakeRevision,
+              lastWakeReason: "capacity_available",
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(tables.capacityWaiters.id, waiter.id),
+                eq(tables.capacityWaiters.status, "waiting"),
+                eq(tables.capacityWaiters.generation, waiter.generation),
+              ),
+            )
+            .returning();
+          if (!updatedWaiter)
+            throw new Error(options.label + " capacity waiter changed during atomic resume");
+          const [recoveringTurn] = await tx
+            .update(schema.sessionTurns)
+            .set({
+              status: "recovering",
+              activeAttemptId: null,
+              metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              version: blockedTurn.version + 1,
+              finishedAt: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, blockedTurn.id),
+                eq(schema.sessionTurns.status, "waiting_capacity"),
+                isNull(schema.sessionTurns.activeAttemptId),
+                eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
+              ),
+            )
+            .returning({ id: schema.sessionTurns.id });
+          if (!recoveringTurn)
+            throw new Error(options.label + " capacity blocked turn changed during resume");
+          const [recoveringSession] = await tx
+            .update(schema.sessions)
+            .set({
+              status: "recovering",
+              activeTurnId: blockedTurn.id,
+              lastSequence: session.lastSequence + 2,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+                eq(schema.sessions.status, "waiting_capacity"),
+                eq(schema.sessions.activeTurnId, blockedTurn.id),
+              ),
+            )
+            .returning({ id: schema.sessions.id });
+          if (!recoveringSession)
+            throw new Error(options.label + " capacity session changed during resume");
           return {
-            action: "waiting",
-            waiter: mapXaiCapacityWaiter(updated),
-            events: [],
+            action: "resumed",
+            waiter: mapXaiCapacityWaiter(updatedWaiter),
+            events: inserted.map(mapEvent),
           } as const;
-        }
+        }),
+    );
+  }
 
-        const inserted = await tx
-          .insert(schema.sessionEvents)
-          .values(
-            withLosslessContentWriteVersion(
-              [
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: session.lastSequence + 1,
-                  type: "turn.recovery.requested",
-                  payload: {
-                    reason: "xai_capacity_available",
-                    provider: "supergrok-subscription",
-                    waiterId: waiter.id,
-                    generation: waiter.generation,
-                    wakeRevision: waiter.wakeRevision,
-                  },
-                  turnId: blockedTurn.id,
-                  turnGeneration: blockedTurn.executionGeneration,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  sequence: session.lastSequence + 2,
-                  type: "session.status.changed",
-                  payload: { status: "recovering", reason: "xai_capacity" },
-                  turnId: blockedTurn.id,
-                  turnGeneration: blockedTurn.executionGeneration,
-                  turnAssociation: "current",
-                  occurredAt: now,
-                },
-              ],
-              "payload",
-              "payloadCodecVersion",
-            ),
-          )
-          .returning();
-        const [updatedWaiter] = await tx
-          .update(schema.xaiCapacityWaiters)
-          .set({
-            status: "resumed",
-            observedWakeRevision: waiter.wakeRevision,
-            lastWakeReason: "capacity_available",
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.xaiCapacityWaiters.id, waiter.id),
-              eq(schema.xaiCapacityWaiters.status, "waiting"),
-              eq(schema.xaiCapacityWaiters.generation, waiter.generation),
-            ),
-          )
-          .returning();
-        if (!updatedWaiter) throw new Error("xAI capacity waiter changed during atomic resume");
-        const [recoveringTurn] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            status: "recovering",
-            activeAttemptId: null,
-            metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
-            version: blockedTurn.version + 1,
-            finishedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, blockedTurn.id),
-              eq(schema.sessionTurns.status, "waiting_capacity"),
-              isNull(schema.sessionTurns.activeAttemptId),
-              eq(schema.sessionTurns.executionGeneration, waiter.blockedTurnGeneration),
-            ),
-          )
-          .returning({ id: schema.sessionTurns.id });
-        if (!recoveringTurn) throw new Error("xAI capacity blocked turn changed during resume");
-        const [recoveringSession] = await tx
-          .update(schema.sessions)
-          .set({
-            status: "recovering",
-            activeTurnId: blockedTurn.id,
-            lastSequence: session.lastSequence + 2,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              eq(schema.sessions.status, "waiting_capacity"),
-              eq(schema.sessions.activeTurnId, blockedTurn.id),
-            ),
-          )
-          .returning({ id: schema.sessions.id });
-        if (!recoveringSession) throw new Error("xAI capacity session changed during resume");
-        return {
-          action: "resumed",
-          waiter: mapXaiCapacityWaiter(updatedWaiter),
-          events: inserted.map(mapEvent),
-        } as const;
-      }),
-  );
+  return {
+    resolveWaiterSubject: resolveXaiWaiterSubject,
+    getWaitForSessionInTransaction: getXaiCapacityWaitForSessionInTransaction,
+    armCapacityWait: armXaiCapacityWait,
+    getWaitForSession: getXaiCapacityWaitForSession,
+    reconcileCapacityWait: reconcileXaiCapacityWait,
+  };
 }
+const xaiCapacityRepository = createScopedSubscriptionCapacityWaiters({
+  provider: "xai",
+  label: "SuperGrok",
+  wireProvider: "supergrok-subscription",
+  workerSubject: "worker:xai-workspace",
+  snapshotColumn: "xaiProviderAccountAuthoritySnapshot",
+  resolvePoolFunction: "resolve_xai_authority_pool",
+  tables: {
+    credentials: schema.xaiSubscriptionCredentials,
+    rotationSettings: schema.xaiRotationSettings,
+    credentialLeases: schema.xaiCredentialLeases,
+    sessionAccountPins: schema.xaiSessionAccountPins,
+    capacityWaiters: schema.xaiCapacityWaiters,
+  },
+  rotationWorkspacePredicate: xaiRotationWorkspacePredicate,
+  credentialWorkspacePredicate: xaiCredentialWorkspacePredicate,
+  selectAvailable: xaiSubscriptionRepository.selectSubscriptionCredentialForUse,
+});
+const claudeCapacityRepository = createScopedSubscriptionCapacityWaiters({
+  provider: "claude",
+  label: "Claude",
+  wireProvider: "claude-subscription",
+  workerSubject: "worker:claude-workspace",
+  snapshotColumn: "claudeProviderAccountAuthoritySnapshot",
+  resolvePoolFunction: "resolve_claude_authority_pool",
+  tables: claudeSubscriptionTables,
+  rotationWorkspacePredicate:
+    claudeSubscriptionAccountRepository.subscriptionRotationWorkspacePredicate,
+  credentialWorkspacePredicate:
+    claudeSubscriptionAccountRepository.subscriptionCredentialWorkspacePredicate,
+  selectAvailable: claudeSubscriptionAccountRepository.selectSubscriptionCredentialForUse,
+});
+export const {
+  resolveWaiterSubject: resolveXaiWaiterSubject,
+  armCapacityWait: armXaiCapacityWait,
+  getWaitForSession: getXaiCapacityWaitForSession,
+  reconcileCapacityWait: reconcileXaiCapacityWait,
+} = xaiCapacityRepository;
+export const {
+  resolveWaiterSubject: resolveClaudeWaiterSubject,
+  armCapacityWait: armClaudeCapacityWait,
+  getWaitForSession: getClaudeCapacityWaitForSession,
+  reconcileCapacityWait: reconcileClaudeCapacityWait,
+} = claudeCapacityRepository;
+const getXaiCapacityWaitForSessionInTransaction =
+  xaiCapacityRepository.getWaitForSessionInTransaction;
+const getClaudeCapacityWaitForSessionInTransaction =
+  claudeCapacityRepository.getWaitForSessionInTransaction;
+export type ClaudeCapacityWait = XaiCapacityWait;
+export type ArmClaudeCapacityWaitResult = ArmXaiCapacityWaitResult;
+export type ReconcileClaudeCapacityWaitResult = ReconcileXaiCapacityWaitResult;
+export type ClaudeCredentialLeaseQuarantine = XaiCredentialLeaseQuarantine;
 
 /**
  * Extend a live holder and return the database-confirmed expiry. A
@@ -29013,19 +29092,13 @@ export async function heartbeatCodexCredentialLeaseUntil(
   leaseTtlMs: number = CODEX_CREDENTIAL_LEASE_TTL_MS,
 ): Promise<Date | null> {
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    const rows = await scopedDb.execute(sql<{ leased_until: Date | string }>`
-      update codex_credential_leases
-      set leased_until = clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'),
-          updated_at = clock_timestamp()
-      where account_id = ${accountId}
-        and workspace_id = ${workspaceId}
-        and turn_id = ${turnId}
-        and holder_id = ${holderId}
-        and generation = ${generation}
-        and leased_until > clock_timestamp()
-      returning leased_until
-    `);
-    return codexMetadataDate(rows[0]?.leased_until);
+    return heartbeatSubscriptionCredentialLeaseUntil(scopedDb, "codex_credential_leases", {
+      workspaceId,
+      turnId,
+      holderId,
+      generation,
+      ttlMs: leaseTtlMs,
+    });
   });
 }
 
@@ -29388,11 +29461,21 @@ export async function updateModelConnectionAccess(
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
+  if (
+    target.workspaceId !== null ||
+    (target.kind !== "codex" &&
+      target.kind !== "supergrok" &&
+      target.kind !== "claude_subscription")
+  ) {
     return await updateModelConnectionAccessPolicy(db, target, policy);
   }
   const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
   return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
+    if (target.kind === "claude_subscription") {
+      return await withOrganizationClaudeCapacityMutation(tx, actor, (scopedDb) =>
+        updateModelConnectionAccessPolicy(scopedDb, target, policy),
+      );
+    }
     if (target.kind === "supergrok") {
       return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
         updateModelConnectionAccessPolicy(scopedDb, target, policy),
@@ -29424,6 +29507,7 @@ export async function getWorkspaceConnectionModelRestrictions(
   workspaceId: string,
   subjectId: string,
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
+  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ) {
   const [accounts, rotation] = await Promise.all([
     listCodexAccountStatuses(db, workspaceId),
@@ -29438,6 +29522,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     subjectId,
     selectableAccounts,
     authoritySnapshot,
+    claudeAuthoritySnapshot,
   );
 }
 
@@ -32065,6 +32150,26 @@ async function updateSessionMcpServerCredentialsInTransaction(
   return { servers, missingIds };
 }
 
+/** A response and its write-only header replacements share one commit. */
+async function applySessionResponseMcpCredentialUpdatesInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
+  },
+): Promise<void> {
+  if (!input.mcpCredentialUpdates?.length) return;
+  const result = await updateSessionMcpServerCredentialsInTransaction(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    updates: input.mcpCredentialUpdates,
+  });
+  if (result.missingIds.length) {
+    throw new Error(`Unknown session MCP server: ${result.missingIds[0]}`);
+  }
+}
+
 export async function updateSessionMcpApprovalPolicy(
   db: Database,
   input: {
@@ -33611,6 +33716,7 @@ export type SessionCreateInput = {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   initialXaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  initialClaudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
@@ -34277,6 +34383,20 @@ async function createSessionInTransaction(
         workspaceId: input.workspaceId,
       });
   }
+  let initialClaudeProviderAccountAuthoritySnapshot =
+    input.initialClaudeProviderAccountAuthoritySnapshot ??
+    WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  if (
+    input.initialClaudeProviderAccountAuthoritySnapshot === undefined &&
+    frozenCreator.initiator.kind === "subject" &&
+    input.subjectId
+  ) {
+    await setSubjectRlsContext(tx, input.subjectId);
+    initialClaudeProviderAccountAuthoritySnapshot =
+      await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(tx, {
+        workspaceId: input.workspaceId,
+      });
+  }
   const parentTurnId = input.parentSessionId
     ? input.createdByActor?.sessionId === input.parentSessionId
       ? input.createdByActor.turnId
@@ -34406,7 +34526,8 @@ async function createSessionInTransaction(
               input.initialPersonalResourceAttachmentIntent ?? null,
             visibility: createRequestedVisibility,
             createRequestedVisibility,
-            initialXaiProviderAccountAuthoritySnapshot: initialXaiProviderAccountAuthoritySnapshot,
+            initialXaiProviderAccountAuthoritySnapshot,
+            initialClaudeProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
             agentAccess: input.agentAccess ?? "workspace",
@@ -35382,22 +35503,7 @@ async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
   sessionId: string,
   turnId: string,
 ): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  const [row] = await db
-    .select({
-      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, workspaceId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-        eq(schema.sessionTurns.id, turnId),
-      ),
-    )
-    .limit(1);
-  return row
-    ? XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot)
-    : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  return subscriptionAuthorityForTurnInTransaction(db, "xai", workspaceId, sessionId, turnId);
 }
 
 export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -35406,17 +35512,7 @@ export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   sessionId: string,
   turnId: string,
 ): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        turnId,
-      ),
-  );
+  return getAcceptedSubscriptionTurnAuthority(db, "xai", workspaceId, sessionId, turnId);
 }
 
 export async function getSessionTurnPersonalConnectionDelegations(
@@ -35469,53 +35565,7 @@ export async function getSessionParentXaiProviderAccountAuthority(
   workspaceId: string,
   childSessionId: string,
 ): Promise<FrozenXaiExecutionAuthority> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [child] = await scopedDb
-      .select({
-        parentSessionId: schema.sessions.parentSessionId,
-        parentTurnId: schema.sessions.parentTurnId,
-      })
-      .from(schema.sessions)
-      .where(
-        and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
-      )
-      .limit(1);
-    if (!child?.parentSessionId || !child.parentTurnId) {
-      return {
-        snapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-        subjectId: null,
-      };
-    }
-    const [parentTurn] = await scopedDb
-      .select({
-        snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-        initiatorKind: schema.sessionTurns.initiatorKind,
-        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, child.parentSessionId),
-          eq(schema.sessionTurns.id, child.parentTurnId),
-        ),
-      )
-      .limit(1);
-    if (!parentTurn) {
-      throw new Error(`Parent turn not found for child session ${childSessionId}`);
-    }
-    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(parentTurn.snapshot);
-    const subjectId =
-      snapshot.scope === "user"
-        ? (parentTurn.initiatingHumanSubjectId ??
-          (parentTurn.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-        : null;
-    if (snapshot.scope === "user" && !subjectId) {
-      throw new Error(`Parent turn lost its user-scoped xAI subject: ${child.parentTurnId}`);
-    }
-    return { snapshot, subjectId };
-  });
+  return getAcceptedSubscriptionParentAuthority(db, "xai", workspaceId, childSessionId);
 }
 
 export async function getSessionSpawnDenial(
@@ -35753,6 +35803,8 @@ export type SessionListFilterOptions = {
   createdFrom?: Date;
   /** Exclusive creation upper bound. */
   createdBefore?: Date;
+  /** Restrict root pages to workstreams requiring human attention. */
+  needsYouOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -35760,6 +35812,8 @@ export type SessionListFilterOptions = {
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
   SessionListFilterOptions & {
     subjectId: string;
+    /** Complete metadata totals, independent of pagination. Root or global pin pages. */
+    includeTotals?: boolean;
     cursor?: SessionListCursor | undefined;
     search?: string | undefined;
     /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
@@ -36681,6 +36735,191 @@ function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requ
   };
 }
 
+function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefined): SQL {
+  if (!scope) return sql`true`;
+  // Used only for parentless roots: target-only grants never admit relatives.
+  return sessionAuthorizationRootScopeFilter(scope, false);
+}
+
+/** Exact target grants never imply visibility of relatives. */
+function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
+  return sql`(
+    ${schema.sessions.status} in ('requires_action', 'failed')
+    or (
+      ${schema.sessions.parentSessionId} is null
+      and ${sessionRelatedListScope(scope)}
+      and exists (
+        with recursive attention_tree(id, status) as (
+          select child.id, child.status from ${schema.sessions} child
+          where child.workspace_id = ${schema.sessions.workspaceId}
+            and child.parent_session_id = ${schema.sessions.id}
+          union
+          select child.id, child.status from attention_tree parent
+          join ${schema.sessions} child on child.parent_session_id = parent.id
+          where child.workspace_id = ${schema.sessions.workspaceId}
+        )
+        select 1 from attention_tree where status = 'requires_action'
+      )
+    )
+  )`;
+}
+
+/**
+ * One content-free graph aggregation, before pagination. Each root owns a
+ * disjoint tree: a single-parent cycle cannot be reachable from a parentless
+ * root. UNION also deduplicates defensive legacy edges. Exact target scopes
+ * seed only their own row; pinned paths leave the ordinary project summaries.
+ * Materialize narrow RLS-authorized rows before recursion so tree depth cannot
+ * multiply base-table permission checks or personal-state scans.
+ */
+async function sessionListTotalsInScope(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+): Promise<SessionListTotals> {
+  const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+  const rootFilters = and(
+    eq(schema.sessions.workspaceId, workspaceId),
+    ...sessionFilters({
+      ...options,
+      parentSessionId: null,
+      needsYouOnly: false,
+      archiveStatus: "all",
+    }),
+    ...(archiveStatus === "all"
+      ? []
+      : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+  );
+  const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
+    db,
+    sql`
+    with recursive tree_sessions as materialized (
+      select id, account_id, parent_session_id, status, direct_control_state,
+        direct_pause_revision, subtree_run_override_revision,
+        active_turn_id, input_wait_until, input_wait_turn_id
+      from ${schema.sessions} where workspace_id = ${workspaceId}
+    ), personal_state as materialized (
+      select workspace_id, subject_id, session_id, pinned, archived,
+        acknowledged_sequence, manually_unread_through, actively_working
+      from ${schema.sessionPins}
+      where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
+    ), roots as materialized (
+      select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
+        ${schema.sessions.accountId} as account_id,
+        ${schema.sessions.status} as status,
+        ${schema.sessions.directControlState} as direct_control_state,
+        ${schema.sessions.directPauseRevision} as direct_pause_revision,
+        ${schema.sessions.subtreeRunOverrideRevision} as subtree_run_override_revision,
+        ${schema.sessions.activeTurnId} as active_turn_id,
+        ${schema.sessions.inputWaitUntil} as input_wait_until,
+        ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${sessionRelatedListScope(options.authorizationScope)} as related,
+        coalesce(root_personal.archived, false) as archived
+      from ${schema.sessions}
+      left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
+      left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
+      where ${rootFilters}
+    ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
+        input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related) as (
+      select root.id, root.channel_id, root.id, root.account_id, root.status,
+        root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
+        greatest(
+          case when control.workspace_state = 'paused' and
+            (root.subtree_run_override_revision is null or
+             root.subtree_run_override_revision <= control.workspace_pause_revision)
+            then control.workspace_pause_revision end,
+          case when root.direct_control_state = 'paused' then root.direct_pause_revision end
+        ),
+        coalesce(personal.pinned, false), root.related
+      from roots root join ${schema.workspaceInferenceControls} control
+        on control.workspace_id = ${workspaceId}
+      left join personal_state personal on personal.session_id = root.id
+      union
+      select parent.root_id, parent.channel_id, child.id, child.account_id, child.status,
+        child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
+        greatest(
+          case when child.subtree_run_override_revision is null or
+              child.subtree_run_override_revision <= parent.pause_revision
+            then parent.pause_revision end,
+          case when child.direct_control_state = 'paused' then child.direct_pause_revision end
+        ),
+        parent.pinned_path or coalesce(personal.pinned, false), parent.related
+      from nodes parent join tree_sessions child on child.parent_session_id = parent.id
+      left join personal_state personal on personal.session_id = child.id
+      where parent.related
+    ), attention_roots as (
+      select root_id, bool_or(status = 'requires_action') as attention
+      from nodes group by root_id
+    ), root_attention as materialized (
+      select root.id, not root.archived and (
+        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+      ) as needs_you
+      from roots root left join attention_roots attention on attention.root_id = root.id
+    ), measured as (
+      select nodes.*,
+        cursor.last_meaningful_sequence > coalesce(
+          case when personal.manually_unread_through is not null then -1
+            else personal.acknowledged_sequence end, 0) as unread,
+        coalesce(personal.actively_working, false) as active_work,
+        case when nodes.status = 'requires_action' then (
+          select min(turn.updated_at) from ${schema.sessionTurns} turn
+          where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
+            and turn.status = 'requires_action'
+        ) end as attention_since,
+        nodes.status = 'idle' and nodes.active_turn_id is null
+          and nodes.input_wait_until is not null
+          and nodes.input_wait_turn_id = (
+            select finished.id from ${schema.sessionTurns} finished
+            where finished.workspace_id = ${workspaceId} and finished.session_id = nodes.id
+              and finished.finished_at is not null
+              and ${sessionInputWaitDecidingTurnSql(
+                {
+                  id: sql`finished.id`,
+                  source: sql`finished.source`,
+                  workspaceId: sql`finished.workspace_id`,
+                  sessionId: sql`finished.session_id`,
+                  finishedAt: sql`finished.finished_at`,
+                  metadata: sql`finished.metadata`,
+                },
+                sql`nodes.input_wait_turn_id`,
+              )}
+            order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+          ) as input_wait
+      from nodes
+      join ${schema.sessionEventCursors} cursor on cursor.workspace_id = ${workspaceId}
+        and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
+      left join personal_state personal on personal.session_id = nodes.id
+      join roots root on root.id = nodes.root_id
+      join root_attention attention on attention.id = nodes.root_id
+      where not root.archived and not nodes.pinned_path
+        and (not ${Boolean(options.needsYouOnly)} or attention.needs_you)
+    ), grouped as (
+      select channel_id as "channelId", count(*)::int as total,
+        count(*) filter (where status = 'requires_action')::int as attention,
+        min(attention_since) as "attentionSince",
+        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where pause_revision is null and
+          (status in ('running', 'recovering') or input_wait))::int as active,
+        count(*) filter (where pause_revision is null and
+          status in ('queued', 'waiting_capacity'))::int as queued,
+        count(*) filter (where unread)::int as unread,
+        count(*) filter (where active_work)::int as "activeWork"
+      from measured group by channel_id
+    )
+    select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
+      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups
+  `,
+  );
+  const result = rows[0];
+  return {
+    needsYouCount: Number(result?.needsYouCount ?? 0),
+    groups: (result?.groups ?? []).map((group) => ({
+      ...group,
+      attentionSince: group.attentionSince ? new Date(group.attentionSince).toISOString() : null,
+    })),
+  };
+}
+
 function sessionFilters(
   options: Pick<
     ListSessionsForSubjectOptions,
@@ -36698,6 +36937,7 @@ function sessionFilters(
     | "createdFrom"
     | "createdBefore"
     | "scopeSubjectId"
+    | "needsYouOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -36710,6 +36950,7 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.needsYouOnly) filters.push(sessionNeedsYouSql(options.authorizationScope));
   if (options.originSiteId) {
     filters.push(
       sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
@@ -36728,7 +36969,11 @@ function sessionFilters(
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
   }
   if (options.authorizationScope) {
-    filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    filters.push(
+      options.parentSessionId === null
+        ? sessionAuthorizationRootScopeFilter(options.authorizationScope)
+        : sessionAuthorizationScopeFilter(options.authorizationScope),
+    );
   }
   if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
     const parentSessionId = options.parentSessionId;
@@ -36804,6 +37049,29 @@ export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer)
  */
 export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
   const hostScope = sessionAuthorizationHostScopeFilter(scope);
+  return scope.agentAccessViewer
+    ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
+    : hostScope;
+}
+
+/** A parentless root cannot be another granted root's descendant. */
+function sessionAuthorizationRootScopeFilter(
+  scope: SessionAuthorizationListScope,
+  includeExact = true,
+): SQL {
+  let hostScope: SQL = sql`true`;
+  if (scope.kind === "scoped") {
+    if (
+      scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
+      scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
+    ) {
+      throw new RangeError(
+        `Session authorization scope exceeds ${SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS} ids per field`,
+      );
+    }
+    const ids = [...new Set([...scope.rootSessionIds, ...(includeExact ? scope.sessionIds : [])])];
+    hostScope = ids.length > 0 ? inArray(schema.sessions.id, ids) : sql`false`;
+  }
   return scope.agentAccessViewer
     ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
     : hostScope;
@@ -36929,7 +37197,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
-    !options.scopeSubjectId
+    !options.scopeSubjectId &&
+    !options.needsYouOnly
   ) {
     return "all";
   }
@@ -36942,6 +37211,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
+    ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
   ]);
 }
 
@@ -37260,6 +37530,17 @@ async function readSessionListForSubject(
         if (options.archivedOnly && archiveMode !== "archived") {
           throw new SessionListCursorError("archivedOnly conflicts with archiveStatus");
         }
+        if (options.includeTotals && options.parentSessionId !== null && !options.pinsOnly)
+          throw new SessionListCursorError("Attention totals require root or global pin pages");
+        const totals = options.includeTotals
+          ? await sessionListTotalsInScope(
+              tx,
+              workspaceId,
+              options.pinsOnly
+                ? { ...options, archiveStatus: "active", parentSessionId: null }
+                : options,
+            )
+          : undefined;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
         const ordinaryPinFilter =
           archiveMode === "archived"
@@ -37711,6 +37992,8 @@ async function readSessionListForSubject(
         if (summary)
           return {
             projection: "summary",
+            ...(totals ? { totals } : {}),
+            ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -37719,6 +38002,8 @@ async function readSessionListForSubject(
             archiveStatus: archiveMode,
           };
         return {
+          ...(totals ? { totals } : {}),
+          ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -41651,6 +41936,8 @@ export async function acceptSessionHumanInputResponse(
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     expireOnly?: boolean;
+    /** Validated/encrypted by the API; never copied into the response event. */
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   },
 ): Promise<AcceptSessionHumanInputResponseResult> {
   return await withSessionActivityRlsContext(
@@ -41752,6 +42039,16 @@ export async function acceptSessionHumanInputResponse(
           }
         }
         if (request.status !== "pending") {
+          // A timeout that lost the first-writer race has nothing left to expire.
+          // It does not acknowledge a human response or repair historical receipts.
+          if (input.expireOnly) {
+            return {
+              action: "conflict",
+              request: mapSessionHumanInputRequest(request),
+              events: [],
+              workflowWakeRevision: null,
+            } as const;
+          }
           let event = await humanInputResponseEventForRequest(tx as unknown as Database, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -41974,6 +42271,10 @@ export async function acceptSessionHumanInputResponse(
             requestId: request.id,
           });
         }
+        await applySessionResponseMcpCredentialUpdatesInTransaction(
+          tx as unknown as Database,
+          input,
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -42374,6 +42675,112 @@ export async function adoptManagedSessionBackgroundCommand(
         });
       }),
   );
+}
+
+/** Recover the missed receipt when a turn closes after retaining a legacy
+ * Modal command. Unknown observation is not exit proof or a reason to block
+ * subsequent turns: preserve the original process and adopt its background
+ * lifetime. The exact reaper claim replaces the now-closed attempt's fence. */
+export async function recoverManagedSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    reconciliationClaimId: string;
+  },
+) {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    const session = await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+    const [process] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(
+        and(
+          eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+          eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+          eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+          eq(schema.sandboxRetainedProcesses.id, input.processId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      session.accountId !== input.accountId ||
+      !process ||
+      process.state !== "active" ||
+      process.reconcileClaimId !== input.reconciliationClaimId ||
+      !retainedProcessMatchesSettlementIdentity(process, input.expected) ||
+      process.providerBackend !== "modal" ||
+      process.routeTargetId !== null ||
+      process.providerCommand?.kind !== "modal-router-v1" ||
+      process.providerCommand.supervision ||
+      process.ownerActorKind !== "turn" ||
+      !process.ownerAttemptId ||
+      !process.ownerTurnId ||
+      process.ownerActorId !== process.ownerAttemptId ||
+      process.ownerExecutionGeneration === null
+    )
+      return null;
+    const [owner] = await tx
+      .select({ state: schema.sessionTurnAttempts.state })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.accountId, input.accountId),
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.id, process.ownerAttemptId),
+          eq(schema.sessionTurnAttempts.turnId, process.ownerTurnId),
+          eq(schema.sessionTurnAttempts.executionGeneration, process.ownerExecutionGeneration),
+        ),
+      )
+      .limit(1);
+    if (owner?.state !== "closed") return null;
+    const [existing] = await tx
+      .select({ id: schema.sessionBackgroundCommands.id })
+      .from(schema.sessionBackgroundCommands)
+      .where(eq(schema.sessionBackgroundCommands.retainedProcessId, process.id))
+      .limit(1);
+    if (existing) return null;
+    const command = await insertManagedSessionBackgroundCommandInTransaction(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      commandId: process.id,
+      retainedProcessId: process.id,
+      turnId: process.ownerTurnId,
+      attemptId: process.ownerAttemptId,
+      executionGeneration: process.ownerExecutionGeneration,
+      command: `Retained command ${process.providerSessionId}; execution outcome unknown after interrupted turn. Inspect the existing execution; it has not been replayed.`,
+    });
+    const control = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+      lock: "none",
+    });
+    const stopping = process.cancellationRequestedAt !== null || control.state !== "active";
+    if (stopping)
+      await tx
+        .update(schema.sessionBackgroundCommands)
+        .set({
+          state: "stopping",
+          cancelRequestedAt: process.cancellationRequestedAt ?? new Date(),
+          cancelRequestedBy: "system:retained-command-recovery",
+        })
+        .where(eq(schema.sessionBackgroundCommands.id, command.id));
+    await enqueueSessionWorkflowWakeInTransaction(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+      reason: "retained_command_background_recovery",
+    });
+    return {
+      ...command,
+      state: stopping ? ("stopping" as const) : command.state,
+    };
+  });
 }
 
 export type InstallOrReadTurnExecutionPolicyForAttemptResult =
@@ -65668,6 +66075,11 @@ export async function getSessionGoalWithContinuation(
         workspaceId,
         sessionId,
       );
+      const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
+        tx,
+        workspaceId,
+        sessionId,
+      );
       const [wake] = await tx
         .select({
           wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
@@ -65698,6 +66110,7 @@ export async function getSessionGoalWithContinuation(
         nextAttemptAt:
           capacityWait?.nextCheckAt.toISOString() ??
           xaiCapacityWait?.nextCheckAt.toISOString() ??
+          claudeCapacityWait?.nextCheckAt.toISOString() ??
           pendingWorkflowWake?.nextAttemptAt.toISOString() ??
           null,
         // Delivery errors belong to one still-undelivered workflow-wake
@@ -65721,7 +66134,12 @@ export async function getSessionGoalWithContinuation(
           reason: "session_cancelled",
           ...base,
         };
-      } else if (capacityWait || xaiCapacityWait || turn?.status === "waiting_capacity") {
+      } else if (
+        capacityWait ||
+        xaiCapacityWait ||
+        claudeCapacityWait ||
+        turn?.status === "waiting_capacity"
+      ) {
         continuation = {
           state: "blocked",
           reason: "provider_backpressure",
@@ -68580,7 +68998,12 @@ export async function materializeGoalContinuation(
           input.workspaceId,
           input.sessionId,
         );
-        if (capacityWait || xaiCapacityWait) {
+        const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+        );
+        if (capacityWait || xaiCapacityWait || claudeCapacityWait) {
           return { action: "none", events: [] } as const;
         }
 
@@ -68718,6 +69141,8 @@ export async function materializeGoalContinuation(
             initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
             xaiProviderAccountAuthoritySnapshot:
               schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+            claudeProviderAccountAuthoritySnapshot:
+              schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
           })
           .from(schema.sessionTurns)
           .where(
@@ -68819,13 +69244,26 @@ export async function materializeGoalContinuation(
               causalTurn.xaiProviderAccountAuthoritySnapshot,
             )
           : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+        const claudeProviderAccountAuthoritySnapshot = causalTurn
+          ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
+              causalTurn.claudeProviderAccountAuthoritySnapshot,
+            )
+          : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
         const xaiAuthoritySubjectId =
           causalTurn && xaiProviderAccountAuthoritySnapshot.scope === "user"
             ? (causalTurn.initiatingHumanSubjectId ??
               (causalTurn.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null))
             : null;
+        const claudeAuthoritySubjectId =
+          causalTurn && claudeProviderAccountAuthoritySnapshot.scope === "user"
+            ? (causalTurn.initiatingHumanSubjectId ??
+              (causalTurn.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null))
+            : null;
         if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
           throw new Error("Goal continuation lost its user-scoped xAI causal subject");
+        }
+        if (claudeProviderAccountAuthoritySnapshot.scope === "user" && !claudeAuthoritySubjectId) {
+          throw new Error("Goal continuation lost its user-scoped Claude causal subject");
         }
 
         const prompt = input.prompt(decision.goal, decision.autoContinuation, decision.cap);
@@ -68871,12 +69309,14 @@ export async function materializeGoalContinuation(
                         }
                       : {}),
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
+                    ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
                   },
                   personalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
                     causalTurn?.mcpAccountBindings,
                   ),
                   xaiProviderAccountAuthoritySnapshot,
+                  claudeProviderAccountAuthoritySnapshot,
                   state: "pending",
                 },
                 "summary",
@@ -69599,6 +70039,8 @@ export async function initializeSessionStartAtomically(
                   ),
                   xaiProviderAccountAuthoritySnapshot:
                     session.initialXaiProviderAccountAuthoritySnapshot,
+                  claudeProviderAccountAuthoritySnapshot:
+                    session.initialClaudeProviderAccountAuthoritySnapshot,
                   createdAt: acceptedAt,
                   updatedAt: acceptedAt,
                 },
@@ -69923,6 +70365,9 @@ export async function enqueueSessionTurn(
                 xaiProviderAccountAuthoritySnapshot:
                   input.xaiProviderAccountAuthoritySnapshot ??
                   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                claudeProviderAccountAuthoritySnapshot:
+                  input.claudeProviderAccountAuthoritySnapshot ??
+                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                 createdAt: acceptedAt,
                 updatedAt: acceptedAt,
               },
@@ -69976,6 +70421,7 @@ type BoundedSystemUpdate = Pick<
   | "personalConnectionDelegations"
   | "mcpAccountBindings"
   | "xaiProviderAccountAuthoritySnapshot"
+  | "claudeProviderAccountAuthoritySnapshot"
   | "scheduledTaskRunId"
 >;
 
@@ -69984,19 +70430,34 @@ export type FrozenXaiExecutionAuthority = {
   subjectId: string | null;
 };
 
-function frozenXaiExecutionAuthority(
-  update: Pick<BoundedSystemUpdate, "id" | "lineage" | "xaiProviderAccountAuthoritySnapshot">,
+function frozenSubscriptionExecutionAuthority(
+  update: Pick<
+    BoundedSystemUpdate,
+    | "id"
+    | "lineage"
+    | "xaiProviderAccountAuthoritySnapshot"
+    | "claudeProviderAccountAuthoritySnapshot"
+  >,
+  provider: "xai" | "claude",
 ): FrozenXaiExecutionAuthority {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
-    update.xaiProviderAccountAuthoritySnapshot,
+    provider === "xai"
+      ? update.xaiProviderAccountAuthoritySnapshot
+      : update.claudeProviderAccountAuthoritySnapshot,
   );
   if (snapshot.scope !== "user") return { snapshot, subjectId: null };
-  const subjectId = update.lineage.xaiAuthoritySubjectId;
-  if (typeof subjectId !== "string" || subjectId.trim().length === 0) {
-    throw new Error(`User-scoped xAI system update has no causal subject: ${update.id}`);
-  }
+  const subjectId =
+    update.lineage[provider === "xai" ? "xaiAuthoritySubjectId" : "claudeAuthoritySubjectId"];
+  if (typeof subjectId !== "string" || subjectId.trim().length === 0)
+    throw new Error(`User-scoped ${provider} system update has no causal subject: ${update.id}`);
   return { snapshot, subjectId };
 }
+const frozenXaiExecutionAuthority = (
+  update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
+) => frozenSubscriptionExecutionAuthority(update, "xai");
+const frozenClaudeExecutionAuthority = (
+  update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
+) => frozenSubscriptionExecutionAuthority(update, "claude");
 
 function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority): string {
   return stableJson({
@@ -70014,6 +70475,7 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
     personalConnectionDelegations,
     mcpAccountBindings: parseAcceptedMcpAccountBindings(update.mcpAccountBindings),
     xai: frozenXaiExecutionAuthority(update),
+    claude: frozenClaudeExecutionAuthority(update),
     connectionAuthoritySubjectId:
       personalConnectionDelegations.length > 0
         ? (update.lineage.connectionAuthoritySubjectId ?? null)
@@ -70242,7 +70704,7 @@ export type ClaimSessionWorkForAttemptResult =
   | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };
 
 function assertSessionGoalFieldBytes(value: string, maxBytes: number, field: string): void {
@@ -71443,6 +71905,7 @@ export async function claimSessionWorkForAttempt(
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
             commandOnlyMayRun?: boolean;
+            claudeAuthority?: FrozenXaiExecutionAuthority;
           } = {},
         ): Promise<{
           count: number;
@@ -71689,9 +72152,12 @@ export async function claimSessionWorkForAttempt(
           }
           const candidates = validUpdates.filter(
             (update) =>
-              !expectedXaiAuthority ||
-              frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
-                frozenXaiExecutionAuthorityKey(expectedXaiAuthority),
+              (!expectedXaiAuthority ||
+                frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
+                  frozenXaiExecutionAuthorityKey(expectedXaiAuthority)) &&
+              (!options.claudeAuthority ||
+                frozenXaiExecutionAuthorityKey(frozenClaudeExecutionAuthority(update)) ===
+                  frozenXaiExecutionAuthorityKey(options.claudeAuthority)),
           );
           if (
             options.commandOnlyMayRun === false &&
@@ -72170,6 +72636,22 @@ export async function claimSessionWorkForAttempt(
         );
         let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
+        // Timeout recovery and claim own the same session fence. If recovery
+        // won before this attempt existed, a delayed activity may not create
+        // its owner (or consume machine input) after Temporal abandoned it.
+        const expiryIdentity = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          attemptId: input.attemptId,
+        };
+        const expiredDispatch = await findSessionDispatchExpiryReceiptTx(
+          tx as unknown as Database,
+          expiryIdentity,
+        );
+        if (isSessionDispatchExpiryReceipt(expiredDispatch, expiryIdentity)) {
+          return { action: "unclaimed", reason: "dispatch-expired" };
+        }
         // Work and realtime may coexist, but claim remains the lazy lifecycle
         // cleanup point for an expired voice lease.
         session = await settleExpiredSessionRealtimeInTransaction(tx, session);
@@ -72217,7 +72699,7 @@ export async function claimSessionWorkForAttempt(
               and attempt.session_id = ${sessionId}
               and attempt.state = 'closed'
               and attempt.quiesced_at is null
-              and ${sessionAttemptPendingWritersSql(sql`attempt`)}
+              and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
           ) as pending
         `);
         if (unquiescedInterruption || unsettledWriters?.pending) {
@@ -72545,7 +73027,10 @@ export async function claimSessionWorkForAttempt(
                           : null))
                       : null,
                 },
-                { pendingEventSequenceBeforeOrAt },
+                {
+                  pendingEventSequenceBeforeOrAt,
+                  claudeAuthority: subscriptionExecutionAuthorityFromTurn(activeTurn, "claude"),
+                },
               );
               await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
               await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
@@ -72699,7 +73184,12 @@ export async function claimSessionWorkForAttempt(
                 workspaceId,
                 sessionId,
               );
-              if (codexWaiter || xaiWaiter) {
+              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
+                tx as unknown as Database,
+                workspaceId,
+                sessionId,
+              );
+              if (codexWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "unclaimed", reason: "no-work" };
               }
             }
@@ -72980,6 +73470,9 @@ export async function claimSessionWorkForAttempt(
                     xaiProviderAccountAuthoritySnapshot:
                       latestStarted?.xaiProviderAccountAuthoritySnapshot ??
                       WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                    claudeProviderAccountAuthoritySnapshot:
+                      latestStarted?.claudeProviderAccountAuthoritySnapshot ??
+                      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                     startedAt: now,
                     createdAt: now,
                     updatedAt: now,
@@ -73168,6 +73661,7 @@ export async function claimSessionWorkForAttempt(
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
           const internalXaiAuthority = frozenXaiExecutionAuthority(authorityUpdate);
+          const internalClaudeAuthority = frozenClaudeExecutionAuthority(authorityUpdate);
           // Messages and Steer inherit the exact admitted sender turn, even
           // with no personal connections. Other notices are context; they
           // cannot replace the command's causal human.
@@ -73513,6 +74007,15 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = internalXaiAuthority.subjectId;
           }
+          if (internalClaudeAuthority.subjectId) {
+            if (
+              initiatingHumanSubjectId &&
+              initiatingHumanSubjectId !== internalClaudeAuthority.subjectId
+            ) {
+              throw new Error("xAI system-update subject does not match turn provenance");
+            }
+            initiatingHumanSubjectId = internalClaudeAuthority.subjectId;
+          }
           if (scheduledTaskCausalHuman) {
             if (initiatingHumanSubjectId && initiatingHumanSubjectId !== scheduledTaskCausalHuman) {
               throw new Error("scheduled personal-resource subject does not match turn provenance");
@@ -73635,6 +74138,7 @@ export async function claimSessionWorkForAttempt(
                   ),
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
+                  claudeProviderAccountAuthoritySnapshot: internalClaudeAuthority.snapshot,
                   startedAt: now,
                   createdAt: now,
                   updatedAt: now,
@@ -73870,7 +74374,10 @@ export async function claimSessionWorkForAttempt(
                       (row.initiatorKind === "subject" ? row.initiatorSubjectId : null))
                     : null,
               },
-              { supersedeGoalContinuations: true },
+              {
+                supersedeGoalContinuations: true,
+                claudeAuthority: subscriptionExecutionAuthorityFromTurn(row, "claude"),
+              },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
         // Same fence advance for a queued human/API turn that coalesced child
@@ -74984,7 +75491,7 @@ export type SessionWorkPeek =
   | {
       kind: "capacity-wait";
       ref: {
-        provider?: "codex" | "xai";
+        provider?: "codex" | "xai" | "claude";
         waiterId: string;
         generation: number;
         nextCheckAt: string;
@@ -75016,6 +75523,7 @@ async function nextSessionAttemptAwaitingQuiescence(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  writerMode: "physical" | "inference" = "physical",
 ): Promise<{
   attemptId: string;
 } | null> {
@@ -75031,7 +75539,7 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
         sql`(
-          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`)}
+          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`, writerMode)}
           or exists (
             select 1
             from session_attempt_interruptions interruption
@@ -75392,6 +75900,7 @@ export async function peekSessionWork(
       scopedDb,
       workspaceId,
       sessionId,
+      "inference",
     );
     if (awaitingQuiescence) {
       return {
@@ -75460,6 +75969,11 @@ export async function peekSessionWork(
       workspaceId,
       sessionId,
     );
+    const claudeCapacityWait = await getClaudeCapacityWaitForSessionInTransaction(
+      scopedDb,
+      workspaceId,
+      sessionId,
+    );
     if (xaiCapacityWait) {
       return {
         kind: "capacity-wait",
@@ -75472,6 +75986,22 @@ export async function peekSessionWork(
               ? new Date(0).toISOString()
               : xaiCapacityWait.nextCheckAt.toISOString(),
           wakeRevision: xaiCapacityWait.wakeRevision,
+        },
+      };
+    }
+
+    if (claudeCapacityWait) {
+      return {
+        kind: "capacity-wait",
+        ref: {
+          provider: "claude",
+          waiterId: claudeCapacityWait.id,
+          generation: claudeCapacityWait.generation,
+          nextCheckAt:
+            claudeCapacityWait.wakeRevision > claudeCapacityWait.observedWakeRevision
+              ? new Date(0).toISOString()
+              : claudeCapacityWait.nextCheckAt.toISOString(),
+          wakeRevision: claudeCapacityWait.wakeRevision,
         },
       };
     }
@@ -75836,6 +76366,9 @@ async function settleSessionInputWaitInActivity(
           xaiProviderAccountAuthoritySnapshot:
             causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          claudeProviderAccountAuthoritySnapshot:
+            causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
+            WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
           lineage: causalAuthority?.lineage ?? {},
           classification: "info",
           sourceId: input.waitTurnId,
@@ -76303,7 +76836,12 @@ export async function failSessionWorkBeforeAttemptClaim(
                 workspaceId,
                 input.sessionId,
               );
-              if (codexWaiter || xaiWaiter) {
+              const claudeWaiter = await getClaudeCapacityWaitForSessionInTransaction(
+                tx as unknown as Database,
+                workspaceId,
+                input.sessionId,
+              );
+              if (codexWaiter || xaiWaiter || claudeWaiter) {
                 return { action: "stale", turnId: null, events: [] } as const;
               }
             }
@@ -77071,6 +77609,8 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
               personalConnectionDelegations: authority.personalConnectionDelegations,
               mcpAccountBindings: authority.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
+              claudeProviderAccountAuthoritySnapshot:
+                authority.claudeProviderAccountAuthoritySnapshot,
               lineage: { ...update.lineage, ...authority.lineage },
             })
             .where(
@@ -80022,6 +80562,8 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
+  /** One rejected-token renewal per serving account generation on this turn. */
+  claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
     historyItemIds: string[];
@@ -80053,6 +80595,15 @@ export async function requestSessionTurnRecovery(
   workspaceId: string,
   input: RequestSessionTurnRecoveryInput,
 ): Promise<RequestSessionTurnRecoveryResult> {
+  if (
+    input.claudeAuthRecovery &&
+    (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      input.claudeAuthRecovery.credentialId,
+    ) ||
+      !Number.isSafeInteger(input.claudeAuthRecovery.credentialVersion) ||
+      input.claudeAuthRecovery.credentialVersion < 1)
+  )
+    throw new Error("Invalid Claude authentication recovery identity");
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
@@ -80300,6 +80851,7 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(input.claudeAuthRecovery ? { claudeAuthRecovery: input.claudeAuthRecovery } : {}),
             ...(input.sandboxSetupOutcomeUnknown
               ? {
                   [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
@@ -80385,6 +80937,70 @@ export type RecoverSessionDispatchInput = {
   maxRedispatches: number;
 };
 
+function sessionDispatchExpiryProducer(attemptId: string): string {
+  return `opengeni:dispatch-retired:${attemptId}`;
+}
+
+type SessionDispatchExpiryIdentity = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+};
+
+const SessionDispatchExpiryPayload = z.strictObject({
+  attemptId: z.string().uuid(),
+  timeoutType: z.enum(["HEARTBEAT", "SCHEDULE_TO_START"]),
+});
+
+async function findSessionDispatchExpiryReceiptTx(
+  tx: Database,
+  identity: SessionDispatchExpiryIdentity,
+) {
+  const [receipt] = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.accountId, identity.accountId),
+        eq(schema.sessionEvents.workspaceId, identity.workspaceId),
+        eq(schema.sessionEvents.sessionId, identity.sessionId),
+        eq(schema.sessionEvents.producerId, sessionDispatchExpiryProducer(identity.attemptId)),
+        eq(schema.sessionEvents.producerSeq, 1),
+      ),
+    )
+    .limit(1);
+  return receipt;
+}
+
+function isSessionDispatchExpiryReceipt(
+  receipt: typeof schema.sessionEvents.$inferSelect | undefined,
+  identity: SessionDispatchExpiryIdentity,
+): boolean {
+  if (
+    !receipt ||
+    receipt.accountId !== identity.accountId ||
+    receipt.workspaceId !== identity.workspaceId ||
+    receipt.sessionId !== identity.sessionId ||
+    receipt.type !== "turn.dispatch.expired" ||
+    receipt.producerId !== sessionDispatchExpiryProducer(identity.attemptId) ||
+    receipt.producerSeq !== 1 ||
+    receipt.clientEventId !== null ||
+    receipt.turnId !== null ||
+    receipt.turnGeneration !== null ||
+    receipt.turnAttemptId !== null ||
+    receipt.turnAssociation !== null ||
+    receipt.duplicateOfEventId !== null ||
+    receipt.duplicateReason !== null
+  ) {
+    return false;
+  }
+  const payload = SessionDispatchExpiryPayload.safeParse(
+    fromPostgresLosslessJson(receipt.payload, receipt.payloadCodecVersion),
+  );
+  return payload.success && payload.data.attemptId === identity.attemptId;
+}
+
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
   | {
@@ -80407,9 +81023,9 @@ export type RecoverSessionDispatchResult =
     };
 
 /**
- * Atomically recover the exact attempt that owned a running turn. An activity
- * that never reached the turn worker has no active attempt and returns
- * `unclaimed` without consuming the crash-loop budget.
+ * Atomically recover the exact attempt that owned a running turn. If timeout
+ * wins before its claim, persist an expiry receipt so a delayed activity cannot
+ * create an owner afterward. This does not consume the crash-loop budget.
  */
 export async function recoverSessionDispatch(
   db: Database,
@@ -80423,6 +81039,7 @@ export async function recoverSessionDispatch(
       "session.status.changed",
       "turn.failed",
       "turn.recovery.requested",
+      "turn.dispatch.expired",
     ],
     maxAttempts: 3,
   };
@@ -80442,6 +81059,71 @@ export async function recoverSessionDispatch(
       );
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
       if (!attempt) {
+        const expiryIdentity = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+        };
+        const existing = await findSessionDispatchExpiryReceiptTx(
+          tx as unknown as Database,
+          expiryIdentity,
+        );
+        if (existing && !isSessionDispatchExpiryReceipt(existing, expiryIdentity)) {
+          throw new SessionControlInvariantError("Conflicting session dispatch expiry receipt");
+        }
+        if (!existing) {
+          const now = new Date();
+          const [inserted] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "turn.dispatch.expired",
+                  payload: { attemptId: input.attemptId, timeoutType: input.timeoutType },
+                  clientEventId: null,
+                  producerId: sessionDispatchExpiryProducer(input.attemptId),
+                  producerSeq: 1,
+                  occurredAt: now,
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .onConflictDoNothing({
+              target: [
+                schema.sessionEvents.workspaceId,
+                schema.sessionEvents.sessionId,
+                schema.sessionEvents.producerId,
+                schema.sessionEvents.producerSeq,
+              ],
+              where: sql`${schema.sessionEvents.producerId} is not null and ${schema.sessionEvents.producerSeq} is not null`,
+            })
+            .returning();
+          if (!inserted) {
+            const duplicate = await findSessionDispatchExpiryReceiptTx(
+              tx as unknown as Database,
+              expiryIdentity,
+            );
+            if (!isSessionDispatchExpiryReceipt(duplicate, expiryIdentity)) {
+              throw new SessionControlInvariantError("Conflicting session dispatch expiry receipt");
+            }
+          } else {
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: inserted.sequence, updatedAt: now })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  eq(schema.sessions.id, input.sessionId),
+                ),
+              );
+          }
+        }
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
@@ -81197,6 +81879,7 @@ async function parentOutboxAuthorityTx(
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   lineage: Record<string, unknown>;
 }> {
   const personalConnectionDelegations = session.parentTurnId
@@ -81223,6 +81906,14 @@ async function parentOutboxAuthorityTx(
         session.parentTurnId,
       )
     : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  const claudeProviderAccountAuthoritySnapshot = session.parentTurnId
+    ? await claudeProviderAccountAuthoritySnapshotForTurnInTransaction(
+        tx,
+        workspaceId,
+        session.parentSessionId,
+        session.parentTurnId,
+      )
+    : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const [parentTurn] = session.parentTurnId
     ? await tx
         .select({
@@ -81245,8 +81936,16 @@ async function parentOutboxAuthorityTx(
       ? (parentTurn?.initiatingHumanSubjectId ??
         (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
       : null;
+  const claudeAuthoritySubjectId =
+    claudeProviderAccountAuthoritySnapshot.scope === "user"
+      ? (parentTurn?.initiatingHumanSubjectId ??
+        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
+      : null;
   if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
     throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
+  }
+  if (claudeProviderAccountAuthoritySnapshot.scope === "user" && !claudeAuthoritySubjectId) {
+    throw new Error("Child lifecycle outbox lost its parent Claude authority subject");
   }
   const connectionAuthoritySubjectId =
     parentTurn?.initiatingHumanSubjectId ??
@@ -81259,6 +81958,7 @@ async function parentOutboxAuthorityTx(
     personalConnectionDelegations,
     mcpAccountBindings,
     xaiProviderAccountAuthoritySnapshot,
+    claudeProviderAccountAuthoritySnapshot,
     lineage: {
       childSessionId: session.id,
       parentSessionId: session.parentSessionId,
@@ -81267,6 +81967,7 @@ async function parentOutboxAuthorityTx(
         ? { connectionAuthoritySubjectId }
         : {}),
       ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
+      ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
     },
   };
 }
@@ -81349,6 +82050,8 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             personalConnectionDelegations: authority.personalConnectionDelegations,
             mcpAccountBindings: authority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
+            claudeProviderAccountAuthoritySnapshot:
+              authority.claudeProviderAccountAuthoritySnapshot,
           },
           "summary",
           "summaryCodecVersion",
@@ -81487,7 +82190,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
   input: {
     turnId: string;
     waiterId: string;
-    provider: "codex" | "xai";
+    provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
   },
 ): Promise<boolean> {
@@ -81641,6 +82344,7 @@ export type SessionSystemUpdateOutboxDelivery = {
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
 };
 
 /** Narrow an outbox row back to its correlated typed kind/payload input variant. */
@@ -81674,6 +82378,7 @@ function mapSystemUpdateOutboxRow(row: {
   personal_connection_delegations: unknown;
   mcp_account_bindings: unknown;
   xai_provider_account_authority_snapshot: unknown;
+  claude_provider_account_authority_snapshot: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   const typed = parseChildLifecycleOutboxPayload(
     fromPostgresLosslessJson(row.payload, row.payload_codec_version),
@@ -81700,6 +82405,9 @@ function mapSystemUpdateOutboxRow(row: {
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcp_account_bindings),
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
       row.xai_provider_account_authority_snapshot,
+    ),
+    claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
+      row.claude_provider_account_authority_snapshot,
     ),
   };
 }
@@ -81754,6 +82462,9 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
           row.xaiProviderAccountAuthoritySnapshot,
         ),
+        claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
+          row.claudeProviderAccountAuthoritySnapshot,
+        ),
       };
     },
   );
@@ -81781,7 +82492,8 @@ export async function claimPendingSessionSystemUpdateOutbox(
     personal_connection_delegations: unknown;
     mcp_account_bindings: unknown;
     xai_provider_account_authority_snapshot: unknown;
-  }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
+    claude_provider_account_authority_snapshot: unknown;
+  }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox_v2(${limit})`);
   // One unparseable row (for example a kind this image does not understand, or
   // a payload that no longer matches its schema) must not poison the whole
   // batch: dead-letter exactly that row with a bounded error and keep
@@ -82291,6 +83003,15 @@ export async function markSessionWorkflowWakeFailed(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // 0560's archive guard locks the session during the outbox UPDATE.
+      // Own the canonical prefix first, like delivery ACK and wake enqueue,
+      // so a failed transport cannot deadlock the turn committing that wake.
+      const locks = await lockSessionEventWriteRows(scopedDb, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+      });
+      if (!locks.sessions[0]) return false;
       const [row] = await scopedDb
         .update(schema.sessionWorkflowWakeOutbox)
         .set({
@@ -82378,6 +83099,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               personalConnectionDelegations: input.personalConnectionDelegations,
               mcpAccountBindings: input.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+              claudeProviderAccountAuthoritySnapshot: input.claudeProviderAccountAuthoritySnapshot,
             },
             "summary",
             "summaryCodecVersion",
@@ -82428,6 +83150,18 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     if (storedXaiSubjectId !== inputXaiSubjectId) {
       throw new Error("System-update outbox replay changed its xAI authority subject");
     }
+    if (
+      stableJson(
+        ClaudeProviderAccountAuthoritySnapshotV1.parse(row.claudeProviderAccountAuthoritySnapshot),
+      ) !== stableJson(input.claudeProviderAccountAuthoritySnapshot)
+    ) {
+      throw new Error("System-update outbox replay changed its Claude authority snapshot");
+    }
+    const storedClaudeSubjectId = row.lineage.claudeAuthoritySubjectId;
+    const inputClaudeSubjectId = input.lineage.claudeAuthoritySubjectId;
+    if (storedClaudeSubjectId !== inputClaudeSubjectId) {
+      throw new Error("System-update outbox replay changed its Claude authority subject");
+    }
     if (row.lineage.connectionAuthoritySubjectId !== input.lineage.connectionAuthoritySubjectId) {
       throw new Error("System-update outbox replay changed its connection authority subject");
     }
@@ -82456,6 +83190,9 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
       xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
         row.xaiProviderAccountAuthoritySnapshot,
+      ),
+      claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
+        row.claudeProviderAccountAuthoritySnapshot,
       ),
     };
   });
@@ -82567,6 +83304,7 @@ export type AddSessionSystemUpdateInput = {
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
 
@@ -82760,6 +83498,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                  claudeProviderAccountAuthoritySnapshot:
+                    input.claudeProviderAccountAuthoritySnapshot ??
+                    WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
                   state: consumedByParentRead ? "superseded" : "pending",
                 },
@@ -83054,19 +83795,24 @@ async function sameSessionCausalAuthorityTx(
   const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
     turn.xaiProviderAccountAuthoritySnapshot,
   );
+  const claudeProviderAccountAuthoritySnapshot = ClaudeProviderAccountAuthoritySnapshotV1.parse(
+    turn.claudeProviderAccountAuthoritySnapshot,
+  );
   const human =
     turn.initiatingHumanSubjectId ??
     (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
   if (
     !human &&
     (personalConnectionDelegations.length > 0 ||
-      xaiProviderAccountAuthoritySnapshot.scope === "user")
+      xaiProviderAccountAuthoritySnapshot.scope === "user" ||
+      claudeProviderAccountAuthoritySnapshot.scope === "user")
   ) {
     throw new SessionControlInvariantError("Causal turn lost its personal execution authority");
   }
   return {
     personalConnectionDelegations,
     xaiProviderAccountAuthoritySnapshot,
+    claudeProviderAccountAuthoritySnapshot,
     lineage: {
       causalTurnId: turn.id,
       ...(human && personalConnectionDelegations.length > 0
@@ -83074,6 +83820,9 @@ async function sameSessionCausalAuthorityTx(
         : {}),
       ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
         ? { xaiAuthoritySubjectId: human }
+        : {}),
+      ...(human && claudeProviderAccountAuthoritySnapshot.scope === "user"
+        ? { claudeAuthoritySubjectId: human }
         : {}),
     },
     mcpAccountBindings: parseAcceptedMcpAccountBindings(turn.mcpAccountBindings),
@@ -83317,6 +84066,9 @@ function backgroundCommandTerminalMutation(input: {
                 xaiProviderAccountAuthoritySnapshot:
                   causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
                   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                claudeProviderAccountAuthoritySnapshot:
+                  causalAuthority?.claudeProviderAccountAuthoritySnapshot ??
+                  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                 lineage: {
                   commandId: command.id,
                   provider: command.provider,
@@ -83904,6 +84656,8 @@ export async function acceptSessionApprovalDecision(
     sessionId: string;
     subjectId: string;
     payload: Record<string, unknown>;
+    /** Validated/encrypted by the API; never copied into the decision event. */
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
     /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -83915,6 +84669,9 @@ export async function acceptSessionApprovalDecision(
     };
   },
 ): Promise<AcceptSessionApprovalDecisionResult> {
+  // Defense in depth for internal callers: this field is ingress-only even
+  // when a caller accidentally passes the complete public request payload.
+  const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = input.payload;
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -83951,8 +84708,8 @@ export async function acceptSessionApprovalDecision(
             );
             if (
               existing.type !== "user.approvalDecision" ||
-              existingPayload.approvalId !== input.payload.approvalId ||
-              existingPayload.decision !== input.payload.decision
+              existingPayload.approvalId !== payload.approvalId ||
+              existingPayload.decision !== payload.decision
             ) {
               throw new Error("clientEventId belongs to a different approval decision");
             }
@@ -84020,7 +84777,7 @@ export async function acceptSessionApprovalDecision(
             sessionStatus: "requires_action",
           } as const;
         }
-        const approvalId = input.payload.approvalId;
+        const approvalId = payload.approvalId;
         const [runState] = await tx
           .select({
             turnId: schema.agentRunStates.turnId,
@@ -84053,7 +84810,7 @@ export async function acceptSessionApprovalDecision(
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";
-          if (input.payload.decision !== expectedInteractionDecision) {
+          if (payload.decision !== expectedInteractionDecision) {
             throw new Error("Interaction outcome does not match its approval decision");
           }
           const [intervention] = await tx
@@ -84092,9 +84849,8 @@ export async function acceptSessionApprovalDecision(
             },
           );
           if (
-            (input.payload.decision === "approve" &&
-              resolved.intervention.status !== "completed") ||
-            (input.payload.decision === "reject" && resolved.intervention.status === "completed")
+            (payload.decision === "approve" && resolved.intervention.status !== "completed") ||
+            (payload.decision === "reject" && resolved.intervention.status === "completed")
           ) {
             // A response exactly on the deadline can discover expiration only
             // while holding the row lock. Roll the whole transaction back so
@@ -84104,6 +84860,10 @@ export async function acceptSessionApprovalDecision(
             );
           }
         }
+        await applySessionResponseMcpCredentialUpdatesInTransaction(
+          tx as unknown as Database,
+          input,
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -84117,7 +84877,7 @@ export async function acceptSessionApprovalDecision(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.approvalDecision",
-                payload: input.payload,
+                payload,
                 clientEventId: input.clientEventId ?? null,
               },
               "payload",
@@ -84126,7 +84886,7 @@ export async function acceptSessionApprovalDecision(
           )
           .returning();
         if (!event) throw new Error("Failed to append approval decision");
-        const approvalDecision = input.payload.decision;
+        const approvalDecision = payload.decision;
         if (approvalDecision === "approve" || approvalDecision === "reject") {
           await enqueueChildRequiresActionResolvedOutboxTx(
             tx as unknown as Database,
@@ -85821,6 +86581,9 @@ function mapSessionTurnForExecution(
     ),
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
       row.xaiProviderAccountAuthoritySnapshot,
+    ),
+    claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.parse(
+      row.claudeProviderAccountAuthoritySnapshot,
     ),
     goalSnapshot: SessionGoalSnapshot.parse(row.goalSnapshot),
   };

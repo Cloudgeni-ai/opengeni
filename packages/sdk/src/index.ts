@@ -1,3 +1,11 @@
+// Types only: a value re-export would pull the contracts runtime into the root entry.
+export type {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionSetupTokenRequest,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "@opengeni/contracts";
 export type {
   ArtifactCatalogKind,
   ArtifactCatalogItem,
@@ -220,6 +228,9 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+// Model display helpers live on the `@opengeni/sdk/model-display` subpath so the
+// root entry stays free of the contracts runtime (publish closure guard).
+export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
   ModelContextInstructionLayer,
@@ -250,7 +261,10 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyToolServer,
 } from "./session-proxy";
+export { ToolRequestError, verifyToolRequest } from "./tool-auth";
+export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } from "./tool-auth";
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
@@ -603,6 +617,7 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  BillingCheckoutStatus,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembership,
   OrganizationAdministrationMember,
@@ -660,10 +675,12 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,
@@ -726,6 +743,7 @@ export type {
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
   ClaudeUsageWindow,
+  ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -1047,6 +1065,7 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,

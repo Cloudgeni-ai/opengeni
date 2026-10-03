@@ -19,7 +19,10 @@ import {
   type RefObject,
 } from "react";
 
-import { ConnectorToolPermissions } from "./connector-tool-permissions";
+import {
+  ConnectorToolPermissions,
+  hasConnectorToolPermissionTarget,
+} from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
@@ -393,11 +396,7 @@ export function DetailBody({
         ) : (
           <CuratedSkillProvenanceSection item={item} />
         )}
-        {workspaceId &&
-        item.enabled &&
-        item.kind === "mcp" &&
-        item.source !== "built_in" &&
-        item.surfaceType !== "codex_apps" ? (
+        {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}
             workspaceId={workspaceId}

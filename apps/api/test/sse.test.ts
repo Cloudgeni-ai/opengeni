@@ -1,7 +1,113 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createByteBoundedSseStream, createLatestWinsDelivery } from "../src/http/sse";
 
+const oversizedFrame = () => {
+  const prefix = "data: ";
+  const suffix = "界🙂\u0000\n\n";
+  const framingBytes = new TextEncoder().encode(prefix + suffix).byteLength;
+  return prefix + "x".repeat(9 * 1024 * 1024 - framingBytes) + suffix;
+};
+
+function trackFrameEncoding() {
+  const encode = TextEncoder.prototype.encode;
+  const encodedBytes: number[] = [];
+  const spy = spyOn(TextEncoder.prototype, "encode").mockImplementation(function (
+    this: TextEncoder,
+    input?: string,
+  ) {
+    const bytes = encode.call(this, input);
+    encodedBytes.push(bytes.byteLength);
+    return bytes;
+  });
+  return { encodedBytes, restore: () => spy.mockRestore() };
+}
+
 describe("SSE server-side backpressure", () => {
+  test("does not encode a capacity-blocked oversized frame when the reader cancels", async () => {
+    const largeFrame = oversizedFrame();
+    let markBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    const channel = createByteBoundedSseStream({
+      onObservation: ({ reason }) => {
+        if (reason === "desired_size_non_positive") markBlocked();
+      },
+    });
+    const reader = channel.stream.getReader();
+    const encoding = trackFrameEncoding();
+    let pending: Promise<boolean> | undefined;
+    try {
+      expect(await channel.write("data: small\n\n")).toBeTrue();
+      pending = channel.write(largeFrame);
+      await blocked;
+      const encodedWhileBlocked = [...encoding.encodedBytes];
+      await reader.cancel();
+      expect(await pending).toBeFalse();
+      expect(channel.stopped()).toBeTrue();
+      expect(encodedWhileBlocked).toEqual([13]);
+      expect(encoding.encodedBytes).toEqual([13]);
+    } finally {
+      await reader.cancel();
+      await pending;
+      reader.releaseLock();
+      encoding.restore();
+    }
+  });
+
+  test("does not encode a frame after the stream has stopped", async () => {
+    const largeFrame = oversizedFrame();
+    const channel = createByteBoundedSseStream();
+    const reader = channel.stream.getReader();
+    const encoding = trackFrameEncoding();
+    try {
+      channel.close();
+      expect(await channel.write(largeFrame)).toBeFalse();
+      expect(encoding.encodedBytes).toEqual([]);
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+      encoding.restore();
+    }
+  });
+
+  test("encodes a capacity-blocked oversized frame once after drain without changing UTF-8", async () => {
+    const largeFrame = oversizedFrame();
+    const expectedBytes = new TextEncoder().encode(largeFrame);
+    let markBlocked!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      markBlocked = resolve;
+    });
+    const channel = createByteBoundedSseStream({
+      onObservation: ({ reason }) => {
+        if (reason === "desired_size_non_positive") markBlocked();
+      },
+    });
+    const reader = channel.stream.getReader();
+    const encoding = trackFrameEncoding();
+    let pending: Promise<boolean> | undefined;
+    try {
+      expect(await channel.write("data: small\n\n")).toBeTrue();
+      pending = channel.write(largeFrame);
+      await blocked;
+      const encodedWhileBlocked = [...encoding.encodedBytes];
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: small\n\n");
+      expect(await pending).toBeTrue();
+      const next = await reader.read();
+      expect(expectedBytes.byteLength).toBe(9 * 1024 * 1024);
+      expect(Bun.deepEquals(next.value, expectedBytes)).toBeTrue();
+      channel.close();
+      expect((await reader.read()).done).toBeTrue();
+      expect(encodedWhileBlocked).toEqual([13]);
+      expect(encoding.encodedBytes).toEqual([13, expectedBytes.byteLength]);
+    } finally {
+      await reader.cancel();
+      await pending;
+      reader.releaseLock();
+      encoding.restore();
+    }
+  });
+
   test("does not enqueue another frame until its encoded bytes fit", async () => {
     const channel = createByteBoundedSseStream({ maxQueuedBytes: 8 });
 

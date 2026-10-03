@@ -1,4 +1,5 @@
 import { AuthApiError } from "@/api";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
 export type ManagedAuthMode = "signin" | "signup";
 export type ManagedAuthField = "name" | "email" | "password";
@@ -63,6 +64,14 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
   }
 
   if (error instanceof AuthApiError) {
+    if (error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE) {
+      return {
+        fields: {},
+        message: `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in instead.`,
+        switchTo: "signin",
+        canResendVerification: false,
+      };
+    }
     if (error.code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
       return {
         fields: { email: "An account already exists for this email." },

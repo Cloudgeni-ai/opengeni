@@ -45,6 +45,7 @@ const SECTIONS = new Set([
   "models",
   "members",
   "billing",
+  "insights",
   "usage",
   "security",
   "integrations",

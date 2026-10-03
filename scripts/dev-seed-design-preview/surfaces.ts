@@ -418,27 +418,57 @@ export const CAPABILITIES: Record<string, { name: string; domain: string; descri
 // Usage (Insights)
 // ---------------------------------------------------------------------------
 
+/**
+ * Model usage mix for Insights, shaped like real traffic: a ChatGPT plan doing
+ * most of the work, a Claude plan that writes to the prompt cache, Opengeni
+ * credits and a customer's own key. Prices are USD per million tokens by token
+ * type, used for the list-price estimate (and the charge, for credits).
+ */
 export const USAGE_MODELS = [
   {
-    provider: "openai",
-    model: "gpt-6-astra",
-    billing: "opengeni_credits",
-    share: 0.55,
-    costPerKToken: 0.9,
+    provider: "codex-subscription",
+    model: "codex/gpt-6.1-sol",
+    billing: "external",
+    share: 0.5,
+    cacheRatio: [0.85, 0.97],
+    writes: false,
+    price: { input: 2.5, cacheRead: 0.25, cacheWrite: 0, output: 15 },
   },
   {
-    provider: "codex-subscription",
-    model: "gpt-5.5-codex",
+    provider: "organization-claude-subscription",
+    model: "organization-claude-subscription/claude-opus-5-5",
     billing: "external",
-    share: 0.35,
-    costPerKToken: 0,
+    share: 0.18,
+    cacheRatio: [0.7, 0.92],
+    writes: true,
+    price: { input: 15, cacheRead: 1.5, cacheWrite: 18.75, output: 75 },
+  },
+  {
+    provider: "opengeni-gateway",
+    model: "anthropic/claude-sonnet-5-5",
+    billing: "opengeni_credits",
+    share: 0.17,
+    cacheRatio: [0.5, 0.85],
+    writes: true,
+    price: { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
+  },
+  {
+    provider: "opengeni-gateway",
+    model: "openai/gpt-6-luna",
+    billing: "opengeni_credits",
+    share: 0.1,
+    cacheRatio: [0.4, 0.8],
+    writes: false,
+    price: { input: 0.4, cacheRead: 0.04, cacheWrite: 0, output: 1.6 },
   },
   {
     provider: "anthropic",
-    model: "claude-opus-5-5",
-    billing: "opengeni_credits",
-    share: 0.1,
-    costPerKToken: 3.2,
+    model: "claude-haiku-5",
+    billing: "external",
+    share: 0.05,
+    cacheRatio: [0.2, 0.6],
+    writes: true,
+    price: { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 },
   },
 ] as const;
 

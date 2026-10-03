@@ -260,7 +260,19 @@ async function installApi(
     if (path.endsWith("/integrations/definitions")) return json({ definitions: [] });
     if (path.endsWith("/integrations")) return json({ integrations: [] });
     if (path.endsWith("/sessions"))
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     if (path.endsWith("/channels") || path.endsWith("/rigs") || path.endsWith("/variable-sets"))
       return json([]);
     if (path.endsWith("/github/app"))

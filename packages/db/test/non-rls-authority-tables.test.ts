@@ -60,6 +60,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       "mcp_oauth_refresh_tokens",
       "nested_agent_depth_configuration",
       "pr_review_managed_github_routes",
+      "slack_api_rate_limits",
       "stripe_webhook_events",
       "workspace_memberships",
       "workspaces",

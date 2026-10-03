@@ -256,6 +256,7 @@ function rfbAttachment(targetId: string): ComputerSessionAttachment {
     targetId,
     stream: {
       kind: "direct_rfb",
+      inputAllowed: true,
       url: "wss://computer.example.test/v1/rfb",
       protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.super-secret"],
     },
@@ -357,13 +358,13 @@ describe("ComputerSession React resources", () => {
           targets: [windowTarget, screenTarget],
         }),
         observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
-          if (targetId === screenTarget.id) return observation(screenTarget);
+          if (targetId === windowTarget.id) return observation(windowTarget);
           if (initialState === "failed") throw new Error("Observation timed out");
           return await initial;
         },
         actInComputer: async (_workspaceId, _computerSessionId, request) => {
           inputRequests.push(request);
-          return { ...receipt(observation(windowTarget), request.operationId), observation: null };
+          return { ...receipt(observation(screenTarget), request.operationId), observation: null };
         },
       });
       const hook = await renderHook(
@@ -379,7 +380,7 @@ describe("ComputerSession React resources", () => {
       try {
         await flush(20);
         expect(hook.result.current.targets).toHaveLength(2);
-        expect(hook.result.current.selectedTarget?.id).toBe(windowTarget.id);
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
         expect(hook.result.current.observation).toBeNull();
         await actRun(async () => {
           await hook.result.current.act({ type: "keyboard", action: "type", value: "hello" });
@@ -388,26 +389,26 @@ describe("ComputerSession React resources", () => {
         expect(inputRequests).toHaveLength(2);
         for (const request of inputRequests) {
           expect(request).toMatchObject({
-            targetId: windowTarget.id,
-            expectedTargetGeneration: windowTarget.targetGeneration,
+            targetId: screenTarget.id,
+            expectedTargetGeneration: screenTarget.targetGeneration,
             expectedObservationId: null,
             expectedFrameId: null,
           });
         }
         await actRun(async () => {
-          await hook.result.current.selectTarget(screenTarget.id);
+          await hook.result.current.selectTarget(windowTarget.id);
         });
-        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
-        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        expect(hook.result.current.selectedTarget?.id).toBe(windowTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(windowTarget.id);
         await actRun(async () => {
-          settleInitial(observation(windowTarget));
+          settleInitial(observation(screenTarget));
         });
         await flush(5);
-        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
-        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        expect(hook.result.current.selectedTarget?.id).toBe(windowTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(windowTarget.id);
         expect(hook.result.current.error).toBeNull();
       } finally {
-        settleInitial(observation(windowTarget));
+        settleInitial(observation(screenTarget));
         await hook.unmount();
       }
     },
@@ -448,6 +449,11 @@ describe("ComputerSession React resources", () => {
     );
     await flush(20);
 
+    expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+    await actRun(async () => {
+      await hook.result.current.selectTarget(windowTarget.id);
+    });
+    expect(requests).toHaveLength(0);
     await actRun(async () => {
       await hook.result.current.act({
         type: "semantic",
@@ -502,42 +508,77 @@ describe("ComputerSession React resources", () => {
     await hook.unmount();
   });
 
-  test("prefers a capturable macOS screen over a focused semantic-only application", async () => {
-    const applicationTarget = { ...target("app-1", "app"), focused: true };
-    const screenTarget = target("screen-1", "screen");
-    const observed: string[] = [];
-    const client = fakeClient({
-      getComputerSession: async () => ({
-        ...computerSession(),
-        platform: "macos",
-        adapter: "opengeni.macos.ax-sck.v1",
-      }),
-      listComputerTargets: async () => ({
-        computerSessionId: COMPUTER_SESSION_ID,
-        controllerGeneration: "controller-1",
-        targets: [applicationTarget, screenTarget],
-      }),
-      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
-        observed.push(targetId);
-        return observation(targetId === screenTarget.id ? screenTarget : applicationTarget);
-      },
-    });
-    const hook = await renderHook(
-      () =>
-        useComputerSession({
-          client,
-          workspaceId: WORKSPACE_ID,
-          computerSessionId: COMPUTER_SESSION_ID,
-          pollIntervalMs: 60_000,
+  test.each(["linux", "macos", "windows"] as const)(
+    "opens the whole desktop on %s and retains an explicitly selected app view",
+    async (platform) => {
+      const applicationTarget = { ...target("app-1", "app"), focused: true };
+      const windowTarget = target();
+      const screenTarget = target("screen-1", "screen");
+      const observed: string[] = [];
+      const requests: ComputerActionRequest[] = [];
+      let targets = [applicationTarget, windowTarget, screenTarget];
+      const client = fakeClient({
+        getComputerSession: async () => ({
+          ...computerSession(),
+          platform,
         }),
-      undefined,
-    );
-    await flush(20);
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets,
+        }),
+        observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+          observed.push(targetId);
+          return observation(targets.find((candidate) => candidate.id === targetId)!);
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, request) => {
+          requests.push(request);
+          return receipt(observation(applicationTarget), request.operationId);
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useComputerSession({
+            client,
+            workspaceId: WORKSPACE_ID,
+            computerSessionId: COMPUTER_SESSION_ID,
+            pollIntervalMs: 60_000,
+          }),
+        undefined,
+      );
+      await flush(20);
 
-    expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
-    expect(observed).toEqual([screenTarget.id]);
-    await hook.unmount();
-  });
+      try {
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(observed).toEqual([screenTarget.id]);
+        await actRun(async () => {
+          await hook.result.current.selectTarget(applicationTarget.id);
+          await hook.result.current.refresh();
+        });
+        expect(hook.result.current.selectedTarget?.id).toBe(applicationTarget.id);
+        expect(requests).toHaveLength(0);
+        await actRun(async () => {
+          await hook.result.current.act({
+            type: "semantic",
+            locator: { kind: "ref", ref: "e1" },
+            action: "invoke",
+          });
+        });
+        expect(requests[0]).toMatchObject({
+          targetId: applicationTarget.id,
+          expectedTargetGeneration: applicationTarget.targetGeneration,
+          expectedObservationId: `observation-${applicationTarget.targetGeneration}`,
+          action: { type: "semantic", action: "invoke" },
+        });
+        targets = [windowTarget, screenTarget];
+        await actRun(() => hook.result.current.refresh());
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(requests).toHaveLength(1);
+      } finally {
+        await hook.unmount();
+      }
+    },
+  );
 });
 
 describe("ComputerSession frame stream", () => {
@@ -812,6 +853,411 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("dismisses both desktop menus after target discovery before dock shortcuts", async () => {
+    const screenTarget = target("screen-1", "screen");
+    const windowTarget = target();
+    let discover!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      discover = resolve;
+    });
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => {
+        await discovered;
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [screenTarget, windowTarget],
+        };
+      },
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) =>
+        observation(targetId === screenTarget.id ? screenTarget : windowTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(screenTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    let dockEscapes = 0;
+    const dock = (event: Event) => {
+      if ((event as KeyboardEvent).key === "Escape") dockEscapes += 1;
+    };
+    document.addEventListener("keydown", dock);
+    try {
+      await flush(40);
+      expect(
+        rendered.container.querySelector("summary[aria-label='Advanced desktop views']"),
+      ).toBeNull();
+      await actRun(discover);
+      await flush(20);
+      const menus = [...rendered.container.querySelectorAll<HTMLDetailsElement>("details")];
+      expect(menus).toHaveLength(2);
+      for (const menu of menus) {
+        const trigger = menu.querySelector("summary")!;
+        const inside = menu.querySelector("button")!;
+        menu.open = true;
+        inside.focus();
+        inside.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
+        expect(menu.open).toBe(true);
+        const escape = new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        });
+        inside.dispatchEvent(escape);
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+        expect(escape.defaultPrevented).toBe(true);
+        expect(dockEscapes).toBe(0);
+        menu.open = true;
+        const outside = new Event("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        document.body.dispatchEvent(outside);
+        expect(menu.open).toBe(false);
+        expect(outside.defaultPrevented).toBe(false);
+      }
+      menus[0]!
+        .querySelector("summary")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(dockEscapes).toBe(1);
+      expect(requests).toEqual([]);
+    } finally {
+      discover();
+      document.removeEventListener("keydown", dock);
+      await rendered.unmount();
+    }
+  });
+
+  test("returns desktop menu focus after keyboard actions without stealing pointer focus", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      const trigger = menu.querySelector("summary")!;
+      for (const label of ["Agent computer", "Follow agent"]) {
+        menu.open = true;
+        const action = [...menu.querySelectorAll("button")].find((button) =>
+          button.textContent?.startsWith(label),
+        )!;
+        action.focus();
+        await actRun(() => action.click());
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+      }
+      menu.open = true;
+      const choice = menu.querySelector("button")!;
+      choice.focus();
+      await actRun(() =>
+        choice.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })),
+      );
+      expect(menu.open).toBe(false);
+      expect(document.activeElement === trigger).toBe(false);
+      expect(fixture.actions).toEqual([]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
+  test("keeps a single desktop uncluttered and puts app/window views under Advanced", async () => {
+    const screenTarget = target("screen-1", "screen");
+    const windowTarget = target();
+    const appTarget = { ...target("app-1", "app"), title: "Example app" };
+    const targets = [windowTarget, appTarget, screenTarget];
+    const observed: string[] = [];
+    const attachments: string[] = [];
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => ({ ...computerSession(), platform: "macos" }),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets,
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observed.push(targetId);
+        return observation(targets.find((candidate) => candidate.id === targetId)!);
+      },
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+        attachments.push(request.targetId);
+        return attachment(request.targetId);
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(appTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    try {
+      await flush(40);
+      expect(observed).toEqual([screenTarget.id]);
+      expect(attachments).toEqual([screenTarget.id]);
+      expect(rendered.container.querySelector("[aria-label='Desktop views']")).toBeNull();
+      expect(rendered.container.querySelector("select[aria-label='Screen']")).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Controls 0");
+      const advanced = rendered.container.querySelector<HTMLElement>(
+        "summary[aria-label='Advanced desktop views']",
+      )!;
+      const menu = advanced.parentElement as HTMLDetailsElement;
+      expect(menu.open).toBe(false);
+      const views = [...menu.querySelectorAll<HTMLButtonElement>("button")];
+      expect(views.map((button) => button.textContent)).toEqual([
+        "Test windowWindow view",
+        "Example appApp controls",
+      ]);
+      await actRun(() => {
+        menu.open = true;
+        views[0]!.click();
+      });
+      await flush(20);
+      expect(menu.open).toBe(false);
+      expect(observed.at(-1)).toBe(windowTarget.id);
+      expect(attachments.at(-1)).toBe(windowTarget.id);
+      expect(requests).toHaveLength(0);
+      await actRun(() => {
+        menu.open = true;
+        views[1]!.click();
+      });
+      await flush(20);
+      expect(menu.open).toBe(false);
+      expect(observed.at(-1)).toBe(appTarget.id);
+      expect(attachments).toEqual([screenTarget.id, windowTarget.id]);
+      expect(rendered.container.textContent).toContain("App · controls work in the background");
+      expect(rendered.container.textContent).not.toContain("Waiting for desktop");
+      expect(
+        rendered.container.querySelector<HTMLTextAreaElement>(
+          "textarea[aria-label='Desktop keyboard input']",
+        )?.disabled,
+      ).toBe(true);
+      const run = [...rendered.container.querySelectorAll<HTMLButtonElement>("aside button")].find(
+        (button) => button.textContent?.includes("Run checks"),
+      )!;
+      await actRun(() => run.click());
+      expect(requests[0]).toMatchObject({
+        targetId: appTarget.id,
+        expectedTargetGeneration: appTarget.targetGeneration,
+        action: { type: "semantic", action: "invoke" },
+      });
+      await actRun(() =>
+        [...rendered.container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Full desktop"))!
+          .click(),
+      );
+      await flush(20);
+      expect(observed.at(-1)).toBe(screenTarget.id);
+      expect(rendered.container.querySelector("aside")).toBeNull();
+      expect(requests).toHaveLength(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("resets app controls when its view disappears and preserves a toggle on same-view refresh", async () => {
+    const screenTarget = target("screen-1", "screen");
+    const appTarget = { ...target("app-1", "app"), title: "Example app" };
+    let targets = [screenTarget, appTarget];
+    const requests: ComputerActionRequest[] = [];
+    const attachments: string[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets,
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) =>
+        observation(targets.find((candidate) => candidate.id === targetId)!),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+        attachments.push(request.targetId);
+        return attachment(request.targetId);
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(appTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    const refresh = () =>
+      rendered.container
+        .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+        .click();
+    const toggle = () =>
+      [...rendered.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Controls 1")!
+        .click();
+    try {
+      await flush(40);
+      await actRun(() => {
+        const menu = rendered.container.querySelector(
+          "summary[aria-label='Advanced desktop views']",
+        )!.parentElement as HTMLDetailsElement;
+        menu.open = true;
+        menu.querySelector<HTMLButtonElement>("button")!.click();
+      });
+      await flush(20);
+      expect(rendered.container.querySelector("aside")).not.toBeNull();
+      await actRun(toggle);
+      expect(rendered.container.querySelector("aside")).toBeNull();
+      await actRun(refresh);
+      await flush(20);
+      expect(rendered.container.querySelector("aside")).toBeNull();
+      expect(rendered.container.textContent).toContain("App · controls work in the background");
+      await actRun(toggle);
+      expect(rendered.container.querySelector("aside")).not.toBeNull();
+      targets = [screenTarget];
+      await actRun(refresh);
+      await flush(20);
+      expect(attachments.at(-1)).toBe(screenTarget.id);
+      expect(rendered.container.querySelector("aside")).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Controls 0");
+      expect(
+        rendered.container.querySelector("summary[aria-label='Advanced desktop views']"),
+      ).toBeNull();
+      expect(requests).toHaveLength(0);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("switches whole screens with the display target's existing frame and coordinate fence", async () => {
+    const canvasMock = mockComputerCanvas();
+    const screens = [
+      { ...target("screen-1", "screen"), title: "Main display", focused: true },
+      {
+        ...target("screen-2", "screen"),
+        title: "Second display",
+        bounds: { x: -1_600, y: -300, width: 1_600, height: 900 },
+      },
+    ];
+    const requests: ComputerActionRequest[] = [];
+    const attachments: string[] = [];
+    const sockets: FakeComputerSocket[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [target(), ...screens],
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) =>
+        observation(screens.find((screen) => screen.id === targetId)!),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+        attachments.push(request.targetId);
+        return attachment(request.targetId);
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return { ...receipt(observation(screens[1]!), request.operationId), observation: null };
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) => {
+          const socket = new FakeComputerSocket(url, protocols);
+          sockets.push(socket);
+          return socket as unknown as ComputerFrameWebSocket;
+        }}
+      />,
+    );
+    try {
+      await flush(40);
+      const picker = rendered.container.querySelector<HTMLSelectElement>(
+        "select[aria-label='Screen']",
+      )!;
+      expect(picker.value).toBe(screens[0]!.id);
+      expect(
+        [...picker.options]
+          .filter((option) => !option.disabled)
+          .map((option) => option.textContent),
+      ).toEqual(["Main display", "Second display"]);
+      await actRun(() => {
+        picker.value = screens[1]!.id;
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await flush(20);
+      expect(picker.value).toBe(screens[1]!.id);
+      expect(attachments).toEqual([screens[0]!.id, screens[1]!.id]);
+      expect(requests).toHaveLength(0);
+      await dispatch(sockets[1]!, "open");
+      await dispatch(sockets[1]!, "message", {
+        data: frameMessage(screens[1]!.id, 1, { width: 1_600, height: 900 }).buffer,
+      });
+      await canvasMock.finishDecode(0);
+      const canvas = rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
+      canvas.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 800, height: 450 }) as DOMRect;
+      await actRun(() => {
+        for (const type of ["pointerdown", "pointerup"]) {
+          canvas.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              clientX: 200,
+              clientY: 150,
+            }),
+          );
+        }
+      });
+      await flush(350);
+      expect(requests[0]).toMatchObject({
+        targetId: screens[1]!.id,
+        expectedTargetGeneration: "screen-2-generation",
+        expectedFrameId: "frame-1",
+        action: { type: "pointer", action: "click", x: 400, y: 300 },
+      });
+      await actRun(() =>
+        rendered.container
+          .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+          .click(),
+      );
+      await flush(20);
+      expect(picker.value).toBe(screens[1]!.id);
+      expect(requests).toHaveLength(1);
+    } finally {
+      await rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("retires a stale Connected Machine Desktop, stops polling, and recreates once", async () => {
     const stale = {
       ...computerSession(),
@@ -1656,6 +2102,56 @@ describe("ComputerViewer", () => {
 });
 
 describe("ComputerViewer input reliability", () => {
+  test.each([undefined, false, true])(
+    "requires explicit attachment input scope for RFB (%p)",
+    async (inputAllowed) => {
+      const priorWebSocket = globalThis.WebSocket;
+      globalThis.WebSocket = class extends EventTarget {
+        static CONNECTING = 0;
+        static CLOSED = 3;
+        readyState = 0;
+        binaryType = "arraybuffer";
+        close() {
+          this.readyState = 3;
+        }
+      } as unknown as typeof WebSocket;
+      const currentSession = computerSession();
+      const currentTarget = target();
+      const client = fakeClient({
+        listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+        getComputerSession: async () => currentSession,
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        }),
+        observeComputerTarget: async () => observation(currentTarget),
+        attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+          const rfbGrantAttachment = rfbAttachment(request.targetId);
+          if (rfbGrantAttachment.stream.kind === "direct_rfb") {
+            if (inputAllowed === undefined)
+              delete (rfbGrantAttachment.stream as Partial<typeof rfbGrantAttachment.stream>)
+                .inputAllowed;
+            else rfbGrantAttachment.stream.inputAllowed = inputAllowed;
+          }
+          return rfbGrantAttachment;
+        },
+      });
+      const rendered = await renderComponent(
+        <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      );
+      try {
+        await flush(40);
+        const desktop = rendered.container.querySelector("[data-opengeni-desktop]");
+        expect(desktop).not.toBeNull();
+        expect(desktop!.hasAttribute("data-in-control")).toBe(inputAllowed === true);
+      } finally {
+        await rendered.unmount();
+        globalThis.WebSocket = priorWebSocket;
+      }
+    },
+  );
+
   test("keeps an RFB desktop view-only when native input is unavailable", async () => {
     const priorWebSocket = globalThis.WebSocket;
     // noVNC owns its socket; keep this component check on a disconnected fixture.
@@ -1929,12 +2425,15 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
-  test("retains keyboard focus after a canvas click and types after that click", async () => {
+  test("dismisses the desktop menu without swallowing a canvas click or subsequent typing", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
       await fixture.frame(1);
       await canvasMock.finishDecode(0);
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      menu.open = true;
+      menu.querySelector("summary")!.focus();
       const pointer = new MouseEvent("pointerdown", {
         bubbles: true,
         cancelable: true,
@@ -1954,6 +2453,7 @@ describe("ComputerViewer input reliability", () => {
         );
       });
       expect(pointer.defaultPrevented).toBe(true);
+      expect(menu.open).toBe(false);
       expect(document.activeElement).toBe(fixture.keyboard);
       await actRun(() => {
         fixture.keyboard.value = "immediate text";
@@ -2626,7 +3126,7 @@ async function renderComputerInputFixture(
     switchTarget: async () => {
       await actRun(() =>
         [...rendered.container.querySelectorAll("button")]
-          .find((button) => button.textContent?.trim() === "Second desktop")!
+          .find((button) => button.textContent?.startsWith("Second desktop"))!
           .click(),
       );
       await flush();

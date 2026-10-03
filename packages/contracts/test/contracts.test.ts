@@ -1426,6 +1426,43 @@ describe("contracts", () => {
     ).toThrow();
   });
 
+  test.each([
+    {
+      type: "user.approvalDecision",
+      payload: { approvalId: "crm-call", decision: "approve", message: "Proceed" },
+    },
+    {
+      type: "user.humanInputResponse",
+      payload: {
+        requestId: "11111111-1111-4111-8111-111111111111",
+        response: { outcome: "answered", answers: [{ questionId: "note", values: ["Proceed"] }] },
+      },
+    },
+  ])("accepts optional write-only credential updates on $type", ({ type, payload }) => {
+    expect(JSON.stringify(ClientSessionEvent.parse({ type, payload }).payload)).toBe(
+      JSON.stringify(payload),
+    );
+    const updates = [{ id: "crm", headers: { Authorization: "Bearer resume-test-token" } }];
+    expect(
+      ClientSessionEvent.parse({ type, payload: { ...payload, mcpCredentialUpdates: updates } })
+        .payload.mcpCredentialUpdates,
+    ).toEqual(updates);
+    expect(
+      ClientSessionEvent.parse({ type, payload: { ...payload, mcpCredentialUpdates: [] } }).payload
+        .mcpCredentialUpdates,
+    ).toEqual([]);
+    for (const invalid of [
+      [{ id: "", headers: {} }],
+      [{ id: "crm", headers: { Authorization: 123 } }],
+      [{ id: "crm" }],
+      "not-an-array",
+    ]) {
+      expect(() =>
+        ClientSessionEvent.parse({ type, payload: { ...payload, mcpCredentialUpdates: invalid } }),
+      ).toThrow();
+    }
+  });
+
   test("canonicalizes and bounds large selective MCP approval policies", () => {
     const requireApproval = Array.from({ length: 245 }, (_, index) => `write_tool_${index}`);
     expect(
@@ -1889,6 +1926,8 @@ describe("contracts", () => {
       true,
     );
     expect(payload.auth.mode === "managedSession" && payload.auth.socialProviders).toEqual([]);
+    // An older deployment omits the sign-up switch; that means sign-ups are open.
+    expect(payload.auth.mode === "managedSession" && payload.auth.newSignupsEnabled).toBe(true);
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     expect(payload.managedAuthSessionSetMode).toBe("legacy");

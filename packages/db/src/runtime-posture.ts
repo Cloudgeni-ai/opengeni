@@ -42,6 +42,25 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+const MODEL_FACT_CAPABILITY_ROUTINES = [
+  [
+    "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+    "Insights complete usage amount projection is missing or unsafe",
+  ],
+  [
+    "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights amount fact projection is missing or unsafe",
+  ],
+  [
+    "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+    "organization model usage aggregate is missing or unsafe",
+  ],
+  [
+    "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights scoped fact projection is missing or unsafe",
+  ],
+] as const;
+
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
@@ -58,6 +77,10 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
+  "record_organization_signup_use_case(uuid, text, text)",
+] as const;
+const ORGANIZATION_SIGNUP_USE_CASES_TABLE = "organization_signup_use_cases";
 export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
@@ -78,6 +101,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "claude_subscription_pool_protocol_v1_active()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -247,6 +271,10 @@ const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sess
 const VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE =
   "set_verified_signup_trial_credits_enabled(boolean, text, text)";
 const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE = "verified_signup_trial_switch_revisions";
+/** Operator-only audited setter for the new-account sign-up switch (migration 0585). */
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE =
+  "set_managed_auth_new_signups_enabled(boolean, text, text)";
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE = "managed_auth_new_signups_switch_revisions";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -599,6 +627,30 @@ const XAI_AUTHORITY_TABLES = [
   "workspace_memberships",
   "xai_subscription_credentials",
 ] as const;
+const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE = XAI_SNAPSHOT_VALIDATOR_ROUTINE.replace("xai_", "claude_");
+const CLAUDE_AUTHORITY_ROUTINES = [
+  XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  XAI_AUTHORITY_LIVE_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+].map((name) => name.replace("xai_", "claude_"));
+export const CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES = [
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
+  ...CLAUDE_AUTHORITY_ROUTINES,
+];
+export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+  XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  XAI_AUTHORITY_LIVE_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
+];
+const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
@@ -640,6 +692,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
@@ -728,10 +781,12 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
@@ -793,6 +848,12 @@ export const FORCE_RLS_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "channels",
+  "claude_capacity_waiters",
+  "claude_credential_leases",
+  "claude_rotation_settings",
+  "claude_session_account_pins",
+  "claude_subscription_account_usage",
+  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -1167,6 +1228,7 @@ export const NON_RLS_RUNTIME_TABLES = [
   "mcp_oauth_refresh_tokens",
   "nested_agent_depth_configuration",
   "pr_review_managed_github_routes",
+  "slack_api_rate_limits",
   "stripe_webhook_events",
   "workspace_memberships",
   "workspaces",
@@ -1202,6 +1264,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "capability_operations",
   "capability_plugin_installations",
   "channels",
+  "claude_capacity_waiters",
+  "claude_credential_leases",
+  "claude_rotation_settings",
+  "claude_session_account_pins",
+  "claude_subscription_account_usage",
+  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -1303,6 +1371,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
+  "slack_api_rate_limits",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
@@ -1652,6 +1721,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedNoDirectDmlTables?: readonly string[];
   targetSchemaCapabilityRoutines?: readonly string[];
   targetSchemaForbiddenRoutines?: readonly string[];
+  /** Frozen binary contract; current callers require both additive Insights capabilities. */
+  modelFactCapabilityRoutines?: readonly string[];
   organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
@@ -1738,6 +1809,7 @@ export type RuntimeDatabasePosture = {
   privateRoutines: RuntimeRoutinePosture[];
   sessionTenancyProductActivationPresent: boolean;
   sessionVariableSetAttachmentsCutoverPresent: boolean;
+  claudeSubscriptionPoolActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1878,6 +1950,12 @@ export async function inspectRuntimeDatabasePosture(
       );
       const sessionVariableSetAttachmentsCutoverPresent =
         variableSetCutoverRows[0]?.present === true;
+      const claudePoolActivationRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.claude_subscription_pool_protocol_v1_active()'
+        ) is not null as present`),
+      );
+      const claudeSubscriptionPoolActivationPresent = claudePoolActivationRows[0]?.present === true;
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1895,6 +1973,7 @@ export async function inspectRuntimeDatabasePosture(
           privateRoutines: [],
           sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
+          claudeSubscriptionPoolActivationPresent,
         };
       }
 
@@ -2069,6 +2148,7 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
@@ -2086,7 +2166,8 @@ export async function inspectRuntimeDatabasePosture(
               'session_import_batches',
               'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
-              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE}
+              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
+              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
       ).map((row) => ({
@@ -2199,6 +2280,7 @@ export async function inspectRuntimeDatabasePosture(
         privateRoutines,
         sessionTenancyProductActivationPresent,
         sessionVariableSetAttachmentsCutoverPresent,
+        claudeSubscriptionPoolActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2225,6 +2307,9 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (!posture.claudeSubscriptionPoolActivationPresent)
+    violations.push("database is missing the Claude subscription account activation receipt");
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
@@ -2993,11 +3078,15 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
-    } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+    } else if (
+      routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE ||
+      routine.name === CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE
+    ) {
       // The immutable SQL validator is invoker-rights and reads no table. Its
       // exact ACL is posture-checked above; it does not participate in the
       // SECURITY DEFINER same-owner authority graph.
     } else if (
+      CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name) ||
       routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
       routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
       routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
@@ -3005,10 +3094,13 @@ export function evaluateRuntimeDatabasePosture(
       routine.name === XAI_RESOLVE_POOL_ROUTINE ||
       routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
     ) {
-      if (!tableByName.has("xai_subscription_credentials")) {
+      const authorityTableNames = CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name)
+        ? XAI_AUTHORITY_TABLES.map((name) => name.replace("xai_", "claude_"))
+        : XAI_AUTHORITY_TABLES;
+      if (!tableByName.has(authorityTableNames[3]!)) {
         continue;
       }
-      const missingAuthorityTables = XAI_AUTHORITY_TABLES.filter(
+      const missingAuthorityTables = authorityTableNames.filter(
         (tableName) => !tableByName.has(tableName),
       );
       if (missingAuthorityTables.length > 0) {
@@ -3016,9 +3108,7 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = XAI_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
-        );
+        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
@@ -3692,6 +3782,23 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
 
+  // The new-account sign-up switch is operator state too. The API reads it on
+  // each sign-up decision but must never append or rewrite it.
+  const newSignupsSwitchTable = posture.privateTables.find(
+    (table) => table.name === MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE,
+  );
+  if (
+    newSignupsSwitchTable &&
+    (newSignupsSwitchTable.owner === expectedRole ||
+      newSignupsSwitchTable.insert ||
+      newSignupsSwitchTable.update ||
+      newSignupsSwitchTable.delete)
+  ) {
+    violations.push(
+      "runtime role has forbidden write authority on the managed auth new signups switch",
+    );
+  }
+
   const connectionBackfillCapabilityTables = posture.privateTables.filter(
     (table) => table.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
   );
@@ -3854,6 +3961,49 @@ export function evaluateRuntimeDatabasePosture(
         !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
       ) {
         violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
+  const signupUseCaseTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  );
+  if (signupUseCaseTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization signup use case private relation is missing or ambiguous");
+  } else {
+    const table = signupUseCaseTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("organization signup use case relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct organization signup use case authority");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("organization signup use case owner does not match session authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`organization signup use case capability ${name} is missing or unsafe`);
       }
     }
   }
@@ -4069,6 +4219,28 @@ export function evaluateRuntimeDatabasePosture(
       aggregateRoutine.owner !== capability.owner
     ) {
       violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+  const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
+  const modelFactCapabilityRoutines = new Set(
+    options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
+  );
+  if (modelCallFactsOwner !== undefined) {
+    for (const [name, violation] of MODEL_FACT_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+      // An older binary does not require a later additive capability, but any
+      // installed capability must retain the same owner and ACL safety contract.
+      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name)) continue;
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== modelCallFactsOwner
+      ) {
+        violations.push(violation);
+      }
     }
   }
 

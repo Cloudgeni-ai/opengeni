@@ -169,6 +169,12 @@ describe("scheduled task frozen setup restriction", () => {
       if (lane === "service") headers["x-opengeni-service-initiator"] = "fixture.setup";
       if (lane === "asUser") {
         track(
+          spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+            callback({} as never),
+          ),
+        );
+        track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+        track(
           spyOn(db, "ensureExternalIdentity").mockResolvedValue({
             id: "77777777-7777-4777-8777-777777777777",
             accountId,

@@ -341,6 +341,13 @@ For tools and MCP work, distinguish:
 - Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
+Configured agents receive capability-gated prompt modules under
+`packages/runtime/src/agent-instructions/`; media guidance belongs to the media
+module, while deferred discovery mechanics remain always on. Inspect the
+runtime's current authorized tool catalog before concluding a tool is absent.
+Integration catalogs and sandbox CLI inventories do not enumerate runtime
+media adapters. Literal-prefix recovery hints never load schemas or grant access.
+
 Managed Codemode clients are release-owned, not image-version-owned. Inspect
 `packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
 scripts for the bundled CLI/ESM asset. Warm managed boxes receive verified,

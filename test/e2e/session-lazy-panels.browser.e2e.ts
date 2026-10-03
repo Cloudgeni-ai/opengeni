@@ -84,6 +84,13 @@ describe("production session conditional loading", () => {
     ).join("\n");
     expect(eagerSource).not.toMatch(/["'`]credit-card["'`]/u);
     expect(eagerSource).not.toMatch(/["'`]fingerprint-pattern["'`]/u);
+    // The composer's Plus glyph shares the existing primitives request.
+    const sharedGlyphs = Object.values(manifest).find(
+      (entry) => entry.name === "session-shared-primitives",
+    )!;
+    expect(await readFile(`${repoRoot}/apps/web/dist/${sharedGlyphs.file}`, "utf8")).toMatch(
+      /["'`]plus["'`]/u,
+    );
     // The Variable Set editor is its own chunk, outside the session's static graph.
     expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
     expect(panelAsset).toBeTruthy();
@@ -584,8 +591,52 @@ async function installApi(page: Page, baseUrl: string, state: State) {
       });
     if (path === "/v1/workspaces") return json([workspace]);
     if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
-      return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const archived = params.get("archiveStatus") === "archived";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const attention = session.status === "requires_action";
+      const filtered = params.get("needsYouOnly") === "true" && !attention;
+      return json({
+        sessions:
+          pinsOnly ||
+          archived ||
+          filtered ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
+            ? []
+            : [session],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus: params.get("archiveStatus") ?? "active",
+        ...(params.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: archived && !pinsOnly ? 0 : Number(attention),
+                groups:
+                  (archived || filtered) && !pinsOnly
+                    ? []
+                    : [
+                        {
+                          channelId: null,
+                          total: 1,
+                          attention: Number(attention),
+                          attentionSince: null,
+                          failed: 0,
+                          active: 0,
+                          queued: 0,
+                          unread: 0,
+                          activeWork: 0,
+                        },
+                      ],
+              },
+            }
+          : {}),
+      });
+    }
     if (path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}`) return json(session);
     if (path.endsWith("/events/stream"))
       return route.fulfill({

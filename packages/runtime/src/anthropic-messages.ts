@@ -10,12 +10,40 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
+import { createModelImageSizer } from "./model-image-sizing";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
 
 export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
+}
+
+/** Preserve documented spend proof, without retaining an arbitrary error body. */
+function anthropicSpendLimitCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
+  const value = error as Json;
+  if (
+    value.type === "rate_limit_error" &&
+    value.details?.error_code === "enforced_spend_limit_reached"
+  )
+    return "enforced_spend_limit_reached";
+  if (
+    value.type === "invalid_request_error" &&
+    typeof value.message === "string" &&
+    /^You have reached your specified (?:workspace )?API usage limits\b/.test(value.message)
+  )
+    return "enforced_spend_limit_reached";
+  return undefined;
+}
+
+function anthropicHttpSpendLimitCode(detail: string): string | undefined {
+  try {
+    return anthropicSpendLimitCode(JSON.parse(detail)?.error);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Closed provider rejections carry authored copy, never arbitrary response text. */
@@ -307,7 +335,9 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
  * replies. Anthropic's system beta requires a system message after a user and
  * before an assistant (or at the end), not user -> system -> user. Coalesce each
  * user phase and its system blocks at that boundary, retaining their own roles,
- * exact content and relative order. Never move a system across an assistant.
+ * exact content and relative order. A machine-only continuation after an
+ * assistant needs a request-local input anchor; it is not a new human message.
+ * Never move a system across an assistant.
  */
 function placeConversationSystems(messages: Message[]): Message[] {
   const result: Message[] = [];
@@ -315,7 +345,15 @@ function placeConversationSystems(messages: Message[]): Message[] {
   const flush = () => {
     if (!systems.length) return;
     if (result.at(-1)?.role !== "user")
-      throw new AnthropicProtocolError("Claude system messages require a preceding user message");
+      result.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "OpenGeni continuation (machine-origin input; no new human message).",
+          },
+        ],
+      });
     result.push({ role: "system", content: systems });
     systems = [];
   };
@@ -575,15 +613,52 @@ export class AnthropicMessagesModel implements Model {
   private readonly fallbackSessionId = randomUUID();
   private readonly promptId = randomUUID();
   private previousRequestId: string | undefined;
+  // The same bound applies from the first image onward. A growing conversation
+  // must not resize its old prefix when it crosses the many-image threshold.
+  private readonly sizeImage = createModelImageSizer(2000);
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
   ) {}
 
+  /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
+  private async sizeImageBlocks(blocks: Json[], signal?: AbortSignal): Promise<Json[]> {
+    const result: Json[] = [];
+    for (const block of blocks) {
+      signal?.throwIfAborted();
+      if (block.type === "tool_result" && Array.isArray(block.content)) {
+        result.push({ ...block, content: await this.sizeImageBlocks(block.content, signal) });
+      } else if (block.type === "image" && block.source?.type === "base64") {
+        const image = await this.sizeImage(block.source.data, block.source.media_type);
+        if (image.data === block.source.data && image.mediaType === block.source.media_type) {
+          result.push(block);
+          continue;
+        }
+        const { cache_control: cache, ...unmarked } = block;
+        result.push({
+          ...unmarked,
+          source: { type: "base64", media_type: image.mediaType, data: image.data },
+        });
+        // Preserve the mapping for tools whose coordinates refer to the original
+        // frame. This note is deterministic and belongs inside the same cache prefix.
+        result.push({
+          type: "text",
+          text: `Image resized for transport: oriented original ${image.originalWidth}x${image.originalHeight}; encoded image ${image.width}x${image.height}. For pixel coordinates, account for any further provider resizing and use the coordinate system required by the tool.`,
+          ...(cache ? { cache_control: cache } : {}),
+        });
+      } else result.push(block);
+    }
+    return result;
+  }
+
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    for (const message of body.messages) {
+      message.content = await this.sizeImageBlocks(message.content, request.signal);
+    }
+    request.signal?.throwIfAborted();
     const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
     for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))
@@ -633,12 +708,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
@@ -675,7 +752,13 @@ export class AnthropicMessagesModel implements Model {
       throw new AnthropicRequestError(
         message,
         response.status,
-        contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
+        contextExceeded
+          ? "context_length_exceeded"
+          : response.status === 402
+            ? "anthropic_billing_error"
+            : response.status === 400 || response.status === 429
+              ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
+              : "anthropic_http_error",
         source,
         response.headers,
       );
@@ -711,19 +794,41 @@ export class AnthropicMessagesModel implements Model {
         const statuses: Record<string, number> = {
           invalid_request_error: 400,
           authentication_error: 401,
+          billing_error: 402,
           permission_error: 403,
           not_found_error: 404,
+          conflict_error: 409,
           request_too_large: 413,
           rate_limit_error: 429,
           api_error: 500,
+          timeout_error: 504,
           overloaded_error: 529,
         };
-        const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
-        const rejection = providerRejection(status, event.error, response.headers);
+        // A new error type is not evidence of a server failure. Never invent
+        // a retryable status for an unknown terminal; completed tools stay saved.
+        const status =
+          typeof kind === "string" && Object.hasOwn(statuses, kind) ? statuses[kind] : undefined;
+        const rejection =
+          status !== undefined
+            ? providerRejection(status, event.error, response.headers)
+            : undefined;
         if (rejection) throw rejection;
-        throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
-          status,
-          code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+        const spendCode =
+          status === 400 || status === 429 ? anthropicSpendLimitCode(event.error) : undefined;
+        const code =
+          spendCode ??
+          (status === 402
+            ? "anthropic_billing_error"
+            : status === 429
+              ? "rate_limit_exceeded"
+              : "anthropic_stream_error");
+        const failureMessage =
+          status === undefined
+            ? "Claude returned an unrecognized stream error. Automatic retries stopped."
+            : `Claude stream failed (HTTP ${status})`;
+        throw Object.assign(new Error(failureMessage), {
+          ...(status !== undefined ? { status } : {}),
+          code,
           request_id: response.headers.get("request-id"),
           headers: response.headers.has("retry-after")
             ? { "retry-after": response.headers.get("retry-after")! }
@@ -731,9 +836,9 @@ export class AnthropicMessagesModel implements Model {
           // Keep the structural stream wrapper stable for provider rejection
           // guards while the typed cause keeps provider text private.
           cause: new AnthropicRequestError(
-            `Claude stream failed (HTTP ${status})`,
+            failureMessage,
             status,
-            status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+            code,
             event.error,
             response.headers,
           ),

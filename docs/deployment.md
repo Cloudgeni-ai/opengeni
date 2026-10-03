@@ -116,6 +116,112 @@ default 30 seconds) publishes two 0/1 gauges:
 New grants happen only while both gauges are 1. The runtime gauge alone reads 1
 on every deployment that never opted in, so never read it as "the trial is live".
 
+## New account sign-up switch (0596)
+
+`0596_managed_auth_new_signups_switch.sql` is a rolling migration with the same
+shape as the 0521 trial switch above. It needs no drain and no
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then run the normal
+`db:provision-roles`. Its seed revision keeps sign-ups open, so this migration
+changes no behavior on its own.
+
+It is the launch-load safety switch for managed deployments: it stops new people
+from creating accounts without affecting anyone who already has one. A new
+managed account is created only when **both** switches allow it:
+
+- `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` (default `true`) is the
+  deployment ceiling. The API reads it at startup, so changing it needs a config
+  rollout and an API restart. Set it with the API's own `api.extraEnv` so only
+  the API Deployment rolls (changing the shared `config` map restarts every
+  component that mounts it). While it is `false`, Better Auth is also built with
+  `emailAndPassword.disableSignUp` and per-provider `disableSignUp`.
+- The runtime switch is the newest row of the append-only
+  `opengeni_private.managed_auth_new_signups_switch_revisions` table. Use it as
+  the fast path during a launch. The API reads it on every sign-up request and
+  every `GET /v1/config/client`, so a change applies to the next request on
+  every API replica, with no deploy or restart. Sessions are untouched, so
+  nobody is signed out.
+
+To pause or reopen sign-ups, connect as the migration owner (the role in
+`OPENGENI_MIGRATIONS_DATABASE_URL`) and call the audited setter:
+
+```sql
+select set_managed_auth_new_signups_enabled(
+  false,                                                        -- true reopens sign-ups
+  'github:<owner>/<repo>:actor:<actor>:run:<run id>:attempt:<n>', -- operator identity, 1-200 characters
+  'launch load: pause new sign-ups'                             -- reason, 6-1000 characters
+);
+```
+
+Use the same operator identity convention as the 0521 switch. The setter
+returns the new revision as JSON (`revision`, `signupsEnabled`,
+`previousSignupsEnabled`, `changed`, `operator`, `reason`, `databaseRole`,
+`changedAt`); every call appends one revision, even without a change, and
+records the calling database login. Revisions cannot be updated, deleted, or
+truncated. Run it from the same audited, access-controlled operator path as the
+0521 switch, never from an application pod. Read the current state with:
+
+```sql
+select revision, signups_enabled, previous_signups_enabled, operator, reason,
+       database_role, changed_at
+from opengeni_private.managed_auth_new_signups_switch_revisions
+order by revision desc
+limit 1;
+```
+
+Then confirm the combined decision the browser sees:
+
+```bash
+curl -s "$OPENGENI_PUBLIC_BASE_URL/v1/config/client" | jq '.auth.newSignupsEnabled'   # false
+```
+
+Do not probe by submitting a real sign-up: while sign-ups are open it creates
+an account and sends a verification email.
+
+While sign-ups are paused (by either switch):
+
+- `POST /v1/auth/sign-up/email` is refused with `403`
+  `{ "code": "NEW_SIGNUPS_PAUSED", "message": "..." }` before any password
+  hashing or email, for new and already-registered addresses alike (no account
+  enumeration). The Better Auth user-create hook refuses every other creation
+  path with the same code.
+- Google and GitHub refuse an unknown provider account, including one that
+  asks for `requestSignUp`; the browser returns with `error=signup_disabled`.
+- Existing humans are unaffected: email and social sign-in (including verified
+  linking of a new provider to an existing human), existing sessions, password
+  reset, email verification of accounts that already exist, post-sign-in
+  organization setup, and invitation acceptance by a signed-in human.
+- Invited people can still create their account from the invitation link
+  (`/setup-account`, `POST /v1/auth/organization-setup`): that path is bound to
+  the pending invitation and does not create users through Better Auth. See
+  [organization tenancy](organization-tenancy.md#post-sign-in-organization-setup-and-one-time-invited-user-setup-0348).
+- `GET /v1/config/client` reports `auth.newSignupsEnabled: false`, and the web
+  sign-up screen shows a capacity message with sign-in still available instead
+  of the form and social buttons. A tab opened before the pause switches to the
+  same message when its sign-up is refused. A tab opened while paused shows the
+  form again after a reload once sign-ups reopen.
+
+Nothing is queued while sign-ups are paused; people who were turned away try
+again later.
+
+What the switch guarantees:
+
+- A read failure never decides sign-ups on its own: the API keeps the last
+  value it observed, and before its first successful read it follows the
+  deployment ceiling. A missing revision (an API running before the migration)
+  also follows the ceiling.
+- A sign-up request that already passed the check when the setter commits may
+  still finish; every request that starts after the commit sees the new value.
+- The setter is `SECURITY DEFINER` and callable only by its owner. PUBLIC and
+  every runtime role lack `EXECUTE`. The migration strips every non-owner grant
+  on the table and the setter at creation, `db:provision-roles` revokes any
+  later stray grant, and runtime posture fails readiness if a runtime role can
+  call the setter or write the table. Runtime roles get `SELECT` only.
+
+The control worker's sandbox-lease reaper pass publishes
+`opengeni_managed_auth_new_signups_runtime_enabled` (1 open, 0 paused) for the
+runtime switch. It does not see the API-only ceiling; `/v1/config/client` is
+the combined answer.
+
 ## Meaningful child attention (0503)
 
 `0585_session_attention_cursor.sql` persists the newest meaningful attention
@@ -1444,7 +1550,12 @@ drain mechanism.
 
 The activation CLI's migration-owner connection carries the same canonical
 `application_name` protocol identity as `createDb`, including through a
-transaction pooler. An unversioned raw connection is not a supported operator
+transaction pooler. Before connecting, it replaces only `application_name` in
+the migration URL's query parameters: a legacy operator Job tag must not
+override the current protocol identity. Credentials, multi-host authority,
+schema, TLS, timeout budgets, and all other URL options are preserved. This
+normalization applies only to activation, not ordinary migration steps.
+An unversioned raw connection is not a supported operator
 substitute: the current sessions policy rejects it even when the backfill
 receipts and parity evidence are ready.
 
@@ -2788,6 +2899,16 @@ The runtime secret must provide values such as:
   `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
   dispute holds on new checkouts remove the corresponding fraction of package
   credits. Existing customer balances are account-wide.
+  Customers can also type a code in Opengeni first (signup onboarding, **Add
+  credits**, Organization > Billing): `POST /v1/billing/checkout` with
+  `promotionCode` looks the code up in Stripe and applies it up front, and a
+  fixed USD amount-off code sets the package to that amount, so a $100 code
+  grants exactly $100. When the code covers the whole package the total is
+  $0, so that checkout skips automatic tax and the billing address and the
+  customer only confirms. Checkout opens in a new tab and the page waits on
+  `GET /v1/billing/checkout/:checkoutSessionId`, which reports the credits
+  once granted and settles a completed session whose webhook is late (same
+  ledger idempotency key, so it never grants twice).
 - sandbox backend credentials when required
 
 Do not commit real secret values.
@@ -4016,3 +4137,34 @@ change organization API keys, external-user authentication, sandbox credentials,
 webhook signatures or signed storage URLs. Review existing issued credentials
 separately when restricting an already-running deployment: removing an email does
 not revoke its previously issued API keys or cancel already accepted work.
+
+### Individual Claude subscription account activation
+
+Migration 0598 is a maintenance cutover. Stop every old API, control worker and
+turn worker, including idle database connections. Supply the exact runtime login
+list through OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES and the existing
+OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY to the normal TypeScript migrator. Plain
+SQL cannot perform the encrypted credential conversion. An installation with no
+legacy Claude credentials needs no encryption key for this migration.
+
+The non-superuser schema owner performs one atomic conversion. It preserves
+credential IDs, logical generations, tokens, model/workspace access and valid
+usage readings, imports the prior primary with rotation disabled, and retires
+native single-connection subscription writes. Accepted turns, child results and
+scheduled inputs retain their producer scope and exact history. The migration
+restores original FORCE-RLS and trigger modes on success; any failure rolls back
+DDL, converted credentials and the activation receipt together. Never restart
+a pre-cutover image after commit. Restart sign-in attempts that were pending
+during the cutover. Anthropic API-key connections are unchanged.
+
+### Slack API pilot activation (0597)
+
+Stop every old/new API, control worker, and turn worker before applying
+`0597_slack_api_rate_limits.sql`, supply the complete runtime login list via
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and provision the matching role
+afterward. The content-free deployment-global quota table changes the exact
+runtime-posture contract; a pre-0597 binary must not be restarted as rollback.
+The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
+bridge with one shared history/replies slot per minute and no search. Apply the
+generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
+for the feature limits and external-workspace release acceptance.

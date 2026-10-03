@@ -67,6 +67,7 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -77,6 +78,7 @@ export type AttemptIdentityState = {
 export type BillingState = {
   isCodexTurn: boolean;
   isXaiTurn: boolean;
+  isClaudeTurn: boolean;
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
@@ -173,6 +175,11 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  effectiveClaudeCredentialId: string | null;
+  effectiveClaudeCredentialVersion: number | null;
+  claudeUpstreamModelId: string | null;
+  claudeRotationEnabled: boolean;
+  claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -191,10 +198,7 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
-  latestClaudeUsage: Map<
-    "workspace" | "organization",
-    import("./claude-usage-observer").CapturedClaudeUsage
-  >;
+  latestClaudeUsage: Map<string, import("./claude-usage-observer").CapturedClaudeUsage>;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -234,6 +238,7 @@ export function createTurnContext(input: {
     billingState: {
       isCodexTurn: false,
       isXaiTurn: false,
+      isClaudeTurn: false,
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
@@ -302,6 +307,11 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      effectiveClaudeCredentialId: null,
+      effectiveClaudeCredentialVersion: null,
+      claudeUpstreamModelId: null,
+      claudeRotationEnabled: false,
+      claudeAuthoritySnapshot: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,

@@ -121,6 +121,7 @@ import {
   type TurnExecutionPolicyV1,
   type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   assertExactNewSessionDraftInTransaction,
@@ -154,6 +155,7 @@ import {
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
@@ -765,7 +767,7 @@ function validateInheritedSessionMcpServersForCreate(
   };
 }
 
-function validateSessionMcpCredentialUpdates(input: {
+export function validateSessionMcpCredentialUpdates(input: {
   settings: Settings;
   grant: AccessGrant;
   session: Session;
@@ -980,6 +982,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -1216,6 +1219,12 @@ export async function createAndStartSessionWithOutcome(input: {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
           }
         : {}),
+      ...(input.claudeProviderAccountAuthoritySnapshot
+        ? {
+            initialClaudeProviderAccountAuthoritySnapshot:
+              input.claudeProviderAccountAuthoritySnapshot,
+          }
+        : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -1315,6 +1324,12 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.xaiProviderAccountAuthoritySnapshot
         ? {
             initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+          }
+        : {}),
+      ...(input.claudeProviderAccountAuthoritySnapshot
+        ? {
+            initialClaudeProviderAccountAuthoritySnapshot:
+              input.claudeProviderAccountAuthoritySnapshot,
           }
         : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
@@ -2681,6 +2696,15 @@ async function createSessionForRequestInFileScope(
           creationInitiator.actor.turnId,
         )
       : undefined;
+  const claudeProviderAccountAuthoritySnapshot =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.turnId,
+        )
+      : undefined;
   const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
   const inheritedPersonalConnectionDelegations =
     connectionDelegationSource.kind === "turn"
@@ -2974,7 +2998,7 @@ async function createSessionForRequestInFileScope(
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted
-  // execution policy fields therefore inherit that calling turn rather than the
+  // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
   // onto the OpenGeni-credits billing path. Legacy session-bound grants without
@@ -2998,6 +3022,9 @@ async function createSessionForRequestInFileScope(
       ...(xaiProviderAccountAuthoritySnapshot
         ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
         : {}),
+      ...(claudeProviderAccountAuthoritySnapshot
+        ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
+        : {}),
     });
     if (!admissibleWorkspaceModel(selections, model)) {
       throw new HTTPException(422, { message: `model is not selectable: ${model}` });
@@ -3008,10 +3035,11 @@ async function createSessionForRequestInFileScope(
     parentSession?.reasoningEffort ??
     resolvedDefault?.reasoningEffort ??
     settings.openaiReasoningEffort;
-  const inheritedLatencyMode =
-    parentCallingTurn?.latencyMode ?? parentSession?.latencyMode ?? "standard";
   const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
-  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
+  // A fresh session never implicitly opts into a faster, higher-cost tier.
+  // This is a fresh-creation default only: replay/repair preserves persisted
+  // policy, and follow-ups use the recipient session's own frozen settings.
+  const latencyMode = payload.latencyMode ?? "standard";
   if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
     throw new HTTPException(409, {
       message: "The submitted session options are not represented by the new-session draft",
@@ -3072,12 +3100,7 @@ async function createSessionForRequestInFileScope(
             : "deployment"
           : "explicit",
       latencyMode,
-      latencyModeSource:
-        payload.latencyMode === undefined
-          ? inheritedFromParent
-            ? "continuation"
-            : "deployment"
-          : "explicit",
+      latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
     }),
     { grant, authorization, trustedMetadata: [parentSession?.metadata] },
   );
@@ -3676,6 +3699,7 @@ async function createSessionForRequestInFileScope(
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
+      ...(claudeProviderAccountAuthoritySnapshot ? { claudeProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       selectedInstalledSkillIds,

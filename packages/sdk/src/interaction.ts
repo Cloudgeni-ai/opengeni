@@ -1055,7 +1055,7 @@ export type InteractionFrameStreamAttachment<RelayKind extends 3 | 4 = 3 | 4> =
 
 export type ComputerFrameStreamAttachment =
   | InteractionFrameStreamAttachment<4>
-  | { kind: "direct_rfb"; url: string; protocols: string[] };
+  | { kind: "direct_rfb"; url: string; protocols: string[]; inputAllowed: boolean };
 
 export type BrowserSessionAttachment = {
   browserSessionId: string;

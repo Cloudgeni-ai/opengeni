@@ -1,5 +1,6 @@
 import {
   Loader2Icon,
+  PlugIcon,
   PuzzleIcon,
   RefreshCwIcon,
   SparklesIcon,
@@ -29,7 +30,10 @@ import {
   OutcomeList,
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
-import { ConnectorToolPermissions } from "@/components/capabilities/connector-tool-permissions";
+import {
+  ConnectorToolPermissions,
+  hasConnectorToolPermissionTarget,
+} from "@/components/capabilities/connector-tool-permissions";
 import {
   capabilityPresentation,
   presentationPermissions,
@@ -115,41 +119,48 @@ export function CatalogItemPage({
     ),
   ].slice(0, 4);
   const reconnect = capabilityReconnectPlan(item, health);
+  const missingPersonalAccount =
+    item.enabled &&
+    health.state === "attention" &&
+    health.connection === null &&
+    (personalOnly || item.connectionRef?.subjectScope === "subject");
   const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const isSkill = item.kind === "skill";
   const signInFlow =
     item.kind === "mcp" && item.authKind === "oauth2" && !item.enabled && onConnectAccount;
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   const chip = capabilityStateChip(item, health);
-  const status = isSkill
-    ? item.enabled
-      ? item.metadata.updateAvailable === true
-        ? "Update available"
-        : "Installed"
-      : undefined
-    : item.surfaceType === "codex_apps"
-      ? item.runtime.available
-        ? "Connected"
-        : "Unavailable"
-      : plan.mode === "social_oauth"
-        ? socialConnections.some(
-            (connection) =>
-              connection.provider === plan.provider && connection.status === "needs_reauth",
-          )
-          ? "Needs attention"
-          : socialConnections.some(
-                (connection) =>
-                  connection.provider === plan.provider && connection.status === "connected",
-              )
-            ? "Connected"
-            : undefined
-        : plan.mode === "fiken_api_token"
-          ? health.state === "connected"
-            ? "Connected"
-            : health.state === "attention"
-              ? "Needs attention"
+  const status = missingPersonalAccount
+    ? "Not connected"
+    : isSkill
+      ? item.enabled
+        ? item.metadata.updateAvailable === true
+          ? "Update available"
+          : "Installed"
+        : undefined
+      : item.surfaceType === "codex_apps"
+        ? item.runtime.available
+          ? "Connected"
+          : "Unavailable"
+        : plan.mode === "social_oauth"
+          ? socialConnections.some(
+              (connection) =>
+                connection.provider === plan.provider && connection.status === "needs_reauth",
+            )
+            ? "Needs attention"
+            : socialConnections.some(
+                  (connection) =>
+                    connection.provider === plan.provider && connection.status === "connected",
+                )
+              ? "Connected"
               : undefined
-          : chip.label;
+          : plan.mode === "fiken_api_token"
+            ? health.state === "connected"
+              ? "Connected"
+              : health.state === "attention"
+                ? "Needs attention"
+                : undefined
+            : chip.label;
   const spinner = <Loader2Icon className="animate-spin" aria-hidden="true" />;
   const socialAccounts =
     plan.mode === "social_oauth"
@@ -238,8 +249,14 @@ export function CatalogItemPage({
             })
           }
         >
-          {busy ? spinner : <RefreshCwIcon aria-hidden="true" />}
-          Reconnect
+          {busy ? (
+            spinner
+          ) : missingPersonalAccount ? (
+            <PlugIcon aria-hidden="true" />
+          ) : (
+            <RefreshCwIcon aria-hidden="true" />
+          )}
+          {missingPersonalAccount ? `Connect ${title}` : "Reconnect"}
         </Button>
       );
     } else if (reconnect?.kind === "api_key" && !reconnecting) {
@@ -443,10 +460,19 @@ export function CatalogItemPage({
           </DetailSection>
         ) : health.state === "attention" ? (
           <DetailSection>
-            <Notice tone="waiting" title={`Sign in again to keep using ${title}`}>
-              {connectedScope === "personal"
-                ? "Your connection stopped working."
-                : "The workspace connection stopped working."}
+            <Notice
+              tone={missingPersonalAccount ? "muted" : "waiting"}
+              title={
+                missingPersonalAccount
+                  ? `Connect your ${title} account`
+                  : `Sign in again to keep using ${title}`
+              }
+            >
+              {missingPersonalAccount
+                ? "This connector is enabled for the workspace. Each person connects their own account."
+                : connectedScope === "personal"
+                  ? "Your connection stopped working."
+                  : "The workspace connection stopped working."}
             </Notice>
           </DetailSection>
         ) : null;
@@ -592,11 +618,7 @@ export function CatalogItemPage({
 
       {setup}
 
-      {workspaceId &&
-      item.enabled &&
-      item.kind === "mcp" &&
-      item.source !== "built_in" &&
-      item.surfaceType !== "codex_apps" ? (
+      {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
           title="Approvals"
           description="Choose which actions need your OK. Applies to new messages."

@@ -8,7 +8,7 @@ The `opengeni-client` skill teaches a coding agent how to integrate OpenGeni the
 
 ## What you need
 
-- An OpenGeni organization. Sign up at [app.opengeni.ai](https://app.opengeni.ai) or [self-host](/guides/self-host).
+- An OpenGeni organization. Sign up at [app.opengeni.ai](https://app.opengeni.ai) or [self-host](/guides/self-host). When you sign up and choose **Add AI agents to my product**, setup creates a full-access setup key (valid 30 days) and either opens a chat where OpenGeni builds the integration with you or copies a ready prompt (with the key) for your coding agent.
 - A **full-access organization API key**: **Organization settings → Developer → API keys**. The token is shown once; store it in your secret manager.
 - Three environment variables on your backend:
 
@@ -26,7 +26,7 @@ Paste it into Claude Code, Codex, Cursor, or any agent that can run commands in 
 Add an OpenGeni agent to this product.
 
 1. Install the OpenGeni integration skill:
-     npx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+     npx skills add Cloudgeni-ai/opengeni --skill opengeni-client --yes
    If that is unavailable, copy
    https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client
    into this repository's skills directory, or read the full text at
@@ -38,8 +38,7 @@ Add an OpenGeni agent to this product.
    the framework adapter) where it fits the product, and give the agent our
    data through our own authenticated tools.
 4. Before building, ask me once about anything the repository does not
-   answer: who shares chats, what runs on a schedule, where results land,
-   and whether the agent may write.
+   answer, such as who can see a chat and whether the agent may change data.
 
 Credentials are in the environment: OPENGENI_API_BASE_URL,
 OPENGENI_ORGANIZATION_ID, OPENGENI_API_KEY. Keep the API key on the server.
@@ -50,11 +49,11 @@ You can also install the skill yourself first:
 <CodeGroup>
 
 ```bash npx
-npx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+npx skills add Cloudgeni-ai/opengeni --skill opengeni-client --yes
 ```
 
 ```bash bunx
-bunx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+bunx skills add Cloudgeni-ai/opengeni --skill opengeni-client --yes
 ```
 
 </CodeGroup>

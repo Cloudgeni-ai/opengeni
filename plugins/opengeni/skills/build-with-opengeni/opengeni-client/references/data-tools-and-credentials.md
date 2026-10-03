@@ -1,8 +1,83 @@
 # Data tools and credentials
 
+## Default for Node: the proxy toolServer
+
+When the product backend is Node (Next.js, Express, Hono, Bun) and mounts
+`createSessionProxyHandler`, give the agent the product's own data as the
+signed-in user with one proxy option plus one verification call. Do not
+hand-build token minting, per-session `mcpServers` wiring, credential refresh,
+or a second auth system.
+
+```ts
+createSessionProxyHandler(og, {
+  resolve, createSession, // unchanged; the token carries what resolve returns
+  toolServer: {
+    // url: defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS; tunnel locally)
+    approvals: { ask: ["rename_post"] }, // list your write tools: the user approves each call
+  },
+});
+```
+
+```ts
+// The MCP endpoint, any library; official SDK shown. Next: export POST/GET = mcp.
+// Express: app.all("/api/mcp", toNodeMiddleware(mcp)); Hono: toHonoHandler(mcp).
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+import { z } from "zod";
+
+export async function mcp(request: Request): Promise<Response> {
+  let user: string;
+  try {
+    ({ user } = await verifyToolRequest(request)); // aud = OPENGENI_TOOL_SERVER_URL, or pass { audience }
+  } catch (error) {
+    if (error instanceof ToolRequestError) return error.toResponse(); // 401
+    throw error;
+  }
+  const server = new McpServer({ name: "acme", version: "1.0.0" });
+  server.registerTool("search_posts",
+    { description: "Search the user's posts", inputSchema: { query: z.string() } },
+    async ({ query }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.search(user, query)) }] }));
+  server.registerTool("rename_post",
+    { description: "Rename one of the user's posts", inputSchema: { id: z.string(), title: z.string() } },
+    async ({ id, title }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.rename(user, id, title)) }] }));
+  const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+  await server.connect(transport);
+  return await transport.handleRequest(request);
+}
+```
+
+What the proxy does: on create it appends a per-session `mcpServers` entry
+(id `"app"` unless `toolServer.id`; model-facing names are `app__<tool>`) with
+`requireApproval` from `approvals.ask`, plus `{ kind: "mcp", id, eager: true }`
+when the hook returns an explicit `tools` list (omitted `tools` keeps workspace
+defaults and the attachment still selects the server). It rotates the token on
+send, steer, composer submit, approval decisions, and human-input answers, and
+only for sessions that carry this exact server and URL. Members need
+`mcp_servers:attach`.
+
+Token facts: HS256 JWT, `iss` `"opengeni-session-proxy"`, `aud` the exact tool
+URL (`toolServer.url` or `OPENGENI_TOOL_SERVER_URL`; `verifyToolRequest` compares
+the full URL), `sub` the external user id, optional `tenant`, `workspace_id`,
+`source`, `exp` 24 hours by default (`ttlSeconds`, at most 7 days), refreshed on
+every message, approval, and answer. The key derives from `OPENGENI_API_KEY`, so
+Node needs no extra configuration. A non-Node tool server gets the hex key from
+`await deriveToolTokenKey()` (store it as its own secret, never the organization
+key) and verifies with any JWT library, for example PyJWT
+`jwt.decode(token, bytes.fromhex(key), algorithms=["HS256"], issuer=..., audience=...)`.
+Tools act as the user who started the chat, also in shared chats. Approvals are
+opt-in: list every write tool in `approvals.ask`. A missing secret or URL is a
+startup `TypeError`.
+
+Still authorize per call: the token proves who the user is, not what they may
+touch now. Scope every query to the verified user and tenant, treat model-sent
+record ids as lookup keys only, and reload current host policy for writes (see
+below). A runnable reference with a tunnel and an end-to-end script is
+`examples/tool-server` in the OpenGeni repository.
+
 ## Existing customer APIs can become agent tools
 
-The customer does not need an MCP server when it already has a suitable HTTP or GraphQL API. Choose among these paths:
+For non-Node backends, background agents, or workspace-wide tools, the customer does not need an MCP server when it already has a suitable HTTP or GraphQL API. Choose among these paths:
 
 1. **OpenAPI Integration** — publish a focused OpenAPI 3.0 or 3.1 document for the operations the agent may use. OpenGeni deterministically compiles selected operations into agent tools.
 2. **GraphQL Integration** — expose a bounded GraphQL endpoint when that is the product's canonical API shape.
@@ -65,6 +140,8 @@ A server attached through a top-level createSession `mcpServers` entry is select
 Selected MCP servers are prepared lazily by default: the model discovers their tools through `tool_search`. For a small, always-needed server (for example a product's own data tools), add `eager: true` to its ref, such as `tools: [{ kind: "mcp", id: "product", eager: true }]`, so its schemas are on the first model request. `eager` is a startup choice only and grants nothing. `optional: true` makes a connect or list failure skip that server instead of failing the demanding turn.
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
+
+The existing `beforeForwardMessage` send hook also refreshes MCP credentials automatically on approval/human-input responses; no integration changes are needed.
 
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
@@ -243,6 +320,8 @@ session/job receipts. An ordinary editor's submitted body or `generated` flag
 cannot establish that provenance or impersonate a different session/author.
 
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
+
+Gate writes with the native tool approval (an API Integration write left at `approvalMode: "ask"`, or the session MCP `requireApproval` list), never with agent instructions that ask the user a yes/no question through `request_human_input` before writing. A native approval shows the exact tool and arguments with Approve/Reject, cannot be bypassed by the model, and resumes the same call; a custom question is only a prompt the model may skip.
 
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.
 

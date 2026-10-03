@@ -30,7 +30,7 @@ import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
-  observeClaudeUsageResponse,
+  captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
 } from "./claude-subscription-usage";
 
@@ -409,7 +409,9 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
-    init = await prepareClaudeSubscriptionRequest(provider, input, init);
+    const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
+    init = prepared.init;
+    const claudeRequestToken = captureClaudeRequestToken(input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
@@ -417,7 +419,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     const started = performance.now();
     try {
       const response = await inner(input, capture.init);
-      observeClaudeUsageResponse(provider, response);
+      prepared.observe(response, claudeRequestToken);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {

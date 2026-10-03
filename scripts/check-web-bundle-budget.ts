@@ -482,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // #2768 union with main 5e1876b18, Bun 1.4 Linux/x64: 2,597,895 raw
+    // and 733,267 gzip across 38 files. Include the documented 18-byte
+    // configured-URL ceiling and the existing 1.5-KiB raw allowance. Insights
+    // stays route-lazy; startup, file-count, lazy and CSS limits stay fixed.
+    wholeKibEnvelope(2_597_913, 1.5 * kib),
     // Removed-model recovery (composer notice, catalog check, default
     // preselection, refusal copy): Linux/x64 Bun 1.4 measures 2,590,762 raw.
     // Retain the established 1.5 KiB allowance; compressed caps stay fixed.
@@ -491,10 +496,26 @@ const effectiveBudgets = {
     // bytes: 2,592,833 / 730,558. Keep the established 1.5 KiB allowance;
     // per-file, file-count, and unrelated caps stay fixed.
     wholeKibEnvelope(2_592_833, 1.5 * kib),
+    // Current main's shared client error handling measures 2,595,849 raw
+    // bytes on Bun 1.4 macOS/arm64; the integrated graph is identical.
+    // Restore the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_595_849, 1.5 * kib),
     // Custom MCP OAuth endpoint discovery and isolated popup completion:
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
     wholeKibEnvelope(2_585_890, 1.5 * kib),
+    // Current-main model recovery and the subscription merge tree emit the
+    // same browser graph: 2,592,768 raw bytes on Bun 1.4 macOS/arm64.
+    // Restore the established 1.5 KiB allowance; unrelated caps stay fixed.
+    wholeKibEnvelope(2_592_768, 1.5 * kib),
+    // #2768 complete-usage contracts, Bun 1.4 Linux/x64 at 5d492ac1c:
+    // 2,587,928 raw / 730,065 gzip across 39 direct-session files. The prior
+    // branch already measured 2,587,622 raw, over the 2,585,600 envelope.
+    // Insights remains route-lazy; only shared package contracts grew. Bind
+    // the exact raw graph plus the documented 18-byte configured-URL ceiling
+    // and the existing 1-KiB headroom to its whole-KiB envelope (2,589,696).
+    // Gzip and all other caps stay fixed.
+    wholeKibEnvelope(2_587_946),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
@@ -643,15 +664,44 @@ const effectiveBudgets = {
     // Linux/x64 CI measures 2,575,385 raw on main 6a9731344. Keep the
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
     wholeKibEnvelope(2_575_385, 1.5 * kib),
+    // The post-signup model step reuses the Models provider list (ListRow and
+    // logo tiles). None of its code joins this graph, but entry-aware chunk
+    // merging regroups shared primitives: Bun 1.4 macOS/arm64 measures
+    // 2,604,402 raw / 735,237 gzip (merged main 8f191fed7 measures 2,602,600
+    // raw on the same machine). Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(2_604_402, 1.5 * kib),
+    // The Insights redesign (#3264) no longer imports the old chart, count-up
+    // and select primitives; entry-aware chunk merging regroups the modules
+    // Insights shared with the session route, and none of its code joins this
+    // graph. Linux/x64 CI on main 3194ab836 measures 2,611,406 raw / 737,356
+    // gzip (macOS/arm64: 2,611,364 / 737,320; parent 692a1f554: 2,604,460).
+    // Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_611_406, 1.5 * kib),
+    // Embedded-chat defaults: the shared composer's Stop control and the
+    // human-input yes/no decision buttons join this graph (theme resolution
+    // stays in the embed roots, outside it). macOS/arm64 Bun 1.4 measures
+    // 2,614,314 raw / 737,561 gzip on main c7c717790 (+2,150 raw / +466 gzip).
+    // Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_614_314, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // The same Insights chunk regrouping measures 737,356 gzip bytes.
+    wholeKibEnvelope(737_356, 1.5 * kib),
+    // The same onboarding provider-list graph measures 735,237 gzip bytes.
+    wholeKibEnvelope(735_237, 1.5 * kib),
+    // The same merged graph measures 733,267 gzip bytes. Preserve the
+    // existing 1.5-KiB platform-skew allowance, with no other cap change.
+    wholeKibEnvelope(733_267, 1.5 * kib),
     // Bound the larger unchanged-main measurement documented above using
     // the established 1.5 KiB allowance; the candidate is 38 bytes smaller.
     wholeKibEnvelope(730_596, 1.5 * kib),
     // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
     // main aa5661dec. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(727_806, 1.5 * kib),
+    // The same unchanged current-main graph measures 730,608 gzip bytes.
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(730_608, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
@@ -811,6 +861,9 @@ if (!manifest[sessionRouteKey]) {
   throw new Error(`bundle manifest is missing ${sessionRouteKey}`);
 }
 const directSessionGraph = staticGraph([...entryKeys, sessionRouteKey]);
+if (directSessionGraph.has("src/routes/insights.tsx")) {
+  throw new Error("Insights must remain lazy, outside the direct-session graph");
+}
 const directSessionMetrics = await metrics(assetPaths(directSessionGraph, true));
 const directSessionTotal = total(directSessionMetrics);
 
@@ -829,7 +882,11 @@ const cssMetrics = await metrics(
 const largestCss = largest(cssMetrics, "gzip");
 
 const report = {
-  initial: { ...initialTotal, files: initialMetrics.length, largestGzip: largestInitial },
+  initial: {
+    ...initialTotal,
+    files: initialMetrics.length,
+    largestGzip: largestInitial,
+  },
   directSession: { ...directSessionTotal, files: directSessionMetrics.length },
   lazy: {
     files: lazyMetrics.length,

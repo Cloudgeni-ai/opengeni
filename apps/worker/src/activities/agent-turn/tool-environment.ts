@@ -1,7 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
   resolveInitiatingHuman,
+  buildSlackApiRateLimiter,
   beginConnectorActionExecution,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
@@ -9,11 +9,6 @@ import {
   listSkillDescriptors,
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
-  getWorkspaceModelPolicy,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
   recordUsageEvent,
@@ -21,10 +16,6 @@ import {
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
-  workspaceCodexSubscriptionActive,
-  workspaceVercelAiGatewayConnectionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -68,7 +59,7 @@ import {
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
-  loadWorkspaceCodexModelAvailability,
+  loadWorkspaceModelSelectionInput,
   withFrozenPersonalConnectionDelegations,
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
@@ -96,24 +87,7 @@ import {
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
-/** A linked turn's immutable policy must survive array and token boundaries. */
-export function linkedTurnFirstPartyPermissions(
-  selected: Permission[] | null,
-  linked: { permissions: Permission[]; permissionMode?: "legacy" | "explicit" } | null,
-): Permission[] | null {
-  if (!linked) return selected;
-  const permissions = (selected ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter((permission) =>
-    hasPermission(linked.permissions, permission, linked.permissionMode),
-  );
-  requireExplicitPermissionDelegation(linked, permissions);
-  return permissions;
-}
-
-import {
-  rollingSafeToolAuthNeededPayload,
-  shouldPublishToolAuthNeededForTurn,
-  xaiCatalogReadinessAuthority,
-} from "./admission";
+import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -143,6 +117,19 @@ import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
+
+/** A linked turn's immutable policy must survive array and token boundaries. */
+export function linkedTurnFirstPartyPermissions(
+  selected: Permission[] | null,
+  linked: { permissions: Permission[]; permissionMode?: "legacy" | "explicit" } | null,
+): Permission[] | null {
+  if (!linked) return selected;
+  const permissions = (selected ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter((permission) =>
+    hasPermission(linked.permissions, permission, linked.permissionMode),
+  );
+  requireExplicitPermissionDelegation(linked, permissions);
+  return permissions;
+}
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -919,85 +906,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       load: async () => {
         const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
         const currentSettings = currentCatalog.settings;
-        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
-        const [
-          connectionModelRestrictions,
-          policy,
-          codexSubscriptionActive,
-          xaiSubscriptionActive,
-          workspaceGatewayConnectionActive,
-          workspaceGatewayCustomModels,
-          openRouterConnectionActive,
-          workspaceOpenRouterCustomModels,
-          organizationGatewayConnectionActive,
-          organizationGatewayCustomModels,
-          organizationOpenRouterConnectionActive,
-          organizationOpenRouterCustomModels,
-          codexModelAvailability,
-        ] = await Promise.all([
-          getWorkspaceConnectionModelRestrictions(
-            db,
-            input.workspaceId,
-            xaiReadinessAuthority?.subjectId ?? credentialSubjectId ?? "worker:model-access",
-            xaiReadinessAuthority?.authoritySnapshot,
-          ),
-          getWorkspaceModelPolicy(db, input.workspaceId),
-          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
-          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
-            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
-                workspaceId: input.workspaceId,
-                ...xaiReadinessAuthority,
-              })
-            : false,
-          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
-          listWorkspaceGatewayCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          workspaceOpenRouterConnectionActive(db, input.workspaceId),
-          listWorkspaceOpenRouterCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-          loadWorkspaceCodexModelAvailability(db, currentSettings, input.workspaceId),
-        ]);
+        const selectionInput = await loadWorkspaceModelSelectionInput(db, currentSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? "worker:model-access",
+          xaiAuthoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+          claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
+        });
         return {
-          selections: resolveWorkspaceModelSelection({
-            observations: codexModelAvailability,
-            connectionModelRestrictions,
-            settings: currentSettings,
-            policy,
-            codexSubscriptionActive,
-            xaiSubscriptionActive,
-            workspaceGatewayConnectionActive,
-            workspaceGatewayCustomModels,
-            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-            workspaceOpenRouterCustomModels,
-            organizationGatewayConnectionActive,
-            organizationGatewayCustomModels,
-            organizationOpenRouterConnectionActive,
-            organizationOpenRouterCustomModels,
-          }),
+          selections: resolveWorkspaceModelSelection(selectionInput),
           modelNotes: currentCatalog.modelNotes,
         };
       },
@@ -1146,6 +1063,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        slackRateLimit: buildSlackApiRateLimiter(db, githubRestMcp.settings),
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
         ...(linkedAuthority
           ? {

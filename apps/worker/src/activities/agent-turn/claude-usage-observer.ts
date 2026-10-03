@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   emptyClaudeUsage,
   mergeClaudeUsage,
@@ -22,17 +23,21 @@ export class ClaudeSubscriptionConnectionUnavailable extends Error {
   }
 }
 export type CapturedClaudeUsage = {
+  scope: Scope;
   token: string;
   expectedConnectionId: string;
   expectedCredentialVersion: number;
   observation?: ClaudeUsageObservation;
+  responseStatus?: number;
+  upstreamModelId?: string;
+  requestId?: string;
   refresh?: { status: "reconnect"; checkedAt: string };
 };
 
 /** Capture the exact credential before requests; replacement fences late responses. */
 export async function createClaudeUsageObserver(
   providers: ReturnType<typeof parseModelProvidersJson>,
-  latest: Map<Scope, CapturedClaudeUsage>,
+  latest: Map<string, CapturedClaudeUsage>,
   readCredential: (scope: Scope) => Promise<{
     token: string;
     connectionId: string;
@@ -83,12 +88,38 @@ export async function createClaudeUsageObserver(
       }),
   );
   const captured = new Map(bindings.filter((binding) => binding !== null));
-  const observe = (providerId: string, response: Response) => {
-    const binding = captured.get(providerId);
+  let anonymousReceipt = 0;
+  const observeBinding = (
+    binding:
+      | Pick<
+          CapturedClaudeUsage,
+          "scope" | "token" | "expectedConnectionId" | "expectedCredentialVersion"
+        >
+      | undefined,
+    response: Response,
+    upstreamModelId?: string,
+    requestToken?: string | null,
+  ) => {
+    if (requestToken === null) return;
     if (!binding) return;
-    const { scope, ...identity } = binding;
-    const previous = latest.get(scope);
-    let observation = parseClaudeUsageHeaders(response.headers);
+    const { scope, ...capturedIdentity } = binding;
+    const identity = { ...capturedIdentity, token: requestToken ?? capturedIdentity.token };
+    // Same-generation OAuth renewal can overlap an older request. Never attach
+    // its authentication failure to the newly renewed token or merge the two.
+    const tokenKey = createHash("sha256").update(identity.token).digest("hex");
+    const rawRequestId = response.headers.get("request-id");
+    const requestId = rawRequestId && rawRequestId.length <= 256 ? rawRequestId : undefined;
+    // Retain exact physical responses, including HTTP 200 streams which can
+    // terminate with typed authentication/rate-limit errors. Parallel titles
+    // must never overwrite the serving request receipt.
+    const receiptKey =
+      requestId ??
+      (response.status === 401 || response.status === 429
+        ? `anonymous-${++anonymousReceipt}`
+        : "aggregate");
+    const captureKey = `${receiptKey}:${scope}:${identity.expectedConnectionId}:${identity.expectedCredentialVersion}:${tokenKey}:${upstreamModelId ?? "unknown"}`;
+    const previous = latest.get(captureKey);
+    let observation = parseClaudeUsageHeaders(response.headers, new Date(), upstreamModelId);
     if (observation && previous?.observation) {
       const merged = mergeClaudeUsage(
         mergeClaudeUsage(emptyClaudeUsage(binding.expectedCredentialVersion), previous.observation),
@@ -98,10 +129,18 @@ export async function createClaudeUsageObserver(
         windows: merged.windows,
         observedAt: merged.observedAt!,
         source: merged.source!,
+        requestStatus: merged.requestStatus ?? null,
+        requestRestrictions: merged.requestRestrictions ?? [],
       };
     }
-    if (observation || response.status === 401)
-      latest.set(scope, {
+    if (requestId || observation || response.status === 401 || response.status === 429)
+      latest.set(captureKey, {
+        scope,
+        responseStatus: response.status,
+        ...(response.headers.get("request-id") && response.headers.get("request-id")!.length <= 256
+          ? { requestId: response.headers.get("request-id")! }
+          : {}),
+        ...(upstreamModelId ? { upstreamModelId } : {}),
         ...identity,
         ...(previous?.observation && !observation ? { observation: previous.observation } : {}),
         ...(observation ? { observation } : {}),
@@ -110,37 +149,57 @@ export async function createClaudeUsageObserver(
           : {}),
       });
   };
+  const observe = (
+    providerId: string,
+    response: Response,
+    upstreamModelId?: string,
+    requestToken?: string | null,
+  ) => observeBinding(captured.get(providerId), response, upstreamModelId, requestToken);
+  const prepareRequestWithObserver = async (
+    providerId: string,
+    headers: Headers,
+    resolve: (binding: {
+      scope: Scope;
+      expectedConnectionId: string;
+      expectedCredentialVersion: number;
+    }) => Promise<ClaudeRequestCredential | null>,
+  ) => {
+    if (!managedProviderIds.has(providerId)) return { headers, observe };
+    const binding = captured.get(providerId);
+    if (!binding) throw new ClaudeSubscriptionConnectionUnavailable();
+    const credential = await resolve({
+      scope: binding.scope,
+      expectedConnectionId: binding.expectedConnectionId,
+      expectedCredentialVersion: binding.expectedCredentialVersion,
+    });
+    if (
+      !credential ||
+      credential.connectionId !== binding.expectedConnectionId ||
+      credential.credentialVersion !== binding.expectedCredentialVersion
+    )
+      throw new ClaudeSubscriptionConnectionUnavailable();
+    const dispatched = Object.freeze({ ...binding, token: credential.token });
+    captured.set(providerId, dispatched);
+    headers.set("authorization", `Bearer ${credential.token}`);
+    headers.delete("x-api-key");
+    return {
+      headers,
+      observe: (
+        _providerId: string,
+        response: Response,
+        upstreamModelId?: string,
+        requestToken?: string | null,
+      ) => observeBinding(dispatched, response, upstreamModelId, requestToken),
+    };
+  };
   return Object.assign(observe, {
-    async prepareRequest(
-      providerId: string,
-      headers: Headers,
-      resolve: (binding: {
-        scope: Scope;
-        expectedConnectionId: string;
-        expectedCredentialVersion: number;
-      }) => Promise<ClaudeRequestCredential | null>,
-    ) {
-      if (!managedProviderIds.has(providerId)) return headers;
-      const binding = captured.get(providerId);
-      if (!binding) throw new ClaudeSubscriptionConnectionUnavailable();
-      const credential = await resolve({
-        scope: binding.scope,
-        expectedConnectionId: binding.expectedConnectionId,
-        expectedCredentialVersion: binding.expectedCredentialVersion,
-      });
-      if (
-        !credential ||
-        credential.connectionId !== binding.expectedConnectionId ||
-        credential.credentialVersion !== binding.expectedCredentialVersion
-      )
-        throw new ClaudeSubscriptionConnectionUnavailable();
-      captured.set(providerId, { ...binding, token: credential.token });
-      headers.set("authorization", `Bearer ${credential.token}`);
-      headers.delete("x-api-key");
-      return headers;
+    prepareRequestWithObserver,
+    async prepareRequest(...args: Parameters<typeof prepareRequestWithObserver>) {
+      return (await prepareRequestWithObserver(...args)).headers;
     },
     binding(providerId: string) {
-      return captured.get(providerId);
+      const binding = captured.get(providerId);
+      return binding ? { ...binding } : undefined;
     },
     renew(
       providerId: string,

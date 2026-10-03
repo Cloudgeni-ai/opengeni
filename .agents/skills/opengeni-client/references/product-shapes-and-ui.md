@@ -10,7 +10,7 @@
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
 | Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason to replace the component. For custom-branded embeds, theme with `--og-*` tokens and density props. For stock UI, keep the shipped components and stylesheet without cosmetic host CSS or token overrides; see [Stock and host-branded appearance](#stock-and-host-branded-appearance). Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
 ## Stock and host-branded appearance
 
@@ -19,6 +19,16 @@ radius and current theme using the shipped stylesheet, scoped `--og-*` tokens
 and supported theme/density/label hooks. Keep UI-owned copy free of OpenGeni
 branding; source quotations and user/assistant content are not UI labels. Verify
 the installed error-copy API separately, not just the heading/placeholder.
+
+`OpenGeniChat` and `SessionConversation` follow the host theme by default: an
+enclosing `data-og-theme`, then `class="dark"`/`data-theme` on `<html>` or
+`<body>`, the host's `color-scheme`, then the page background. Do not wire the
+OS `prefers-color-scheme` into them; pass `theme="light" | "dark"` only to force
+one. Their backgrounds and cards derive from the host background
+(`surface="host"`), so mount them without a wrapper panel color; customized
+`--og-color-*` tokens are kept. End users see a Stop control only while a
+response runs (no Pause), and no model picker unless the host opts in
+(`modelPicker` or `createSessionProxyHandler({ modelSelection: true })`).
 
 Stock mode uses the shipped components and `compiled.css` without extra host
 cosmetic CSS. The quality target is simple, polished and smooth at desktop

@@ -1,6 +1,7 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
 import {
@@ -28,6 +29,7 @@ export function useClaudeUsage({
   credentialVersion,
   canManage,
   onCredentialChanged,
+  accountPool = false,
 }: {
   client: OpenGeniBrowserClient;
   scope: "workspace" | "organization";
@@ -37,6 +39,7 @@ export function useClaudeUsage({
   credentialId?: string | null;
   credentialVersion?: number | null;
   canManage: boolean;
+  accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
   const key = `${scope}:${scopeId}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
@@ -64,13 +67,21 @@ export function useClaudeUsage({
       }
       try {
         const result =
-          scope === "workspace"
-            ? await (refresh
-                ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
-                : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
-            : await (refresh
-                ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
-                : client.getOrganizationClaudeSubscriptionUsage(scopeId));
+          accountPool && credentialId
+            ? scope === "workspace"
+              ? await (refresh
+                  ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
+                  : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
+              : await (refresh
+                  ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
+                  : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
+            : scope === "workspace"
+              ? await (refresh
+                  ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
+                  : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
+              : await (refresh
+                  ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
+                  : client.getOrganizationClaudeSubscriptionUsage(scopeId));
         if (currentKey.current !== key || generation.current !== request) return;
         if (
           !result.connected ||
@@ -96,7 +107,18 @@ export function useClaudeUsage({
         if (refresh && refreshingKey.current?.request === request) refreshingKey.current = null;
       }
     },
-    [client, scope, scopeId, key, enabled, connected, canManage, credentialVersion],
+    [
+      client,
+      scope,
+      scopeId,
+      key,
+      enabled,
+      connected,
+      canManage,
+      credentialVersion,
+      credentialId,
+      accountPool,
+    ],
   );
   useEffect(() => {
     setState({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
@@ -204,7 +226,13 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
   );
 }
 
-export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
+export function ClaudeUsage({
+  state,
+  onReconnect,
+}: {
+  state: ClaudeUsageState;
+  onReconnect?: (() => void) | undefined;
+}) {
   const now = useMinuteNow();
   const value = state.value;
   const readings = claudeUsageReadings(value, now);
@@ -252,6 +280,11 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
           This setup token allows model calls. Usage readings update after Claude is used. Sign in
           again to check current usage and reset times.
         </p>
+      ) : null}
+      {value?.refreshStatus === "scope_required" && onReconnect ? (
+        <Button type="button" variant="outline" size="sm" className="mt-3" onClick={onReconnect}>
+          Sign in again
+        </Button>
       ) : null}
     </DetailSection>
   );

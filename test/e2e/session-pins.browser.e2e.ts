@@ -10,7 +10,9 @@ import {
   grantWorkspaceAccess,
   removeWorkspaceMember,
   updateSessionTitle,
+  withWorkspaceRls,
 } from "@opengeni/db";
+import { sql } from "drizzle-orm";
 import { signDelegatedAccessToken, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -647,7 +649,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         if (
           request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page"
+          url.searchParams.get("view") === "page" &&
+          // The separate Recent sessions panel needs full model/resource data.
+          // Identify sidebar reads by their query shape, independently of projection.
+          (url.searchParams.get("parentSessionId") === "null" ||
+            url.searchParams.has("channelId") ||
+            url.searchParams.get("pinsOnly") === "true")
         ) {
           paginationRequests.push(url);
         }
@@ -673,6 +680,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(
         paginationRequests.some((request) => request.searchParams.get("pinsOnly") === "true"),
       ).toBe(true);
+      expect(
+        paginationRequests.some(
+          (request) =>
+            request.searchParams.get("parentSessionId") === "null" &&
+            !request.searchParams.has("channelId"),
+        ),
+      ).toBe(true);
+      for (const project of [projectA, projectB, emptyProject]) {
+        expect(
+          paginationRequests.some(
+            (request) => request.searchParams.get("channelId") === project.id,
+          ),
+        ).toBe(true);
+      }
       expect(projectAPage.sessions).toHaveLength(4);
       expect(projectAPage.sessions[0]).not.toHaveProperty("initialMessage");
       expect(projectAPage.sessions[0]).not.toHaveProperty("metadata");
@@ -2860,6 +2881,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
+      // These scenarios share a configured workspace, so earlier fixtures can
+      // legitimately contribute attention outside the painted project window.
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
       const parent = await createSessionThroughApi(
         page,
         apiBaseUrl,
@@ -2945,9 +2969,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         pause: "paused",
       });
       expect(evidence.direct).toEqual([child.id]);
+      // New idle roots push the attention tree outside the four-row project window.
+      for (let index = 0; index < 6; index++)
+        await createSessionThroughApi(page, apiBaseUrl, workspaceId, `New idle fixture ${index}`);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
-      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
@@ -2968,6 +3004,89 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.screenshot({ path: "/tmp/ux-needs-you-child-routing.png", fullPage: true });
       await nested.click();
       await waitFor(() => page.url().endsWith(`/sessions/${grandchild.id}`));
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("keeps pinned workstreams with attention beyond the painted-tree depth", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
+      const root = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Deep pinned root");
+      await withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
+        await scoped.execute(sql`update workspaces
+          set settings = settings || '{"maxNestedAgentDepth":64}'::jsonb
+          where id = ${workspaceId}`);
+      });
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        root.id,
+        [{ type: "session.status.changed", payload: { status: "idle" } }],
+        { status: "idle" },
+      );
+      let parentId = root.id;
+      for (let depth = 1; depth <= 33; depth++) {
+        const child = await createTitledSession(dbClient.db, {
+          accountId: root.accountId,
+          workspaceId,
+          initialMessage: `Deep child ${depth}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          parentSessionId: parentId,
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        parentId = child.id;
+      }
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        parentId,
+        [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+        { status: "requires_action" },
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, root, true);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      // The depth-33 descendant contributes exactly one more root workstream,
+      // independent of earlier fixtures and the treeStats painted-depth cap.
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
+      await page.getByRole("menuitem", { name: /^Status/ }).focus();
+      await page.keyboard.press("ArrowRight");
+      const filteredPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname.endsWith("/sessions") &&
+          url.searchParams.get("needsYouOnly") === "true" &&
+          url.searchParams.get("includeTotals") === "true"
+        );
+      });
+      await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
+      const receipt = await (await filteredPage).json();
+      expect(receipt.pinned.map((session: { id: string }) => session.id)).toEqual([root.id]);
+      expect(receipt.pinned[0].treeStats.attentionDescendants).toBe(0);
+      await page
+        .getByRole("button", { name: "Session view, showing sessions that need you", exact: true })
+        .waitFor();
+      await page.locator(`a[data-session-row="${root.id}"]`).waitFor();
+      await page.screenshot({ path: "/tmp/ux-needs-you-deep-pinned.png", fullPage: true });
     } finally {
       await context.close();
     }
@@ -3931,6 +4050,7 @@ type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
   nextCursor: string | null;
+  totals?: { needsYouCount: number };
 };
 
 function sessionPageResponse(
@@ -4309,7 +4429,13 @@ async function listPageFromBrowser(
   page: Page,
   apiBaseUrl: string,
   workspaceId: string,
-  options: { limit: number; cursor?: string; search?: string },
+  options: {
+    limit: number;
+    cursor?: string;
+    search?: string;
+    parentSessionId?: null;
+    includeTotals?: boolean;
+  },
 ): Promise<BrowserSessionPage> {
   return await page.evaluate(
     async ({
@@ -4323,6 +4449,8 @@ async function listPageFromBrowser(
       });
       if (pageOptions.cursor) query.set("cursor", pageOptions.cursor);
       if (pageOptions.search) query.set("search", pageOptions.search);
+      if (pageOptions.parentSessionId === null) query.set("parentSessionId", "null");
+      if (pageOptions.includeTotals) query.set("includeTotals", "true");
       const response = await fetch(
         `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions?${query.toString()}`,
       );
@@ -4333,6 +4461,21 @@ async function listPageFromBrowser(
     },
     { apiBaseUrl, workspaceId, options },
   );
+}
+
+async function needsYouCountFromBrowser(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+): Promise<number> {
+  // A one-row root page must still report the complete, member-scoped total.
+  const response = await listPageFromBrowser(page, apiBaseUrl, workspaceId, {
+    limit: 1,
+    parentSessionId: null,
+    includeTotals: true,
+  });
+  expect(response.totals).toBeDefined();
+  return response.totals!.needsYouCount;
 }
 
 async function expectNoPageOverflow(page: Page): Promise<void> {

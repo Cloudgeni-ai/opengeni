@@ -1,3 +1,4 @@
+import { getSessionParentClaudeProviderAccountAuthority } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni/contracts";
 import {
@@ -83,6 +84,11 @@ export async function notifyParentOfChildIdle(
       workspaceId,
       childSessionId,
     );
+    const claudeAuthority = await getSessionParentClaudeProviderAccountAuthority(
+      svc.db,
+      workspaceId,
+      childSessionId,
+    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
@@ -95,6 +101,9 @@ export async function notifyParentOfChildIdle(
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
       lineage: {
+        ...(claudeAuthority.subjectId
+          ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
+          : {}),
         childSessionId: child.id,
         parentSessionId: child.parentSessionId,
         ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
@@ -102,6 +111,7 @@ export async function notifyParentOfChildIdle(
       personalConnectionDelegations,
       mcpAccountBindings,
       xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+      claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
       return;
@@ -220,6 +230,7 @@ async function deliverParentSystemUpdateOutbox(
         personalConnectionDelegations: outbox.personalConnectionDelegations,
         mcpAccountBindings: outbox.mcpAccountBindings,
         xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot: outbox.claudeProviderAccountAuthoritySnapshot,
       },
       async (tx) => {
         await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);

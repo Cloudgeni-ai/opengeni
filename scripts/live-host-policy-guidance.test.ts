@@ -327,6 +327,41 @@ test("client/setup/public UI expectations preserve host matching, stock ownershi
   expect(setup).toContain("not a passed UI");
 });
 
+test("conversation defaults distinguish custom branding from stock appearance", async () => {
+  function defaultParagraph(source: string, heading: string): string {
+    let selected = false;
+    for (
+      let node = markdownLanguage.parser.parse(source).topNode.firstChild;
+      node;
+      node = node.nextSibling
+    ) {
+      if (node.name.startsWith("ATXHeading")) {
+        if (selected) break;
+        selected = source.slice(node.from, node.to).trim() === heading;
+      } else if (selected && node.name === "Paragraph") {
+        return source.slice(node.from, node.to).replaceAll(/\s+/g, " ");
+      }
+    }
+    throw new Error(`Missing default paragraph after ${heading}`);
+  }
+
+  const skill = await Bun.file(new URL(".agents/skills/opengeni-client/SKILL.md", root)).text();
+  const client = await readGuide("product-shapes-and-ui");
+  const defaults = [
+    defaultParagraph(skill, "## Default: the full conversation behind a packaged proxy"),
+    defaultParagraph(client, "## Default to the full conversation"),
+  ];
+  for (const prose of defaults) {
+    expect(prose).toContain("For custom-branded embeds, theme with");
+    expect(prose).toContain("`--og-*` tokens");
+    expect(prose).toContain("For stock UI,");
+    expect(prose).toContain("without cosmetic host CSS or token overrides");
+    expect(prose).toContain("Stock and host-branded appearance");
+  }
+  expect(defaults[0]).not.toContain("(brand it with");
+  expect(defaults[1]).not.toContain("Styling differences alone are not a reason: theme with");
+});
+
 test("exact host formatter example preserves neutral action guidance and reference without changing diagnostics", async () => {
   const guide = await readGuide("compatibility-and-troubleshooting");
   const { formatAssistantError } = await examples<{

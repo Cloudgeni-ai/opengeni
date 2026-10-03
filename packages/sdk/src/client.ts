@@ -1,3 +1,10 @@
+import type {
+  ClaudeSubscriptionAccountsResponse,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionOAuthStartRequest,
+  ClaudeSubscriptionSetupTokenRequest,
+  SubscriptionPoolSettings,
+} from "@opengeni/contracts";
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
   SessionMessageSearchRequest,
@@ -292,6 +299,7 @@ import type {
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
+  BillingCheckoutStatus,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -647,6 +655,10 @@ function sessionListQuery(options: {
 }
 
 export type SessionListPageOptions = {
+  /** Complete content-free totals for an authorized root page. */
+  includeTotals?: boolean;
+  /** Filter attention rows before pagination. */
+  needsYouOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -698,7 +710,10 @@ const SESSION_PAGE_STRING_QUERY_KEYS = [
 ] as const;
 
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
-  return SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined);
+  return (
+    Boolean(options.needsYouOnly) ||
+    SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
+  );
 }
 
 function unsupportedSessionPage(feature: string): Error {
@@ -1649,6 +1664,8 @@ export class OpenGeniClient {
         if (value) query[key] = value;
       }
       if (options.pinsOnly) query.pinsOnly = "true";
+      if (options.includeTotals) query.includeTotals = "true";
+      if (options.needsYouOnly) query.needsYouOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -1688,20 +1705,26 @@ export class OpenGeniClient {
       // array as a successful search would be worse than an explicit rolling-
       // upgrade error (and client-side filtering cannot recover matches beyond
       // the old endpoint's bounded first page).
-      const unsupported = options.cursor
-        ? "stable session-page cursors"
-        : search
-          ? "session search"
-          : options.pinsOnly
-            ? "pins-only session lists"
-            : options.archivedOnly
-              ? "archived session lists"
-              : filtered
-                ? "filtered session lists"
-                : null;
+      const unsupported = options.includeTotals
+        ? "complete session totals"
+        : options.cursor
+          ? "stable session-page cursors"
+          : search
+            ? "session search"
+            : options.pinsOnly
+              ? "pins-only session lists"
+              : options.archivedOnly
+                ? "archived session lists"
+                : filtered
+                  ? "filtered session lists"
+                  : null;
       if (unsupported) throw unsupportedSessionPage(unsupported);
       return { pinned: [], sessions: response, nextCursor: null };
     }
+    if (options.includeTotals && response.totals === undefined)
+      throw unsupportedSessionPage("complete session totals");
+    if (options.needsYouOnly && response.needsYouOnly !== true)
+      throw unsupportedSessionPage("attention session filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -4609,13 +4632,20 @@ export class OpenGeniClient {
     request: ComputerSessionAttachmentRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionAttachment> {
-    return await this.requestJson<ComputerSessionAttachment>(
+    const attachment = await this.requestJson<ComputerSessionAttachment>(
       "POST",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/attachments`,
       request,
       {},
       options,
     );
+    if (attachment.stream.kind === "direct_rfb") {
+      return {
+        ...attachment,
+        stream: { ...attachment.stream, inputAllowed: attachment.stream.inputAllowed === true },
+      };
+    }
+    return attachment;
   }
 
   async heartbeatComputerSession(
@@ -4783,14 +4813,185 @@ export class OpenGeniClient {
     );
   }
 
+  async listClaudeSubscriptionAccounts(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionAccountsResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/claude/accounts`);
+  }
+  async activateClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<{ activated: boolean; accountId: string }> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/activate`,
+      {},
+    );
+  }
+  async setClaudeSubscriptionRotationSettings(
+    workspaceId: string,
+    request: { rotationEnabled: boolean },
+  ): Promise<SubscriptionPoolSettings> {
+    return this.requestJson("PATCH", `/v1/workspaces/${workspaceId}/claude/settings`, request);
+  }
+  async setClaudeSubscriptionAccountAllocator(
+    workspaceId: string,
+    accountId: string,
+    request: { enabled: boolean; expectedVersion: number },
+  ): Promise<unknown> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/allocator`,
+      request,
+    );
+  }
+  async renameClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<ClaudeSubscriptionAccount> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      { label },
+    );
+  }
+  async disconnectClaudeSubscriptionAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<unknown> {
+    return this.requestJson(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      {},
+    );
+  }
+  async getClaudeSubscriptionAccountUsage(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/usage`,
+    );
+  }
+  async refreshClaudeSubscriptionAccountUsage(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
+      {},
+    );
+  }
+
+  async listOrganizationClaudeSubscriptionAccounts(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionAccountsResponse> {
+    return this.requestJson("GET", `/v1/organizations/${organizationId}/claude/accounts`);
+  }
+  async activateOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ updated: boolean }> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/activate`,
+      {},
+    );
+  }
+  async setOrganizationClaudeSubscriptionRotationSettings(
+    organizationId: string,
+    request: { rotationEnabled: boolean },
+  ): Promise<SubscriptionPoolSettings> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/settings`,
+      request,
+    );
+  }
+  async setOrganizationClaudeSubscriptionAccountAllocator(
+    organizationId: string,
+    accountId: string,
+    request: { enabled: boolean; expectedVersion: number },
+  ): Promise<unknown> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/allocator`,
+      request,
+    );
+  }
+  async renameOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<{ updated: boolean }> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      { label },
+    );
+  }
+  async disconnectOrganizationClaudeSubscriptionAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<unknown> {
+    return this.requestJson(
+      "DELETE",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}`,
+      {},
+    );
+  }
+  async getOrganizationClaudeSubscriptionAccountUsage(
+    organizationId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage`,
+    );
+  }
+  async refreshOrganizationClaudeSubscriptionAccountUsage(
+    organizationId: string,
+    accountId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/${encodeURIComponent(accountId)}/usage/refresh`,
+      {},
+    );
+  }
+
+  async connectClaudeSubscriptionSetupToken(
+    workspaceId: string,
+    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope"> & { scope?: "workspace" | "user" },
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/claude/accounts/setup-token`,
+      request,
+    );
+  }
+  async connectOrganizationClaudeSubscriptionSetupToken(
+    organizationId: string,
+    request: Omit<ClaudeSubscriptionSetupTokenRequest, "scope">,
+  ): Promise<ClaudeSubscriptionOAuthCompleteResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/claude/accounts/setup-token`,
+      request,
+    );
+  }
   /** Sign in with model and profile access; no inference request is made. */
   async startWorkspaceClaudeSubscriptionOAuth(
     workspaceId: string,
+    request: Partial<ClaudeSubscriptionOAuthStartRequest> = {},
   ): Promise<ClaudeSubscriptionOAuthStartResponse> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/oauth/start`,
-      {},
+      request,
     );
   }
 
@@ -4807,11 +5008,12 @@ export class OpenGeniClient {
 
   async startOrganizationClaudeSubscriptionOAuth(
     organizationId: string,
+    request: Pick<ClaudeSubscriptionOAuthStartRequest, "reconnectAccountId"> = {},
   ): Promise<ClaudeSubscriptionOAuthStartResponse> {
     return this.requestJson(
       "POST",
       `/v1/organizations/${organizationId}/model-providers/claude_subscription/oauth/start`,
-      {},
+      request,
     );
   }
 
@@ -6768,9 +6970,8 @@ export class OpenGeniClient {
     const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
     if (!metadata.available) return { metadata, bytes: null };
     const supportedScreenshot =
-      (metadata.kind === "computer_screenshot" && metadata.contentType === "image/png") ||
-      (metadata.kind === "browser_screenshot" &&
-        ["image/png", "image/jpeg", "image/webp"].includes(metadata.contentType));
+      (metadata.kind === "computer_screenshot" || metadata.kind === "browser_screenshot") &&
+      ["image/png", "image/jpeg", "image/webp"].includes(metadata.contentType);
     if (
       !supportedScreenshot ||
       !metadata.dimensions ||
@@ -8463,6 +8664,27 @@ export class OpenGeniClient {
     );
   }
 
+  async getOrganizationModelUsage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts/organization-model-usage").OrganizationModelUsage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-models",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getOrganizationUsageWorkspacePage(
     options: {
       accountId: string;
@@ -8501,6 +8723,8 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      rootSessionId?: string;
+      sessionId?: string;
       signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
@@ -8512,6 +8736,8 @@ export class OpenGeniClient {
         range: options.range ?? "week",
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.rootSessionId !== undefined ? { rootSessionId: options.rootSessionId } : {}),
+        ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
       { signal: options.signal },
     );
@@ -8533,6 +8759,24 @@ export class OpenGeniClient {
   /** Start a Stripe checkout for prepaid credits. */
   async createBillingCheckout(request: CreateCheckoutRequest): Promise<CreateCheckoutResponse> {
     return await this.requestJson<CreateCheckoutResponse>("POST", "/v1/billing/checkout", request);
+  }
+
+  /**
+   * Where one checkout stands, and whether its credits reached the balance.
+   * Poll it after the customer returns from Stripe Checkout.
+   */
+  async getBillingCheckout(
+    checkoutSessionId: string,
+    options: { accountId?: string } = {},
+  ): Promise<BillingCheckoutStatus> {
+    return await this.requestJson(
+      "GET",
+      `/v1/billing/checkout/${encodeURIComponent(checkoutSessionId)}`,
+      undefined,
+      {
+        ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+      },
+    );
   }
 
   /** Open Stripe's hosted portal for invoices and payment information. */

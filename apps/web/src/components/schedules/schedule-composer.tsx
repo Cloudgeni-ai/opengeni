@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { payerShortLabel } from "@/components/models/models-ui";
+import { modelPayerHint } from "@/lib/model-payer";
 import { ModelPicker, type PickerModelRow } from "@/components/pickers";
 import {
   DropdownMenu,
@@ -296,7 +296,7 @@ export function ComposerField({
   /* ----- model */
   const followed = draft.modelFollowsDefault ? defaultModelSelection : null;
   const selectedRow = modelRows.find((row) => row.id === (followed?.model ?? draft.model));
-  const payer = selectedRow ? payerShortLabel(selectedRow) : null;
+  const payer = selectedRow ? modelPayerHint(selectedRow) : null;
   const modelMeta = draft.modelFollowsDefault ? (payer ? `Default · ${payer}` : null) : payer;
 
   const showSetChip = canAttachSets && (setOptions.length > 0 || variableSets.loading);

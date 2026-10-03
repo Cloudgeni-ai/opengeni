@@ -52,7 +52,7 @@ describe("model-policy", () => {
       codex: true,
       free: true,
       codexOnly: false,
-      first: "Opengeni",
+      first: "Models",
     },
     {
       name: "no usable Codex",
@@ -60,7 +60,7 @@ describe("model-policy", () => {
       codex: false,
       free: true,
       codexOnly: false,
-      first: "Opengeni",
+      first: "Models",
     },
     {
       name: "no selectable OpenGeni",
@@ -68,7 +68,7 @@ describe("model-policy", () => {
       codex: true,
       free: false,
       codexOnly: false,
-      first: "Opengeni",
+      first: "Models",
     },
     {
       name: "Codex-only session",
@@ -84,7 +84,7 @@ describe("model-policy", () => {
       codex: false,
       free: false,
       codexOnly: true,
-      first: "Opengeni",
+      first: "Models",
     },
   ])("conditionally promotes the UI group: $name", ({ paid, codex, free, codexOnly, first }) => {
     const rows = projectPickerRows([
@@ -102,7 +102,7 @@ describe("model-policy", () => {
     expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
     expect(groups.flatMap((group) => group.rows).find((row) => row.id === "paid")).toEqual(rows[1]);
     expect(rows).toEqual(snapshot);
-    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("Opengeni");
+    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("Models");
   });
 
   test("unknown legacy cost is not treated as free", () => {
@@ -111,7 +111,7 @@ describe("model-policy", () => {
       catalogModel({ id: "codex/test", label: "Codex", source: "codex" }),
     ]);
     expect(groupPickerRowsByBillingClass(rows).map((group) => group.label)).toEqual([
-      "Opengeni",
+      "Models",
       "Codex",
     ]);
   });
@@ -167,7 +167,7 @@ describe("model-policy", () => {
     });
     expect(projectPickerRows([model])).toEqual([]);
   });
-  test("labels organization provider billing separately from workspace BYOK", () => {
+  test("labels organization API keys like workspace ones, without connection scope", () => {
     const model = catalogModel({
       id: "organization-openrouter/openai/gpt-org",
       label: "Org GPT",
@@ -178,7 +178,7 @@ describe("model-policy", () => {
       cost: "organization",
     });
     expect(billingClassForModel(model)).toBe("organization_byok");
-    expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("Organization providers");
+    expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("API keys");
     expect(payerSummaryForModel(model)).toBe("Billed to the organization OpenRouter account");
     expect(payerSummaryForModel({ ...model, cost: undefined })).toBe(
       "Billed to the organization OpenRouter account",
@@ -228,7 +228,7 @@ describe("model-policy", () => {
     ]);
     expect(rows[0]).toMatchObject({
       billingClass: "byok",
-      billingClassLabel: "Workspace providers",
+      billingClassLabel: "API keys",
     });
     expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the workspace Vercel account");
   });
@@ -269,7 +269,7 @@ describe("model-policy", () => {
     expect(billingClassForModel(model)).toBe("opengeni_credits");
     expect(projectPickerRows([model])[0]).toMatchObject({
       billingClass: "opengeni_credits",
-      billingClassLabel: "Opengeni",
+      billingClassLabel: "Models",
     });
     expect(advancedSourceSummary(model)).toBe("Deployment-provided connection");
     expect(payerSummaryForModel(model)).toBe("Opengeni · no model credits");
@@ -424,5 +424,117 @@ describe("model-policy", () => {
     ]);
     expect(rows[0]?.selectable).toBe(false);
     expect(rows[0]?.unavailableReason).toBe("Blocked by workspace policy");
+  });
+});
+
+describe("model display across connection scopes", () => {
+  const claude = (scope: "organization" | "workspace", upstream: string, label = upstream) =>
+    catalogModel({
+      id: `${scope}-claude-subscription/${upstream}`,
+      label,
+      provider: `${scope}-claude-subscription`,
+      providerLabel: "Claude subscription",
+      cost: scope,
+    });
+  const anthropic = (scope: "organization" | "workspace", upstream: string) =>
+    catalogModel({
+      id: `${scope}-anthropic/${upstream}`,
+      label: upstream,
+      provider: `${scope}-anthropic`,
+      providerLabel: "Anthropic API",
+      cost: scope,
+    });
+
+  test("rows carry the clean display name, never the raw catalog label", () => {
+    const rows = projectPickerRows([
+      claude("organization", "claude-opus-4-8"),
+      anthropic("workspace", "claude-haiku-4-5-20251001"),
+    ]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude Opus 4.8", "Claude Haiku 4.5"]);
+  });
+
+  test("org- and workspace-connected copies collapse to one row, keeping the selection", () => {
+    const rows = projectPickerRows([
+      claude("organization", "claude-opus-5-5", "Claude Opus 5.5"),
+      claude("workspace", "claude-opus-5-5", "Claude Opus 5.5"),
+      anthropic("organization", "claude-sonnet-4-6"),
+      anthropic("workspace", "claude-sonnet-4-6"),
+    ]);
+    const groups = groupPickerRowsByBillingClass(rows, {
+      selectedId: "workspace-claude-subscription/claude-opus-5-5",
+    });
+    expect(groups.map((group) => group.label)).toEqual(["Claude subscription", "API keys"]);
+    expect(groups[0]!.rows.map((row) => row.id)).toEqual([
+      "workspace-claude-subscription/claude-opus-5-5",
+    ]);
+    expect(groups[1]!.rows.map((row) => row.label)).toEqual(["Claude Sonnet 4.6"]);
+  });
+
+  test("Claude rows get a compact family-free label for narrow triggers", () => {
+    const rows = projectPickerRows([claude("organization", "claude-opus-5-5", "Claude Opus 5.5")]);
+    expect(rows[0]?.shortLabel).toBe("Opus 5.5");
+  });
+
+  test("deployment models with the same name stay separate choices", () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "azure/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),
+      catalogModel({ id: "openai/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),
+    ]);
+    expect(groupPickerRowsByBillingClass(rows)[0]!.rows).toHaveLength(2);
+  });
+});
+
+describe("scope collapse never merges different accounts", () => {
+  const row = (id: string, provider: string, label: string, cost: "organization" | "workspace") =>
+    catalogModel({ id, label, provider, providerLabel: provider, cost });
+
+  test("the same model through OpenRouter and the Anthropic API stays two rows", () => {
+    const rows = projectPickerRows([
+      row(
+        "workspace-openrouter/anthropic/claude-sonnet-4.6",
+        "workspace-openrouter",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+      row(
+        "organization-anthropic/claude-sonnet-4.6",
+        "organization-anthropic",
+        "Claude Sonnet 4.6",
+        "organization",
+      ),
+      row(
+        "workspace-anthropic/claude-sonnet-4.6",
+        "workspace-anthropic",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+    ]);
+    const [keys] = groupPickerRowsByBillingClass(rows);
+    expect(keys!.label).toBe("API keys");
+    // Org + workspace Anthropic collapse; OpenRouter is a different account.
+    expect(
+      keys!.rows
+        .map((candidate) => candidate.provider.replace(/^(organization|workspace)-/, ""))
+        .sort(),
+    ).toEqual(["anthropic", "openrouter"]);
+  });
+
+  test("collapseScopes false keeps every row and scoped groups", () => {
+    const rows = projectPickerRows([
+      row(
+        "organization-anthropic/claude-sonnet-4.6",
+        "organization-anthropic",
+        "Claude Sonnet 4.6",
+        "organization",
+      ),
+      row(
+        "workspace-anthropic/claude-sonnet-4.6",
+        "workspace-anthropic",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+    ]);
+    const groups = groupPickerRowsByBillingClass(rows, { collapseScopes: false });
+    expect(groups.map((group) => group.billingClass)).toEqual(["byok", "organization_byok"]);
   });
 });
