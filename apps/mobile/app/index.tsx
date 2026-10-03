@@ -76,15 +76,15 @@ export default function SessionsScreen() {
       keyboardVerticalOffset={headerHeight}
       style={styles.root}
     >
-      {error || listError ? (
-        <Text style={styles.error}>{error?.message ?? listError}</Text>
-      ) : null}
+      {error || listError ? <Text style={styles.error}>{error?.message ?? listError}</Text> : null}
       <FlatList
         data={sessions}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
         keyExtractor={(session) => session.id}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void reload().then(load)} />}
+        refreshControl={
+          <RefreshControl refreshing={loading} onRefresh={() => void reload().then(load)} />
+        }
         ListHeaderComponent={
           workspaceName ? <Text style={styles.workspace}>{workspaceName}</Text> : null
         }
@@ -127,14 +127,50 @@ export default function SessionsScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#fff" },
   error: { color: "#b42318", padding: 16 },
-  workspace: { fontSize: 13, color: "#667085", paddingHorizontal: 20, paddingTop: 12, paddingBottom: 4 },
-  row: { paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: "#e4e7ec" },
+  workspace: {
+    fontSize: 13,
+    color: "#667085",
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  row: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: "#e4e7ec",
+  },
   rowPressed: { backgroundColor: "#f2f4f7" },
   rowTitle: { fontSize: 16, color: "#101828" },
   rowMeta: { fontSize: 13, color: "#667085", marginTop: 2 },
-  composer: { flexDirection: "row", alignItems: "flex-end", gap: 8, paddingHorizontal: 12, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderColor: "#e4e7ec" },
-  input: { flex: 1, minHeight: 44, maxHeight: 140, borderRadius: 22, backgroundColor: "#f2f4f7", paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12, fontSize: 16 },
-  send: { width: 44, height: 44, borderRadius: 22, backgroundColor: "#101828", alignItems: "center", justifyContent: "center" },
+  composer: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: "#e4e7ec",
+  },
+  input: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 140,
+    borderRadius: 22,
+    backgroundColor: "#f2f4f7",
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
+    fontSize: 16,
+  },
+  send: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#101828",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   sendDisabled: { opacity: 0.35 },
   sendText: { color: "#fff", fontSize: 20, fontWeight: "600" },
 });

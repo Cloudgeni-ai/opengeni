@@ -22,6 +22,14 @@
     "./ui": {
       "types": "./src/ui/index.ts",
       "default": "./src/ui/index.ts"
+    },
+    "./timeline": {
+      "types": "./src/timeline/index.ts",
+      "default": "./src/timeline/index.ts"
+    },
+    "./timeline/markdown": {
+      "types": "./src/timeline/markdown.tsx",
+      "default": "./src/timeline/markdown.tsx"
     }
   },
   "scripts": {
@@ -42,6 +50,12 @@
     "react": ">=19",
     "react-native": ">=0.80",
     "react-native-reanimated": ">=4",
-    "react-native-svg": ">=15"
+    "react-native-svg": ">=15",
+    "react-native-markdown-display": ">=7"
+  },
+  "peerDependenciesMeta": {
+    "react-native-markdown-display": {
+      "optional": true
+    }
   }
 }

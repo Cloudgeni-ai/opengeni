@@ -10,9 +10,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@expo-google-fonts/inter": "^0.4.2",
+    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
     "@expo/ui": "57.0.16",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "57.0.20",
+    "expo-clipboard": "~57.0.2",
     "expo-constants": "57.0.17",
     "expo-crypto": "~57.0.2",
     "expo-dev-client": "57.0.18",

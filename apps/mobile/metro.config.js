@@ -13,7 +13,8 @@ const nativeKitRoot = path.join(repoRoot, "packages/react-native");
 const nativeKitOrigin = path.join(nativeKitRoot, "package.json");
 const nativeKitExports = require(nativeKitOrigin).exports;
 const appOrigin = path.join(appRoot, "package.json");
-const singletons = /^(react|react-native|react-dom|scheduler)(\/.*)?$/;
+// React and every native-module package (React Native, Expo) belong to the app build.
+const singletons = /^(react|react-dom|scheduler|react-native|react-native-[\w-]+|@react-native[\w-]*\/[\w-]+|expo|expo-[\w-]+|@expo\/[\w-]+|@expo-google-fonts\/[\w-]+)(\/.*)?$/;
 const nativeKit = /^@opengeni\/react-native(?:\/(.+))?$/;
 
 const config = getDefaultConfig(appRoot);

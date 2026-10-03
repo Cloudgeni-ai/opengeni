@@ -30,6 +30,15 @@
       ],
       "@opengeni/react/testing": [
         "../../packages/react/src/testing/session-scenarios.ts"
+      ],
+      "@opengeni/react/timeline-model": [
+        "../../packages/react/src/timeline-model.ts"
+      ],
+      "@opengeni/react-native/timeline": [
+        "../../packages/react-native/src/timeline/index.ts"
+      ],
+      "@opengeni/react-native/timeline/markdown": [
+        "../../packages/react-native/src/timeline/markdown.tsx"
       ]
     }
   },

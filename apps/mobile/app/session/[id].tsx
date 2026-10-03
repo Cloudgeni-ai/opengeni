@@ -1,7 +1,4 @@
-import {
-  OpenGeniNativeSessionView,
-  useOpenGeniNativeSession,
-} from "@opengeni/react-native";
+import { OpenGeniNativeSessionView, useOpenGeniNativeSession } from "@opengeni/react-native";
 import { Stack, useLocalSearchParams } from "expo-router";
 import { Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";

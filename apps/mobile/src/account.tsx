@@ -60,7 +60,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const adapters = useMemo(
     () =>
       createExpoOpenGeniAdapters({
-        persistence: createHydratedPersistenceAdapter(AsyncStorage, `opengeni:native:${account.id}`),
+        persistence: createHydratedPersistenceAdapter(
+          AsyncStorage,
+          `opengeni:native:${account.id}`,
+        ),
       }),
     [account.id],
   );
