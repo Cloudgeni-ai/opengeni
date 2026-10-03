@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
+import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 
 const running = (sessionId: number) => `Process running with session ID ${sessionId}\n\nOutput:\n`;
 const exited = (exitCode: number) => `Process exited with code ${exitCode}\n\nOutput:\n`;
@@ -24,19 +25,29 @@ function pendingInvocation(entryPoint: "model" | "lifecycle") {
   const started = deferred<void>();
   const start = deferred<string>();
   const helperStarted = deferred<void>();
+  const helperPollStarted = deferred<void>();
   const exactPollStarted = deferred<void>();
   const state = {
     launches: 0,
     ordinaryHelpers: 0,
     exactHelpers: 0,
     retained: true,
+    helperRetained: true,
+    helperReconciled: false,
+    helperIdentity: "retained-412",
+    renderHelperFault: false,
+    helperReads: [] as number[],
     cancelStart: async () => start.resolve(running(411)),
     ordinaryHelper: async (): Promise<string> => {
-      throw new Error("ordinary attempt is fenced");
+      throw new ModalCommandStartNotDispatchedError(new Error("helper Start was never sent"));
     },
     exactPoll: async (): Promise<string> => {
       state.retained = false;
       return exited(130);
+    },
+    helperPoll: async (): Promise<string> => {
+      state.helperRetained = false;
+      return exited(76);
     },
   };
   const invokeExec = async (_context?: unknown, _input?: string) => {
@@ -51,14 +62,29 @@ function pendingInvocation(entryPoint: "model" | "lifecycle") {
   };
   const session = {
     supportsPty: () => true,
-    hasRetainedProcess: (sessionId: number) => sessionId === 411 && state.retained,
+    hasRetainedProcess: (sessionId: number) =>
+      sessionId === 411 ? state.retained : sessionId === 412 && state.helperRetained,
+    retainedProcessIdentity: (sessionId: number) => ({
+      id: sessionId === 412 ? state.helperIdentity : `retained-${sessionId}`,
+    }),
+    reconcileRetainedProcess: async (sessionId: number) => {
+      if (sessionId !== 412 || !state.helperReconciled) return false;
+      state.helperRetained = false;
+      return true;
+    },
     cancelPendingExecCommand: async () => await state.cancelStart(),
     cancelSupervisedCommand: async () => false,
     execCommandForProcessControl: async () => {
       state.exactHelpers++;
       return exited(0);
     },
-    writeStdinForProcessControl: async () => {
+    writeStdinForProcessControl: async (args: { sessionId: number; chars?: string }) => {
+      if (args.sessionId === 412) {
+        expect(args.chars).toBe("");
+        state.helperReads.push(args.sessionId);
+        helperPollStarted.resolve();
+        return await state.helperPoll();
+      }
       exactPollStarted.resolve();
       return await state.exactPoll();
     },
@@ -67,7 +93,21 @@ function pendingInvocation(entryPoint: "model" | "lifecycle") {
   };
   const [wrapped] = controller.wrapTools(
     [
-      { type: "function", name: "exec_command", invoke: invokeExec },
+      {
+        type: "function",
+        name: "exec_command",
+        invoke: async (context: unknown, input: string) => {
+          const helper = state.launches > 0;
+          try {
+            return await invokeExec(context, input);
+          } catch (error) {
+            // The SDK's errorFunction can erase helper retained-error metadata;
+            // cleanup must select the same session's direct exec instead.
+            if (helper && state.renderHelperFault) return "tool error";
+            throw error;
+          }
+        },
+      },
       { type: "function", name: "write_stdin", invoke: async () => exited(130) },
     ],
     session,
@@ -84,6 +124,7 @@ function pendingInvocation(entryPoint: "model" | "lifecycle") {
     start,
     started: started.promise,
     helperStarted: helperStarted.promise,
+    helperPollStarted: helperPollStarted.promise,
     exactPollStarted: exactPollStarted.promise,
     invocation,
     teardown: async () => {
@@ -173,7 +214,7 @@ describe("pending shell cancellation after exact retained handoff", () => {
       fixture.state.cancelStart = async () => {};
       fixture.state.ordinaryHelper = async () => {
         await release.promise;
-        throw new Error("ordinary attempt is fenced");
+        return exited(76);
       };
       await fixture.started;
       fixture.abort.abort(new Error("steered"));
@@ -191,5 +232,118 @@ describe("pending shell cancellation after exact retained handoff", () => {
         await fixture.teardown();
       }
     });
+
+    for (const result of ["running", "retained_error"] as const) {
+      test(`${entryPoint} joins the SAME ${result} proof helper's physical settlement`, async () => {
+        const fixture = pendingInvocation(entryPoint);
+        const release = deferred<void>();
+        fixture.state.cancelStart = async () => {};
+        fixture.state.renderHelperFault = true;
+        fixture.state.ordinaryHelper = async () => {
+          if (result === "retained_error") {
+            throw new RoutingMutationOutcomeUnknownError("execCommand", "helper receipt unknown", {
+              retainedProcess: { id: "retained-412", providerSessionId: 412 },
+            });
+          }
+          return running(412);
+        };
+        fixture.state.helperPoll = async () => {
+          await release.promise;
+          fixture.state.helperRetained = false;
+          return exited(76);
+        };
+        await fixture.started;
+        fixture.abort.abort(new Error("steered"));
+        try {
+          expect(await settlesWithin(fixture.helperStarted, 500)).toBe(true);
+          fixture.start.resolve(running(411));
+          const drain = fixture.controller.waitForQuiescence();
+          expect(await settlesWithin(drain, 150)).toBe(false);
+          expect(fixture.state.helperRetained).toBe(true);
+          expect(fixture.state.exactHelpers).toBe(0);
+          expect(fixture.state.ordinaryHelpers).toBe(1);
+          // Both initial helper receipt forms identify its own process, not
+          // the original command's PGID. Only empty reads may join that helper.
+          expect(await settlesWithin(fixture.helperPollStarted, 500)).toBe(true);
+          release.resolve();
+          expect(await settlesWithin(drain, 500)).toBe(true);
+          expect(fixture.state.helperReads).toEqual([412]);
+          expect(fixture.state.helperRetained).toBe(false);
+          expect(fixture.state.ordinaryHelpers).toBe(1);
+          expect(fixture.state.exactHelpers).toBe(1);
+          expect(fixture.state.launches).toBe(1);
+        } finally {
+          release.resolve();
+          await fixture.teardown();
+        }
+      });
+    }
+
+    test(`${entryPoint} joins exact reaper proof without detaching the helper early`, async () => {
+      const fixture = pendingInvocation(entryPoint);
+      const release = deferred<void>();
+      fixture.state.cancelStart = async () => {};
+      fixture.state.ordinaryHelper = async () => running(412);
+      fixture.state.helperPoll = async () => {
+        await release.promise;
+        return exited(76);
+      };
+      await fixture.started;
+      fixture.abort.abort(new Error("steered"));
+      try {
+        expect(await settlesWithin(fixture.helperPollStarted, 500)).toBe(true);
+        fixture.start.resolve(running(411));
+        const drain = fixture.controller.waitForQuiescence();
+        expect(await settlesWithin(drain, 150)).toBe(false);
+        expect(fixture.state.ordinaryHelpers).toBe(1);
+        expect(fixture.state.exactHelpers).toBe(0);
+        fixture.state.helperReconciled = true;
+        expect(await settlesWithin(drain, 500)).toBe(true);
+        expect(fixture.state.helperReads).toEqual([412]);
+        expect(fixture.state.exactHelpers).toBe(1);
+      } finally {
+        release.resolve();
+        await fixture.teardown();
+      }
+    });
+
+    for (const result of [
+      "rejected",
+      "rendered_error",
+      "unretained",
+      "retained_error_without_locator",
+      "identity_mismatch",
+    ] as const) {
+      test(`${entryPoint} fails closed on the issued helper's ${result} outcome`, async () => {
+        const fixture = pendingInvocation(entryPoint);
+        fixture.state.cancelStart = async () => {};
+        fixture.state.helperRetained = false;
+        fixture.state.ordinaryHelper = async () => {
+          if (result === "rejected") throw new Error("helper acceptance unknown");
+          if (result === "retained_error_without_locator")
+            throw new RoutingMutationOutcomeUnknownError("execCommand", "helper locator unknown");
+          if (result === "identity_mismatch") {
+            fixture.state.helperRetained = true;
+            throw new RoutingMutationOutcomeUnknownError("execCommand", "helper receipt unknown", {
+              retainedProcess: { id: "different-process", providerSessionId: 412 },
+            });
+          }
+          return result === "unretained" ? running(412) : "tool error";
+        };
+        await fixture.started;
+        fixture.abort.abort(new Error("steered"));
+        expect(await settlesWithin(fixture.helperStarted, 500)).toBe(true);
+        fixture.start.resolve(running(411));
+        expect(await settlesWithin(fixture.controller.waitForQuiescence(), 150)).toBe(false);
+        expect(fixture.state.ordinaryHelpers).toBe(1);
+        expect(fixture.state.exactHelpers).toBe(0);
+        expect(fixture.state.helperReads).toEqual([]);
+        expect(fixture.state.launches).toBe(1);
+        // There is intentionally no fabricated settlement for an unknown,
+        // unretained helper. Its unresolved promise has no polling timer or
+        // provider mock running; the physical fence must remain closed.
+        await fixture.invocation;
+      });
+    }
   }
 });

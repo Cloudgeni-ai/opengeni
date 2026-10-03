@@ -1756,8 +1756,15 @@ retained route, pending-start cleanup hands off to the retained process's
 physical cancellation and settlement fence. It must not retry a new ordinary
 mutation after that handoff, since Steer may already fence ordinary admission.
 A rejected or rendered transport error, or an unretained numeric session id,
-does not authorize this handoff; an already-issued proof helper must still
-settle. The queue/chrome projection renders this period as stopping previous
+does not authorize this handoff. An already-issued proof helper has its own
+physical fence, independent of the original start's registration: a running
+receipt or typed retained-outcome-unknown fault is joined through empty control
+reads on that helper's exact retained route, or exact durable terminal proof.
+The helper is never relaunched or cancelled with the original command's marker.
+Generic rejection, rendered errors, and unretained helper locators remain
+outcome-unknown and keep quiescence closed; only typed non-dispatch/rejection
+permits retrying the tombstone helper. The queue/chrome projection renders this
+period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
