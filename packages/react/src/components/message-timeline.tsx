@@ -1,3 +1,4 @@
+import { QUESTION_NAV_MARGIN_PX, questionNavTarget } from "../timeline/question-nav-model";
 import { RollingActivity } from "../timeline/rolling-activity";
 import {
   clusterIsSettled,
@@ -341,8 +342,6 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
-/** Breathing room above the question when following stops at an answer. */
-const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Floating timeline navigation (Back to your message, Jump to latest) shares one
  * fixed anchor: centered at the bottom of the conversation, above the composer.
@@ -493,24 +492,17 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
 type QuestionNav = { key: string };
 
 /** How far a question's start must be above the viewport before navigation shows. */
-const QUESTION_NAV_HIDDEN_PX = 24;
 
 function readQuestionNav(node: HTMLElement): QuestionNav | null {
   const view = node.getBoundingClientRect();
-  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
-  // The last prompt before the reading position owns the response/work in view.
-  // A newer prompt farther down the conversation is not a navigation target.
-  const middle = view.top + view.height / 2;
-  const prompt = prompts
-    .reverse()
-    .find((candidate) => candidate.getBoundingClientRect().top <= middle);
-  const key = prompt?.dataset.ogGroupKey;
-  if (!prompt || !key) return null;
-  const bounds = prompt.getBoundingClientRect();
-  if (bounds.top >= view.top - QUESTION_NAV_HIDDEN_PX || bounds.bottom > view.top) {
-    return null;
-  }
-  return { key };
+  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")].flatMap((prompt) => {
+    const key = prompt.dataset.ogGroupKey;
+    if (!key) return [];
+    const bounds = prompt.getBoundingClientRect();
+    return [{ key, top: bounds.top, bottom: bounds.bottom }];
+  });
+  const key = questionNavTarget(prompts, { top: view.top, height: view.height });
+  return key ? { key } : null;
 }
 
 function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean {

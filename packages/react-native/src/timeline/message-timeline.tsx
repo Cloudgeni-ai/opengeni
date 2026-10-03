@@ -17,6 +17,8 @@ import {
   isPreparingWork,
   noticeDisplayText,
   noticeTone,
+  QUESTION_NAV_MARGIN_PX,
+  questionNavTarget,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
   readableWorkStatus,
@@ -96,6 +98,9 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   // (content growing before the first scroll-to-end) must not unstick it.
   const readerScrolling = useRef(false);
   const [showJump, setShowJump] = useState(false);
+  // "Back to your message": prompt rows' content offsets, read on scroll.
+  const promptFrames = useRef(new Map<string, { top: number; bottom: number }>()).current;
+  const [questionNav, setQuestionNav] = useState<string | null>(null);
   const measure = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     return contentSize.height - layoutMeasurement.height - contentOffset.y;
@@ -105,8 +110,17 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
       const distance = measure(event);
       if (readerScrolling.current) following.current = distance < 48;
       setShowJump(distance > 240 && !following.current);
+      const { contentOffset, layoutMeasurement } = event.nativeEvent;
+      const prompts = [...promptFrames.entries()]
+        .map(([key, frame]) => ({ key, ...frame }))
+        .sort((a, b) => a.top - b.top);
+      const next = questionNavTarget(prompts, {
+        top: contentOffset.y,
+        height: layoutMeasurement.height,
+      });
+      setQuestionNav((current) => (current === next ? current : next));
     },
-    [measure],
+    [measure, promptFrames],
   );
   const onScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -170,39 +184,105 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           >
             {props.header}
             {groups.length === 0 && props.emptyState ? props.emptyState : null}
-            {groups.map((group) => (
-              <TimelineGroupView key={groupKey(group)} group={group} context={context} />
-            ))}
+            {groups.map((group) => {
+              const key = groupKey(group);
+              const prompt = group.kind === "item" && group.item.kind === "user-message";
+              return prompt ? (
+                <View
+                  key={key}
+                  onLayout={(event) => {
+                    const { y, height } = event.nativeEvent.layout;
+                    promptFrames.set(key, { top: y, bottom: y + height });
+                  }}
+                >
+                  <TimelineGroupView group={group} context={context} />
+                </View>
+              ) : (
+                <TimelineGroupView key={key} group={group} context={context} />
+              );
+            })}
             {props.trailing}
           </ScrollView>
-          {showJump ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Jump to latest"
-              onPress={() => {
-                following.current = true;
-                scrollRef.current?.scrollToEnd({ animated: true });
-              }}
+          {/* One fixed anchor for floating navigation, as on web: centered above
+              the composer; the up-pointing action stacks above Jump to latest. */}
+          {questionNav || showJump ? (
+            <View
+              pointerEvents="box-none"
               style={{
                 position: "absolute",
-                bottom: 12,
-                alignSelf: "center",
-                width: 36,
-                height: 36,
-                borderRadius: 18,
+                left: 16,
+                right: 16,
+                bottom: 16,
                 alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: theme.colors["surface-1"],
-                borderWidth: 1,
-                borderColor: theme.colors.border,
+                gap: 8,
               }}
             >
-              <Icon name="arrow-down" size={16} color={theme.colors["fg-muted"]} />
-            </Pressable>
+              {questionNav ? (
+                <NavPill
+                  icon="arrow-up"
+                  label="Back to your message"
+                  onPress={() => {
+                    const frame = promptFrames.get(questionNav);
+                    if (!frame) return;
+                    following.current = false;
+                    scrollRef.current?.scrollTo({
+                      y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                      animated: true,
+                    });
+                  }}
+                />
+              ) : null}
+              {showJump ? (
+                <NavPill
+                  icon="arrow-down"
+                  label="Jump to latest"
+                  onPress={() => {
+                    following.current = true;
+                    scrollRef.current?.scrollToEnd({ animated: true });
+                  }}
+                />
+              ) : null}
+            </View>
           ) : null}
         </View>
       </FoldMemoryProvider>
     </NativeActivityOptionsProvider>
+  );
+}
+
+/** The web timeline's floating navigation pill (NAV_PILL_CLASS). */
+function NavPill(props: { icon: "arrow-up" | "arrow-down"; label: string; onPress: () => void }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Animated.View entering={FadeIn.duration(150)}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={props.label}
+        onPress={props.onPress}
+        style={({ pressed }) => ({
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 6,
+          minHeight: 44,
+          paddingHorizontal: 12,
+          borderRadius: 999,
+          borderWidth: 1,
+          borderColor: pressed ? c["border-strong"] : c.border,
+          backgroundColor: withAlpha(c["surface-3"], 0.92),
+          shadowColor: "#000",
+          shadowOpacity: 0.1,
+          shadowRadius: 6,
+          shadowOffset: { width: 0, height: 2 },
+          elevation: 3,
+        })}
+      >
+        <Icon name={props.icon} size={14} color={c.fg} />
+        <Text style={{ ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c.fg }}>
+          {props.label}
+        </Text>
+      </Pressable>
+    </Animated.View>
   );
 }
 

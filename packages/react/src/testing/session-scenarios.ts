@@ -3,7 +3,7 @@
 // replays identical input through the official projection with no model calls.
 import type { SessionEvent } from "@opengeni/sdk";
 
-export type LabScenarioId = "answer" | "working" | "needs-you" | "history";
+export type LabScenarioId = "answer" | "working" | "needs-you" | "history" | "failure" | "long";
 
 export interface LabScenario {
   id: LabScenarioId;
@@ -162,6 +162,78 @@ function history(): LabScenario {
   return { id: "history", title: "History", events: r.events, running: false };
 }
 
+function failure(): LabScenario {
+  const r = recorder("lab-failure");
+  const t = "turn-failure";
+  r.push("user.message", { text: "Deploy the latest build to staging." }, t);
+  r.push("turn.started", {}, t, 400);
+  r.tool(t, "f1", "exec_command", { cmd: "bun run build" }, "Build completed in 38s", 7_000);
+  r.tool(
+    t,
+    "f2",
+    "exec_command",
+    { cmd: "deploy --env staging" },
+    "error: staging cluster unreachable (connection refused after 3 attempts)",
+    4_000,
+  );
+  r.push(
+    "turn.failed",
+    { error: "The staging cluster refused the connection. Nothing was deployed." },
+    t,
+    400,
+  );
+  return { id: "failure", title: "Failure", events: r.events, running: false };
+}
+
+function longContent(): LabScenario {
+  const r = recorder("lab-long");
+  const t = "turn-long";
+  const question = [
+    "Here is the incident timeline from the on-call channel. Please turn it into a short postmortem with a summary, impact, root cause, a table of the timeline and the follow-ups.",
+    "",
+    "09:02 alerts fire for elevated 5xx on the checkout API; 09:05 on-call acknowledges; 09:11 rollback of release 412 starts; 09:19 error rate back to baseline; 09:40 root cause identified as a missing index after the orders migration; 10:15 index added and release 412 redeployed.",
+  ].join("\n");
+  r.push("user.message", { text: question }, t);
+  r.push("turn.started", {}, t, 400);
+  r.push("agent.reasoning.delta", { text: "Structure it as a standard postmortem with a timeline table." }, t, 1_500);
+  const text = [
+    "## Postmortem: checkout 5xx after release 412",
+    "",
+    "**Summary.** For 17 minutes the checkout API returned elevated server errors after release 412. Rolling back restored service; the fix shipped the same morning.",
+    "",
+    "**Impact.** Roughly 6% of checkout attempts failed between 09:02 and 09:19. No orders were lost, but some customers had to retry.",
+    "",
+    "**Root cause.** The orders migration in release 412 dropped and recreated a table without its `customer_id` index, so a hot query fell back to a sequential scan and timed out under load.",
+    "",
+    "### Timeline",
+    "",
+    "| Time | Event |",
+    "| --- | --- |",
+    "| 09:02 | Alerts fire for elevated 5xx on checkout |",
+    "| 09:05 | On-call acknowledges |",
+    "| 09:11 | Rollback of release 412 starts |",
+    "| 09:19 | Error rate back to baseline |",
+    "| 09:40 | Missing index identified |",
+    "| 10:15 | Index added, release 412 redeployed |",
+    "",
+    "### Follow-ups",
+    "",
+    "1. Add a migration check that fails when an index disappears.",
+    "2. Alert on query latency, not only error rate.",
+    "3. Document the rollback runbook link in the alert itself.",
+    "",
+    "```sql",
+    "CREATE INDEX CONCURRENTLY orders_customer_id_idx ON orders (customer_id);",
+    "```",
+    "",
+    "> Rollback was the right first move: it bought time to find the cause without pressure.",
+  ].join("\n");
+  r.push("agent.message.delta", { text }, t, 3_000);
+  r.push("agent.message.completed", { text }, t, 300);
+  r.push("turn.completed", { output: text }, t, 200);
+  return { id: "long", title: "Long content", events: r.events, running: false };
+}
+
 export function labScenarios(): LabScenario[] {
-  return [answer(), working(), needsYou(), history()];
+  return [answer(), working(), needsYou(), history(), failure(), longContent()];
 }

@@ -96,3 +96,9 @@ export { SESSION_STATUS_BADGE, SESSION_STATUS_PRESENTATION } from "./session-sta
 export type { SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
 export { noticeDisplayText, noticeTone } from "./timeline/notice-presentation";
+export {
+  QUESTION_NAV_HIDDEN_PX,
+  QUESTION_NAV_MARGIN_PX,
+  questionNavTarget,
+} from "./timeline/question-nav-model";
+export type { QuestionNavPrompt } from "./timeline/question-nav-model";

@@ -1,7 +1,8 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import Markdown, { renderRules, type RenderRules } from "react-native-markdown-display";
 import { Icon } from "./icon";
+import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
   fontStyle,
@@ -99,6 +100,8 @@ export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "mu
       textDecorationColor: c["border-strong"],
     },
     blockquote: {
+      // Web blockquote text is fg-muted; text styles inherit through the renderer.
+      color: c["fg-muted"],
       backgroundColor: "transparent",
       borderLeftColor: c["border-strong"],
       borderLeftWidth: 2,
@@ -107,18 +110,25 @@ export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "mu
       marginVertical: 12,
     },
     hr: { backgroundColor: c.border, height: 1, marginVertical: 16 },
-    table: { borderWidth: 0, marginVertical: 10 },
+    // Web tables: unboxed, text-og-base, hairline rules, content-sized columns.
+    table: { borderWidth: 0, marginTop: 12, marginBottom: 10 },
     thead: {},
     th: {
       ...fontStyle(theme, 500),
       color: c.fg,
+      fontSize: theme.size.base,
+      lineHeight: 20,
       paddingVertical: 6,
       paddingRight: 16,
-      borderBottomWidth: 1,
-      borderColor: c.border,
     },
-    tr: { borderBottomWidth: 1, borderColor: c.border },
-    td: { color: c["fg-muted"], paddingVertical: 6, paddingRight: 16 },
+    tr: { borderBottomWidth: 0 },
+    td: {
+      color: c["fg-muted"],
+      fontSize: theme.size.base,
+      lineHeight: 20,
+      paddingVertical: 6,
+      paddingRight: 16,
+    },
   };
 }
 
@@ -203,6 +213,152 @@ function CodeFence({
   );
 }
 
+/* Tables ------------------------------------------------------------------- */
+
+type AstNode = { type: string; content?: string; children?: AstNode[] };
+
+function astText(node: AstNode): string {
+  // Container nodes carry an empty content string; text lives in their leaves.
+  if (node.children && node.children.length > 0) return node.children.map(astText).join("");
+  return typeof node.content === "string" ? node.content : "";
+}
+
+function tableRows(table: AstNode): string[][] {
+  const rows: string[][] = [];
+  const visit = (node: AstNode) => {
+    if (node.type === "tr") rows.push((node.children ?? []).map((cell) => astText(cell).trim()));
+    else (node.children ?? []).forEach(visit);
+  };
+  visit(table);
+  return rows;
+}
+
+/**
+ * Content-sized columns, as a browser's auto table layout lays them out: short
+ * columns keep their natural width on one line, long ones share the rest.
+ */
+function tableColumns(rows: string[][]): { width?: number; grow: number }[] {
+  const count = Math.max(0, ...rows.map((row) => row.length));
+  return Array.from({ length: count }, (_, index) => {
+    const longest = Math.max(1, ...rows.map((row) => row[index]?.length ?? 0));
+    return longest <= 14 ? { width: Math.ceil(longest * 8.4) + 20, grow: 0 } : { grow: longest };
+  });
+}
+
+/** A cell's column: its sibling index in the row (set by the AST builder). */
+function cellIndex(node: { index?: unknown }): number {
+  return typeof node.index === "number" && node.index >= 0 ? node.index : 0;
+}
+
+/** Explicit column widths for a measured table; empty until the table lays out. */
+const TableColumnsContext = createContext<number[]>([]);
+
+function columnWidths(columns: { width?: number; grow: number }[], available: number): number[] {
+  const fixed = columns.reduce((sum, column) => sum + (column.width ?? 0), 0);
+  const growth = columns.reduce(
+    (sum, column) => sum + (column.width === undefined ? column.grow : 0),
+    0,
+  );
+  const rest = Math.max(0, available - fixed);
+  if (growth === 0) return columns.map((column) => column.width ?? 0);
+  // Long columns share the rest by length, each keeping a readable minimum.
+  return columns.map((column) =>
+    column.width !== undefined ? column.width : Math.max(64, (rest * column.grow) / growth),
+  );
+}
+
+function MarkdownTable({
+  node,
+  children,
+  onCopy,
+}: {
+  node: AstNode;
+  children: ReactNode;
+  onCopy?: ((text: string) => void) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const rows = useMemo(() => tableRows(node), [node]);
+  const columns = useMemo(() => tableColumns(rows), [rows]);
+  const [available, setAvailable] = useState(0);
+  const widths = useMemo(
+    () => (available > 0 ? columnWidths(columns, available) : []),
+    [available, columns],
+  );
+  const [copied, setCopied] = useState(false);
+  return (
+    <View
+      style={{ marginTop: 12, marginBottom: 10 }}
+      onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
+    >
+      <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
+      {onCopy ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Copy table"
+          hitSlop={8}
+          onPress={() => {
+            onCopy(rows.map((row) => row.join("\t")).join("\n"));
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          }}
+          style={{
+            position: "absolute",
+            top: 2,
+            right: 0,
+            width: 28,
+            height: 28,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+function TableRow({ head, last, children }: { head: boolean; last: boolean; children: ReactNode }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        borderBottomWidth: last ? 0 : 1,
+        // Header rule in border; body rules at 70% (web border-og-border/70).
+        borderBottomColor: head ? c.border : withAlphaColor(c.border, 0.7),
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function TableCell({
+  index,
+  style,
+  children,
+}: {
+  index: number;
+  style: object;
+  children: ReactNode;
+}) {
+  const width = useContext(TableColumnsContext)[index];
+  return (
+    <View
+      style={[
+        style,
+        // The renderer's default cell style is flex: 1 (equal columns); a measured
+        // table replaces it with content-sized widths.
+        width !== undefined ? { flex: 0, width } : null,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
 function webRules(
   theme: NativeTimelineTheme,
   tone: "body" | "muted",
@@ -238,6 +394,33 @@ function webRules(
       }
       return renderRules.list_item!(node, children, parent, styles, inheritedStyles);
     },
+    table: (node, children) => (
+      <MarkdownTable key={node.key} node={node} onCopy={onCopy}>
+        {children}
+      </MarkdownTable>
+    ),
+    tr: (node, children, parent) => {
+      const head = parent.some((entry: { type: string }) => entry.type === "thead");
+      const body = parent.find((entry: { type: string }) => entry.type === "tbody") as
+        | { children?: unknown[] }
+        | undefined;
+      const last = !head && body?.children?.[body.children.length - 1] === node;
+      return (
+        <TableRow key={node.key} head={head} last={last}>
+          {children}
+        </TableRow>
+      );
+    },
+    th: (node, children, _parent, styles) => (
+      <TableCell key={node.key} index={cellIndex(node)} style={styles._VIEW_SAFE_th}>
+        {children}
+      </TableCell>
+    ),
+    td: (node, children, _parent, styles) => (
+      <TableCell key={node.key} index={cellIndex(node)} style={styles._VIEW_SAFE_td}>
+        {children}
+      </TableCell>
+    ),
     fence: (node) => {
       const raw = typeof node.content === "string" ? node.content : "";
       const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
