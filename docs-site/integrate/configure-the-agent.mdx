@@ -1,0 +1,146 @@
+---
+title: "Configure the agent"
+description: "Choose what the agent can do, who it is, and how its answers render, with one agent object."
+icon: "sliders"
+---
+
+Every session takes one `agent` object:
+
+```ts
+agent: {
+  identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
+  instructions: "Lead with the number, then one sentence of context.",
+  capabilities: { from: "none", webSearch: true, knowledge: true },
+  renderer: "opengeni",
+}
+```
+
+The same object works when you create a session, in the proxy's `createSession` hook, in the chat facade, on schedules, as the workspace default, and for a running session. A session with agent settings reports what they resolved to.
+
+<Note>
+  Agent settings need the deployment switch `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`. When it is
+  off, `getClientConfig()` reports `agentConfig.enabled: false` and a request with `agent` is
+  refused with `agent_config_not_enabled`. Use `firstPartyMcpTools: []` and `tools` to narrow an
+  agent until then.
+</Note>
+
+## Capabilities
+
+Start from `"all"` (everything the workspace offers, which is what a session without `agent` gets) or `"none"` (the session's own tools plus asking questions and reading Skills). Then switch single capabilities:
+
+```ts
+capabilities: "none"
+capabilities: { from: "none", webSearch: true, knowledge: true }
+capabilities: { from: "all", browser: false, workspaceAdmin: false }
+```
+
+| Capability            | Lets the agent                                                      | In `"none"` |
+| --------------------- | ------------------------------------------------------------------- | ----------- |
+| `humanInput`          | Pause and ask the person for a decision or missing detail           | On          |
+| `webSearch`           | Search the public web                                               | Off         |
+| `media`               | Generate images and videos                                          | Off         |
+| `goals`               | Work toward a goal across many turns                                | Off         |
+| `subagents`           | Start, message, and follow other sessions; list models              | Off         |
+| `skills`              | `"read"` installed Skills, or `"manage"` them too                   | `"read"`    |
+| `artifacts`           | Publish files, documents, and Sites people can open                 | Off         |
+| `browser`             | Use a browser or desktop computer                                   | Off         |
+| `schedules`           | Create and manage scheduled tasks                                   | Off         |
+| `knowledge`           | Search and save workspace knowledge, task notes, and instructions   | Off         |
+| `workspaceFiles`      | Read files uploaded to the workspace                                | Off         |
+| `workspaceConnectors` | Use the workspace's connected apps and integrations                 | Off         |
+| `workspaceAdmin`      | Manage variable sets, projects, rigs, machines, and connector setup | Off         |
+
+Some tools are never toggled:
+
+- **Your own tools.** MCP servers you attach to the session and integrations you name in `tools` stay available under `"none"`.
+- **Sandbox tools.** The shell and file editing come with a sandbox. `sandboxBackend: "none"` removes them.
+- **Runtime mechanics.** Waiting for input, reading background commands, and titling the session.
+
+A capability the server does not offer shows as off in `agent.unavailable`, and asking for it is refused with `agent_capability_unavailable`.
+
+## Identity and instructions
+
+- `identity` replaces how OpenGeni introduces the agent: its name, your product, its domain and voice. Leave it out to use the workspace's identity, or OpenGeni's.
+- `instructions` are the session's instructions: rules for this agent.
+
+The prompt order is identity, OpenGeni's working style, your organization's identity, workspace instructions, then session instructions. Instructions take priority over OpenGeni's default working style ("answer in one sentence" wins), never over its safety rules or how it runs tools. Put facts about the current page in the message's `modelContext`, not in instructions.
+
+## Renderer
+
+- `"opengeni"` for `OpenGeniChat` and `SessionConversation`: the agent can link files and artifacts and show visuals inline.
+- `"markdown"` for your own chat UI, Slack, or email: ordinary Markdown links only. The chat facade uses it by default.
+
+## Where it goes
+
+<CodeGroup>
+```ts Proxy
+createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+  initialMessage,
+  idempotencyKey,
+  agent: { identity, capabilities: "none" }, // only your tools plus the essentials
+  mcpServers: [{ id: "acme", url: ACME_MCP_URL, headers: await userHeaders(user) }],
+  tools: [{ kind: "mcp", id: "acme" }],
+  sandboxBackend: "none",
+}),
+```
+
+```ts Workspace default
+await og.updateWorkspaceSettings(workspaceId, {
+  sessionAgentDefaults: {
+    capabilities: { from: "all", browser: false, workspaceAdmin: false },
+    identity: "You are Acme's operations agent.",
+  },
+});
+```
+
+```ts Schedule
+await og.createScheduledTask(workspaceId, {
+  name: "Morning digest",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  agentConfig: {
+    prompt: "Summarize yesterday's new tickets and flag anything urgent.",
+    agent: { capabilities: { from: "none", knowledge: true } },
+    tools: [{ kind: "mcp", id: "acme" }],
+  },
+});
+```
+
+```ts Running session
+const session = await og.getSession(workspaceId, sessionId);
+await og.updateSessionAgent(workspaceId, sessionId, {
+  agent: { capabilities: { from: "all", webSearch: false } },
+  expectedVersion: session.toolPolicyVersion, // 409 when someone changed it first
+});
+```
+
+</CodeGroup>
+
+A change to a running session applies from its next turn. Sessions created by an agent inherit their parent's settings and can only narrow them. A goal turns `goals` on.
+
+## Check what the agent can do
+
+```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
+const session = await og.getSession(workspaceId, sessionId);
+session.agent; // the resolved settings, or null when the session has none stored
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
+```
+
+`effectiveTools.tools` is a flat list of known tools, not a capability-keyed object; group it locally as above. An absent projection on an older session means unknown, not that every capability is off. Tool `visibility` (`"upfront"` or `"search"`) describes model discovery, not human access. `mcpServers[].toolsKnown: false` means that server's schemas are not known in this projection; do not invent names or infer that it is disabled.
+
+Enabling `media` adds image and video discovery guidance. An attached adapter may still have a deferred schema: the agent discovers it with `tool_search`. An empty literal-prefix result from `tool_list` does not establish that a capability is unavailable; suggested names come only from the current authorized catalog.
+
+Human visibility is `session.tenancy?.visibility`, not top-level `session.visibility`. Top-level `visibility` is a create-request field. A missing tenancy projection means unknown, not `"workspace"`. The OpenGeni web app shows the agent's settings in the session's Agent panel, and the exact instructions sent in Debug > Context.
+
+<Tip>
+  Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) walks it through these
+  choices and inspects your existing setup first.
+</Tip>

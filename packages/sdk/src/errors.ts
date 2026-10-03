@@ -49,6 +49,81 @@ export class OpenGeniApiError extends Error {
   }
 }
 
+/** Deployment or organization setup must be completed before private chats can be created. */
+export class OpenGeniSetupError extends OpenGeniApiError {
+  constructor(error: OpenGeniApiError) {
+    super(error.status, error.body, {
+      code: "OPENGENI_SETUP_REQUIRED",
+      retryable: false,
+      correlationId: error.correlationId,
+      displayMessage:
+        "Private chats require organization_private_session_settings.enabled (migration 0323). " +
+        "An organization owner or admin can enable Only me chats in the web app under Organization settings > Security & data, " +
+        "or use updateOrganizationPrivateSessionSettings from @opengeni/sdk/organization-private-session-settings " +
+        "with enabled: true, the current expectedVersion and a stable operationId " +
+        "(PATCH /v1/organizations/:organizationId/private-session-settings; an organization key needs workspace:admin). " +
+        "If platform readiness is unavailable, ask the deployment operator to activate session tenancy first.",
+    });
+    this.name = "OpenGeniSetupError";
+  }
+}
+
+/** A settled usage ceiling refuses the next call; retry after reset or an authorized grant. */
+export class OpenGeniAllowanceExhaustedError extends OpenGeniApiError {
+  readonly scope: "workspace" | "member";
+  readonly resetsAt: string | null;
+  readonly subjectId: string | undefined;
+
+  constructor(
+    status: number,
+    body: string,
+    options: ConstructorParameters<typeof OpenGeniApiError>[2] = {},
+  ) {
+    super(status, body, {
+      ...options,
+      code: "allowance_exhausted",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    this.name = "OpenGeniAllowanceExhaustedError";
+    const refusal = allowanceExhaustedFields(body);
+    this.scope = refusal?.scope ?? "workspace";
+    this.resetsAt = refusal?.resetsAt ?? null;
+    this.subjectId = refusal?.subjectId;
+  }
+}
+
+/** Accept both the API error envelope and the standalone admission refusal. */
+export function allowanceExhaustedFields(body: string): {
+  scope: "workspace" | "member";
+  resetsAt: string | null;
+  subjectId?: string;
+} | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    const error =
+      root.error && typeof root.error === "object" && !Array.isArray(root.error)
+        ? (root.error as Record<string, unknown>)
+        : root;
+    if (error.code !== "allowance_exhausted") return null;
+    const fields =
+      error.details && typeof error.details === "object" && !Array.isArray(error.details)
+        ? (error.details as Record<string, unknown>)
+        : error;
+    if (fields.scope !== "workspace" && fields.scope !== "member") return null;
+    if (fields.resetsAt !== null && typeof fields.resetsAt !== "string") return null;
+    return {
+      scope: fields.scope,
+      resetsAt: fields.resetsAt,
+      ...(typeof fields.subjectId === "string" ? { subjectId: fields.subjectId } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export type OpenGeniSecureContextRequiredReason = "insecure_context" | "web_crypto_unavailable";
 
 /**
@@ -173,6 +248,75 @@ export class OpenGeniStreamError extends Error {
     super(message);
     this.name = "OpenGeniStreamError";
   }
+}
+
+/**
+ * Brand-neutral end-user copy for a failed SDK operation. Error.message, body,
+ * details and typed fields remain unchanged for diagnostics and host policy.
+ * Never use this to rewrite user, assistant or tool content.
+ */
+export function formatErrorMessage(
+  error: unknown,
+  fallback = "The request could not be completed.",
+): string {
+  if (error instanceof OpenGeniApiError) {
+    let message: string;
+    if (error.outcomeUnknown) {
+      message = "The request could not be confirmed. Check its status before retrying.";
+    } else if (
+      error instanceof OpenGeniSetupError ||
+      error.code === "OPENGENI_SETUP_REQUIRED" ||
+      error.code === "SESSION_TENANCY_NOT_ACTIVATED"
+    ) {
+      message = "Private conversations are unavailable. Ask an administrator to enable them.";
+    } else if (error.code === "allowance_exhausted") {
+      message = "Usage limit reached. Wait for the reset or ask an administrator for more usage.";
+    } else if (error instanceof OpenGeniSessionListCursorError) {
+      message = "The conversation list changed. Refresh and try again.";
+    } else if (error.status === 401) {
+      message = "Sign in to continue.";
+    } else if (error.status === 403) {
+      message = "You don’t have permission to do that.";
+    } else if (error.status === 404) {
+      message = "The requested item is unavailable.";
+    } else if (error.status === 402 || error.code === "payment_required") {
+      message = "There are not enough credits to continue.";
+    } else if (error.status === 429 || error.code === "rate_limited") {
+      message = error.retryable
+        ? "Too many requests. Wait a moment and try again."
+        : "This request is unavailable. Ask an administrator for help.";
+    } else if (error.status === 409) {
+      message = "The request conflicts with the current state. Refresh and try again.";
+    } else if (error.status === 400 || error.status === 422) {
+      message = "The request could not be accepted. Check your input and try again.";
+    } else if (error.status === 408 || error.status === 425 || error.status === 0) {
+      message = error.retryable
+        ? "The connection could not be completed. Try again later."
+        : fallback;
+    } else if (error.status >= 500) {
+      message = error.retryable
+        ? "The service is temporarily unavailable. Try again later."
+        : "The service is unavailable. Ask an administrator for help.";
+    } else {
+      message = fallback;
+    }
+    return error.correlationId ? `${message} Reference: ${error.correlationId}.` : message;
+  }
+  if (
+    error instanceof OpenGeniSecureContextRequiredError ||
+    (error instanceof Error && "code" in error && error.code === "secure_context_required")
+  ) {
+    return "reason" in error && error.reason === "insecure_context"
+      ? "Attachments require HTTPS. Open this page over a secure connection."
+      : "Attachments require secure browser cryptography. Use a supported browser over HTTPS.";
+  }
+  if (error instanceof OpenGeniApiContractMismatchError) {
+    return "This page is out of date. Reload it before trying again.";
+  }
+  if (error instanceof OpenGeniStreamError) {
+    return "The live connection could not be restored. Refresh to check the latest state.";
+  }
+  return fallback;
 }
 
 export function isAbortError(error: unknown): boolean {

@@ -21,8 +21,14 @@ export function PermissionGroupPicker(props: {
             <div className="min-w-0 text-xs font-medium text-fg-muted">
               {group.label}
               <span className="ml-1.5 font-normal text-fg-subtle">
-                {group.permissions.filter((permission) => props.selected.has(permission)).length}/
-                {group.permissions.length}
+                {
+                  group.permissions.filter(
+                    (permission) =>
+                      (!props.delegable || props.delegable.has(permission)) &&
+                      props.selected.has(permission),
+                  ).length
+                }
+                /{group.permissions.length}
               </span>
             </div>
             {props.onSetGroup && group.permissions.length > 1 ? (

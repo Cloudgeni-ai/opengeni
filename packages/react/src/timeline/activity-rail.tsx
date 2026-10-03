@@ -2,8 +2,17 @@ import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
 import { useStartupDetails } from "./startup-preference";
-import { ArrowRightIcon, BotIcon, BrainCircuitIcon } from "lucide-react";
-import { lazy, Suspense, useContext, useLayoutEffect, useRef, useState } from "react";
+import { ArrowRightIcon, BotIcon, BrainCircuitIcon, MessageSquareTextIcon } from "lucide-react";
+import {
+  createContext,
+  lazy,
+  Suspense,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
@@ -20,7 +29,7 @@ import {
   ToolCallTruncationProvider,
 } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, MemoryItem, WorkerItem } from "./types";
+import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
@@ -96,7 +105,8 @@ export function ActivityRail({
   const providerResponded = phases.some(
     (item) => item.phase === "provider_first_byte" && item.status === "complete",
   );
-  const preparing =
+  const responsePending = phases.some((item) => item.phase === "provider_first_byte");
+  const loading =
     !hasWork &&
     !interrupted &&
     (startupActive ?? (!providerResponded && phases.some((item) => item.status === "running")));
@@ -155,7 +165,7 @@ export function ActivityRail({
       )}
     >
       <AnimatePresence initial={false}>
-        {preparing && !debug ? (
+        {loading && !debug ? (
           <motion.div
             key="startup"
             initial={{ opacity: 0 }}
@@ -173,13 +183,14 @@ export function ActivityRail({
           >
             <GenieLoading
               startedAt={startedAt}
+              phase={responsePending ? "waiting" : "preparing"}
               detailsOpen={detailsOpen}
               onShowDetails={() => setDetailsOpen((open) => !open)}
             />
           </motion.div>
         ) : null}
       </AnimatePresence>
-      {detailsOpen && !debug && !preparing ? (
+      {detailsOpen && !debug && !loading ? (
         <button
           type="button"
           className="og-genie-details self-start"
@@ -212,6 +223,40 @@ export function ActivityRail({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Host message renderer for progress notes inside a rail, so notes keep the
+ * host's links and formatting. Without one, notes render the library Markdown.
+ */
+export const ActivityNoteTextContext = createContext<
+  ((text: string, item: AgentMessageItem) => ReactNode) | null
+>(null);
+
+/**
+ * Assistant commentary folded into the rail: the agent's own words about the
+ * work, quieter than an answer and aligned with the step titles.
+ */
+function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
+  const renderText = useContext(ActivityNoteTextContext);
+  if (!item.text.trim()) return null;
+  return (
+    <div className="flex items-start gap-2 px-1.5 py-1.5" data-og-activity-note="">
+      <span className="size-3.5 shrink-0" aria-hidden />
+      <MessageSquareTextIcon aria-hidden className="mt-1 size-3.5 shrink-0 text-og-fg-subtle" />
+      <div
+        className="min-w-0 flex-1 text-og-sm text-og-fg-muted"
+        data-og-search-item={item.id}
+        data-og-annotation-source-key={item.annotationSource?.eventId}
+      >
+        {renderText ? (
+          renderText(item.text, item)
+        ) : (
+          <Markdown streaming={item.streaming}>{item.text}</Markdown>
+        )}
+      </div>
     </div>
   );
 }
@@ -273,6 +318,8 @@ export function renderActivity(
       );
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
+    case "agent-message":
+      return <ActivityNoteRow item={item} />;
     case "fleet-decision":
       return (
         <Suspense fallback={null}>

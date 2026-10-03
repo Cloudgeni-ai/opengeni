@@ -1,10 +1,16 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import { modelFundingForAdmission } from "@opengeni/core";
-import { getBillingBalance, isCodexBilledTurn, sumUsageQuantity } from "@opengeni/db";
+import {
+  checkWorkspaceAllowance,
+  getBillingBalance,
+  isCodexBilledTurn,
+  sumUsageQuantity,
+} from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
 export type AgentRunAdmissionDenial =
   | "insufficient_credits"
+  | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
 
@@ -16,6 +22,8 @@ export async function agentRunAdmissionDenial(
     workspaceId: string;
     model: string;
     requestedAgentRuns: number;
+    /** The accepted work's causal human, not the scheduler/service caller. */
+    initiatingHumanSubjectId?: string | null;
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -45,6 +53,14 @@ export async function agentRunAdmissionDenial(
       const balance = await getBillingBalance(services.db, input.accountId);
       if (balance.balanceMicros <= 0) return "insufficient_credits";
     }
+  }
+  if (!externallyBilled) {
+    const refusal = await checkWorkspaceAllowance(services.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.initiatingHumanSubjectId ?? null,
+    });
+    if (refusal) return refusal.code;
   }
   if (
     services.settings.usageLimitsMode !== "static" &&

@@ -143,6 +143,20 @@ workspace-anchored lane instead of minting a portable organization-user
 authority. Migration bytes are frozen, so this needs its own reviewed repair
 migration - it is listed here rather than fixed in passing.
 
+**Known unrepaired global aggregate.** `opengeni_private.count_session_recovery_backlog()`
+(0375, restated by 0519) reads `sessions`, `session_turns`,
+`session_turn_attempts`, `session_attempt_interruptions`, `session_events`, and
+`workspace_inference_controls` with no tenant GUC and no capability window.
+Every permissive policy those tables offer its owner needs one, so on the
+documented posture the function reads zero rows and reports `0/0`: a blind
+recovery-backlog monitor, never a false alert. A deployment whose migration
+owner bypasses RLS sees the true counts. The repair is a narrow owner-only read
+capability in the shape of 0497's `modal_inventory_read_capabilities`, with
+`acquireOwnerMigratedTestDatabase` coverage. It needs its own reviewed migration
+because `CREATE POLICY` takes an `ACCESS EXCLUSIVE` lock on each of those hot
+tables. Check the other `opengeni_private.count_*` aggregates for the same shape
+when repairing it.
+
 The organization-tenancy lane alone has produced four more instances - all in
 tenancy migrations rather than 0258's Document lane - all invisible
 until a test ran through `acquireOwnerMigratedTestDatabase`:

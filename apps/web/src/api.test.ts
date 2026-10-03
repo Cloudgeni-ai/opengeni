@@ -2,6 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   AuthApiError,
+  checkDeploymentRevision,
   apiErrorFromResponseBody,
   authHeadersForAccessKey,
   configureManagedActorEpoch,
@@ -14,7 +15,9 @@ import {
   redeemCodexResetCredit,
   resolveApiBaseUrl,
   signInEmail,
+  signUpEmail,
   sendVerificationEmail,
+  startManagedSocialSignIn,
   setStoredAccessKey,
   clearStoredAccessKey,
   completeSelfServiceOrganizationSetup,
@@ -24,8 +27,82 @@ import {
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
 } from "./api";
+import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
 describe("web API auth helpers", () => {
+  test("deployment checks wait for a foreground read response body before settling", async () => {
+    const originalFetch = globalThis.fetch;
+    let foregroundBody!: ReadableStreamDefaultController<Uint8Array>;
+    let configReads = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client")) {
+        configReads++;
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            foregroundBody = controller;
+          },
+        }),
+      );
+    }) as typeof fetch;
+    const controller = new AbortController();
+    try {
+      configureManagedActorEpoch(null);
+      const foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      let settled = false;
+      const check = checkDeploymentRevision(controller.signal).then(() => {
+        settled = true;
+      });
+      await Bun.sleep(0);
+      expect(configReads).toBe(1);
+      expect(settled).toBe(false);
+      foregroundBody.close();
+      await foreground.text();
+      await check;
+      expect(settled).toBe(true);
+    } finally {
+      controller.abort();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("cleanup cancels a deployment check waiting for foreground work", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client"))
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      return new Response(new ReadableStream());
+    }) as typeof fetch;
+    const controller = new AbortController();
+    let foreground: Response | undefined;
+    try {
+      configureManagedActorEpoch(null);
+      foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      const check = checkDeploymentRevision(controller.signal);
+      await Bun.sleep(0);
+      controller.abort(new DOMException("The check was canceled", "AbortError"));
+      await expect(check).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      controller.abort();
+      await foreground?.body?.cancel();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test.each(["text", "json"] as const)(
     "managed actor %s preserves decoding and single body consumption",
     async (method) => {
@@ -170,81 +247,95 @@ describe("web API auth helpers", () => {
     });
   });
 
-  test("bounds browser event streams only on HTTP/1", () => {
+  test("bounds browser event streams until multiplexed HTTP is observed", () => {
     expect(shouldBoundBrowserSseForProtocol("http/1.0")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("http/1.1")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("h2")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol("h2c")).toBe(false);
     expect(shouldBoundBrowserSseForProtocol("h3")).toBe(false);
-    expect(shouldBoundBrowserSseForProtocol(null)).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol("h3-29")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol(" H2 ")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol(null)).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol(undefined)).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("")).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("unknown")).toBe(true);
   });
 
-  test("holds a new bounded stream until foreground API reads drain", async () => {
-    const originalFetch = globalThis.fetch;
-    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
-    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
-    let finiteController!: ReadableStreamDefaultController<Uint8Array>;
-    let streamDispatches = 0;
-    const streamAccepts: Array<string | null> = [];
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: { location: new URL("https://api.example.test/workspaces/current") },
-    });
-    Object.defineProperty(performance, "getEntriesByType", {
-      configurable: true,
-      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
-    });
-    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      const url = new URL(String(input));
-      if (url.pathname === "/v1/workspaces") {
-        return new Response(
-          new ReadableStream<Uint8Array>({
-            start(controller) {
-              finiteController = controller;
-            },
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      }
-      streamDispatches += 1;
-      streamAccepts.push(new Headers(init?.headers).get("accept"));
-      return new Response(": connected\n\n", {
-        headers: {
-          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
-          "content-length": "13",
-        },
+  test.each(["http1", "masked", "missing"] as const)(
+    "holds a new bounded stream until foreground API reads drain with %s timing",
+    async (timing) => {
+      const originalFetch = globalThis.fetch;
+      const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+      const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+      let finiteController!: ReadableStreamDefaultController<Uint8Array>;
+      let streamDispatches = 0;
+      const streamAccepts: Array<string | null> = [];
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: { location: new URL("https://api.example.test/workspaces/current") },
       });
-    }) as unknown as typeof fetch;
+      Object.defineProperty(performance, "getEntriesByType", {
+        configurable: true,
+        value: (type: string) =>
+          timing === "http1" && type === "navigation"
+            ? [{ nextHopProtocol: "http/1.1" }]
+            : timing === "masked" && type === "resource"
+              ? [{ name: "https://api.example.test/v1/workspaces", nextHopProtocol: "" }]
+              : [],
+      });
+      globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/v1/workspaces") {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                finiteController = controller;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        streamDispatches += 1;
+        streamAccepts.push(new Headers(init?.headers).get("accept"));
+        return new Response(": connected\n\n", {
+          headers: {
+            "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
+            "content-length": "13",
+          },
+        });
+      }) as unknown as typeof fetch;
 
-    try {
-      configureManagedActorEpoch("foreground-gate");
-      const finite = managedActorFetch("https://api.example.test/v1/workspaces");
-      await Promise.resolve();
-      const stream = managedActorFetch(
-        "https://api.example.test/v1/workspaces/current/live-events/stream",
-        { headers: { accept: "text/event-stream" } },
-      );
-      await Promise.resolve();
-      expect(streamDispatches).toBe(0);
-      finiteController.enqueue(new TextEncoder().encode("[]"));
-      finiteController.close();
-      const finiteResponse = await finite;
-      const streamResponse = await stream;
-      expect(streamDispatches).toBe(1);
-      expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
-      await finiteResponse.body!.cancel();
-      await streamResponse.body!.cancel();
-    } finally {
-      configureManagedActorEpoch(null);
-      globalThis.fetch = originalFetch;
-      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
-      else Reflect.deleteProperty(globalThis, "window");
-      if (entriesDescriptor) {
-        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
-      } else {
-        Reflect.deleteProperty(performance, "getEntriesByType");
+      try {
+        configureManagedActorEpoch("foreground-gate");
+        const finite = managedActorFetch("https://api.example.test/v1/workspaces");
+        await Promise.resolve();
+        const stream = managedActorFetch(
+          "https://api.example.test/v1/workspaces/current/live-events/stream",
+          { headers: { accept: "text/event-stream" } },
+        );
+        await Promise.resolve();
+        expect(streamDispatches).toBe(0);
+        finiteController.enqueue(new TextEncoder().encode("[]"));
+        finiteController.close();
+        const finiteResponse = await finite;
+        const streamResponse = await stream;
+        expect(streamDispatches).toBe(1);
+        expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
+        await finiteResponse.body!.cancel();
+        await streamResponse.body!.cancel();
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+        if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+        else Reflect.deleteProperty(globalThis, "window");
+        if (entriesDescriptor) {
+          Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+        } else {
+          Reflect.deleteProperty(performance, "getEntriesByType");
+        }
       }
-    }
-  });
+    },
+  );
 
   test("aborts a bounded stream that never receives response headers", async () => {
     jest.useFakeTimers();
@@ -345,6 +436,73 @@ describe("web API auth helpers", () => {
         Reflect.deleteProperty(performance, "getEntriesByType");
       }
       jest.useRealTimers();
+    }
+  });
+
+  test("keeps live events flowing while an attention mutation is pending", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let mutationController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: new URL("https://api.example.test/workspaces/current"),
+      },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: () => [],
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (new URL(String(input)).pathname.endsWith("/attention")) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              mutationController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "application/vnd.opengeni.sse-batch",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("pending-attention");
+      const mutation = managedActorFetch("https://api.example.test/v1/sessions/current/attention", {
+        method: "PUT",
+        body: "{}",
+      });
+      void mutation.catch(() => {});
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        {
+          headers: { accept: "text/event-stream" },
+        },
+      );
+      void stream.catch(() => {});
+      await Promise.resolve();
+      expect(streamDispatches).toBe(1);
+      mutationController.enqueue(new TextEncoder().encode("{}"));
+      mutationController.close();
+      await (await mutation).body!.cancel();
+      await (await stream).body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor)
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      else Reflect.deleteProperty(performance, "getEntriesByType");
     }
   });
 
@@ -1259,10 +1417,67 @@ describe("web API auth helpers", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({
       email: "user@example.com",
+      callbackURL: "/?auth_event=email_verified",
     });
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
       OPENGENI_API_CONTRACT_REVISION,
     );
+  });
+
+  test("carries first-touch attribution through email and social sign-up without storage", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const assigned: string[] = [];
+    const replaced: string[] = [];
+    const landing = new URL(
+      "https://app.example.test/?mode=signup&utm_source=producthunt&utm_campaign=launch&ref=producthunt&utm_content=bad%3Cscript%3E",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: Object.assign(landing, { assign: (url: string) => assigned.push(url) }),
+        history: {
+          state: null,
+          replaceState: (_: unknown, __: string, url: string) => replaced.push(url),
+        },
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ url: "https://accounts.google.com/o/oauth2/v2/auth?state=s" });
+    }) as unknown as typeof fetch;
+    try {
+      resetSignupAttributionForTests();
+      retainSignupAttribution(window);
+      // Only one-shot markers are consumed from the URL; campaign values stay.
+      expect(replaced).toEqual([]);
+      await signUpEmail({ name: "Human", email: "human@example.test", password: "secret-123" });
+      await startManagedSocialSignIn("google");
+    } finally {
+      resetSignupAttributionForTests();
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+    const attribution = { utmSource: "producthunt", utmCampaign: "launch", ref: "producthunt" };
+    const returnQuery = "utm_source=producthunt&utm_campaign=launch&ref=producthunt";
+    expect(bodies[0]).toEqual({
+      name: "Human",
+      email: "human@example.test",
+      password: "secret-123",
+      callbackURL: `/?${returnQuery}&auth_event=email_verified`,
+      opengeniAttribution: attribution,
+    });
+    expect(bodies[1]).toEqual({
+      provider: "google",
+      callbackURL: `https://app.example.test/?${returnQuery}&auth_event=google_signin`,
+      errorCallbackURL: `https://app.example.test/?${returnQuery}`,
+      newUserCallbackURL: `https://app.example.test/?${returnQuery}&auth_event=google_signup`,
+      disableRedirect: true,
+      additionalData: { opengeniAttribution: attribution },
+    });
+    expect(assigned).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?state=s"]);
   });
 
   test("sends the exact API contract revision on product-owned auth mutations", async () => {

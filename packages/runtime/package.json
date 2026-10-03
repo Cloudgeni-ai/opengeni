@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "4.0.1",
+  "version": "4.7.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -37,6 +37,10 @@
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
     },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
+    },
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
@@ -70,6 +74,7 @@
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
@@ -77,6 +82,7 @@
     "modal": "0.9.0",
     "openai": "6.47.0",
     "protobufjs": "7.6.5",
+    "sharp": "0.34.5",
     "ws": "8.21.1",
     "zod": "4.4.3"
   },

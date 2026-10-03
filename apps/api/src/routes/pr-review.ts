@@ -14,6 +14,7 @@ import {
   defaultPrReviewProviderBaseUrl,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
+  modelUnavailableHttpException,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   requireAccessGrant,
@@ -47,6 +48,7 @@ import {
 } from "../integrations/pr-review-provider";
 import { registerPrReviewGitHubRoutes } from "./pr-review-github";
 import { integrationCommitGrant } from "../integrations/integration-commit-authority";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -68,7 +70,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "secrets:write");
 
     assertPrReviewSandboxBackend(deps);
-    const payload = CreatePrReviewAppRegistrationRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreatePrReviewAppRegistrationRequest);
     const encryptionKey = requirePrReviewEncryptionKey(deps);
     let providerBaseUrl: string;
     try {
@@ -142,7 +144,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
 
-    const payload = UpdatePrReviewAppRegistrationRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdatePrReviewAppRegistrationRequest);
     const existing = await getPrReviewAppRegistrationSecret(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -281,7 +283,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       { settings: deps.settings, authorizationHeader: c.req.header("authorization") },
     );
 
-    const payload = CreatePrReviewRepositoryBindingRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreatePrReviewRepositoryBindingRequest);
     const registration = await getPrReviewAppRegistrationSecret(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -465,7 +467,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
 
-    const payload = UpdatePrReviewRepositoryBindingRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdatePrReviewRepositoryBindingRequest);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -575,9 +577,7 @@ function prReviewCustomModelCommitGuard(input: {
       reference,
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }

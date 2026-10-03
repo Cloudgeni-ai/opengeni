@@ -343,17 +343,14 @@ describe("normalizeCodexRequestBody", () => {
   test("applies the model resolver to body.model", () => {
     const body = normalizeCodexRequestBody(
       { model: "gpt-5.2-codex-high" },
-      buildModelResolver(["gpt-5.2-codex", "gpt-5.6-sol"], "gpt-5.6-sol"),
+      buildModelResolver(["gpt-5.2-codex", "gpt-5.6-sol"]),
     );
     expect(body.model).toBe("gpt-5.2-codex");
   });
 });
 
 describe("buildModelResolver", () => {
-  const resolve = buildModelResolver(
-    ["gpt-5.6-sol", "gpt-5.4", "gpt-5.2-codex", "gpt-5.4-mini"],
-    "gpt-5.6-sol",
-  );
+  const resolve = buildModelResolver(["gpt-5.6-sol", "gpt-5.4", "gpt-5.2-codex", "gpt-5.4-mini"]);
 
   test("longest-prefix match wins", () => {
     expect(resolve("gpt-5.2-codex-xhigh")).toBe("gpt-5.2-codex");
@@ -365,15 +362,19 @@ describe("buildModelResolver", () => {
     expect(resolve("openai/gpt-5.6-sol")).toBe("gpt-5.6-sol");
   });
 
-  test("unknown slug -> fallback", () => {
-    expect(resolve("o3-pro")).toBe("gpt-5.6-sol");
+  test("unknown slug passes through unchanged instead of substituting another model", () => {
+    expect(resolve("o3-pro")).toBe("o3-pro");
+    expect(resolve("codex/gpt-6.1-sol")).toBe("gpt-6.1-sol");
+  });
+
+  test("a newer catalog slug is never rewritten to an older prefix-less sibling", () => {
+    const catalog = buildModelResolver(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"]);
+    expect(catalog("codex/gpt-6.1-sol")).toBe("gpt-6.1-sol");
+    expect(catalog("codex/gpt-6-sol")).toBe("gpt-6-sol");
   });
 
   test("all exposed Codex GPT-6 ids reach the exact upstream slug unchanged", () => {
-    const resolveExact = buildModelResolver(
-      CODEX_FALLBACK_MODEL_SLUGS,
-      CODEX_FALLBACK_MODEL_SLUGS[0],
-    );
+    const resolveExact = buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS);
 
     for (const slug of CODEX_FALLBACK_MODEL_SLUGS) {
       expect(resolveExact(`codex/${slug}`)).toBe(slug);

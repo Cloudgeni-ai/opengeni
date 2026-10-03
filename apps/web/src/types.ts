@@ -124,8 +124,11 @@ export type {
   RigVersion,
   SandboxBackend,
   ScheduledTask,
+  ScheduledTaskAccessAttention,
   ScheduledTaskAgentConfig,
+  ScheduledTaskPolicyDrift,
   ScheduledTaskRun,
+  ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
   Session,
   SessionEvent,
@@ -210,6 +213,8 @@ export type TurnSubmission = {
   firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
   personalResourceAttachment?: import("@opengeni/sdk").PersonalResourceAttachmentIntent;
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
+  /** Per-chat agent settings; omitted follows the workspace's defaults. */
+  agent?: import("@opengeni/sdk").AgentConfigRequest;
 };
 
 export type AuthSession = {

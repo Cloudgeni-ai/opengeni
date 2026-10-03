@@ -10,6 +10,7 @@ import {
   EditableArtifactWorkbench,
   EditableArtifactWorkbenchHost,
 } from "../src/components/artifacts/editable-artifact-workbench";
+import { ArtifactSurface } from "../src/components/artifacts/artifact-surface";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -76,6 +77,30 @@ function asSession(value: FailingProjectionSession): EditableArtifactSession {
 }
 
 describe("editable artifact workbench", () => {
+  test("headerless chrome retains status, busy state and host actions without repeating its title", async () => {
+    const rendered = await renderComponent(
+      <ArtifactSurface
+        modality="document"
+        title="Session draft"
+        showHeader={false}
+        subtitle="Read only"
+        busy
+        actions={<button type="button">Host action</button>}
+      >
+        Document body
+      </ArtifactSurface>,
+    );
+    const surface = rendered.container.querySelector("section")!;
+    expect(surface.getAttribute("aria-label")).toBe("Document: Session draft");
+    expect(surface.getAttribute("aria-busy")).toBe("true");
+    expect(surface.querySelector("header")).toBeNull();
+    expect(surface.querySelector('[role="status"]')?.textContent).toBe("Read only");
+    expect(surface.querySelector('[role="status"]')?.classList.contains("sr-only")).toBe(true);
+    expect(surface.querySelector("button")?.textContent).toBe("Host action");
+    expect(surface.textContent).toContain("Document body");
+    await rendered.unmount();
+  });
+
   test("dispatches every modality through the same public workbench", async () => {
     for (const modality of ["document", "spreadsheet", "presentation"] as const) {
       const rendered = await renderComponent(
@@ -97,6 +122,26 @@ describe("editable artifact workbench", () => {
     const surface = rendered.container.querySelector('[data-og-artifact-modality="spreadsheet"]');
     expect(surface?.classList.contains("h-full")).toBe(true);
     await rendered.unmount();
+  });
+
+  test("embedded surfaces omit duplicate headers across modalities while retaining error states", async () => {
+    for (const modality of ["document", "spreadsheet", "presentation"] as const) {
+      const rendered = await renderComponent(
+        <EditableArtifactWorkbench
+          session={asSession(session(modality))}
+          document={{ title: "Session draft", showHeader: false }}
+          spreadsheet={{ title: "Session draft", showHeader: false }}
+          presentation={{ title: "Session draft", showHeader: false }}
+        />,
+      );
+      await flush(10);
+      expect(rendered.container.querySelector("section")?.getAttribute("aria-label")).toBe(
+        `${modality[0]!.toUpperCase()}${modality.slice(1)}: Session draft`,
+      );
+      expect(rendered.container.querySelector("section header")).toBeNull();
+      expect(rendered.container.textContent?.length).toBeGreaterThan(0);
+      await rendered.unmount();
+    }
   });
 
   test("keeps one active SDK session per authority key and closes every replacement", async () => {

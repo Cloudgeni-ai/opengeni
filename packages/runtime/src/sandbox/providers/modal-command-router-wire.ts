@@ -1,5 +1,7 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
+import { createHash } from "node:crypto";
 import protobuf from "protobufjs";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
@@ -32,7 +34,25 @@ message Empty {}
 `).root;
 
 const prefix = "/modal.task_command_router.TaskCommandRouter/";
-const maxPageBytes = 64 * 1024;
+const startEncoderVersion = "protobufjs@7.6.5";
+// Fingerprint of this local schema and encoding recipe, not an attestation of
+// transmitted bytes. Unary RPC serialization still re-encodes the snapshot;
+// protobufjs map iteration is not a universal canonical encoding.
+const startEncoderFingerprint = `sha256:${createHash("sha256")
+  .update(
+    JSON.stringify({
+      encoderVersion: startEncoderVersion,
+      schema: modalRouterWire.toJSON(),
+      encoding: "Start.encode(Start.fromObject(value)).finish()",
+    }),
+  )
+  .digest("hex")}`;
+/** Upper bound on one stream's bytes per read. A command's exit is reported
+ * only after both streams reach EOF, and after its turn ends the reaper reads
+ * once per sweep, so a small page left finished large-output commands running
+ * for hours. Invalid UTF-8 can decode to three bytes per input byte, so 1 MiB
+ * stays below the 4 MiB per-stream capture bound after decoding. */
+export const MODAL_ROUTER_READ_PAGE_BYTES = 1024 * 1024;
 const maxWireBytes = 4 * 1024 * 1024;
 
 /** Only constructed at the authenticated Start RPC boundary. Transport loss,
@@ -44,6 +64,64 @@ export class ModalCommandStartRejectedError extends ProviderCommandStartRejected
   ) {
     super(cause);
     this.name = "ModalCommandStartRejectedError";
+  }
+}
+
+/** Only a local channel-readiness failure BEFORE TaskExecStart is issued can
+ * prove that start was never dispatched. RPC status/details, even if they look
+ * like a DNS resolver error, can originate from an accepting server. */
+export class ModalCommandStartPreDispatchUnavailableError extends Error {
+  private constructor(cause: Error) {
+    super("Modal command router was not ready before Start dispatch", { cause });
+    this.name = "ModalCommandStartPreDispatchUnavailableError";
+  }
+
+  /** The supplied operation must contain only read-only preparation, never
+   * Start itself. Its transport failure therefore proves non-dispatch. */
+  static async beforeDispatch<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    try {
+      return await operation();
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = (error as Partial<ServiceError> | null)?.code;
+      if (
+        error instanceof Error &&
+        (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED)
+      )
+        throw new ModalCommandStartPreDispatchUnavailableError(error);
+      throw error;
+    }
+  }
+
+  static async ensureReady(client: Client, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        if (signal?.aborted) reject(signal.reason);
+        else if (error) reject(new ModalCommandStartPreDispatchUnavailableError(error));
+        else resolve();
+      };
+      const abort = () => finish();
+      signal?.addEventListener("abort", abort, { once: true });
+      client.waitForReady(Date.now() + 5_000, finish);
+      if (signal?.aborted) abort();
+    });
+  }
+}
+
+/** Local cancellation/closure before Start dispatch. This permits exact
+ * never-started reservation settlement, NOT another launch or turn recovery. */
+export class ModalCommandStartNotDispatchedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Modal command Start was never dispatched", {
+      cause,
+    });
+    this.name = "ModalCommandStartNotDispatchedError";
   }
 }
 
@@ -63,6 +141,133 @@ export type ModalRouterStart = ModalRouterIdentity & {
   };
 };
 
+declare const preparedStartBrand: unique symbol;
+/** An in-memory, single-use request on its issuing transport, NOT command
+ * admission or durable dispatch authority. Copies/serialized identities cannot
+ * be dispatched. The caller still owns authorization before physical Start. */
+export type ModalRouterPreparedStart = Readonly<ModalRouterIdentity> & {
+  readonly [preparedStartBrand]: true;
+};
+
+/** Nonsecret preflight integrity/correlation only. This recipe identifies ONLY
+ * ['/bin/true'], /tmp, empty env, stdout/stderr config 1 and no PTY/extras.
+ * It grants no dispatch, retry, settlement or readiness-completion authority.
+ * Provider instance/namespace must come from a trusted original-context join. */
+export type ModalRouterPreparedStartDescriptor = Readonly<ModalRouterIdentity> & {
+  readonly descriptorProtocol: "modal-prepared-start-descriptor";
+  readonly descriptorVersion: 1;
+  readonly readinessRecipe: "modal-exec-readiness-bin-true-v1";
+  readonly readinessRecipeVersion: 1;
+  readonly startMessage: "Start";
+  readonly rpcMethod: "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
+  readonly encoderVersion: "protobufjs@7.6.5";
+  readonly preflight: Readonly<{
+    encoding: "modal-start-protobuf-preflight-v1";
+    sha256: string;
+    byteLength: number;
+    encoderFingerprint: string;
+  }>;
+};
+
+type PreparedStartRequest = ModalRouterStart & { stdoutConfig: number; stderrConfig: number };
+
+function isReadinessRequest(request: ModalRouterStart, snapshot: PreparedStartRequest): boolean {
+  if (
+    snapshot.commandArgs.length !== 1 ||
+    snapshot.commandArgs[0] !== "/bin/true" ||
+    snapshot.workdir !== "/tmp" ||
+    Reflect.ownKeys(snapshot.env).length !== 0 ||
+    snapshot.ptyInfo
+  )
+    return false;
+  try {
+    return Reflect.ownKeys(request).every((key) =>
+      ["taskId", "execId", "commandArgs", "workdir", "env"].includes(key as string),
+    );
+  } catch {
+    // A generic request may be a Proxy with an unreadable original shape.
+    // Refuse description, not its otherwise valid existing Start behavior.
+    return false;
+  }
+}
+
+function prepareStartRequest(request: ModalRouterStart): {
+  request: PreparedStartRequest;
+  descriptor: ModalRouterPreparedStartDescriptor | undefined;
+} {
+  // Validate before protobuf's fromObject coercions and snapshot only the
+  // supported request fields. Caller mutations must not substitute parameters
+  // between preparation and the eventual dispatch boundary.
+  const { taskId, execId, commandArgs, workdir, env, ptyInfo } = request;
+  if (
+    !taskId ||
+    !execId ||
+    !Array.isArray(commandArgs) ||
+    !commandArgs.length ||
+    typeof workdir !== "string" ||
+    !env ||
+    typeof env !== "object" ||
+    Array.isArray(env)
+  )
+    throw new Error("Invalid Modal command Start request");
+  const snapshot: PreparedStartRequest = {
+    taskId,
+    execId,
+    commandArgs: [...commandArgs],
+    workdir,
+    env: { ...env },
+    ...(ptyInfo
+      ? {
+          ptyInfo: {
+            enabled: ptyInfo.enabled,
+            winszRows: ptyInfo.winszRows,
+            winszCols: ptyInfo.winszCols,
+            envTerm: ptyInfo.envTerm,
+            ptyType: ptyInfo.ptyType,
+            noTerminateOnIdleStdin: ptyInfo.noTerminateOnIdleStdin,
+          },
+        }
+      : {}),
+    stdoutConfig: 1,
+    stderrConfig: 1,
+  };
+  if (modalRouterWire.lookupType("Start").verify(snapshot))
+    throw new Error("Invalid Modal command Start request");
+  const preflight = encode("Start", snapshot);
+  if (preflight.length > maxWireBytes)
+    throw new Error("Modal command Start request exceeds the wire limit");
+  Object.freeze(snapshot.commandArgs);
+  Object.freeze(snapshot.env);
+  if (snapshot.ptyInfo) Object.freeze(snapshot.ptyInfo);
+  Object.freeze(snapshot);
+  // Unsupported descriptions must not narrow generic preparation/dispatch.
+  // Inspect the original shape as well: ignored extra input fields must never
+  // acquire the fixed readiness recipe merely because the snapshot drops them.
+  const descriptor: ModalRouterPreparedStartDescriptor | undefined = isReadinessRequest(
+    request,
+    snapshot,
+  )
+    ? Object.freeze({
+        taskId: snapshot.taskId,
+        execId: snapshot.execId,
+        descriptorProtocol: "modal-prepared-start-descriptor",
+        descriptorVersion: 1,
+        readinessRecipe: "modal-exec-readiness-bin-true-v1",
+        readinessRecipeVersion: 1,
+        startMessage: "Start",
+        rpcMethod: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
+        encoderVersion: startEncoderVersion,
+        preflight: Object.freeze({
+          encoding: "modal-start-protobuf-preflight-v1",
+          sha256: createHash("sha256").update(preflight).digest("hex"),
+          byteLength: preflight.length,
+          encoderFingerprint: startEncoderFingerprint,
+        }),
+      })
+    : undefined;
+  return { request: snapshot, descriptor };
+}
+
 function encode(type: string, value: object): Buffer {
   const codec = modalRouterWire.lookupType(type);
   return Buffer.from(codec.encode(codec.fromObject(value)).finish());
@@ -75,17 +280,34 @@ function encode(type: string, value: object): Buffer {
 export class ModalCommandRouterWire {
   private readonly client: Client;
   private readonly metadata: Metadata;
+  readonly #preparedStarts = new WeakMap<
+    ModalRouterPreparedStart,
+    {
+      request: PreparedStartRequest;
+      descriptor: ModalRouterPreparedStartDescriptor | undefined;
+      spent: boolean;
+    }
+  >();
   private closed = false;
-
   constructor(access: ModalRouterAccess, trustedRoots?: Buffer) {
     const url = new URL(access.url);
     if (url.protocol !== "https:" || url.username || url.password || !access.jwt)
       throw new Error("Modal command router requires authenticated TLS");
-    this.client = new Client(url.host, credentials.createSsl(trustedRoots), {
-      "grpc.max_receive_message_length": maxWireBytes,
-      "grpc.max_send_message_length": maxWireBytes,
-      "grpc.enable_retries": 0,
-    });
+    // URL.host elides HTTPS's default :443; use the actual normalized gRPC
+    // target for both the resolver and the authenticated TLS transport.
+    this.client = new Client(
+      `${url.hostname}:${url.port || "443"}`,
+      credentials.createSsl(trustedRoots),
+      {
+        "grpc.max_receive_message_length": maxWireBytes,
+        "grpc.max_send_message_length": maxWireBytes,
+        "grpc.enable_retries": 0,
+        // The HTTP/2 default 64 KiB window caps one read at 64 KiB per round
+        // trip. Two pages lets stdout and stderr each fill a page in one trip
+        // while bounding bytes discarded when a full read cancels its stream.
+        "grpc-node.flow_control_window": 2 * MODAL_ROUTER_READ_PAGE_BYTES,
+      },
+    );
     this.metadata = new Metadata();
     this.metadata.set("authorization", `Bearer ${access.jwt}`);
   }
@@ -126,19 +348,68 @@ export class ModalCommandRouterWire {
     });
   }
 
-  async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
+  /** Read-only transport preparation. It sends neither Start nor stdin and
+   * does not invoke a caller's dispatch/admission callback. Prevalidation is not
+   * wire proof: gRPC still serializes at RPC invocation after dispatch begins. */
+  async prepareStart(
+    request: ModalRouterStart,
+    signal?: AbortSignal,
+  ): Promise<ModalRouterPreparedStart> {
     try {
-      await this.unary(
-        "TaskExecStart",
-        "Start",
-        "Empty",
-        {
-          ...request,
-          stdoutConfig: 1,
-          stderrConfig: 1,
-        },
-        signal,
-      );
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
+      const { request: snapshot, descriptor } = prepareStartRequest(request);
+      await ModalCommandStartPreDispatchUnavailableError.ensureReady(this.client, signal);
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
+      const prepared = Object.freeze({
+        taskId: snapshot.taskId,
+        execId: snapshot.execId,
+      }) as ModalRouterPreparedStart;
+      this.#preparedStarts.set(prepared, { request: snapshot, descriptor, spent: false });
+      return prepared;
+    } catch (error) {
+      if (this.closed)
+        throw new ModalCommandStartNotDispatchedError(
+          new Error("Modal command router is closed", { cause: error }),
+        );
+      if (error instanceof ModalCommandStartPreDispatchUnavailableError) throw error;
+      throw new ModalCommandStartNotDispatchedError(error);
+    }
+  }
+
+  /** Passive, synchronous read on the same open issuing transport. Neither
+   * consumes the handle nor performs readiness/encoding/RPC/callback work.
+   * Every refusal is generic: no genuine non-dispatch or recovery proof. */
+  describePreparedStart(prepared: ModalRouterPreparedStart): ModalRouterPreparedStartDescriptor {
+    const entry = this.#preparedStarts.get(prepared);
+    if (this.closed || !entry || entry.spent || !entry.descriptor)
+      throw new Error("Invalid, unsupported or unavailable Modal prepared Start descriptor");
+    return entry.descriptor;
+  }
+
+  /** No readiness, route lookup or retry here. Consume the authentic local
+   * handle synchronously before RPC, including when cancellation/closure wins.
+   * Once spent it never resets, even if no acknowledgement was received. */
+  async dispatchPreparedStart(
+    prepared: ModalRouterPreparedStart,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const entry = this.#preparedStarts.get(prepared);
+    if (!entry || entry.spent)
+      // An invalid/spent reference is not proof that an earlier Start was never
+      // dispatched, and must not acquire a retry/settlement error brand.
+      throw new Error("Invalid or consumed Modal prepared Start handle");
+    entry.spent = true;
+    try {
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
+    } catch (error) {
+      throw new ModalCommandStartNotDispatchedError(error);
+    }
+    const request = entry.request;
+    try {
+      await this.unary("TaskExecStart", "Start", "Empty", request, signal);
     } catch (error) {
       const code = (error as Partial<ServiceError> | null)?.code;
       if (
@@ -152,8 +423,13 @@ export class ModalCommandRouterWire {
         ].includes(code)
       )
         throw new ModalCommandStartRejectedError(code, error);
-      throw error;
+      throw new ModalCommandStartOutcomeUnknownError(request.taskId, request.execId, error);
     }
+  }
+
+  async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
+    const prepared = await this.prepareStart(request, signal);
+    await this.dispatchPreparedStart(prepared, signal);
   }
 
   async write(
@@ -225,12 +501,12 @@ export class ModalCommandRouterWire {
       };
       call.on("data", (value: { data: Uint8Array }) => {
         if (limited) return;
-        const part = Buffer.from(value.data).subarray(0, maxPageBytes - length);
+        const part = Buffer.from(value.data).subarray(0, MODAL_ROUTER_READ_PAGE_BYTES - length);
         if (part.length) {
           chunks.push(part);
           length += part.length;
         }
-        if (length === maxPageBytes) {
+        if (length === MODAL_ROUTER_READ_PAGE_BYTES) {
           limited = true;
           call.cancel();
         }

@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { SandboxRecoveryProjection } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SandboxRecoveryClient, SandboxRecoveryRequest } from "@/lib/sandbox-recovery";
 
 // Radix detects browser support at import time, before rendering its real portal.
@@ -106,6 +107,120 @@ test("explicit confirmation names exact timestamp and generation gap, and cancel
   expect(writes).toBe(0);
 });
 
+for (const lane of ["checkpoint", "fresh_workspace"] as const) {
+  test(`an automatically recoverable ${lane} failure offers only Retry and says what it will do`, async () => {
+    let retries = 0;
+    let consentWrites = 0;
+    const projection: SandboxRecoveryProjection =
+      lane === "checkpoint"
+        ? { ...eligible, automaticAvailable: true, automaticLane: "checkpoint" }
+        : { ...eligible, checkpoint: null, automaticAvailable: true, automaticLane: lane };
+    const container = await render(
+      {
+        getSandboxRecovery: async () => projection,
+        recoverSandbox: async () => {
+          consentWrites++;
+          throw new Error("automatic continuity must not submit human consent");
+        },
+      },
+      true,
+      true,
+      {
+        onRetry: async () => {
+          retries++;
+          return true;
+        },
+      },
+    );
+    if (lane === "checkpoint") {
+      expect(container.textContent).toContain("Retry will use the latest verified checkpoint from");
+      expect(container.textContent).toContain("Newer files are unavailable.");
+      expect(container.textContent).toContain(
+        new Date(eligible.checkpoint!.capturedAt).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }),
+      );
+    } else {
+      expect(container.textContent).toContain(
+        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+      );
+      expect(container.textContent).not.toContain("checkpoint from");
+    }
+    expect(container.textContent).not.toContain("Review checkpoint recovery");
+    expect(container.textContent).not.toContain("Choose another model");
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    await click("Retry");
+    expect(retries).toBe(1);
+    expect(consentWrites).toBe(0);
+  });
+}
+
+for (const [reason, copy] of [
+  [
+    "shared_sandbox_member_active",
+    "Another session sharing this sandbox is still running or waiting for input.",
+  ],
+  [
+    "retry_tool_outcome_unresolved",
+    "Send a new message to continue; the lost sandbox then recovers automatically.",
+  ],
+  ["restore_retry_backoff", "The checkpoint is kept for the next attempt. You can retry later."],
+  ["restore_retry_exhausted", "The checkpoint is kept; ask your operator to review this session."],
+  ["provider_lifetime_unexpired", "once the lost sandbox's provider lifetime has ended"],
+] as const) {
+  test(`${reason} explains why Retry is not offered and what to do`, async () => {
+    const container = await render({
+      getSandboxRecovery: async () => ({ ...eligible, status: "blocked", reason }),
+      recoverSandbox: async () => {
+        throw new Error("unexpected mutation");
+      },
+    });
+    expect(container.textContent).toContain(copy);
+    expect(container.textContent).not.toContain("Retry will");
+    expect([...container.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
+      "Check recovery status",
+    ]);
+  });
+}
+
+for (const reason of ["restore_retry_backoff", "provider_lifetime_unexpired"] as const) {
+  test(`${reason} names when Retry can decide again, never implying automatic progress`, async () => {
+    const availableAt = "2026-09-18T07:24:31.000Z";
+    const container = await render({
+      getSandboxRecovery: async () => ({ ...eligible, status: "blocked", reason, availableAt }),
+      recoverSandbox: async () => {
+        throw new Error("unexpected mutation");
+      },
+    });
+    // Shown to the minute and rounded up, so a Retry at the shown time is never early.
+    expect(container.textContent).toContain(
+      `You can retry after ${new Date("2026-09-18T07:25:00.000Z").toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })}.`,
+    );
+    expect(container.textContent).not.toContain("OpenGeni will");
+    expect(container.textContent).not.toContain("check back");
+  });
+}
+
+test("a fresh-workspace projection for another session is not a Retry lane", async () => {
+  const container = await render({
+    getSandboxRecovery: async () => ({
+      ...eligible,
+      checkpoint: { ...eligible.checkpoint!, sessionId: "other" },
+      automaticAvailable: true,
+      automaticLane: "checkpoint",
+    }),
+    recoverSandbox: async () => {
+      throw new Error("unexpected mutation");
+    },
+  });
+  expect(container.textContent).not.toContain("Retry will");
+  expect(container.querySelector("button")?.textContent).not.toBe("Retry");
+});
+
 test("acceptance is not restoration and double clicks never replay mutation", async () => {
   const requests: SandboxRecoveryRequest[] = [];
   const container = await render({
@@ -192,6 +307,71 @@ test("unavailable reads and unsupported structural failures never fall back to r
   await click("Check recovery status");
   expect(container.textContent).toContain("unavailable");
   expect(container.textContent).not.toContain("Choose another model");
+});
+
+test.each([false, true])(
+  "a 403 read (structural %p) is not applicable, not a failed check",
+  async (structural) => {
+    let reads = 0;
+    const container = await render(
+      {
+        getSandboxRecovery: async () => {
+          reads++;
+          throw new OpenGeniApiError(
+            403,
+            JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+          );
+        },
+        recoverSandbox: async () => {
+          throw new Error("unexpected mutation");
+        },
+      },
+      structural,
+    );
+    expect(reads).toBe(1);
+    expect(container.textContent).not.toContain("Could not check checkpoint recovery");
+    expect(container.textContent).not.toContain("Checking checkpoint recovery");
+    expect(container.textContent).not.toContain("Check recovery status");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The lane defers to its caller's ordinary remedies; the banner already
+    // withholds generic Retry from structural failures.
+    expect(container.textContent).toContain("Try again");
+  },
+);
+
+test("a 403 read after an unconfirmed consent keeps the notice and status checks", async () => {
+  let denied = false;
+  let reads = 0;
+  let writes = 0;
+  const container = await render(
+    {
+      getSandboxRecovery: async () => {
+        reads++;
+        if (denied)
+          throw new OpenGeniApiError(403, JSON.stringify({ error: { message: "denied" } }));
+        return eligible;
+      },
+      recoverSandbox: async () => {
+        writes++;
+        throw new Error("response lost");
+      },
+    },
+    false,
+  );
+  await click("Review checkpoint recovery");
+  await click("Accept and restore checkpoint");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  denied = true;
+  await click("Check recovery status");
+  expect(container.textContent).toContain("outcome unconfirmed");
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain(
+    "Could not check checkpoint recovery",
+  );
+  expect(container.textContent).not.toContain("Try again");
+  const before = reads;
+  await click("Check recovery status");
+  expect(reads).toBe(before + 1);
+  expect(writes).toBe(1);
 });
 
 test("nonstructural unsupported recovery preserves ordinary failure controls", async () => {

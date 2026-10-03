@@ -330,6 +330,28 @@ with `%L` (13 sites, including `0225`, `0254`, `0258`, `0262`, `0285`), or
 sites). Nothing breaks on a deployment whose owner is not named `postgres`. The
 finding should be recorded as already-correct rather than as a defect.
 
+### 2026-10-02 addendum: content-free Slack provider quotas
+
+`slack_api_rate_limits` is a deliberate non-RLS operational table. Slack applies
+its method limits across tokens sharing an app and Slack workspace, including
+tokens owned by different OpenGeni organizations. An organization predicate
+would split the same provider quota and permit concurrent requests beyond it.
+
+The table stores only a SHA-256 hash of the configured Slack client id, verified
+Slack workspace id, and fixed API method, plus the next allowed request time. It
+stores no credential, user, connection, channel, message, or tenant attribution.
+Conditional UPSERT admissions serialize across replicas; provider `Retry-After`
+can extend a cooldown. These rows grant no authority: exact connection and live
+request authorization remain required before provider dispatch.
+
+Arbitrary runtime-role SQL could read or alter these opaque cooldowns, affecting
+availability, but cannot obtain a credential or authorize a Slack request from
+this table. Migration `0597_slack_api_rate_limits.sql` revokes public access;
+role provisioning grants the matching runtime role direct DML. This global
+operational exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`, with shared atomic admission
+covered by `packages/db/test/slack-api-rate-limits.test.ts`.
+
 ## What would change the verdict
 
 The `workspaces` and `workspace_memberships` exemptions are consequences of one

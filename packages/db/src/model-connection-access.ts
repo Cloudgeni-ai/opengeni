@@ -7,7 +7,13 @@ import {
   type Database,
 } from "./database";
 
-export type ModelConnectionKind = "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+export type ModelConnectionKind =
+  | "codex"
+  | "supergrok"
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 export type ModelConnectionAccess = {
   allowedModels: string[] | null;
   allowedWorkspaces: string[] | null;
@@ -45,10 +51,18 @@ export function assignedConnectionDefault(
 }
 
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
-  if (target.kind === "codex" || target.kind === "supergrok")
+  if (
+    target.kind === "codex" ||
+    target.kind === "supergrok" ||
+    target.kind === "claude_subscription"
+  )
     return {
       table: sql.identifier(
-        target.kind === "codex" ? "codex_subscription_credentials" : "xai_subscription_credentials",
+        target.kind === "codex"
+          ? "codex_subscription_credentials"
+          : target.kind === "supergrok"
+            ? "xai_subscription_credentials"
+            : "claude_subscription_credentials",
       ),
       condition: sql`id = ${target.connectionId}::uuid AND account_id = ${target.accountId}::uuid AND ${
         target.workspaceId === null
@@ -66,7 +80,8 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
     table: sql.identifier("connections"),
     condition: sql`account_id = ${target.accountId}::uuid AND workspace_id = ${target.workspaceId}::uuid
       AND id = ${target.connectionId}::uuid AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'
-      AND metadata->>'credentialRole' = ${target.kind === "vercel_gateway" ? "vercel_ai_gateway" : "openrouter"}`,
+      AND metadata->>'credentialRole' = ${target.kind === "vercel_gateway" ? "vercel_ai_gateway" : target.kind}
+      ${target.kind === "anthropic" ? sql`AND lower(provider_domain) = 'api.anthropic.com'` : sql``}`,
   };
 }
 

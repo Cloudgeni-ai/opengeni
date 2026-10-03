@@ -28,6 +28,11 @@ import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-tr
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import {
+  captureClaudeRequestToken,
+  prepareClaudeSubscriptionRequest,
+} from "./claude-subscription-usage";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
@@ -85,7 +90,10 @@ export function buildOpenAIClientFromSettings(
           settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
             ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
             : undefined,
-        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+        fetch: sdkRetryingModelFetch(
+          settings.openaiMaxRetries,
+          instrumentedModelFetch(providerId, globalThis.fetch),
+        ),
       },
       { modelRequestPolicy: azureModelRequestPolicy },
     );
@@ -94,8 +102,21 @@ export function buildOpenAIClientFromSettings(
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
     maxRetries: settings.openaiMaxRetries,
-    fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+    fetch: sdkRetryingModelFetch(
+      settings.openaiMaxRetries,
+      instrumentedModelFetch(providerId, globalThis.fetch),
+    ),
   });
+}
+
+/**
+ * A client that lets the OpenAI SDK retry 429s must not replay an exhausted
+ * provider quota: the refusal cannot clear within the SDK's backoff, and each
+ * retry only delays the typed turn failure. Clients with SDK retries disabled
+ * need no veto.
+ */
+function sdkRetryingModelFetch(maxRetries: number, inner: typeof fetch): typeof fetch {
+  return maxRetries > 0 ? withoutQuotaExhaustedRetries(inner) : inner;
 }
 
 /**
@@ -245,6 +266,12 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 }
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  if (
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
+    !provider.apiKey?.trim()
+  ) {
+    throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
     provider.credentialSource?.kind === "workspace_connection" ||
@@ -270,6 +297,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     return cached;
   }
   if (scopedCredentialProvider && !provider.apiKey) {
+    if (provider.api === "anthropic-messages")
+      throw new Error(
+        "Claude is not connected. Ask someone who manages this connection to connect it in Models.",
+      );
     if (provider.kind === "openrouter-organization") {
       throw new OrganizationOpenRouterUnavailableError();
     }
@@ -282,6 +313,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
+  // Gateway and OpenRouter requests can incur upstream work or charges
+  // before a retryable response failure reaches this process. Neither
+  // transport has a provider idempotency key tied to our durable call,
+  // so never let the SDK replay them blindly.
+  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -342,24 +378,23 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? { apiKey: provider.apiKey }
                   : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-              // Gateway and OpenRouter requests can incur upstream work or charges
-              // before a retryable response failure reaches this process. Neither
-              // transport has a provider idempotency key tied to our durable call,
-              // so never let the SDK replay them blindly.
-              maxRetries: gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries,
+              maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-              fetch: anonymousProvider
-                ? withoutAuthenticationHeaders(
-                    instrumentedModelFetch(provider.id, globalThis.fetch),
-                  )
-                : gatewayProvider
-                  ? vercelGatewayRoutingFetch(
-                      provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+              fetch: sdkRetryingModelFetch(
+                registryMaxRetries,
+                anonymousProvider
+                  ? withoutAuthenticationHeaders(
                       instrumentedModelFetch(provider.id, globalThis.fetch),
-                      gatewayPolicies,
                     )
-                  : instrumentedModelFetch(provider.id, globalThis.fetch),
+                  : gatewayProvider
+                    ? vercelGatewayRoutingFetch(
+                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                        instrumentedModelFetch(provider.id, globalThis.fetch),
+                        gatewayPolicies,
+                      )
+                    : instrumentedModelFetch(provider.id, globalThis.fetch),
+              ),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );
@@ -374,6 +409,9 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
+    const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
+    init = prepared.init;
+    const claudeRequestToken = captureClaudeRequestToken(input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
@@ -381,6 +419,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     const started = performance.now();
     try {
       const response = await inner(input, capture.init);
+      prepared.observe(response, claudeRequestToken);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {

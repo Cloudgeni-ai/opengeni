@@ -5,12 +5,17 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 
 const migration = "0478_sender_owned_connections.sql";
 // 0494 patches the installed 0478 resolver, so it must wait until this fixture
 // has actually applied the sender cutover rather than merely marked it applied.
 const accountBindingsMigration = "0494_mcp_account_bindings.sql";
 const sharingMigration = "0501_session_sharing_execution.sql";
+// Replaces the owner trigger installed by this cutover.
+const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
+// Replaces 0534's scheduled-run triggers; withheld with it.
+const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -31,9 +36,14 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     await owner.unsafe(
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration})`;
+    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration}), (${admissionRefusalsMigration})`;
+    // The allowance guard patch must wait for the withheld refusal lifecycle.
+    for (const name of allowanceMigrationTail)
+      await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(db.ownerUrl);
-    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration})`;
+    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration}, ${admissionRefusalsMigration})`;
+    for (const name of allowanceMigrationTail)
+      await owner`delete from schema_migrations where name=${name}`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
     expect(posture).toMatchObject({ rolsuper: false, rolbypassrls: false });

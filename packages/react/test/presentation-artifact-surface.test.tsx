@@ -72,6 +72,258 @@ function installRecordingCanvas(calls: string[]): () => void {
 }
 
 describe("presentation artifact surface", () => {
+  for (const reason of ["prior_writer", "pending_conflict"] as const) {
+    test(`${reason} fences mutations while preserving selection, slides, and zoom`, async () => {
+      const presentation = makePresentation(2);
+      const shape = presentation.slides.items[0]!.shapes.items[0]!;
+      const before = { ...shape.position };
+      const commits: PresentationCommit[] = [];
+      const zoomChanges: number[] = [];
+      const rendered = await renderComponent(
+        <PresentationEditor
+          presentation={presentation}
+          authoringBlockedReason={reason}
+          defaultSelectedObjectId={shape.id}
+          onCommit={(commit) => {
+            commits.push(commit);
+          }}
+          onZoomChange={(zoom) => zoomChanges.push(zoom)}
+        />,
+      );
+      try {
+        await flush();
+        for (const label of [
+          "Add slide",
+          "Delete slide",
+          "Add text box",
+          "Delete selected object",
+        ]) {
+          const button = rendered.container.querySelector<HTMLButtonElement>(
+            `button[aria-label="${label}"]`,
+          )!;
+          expect(button.disabled).toBe(true);
+          await actRun(() => button.click());
+        }
+        const editor = rendered.container.querySelector<SVGSVGElement>('[role="application"]')!;
+        await actRun(() => {
+          editor.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+          editor.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "ArrowDown", altKey: true, bubbles: true }),
+          );
+          editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+          editor.dispatchEvent(
+            new PointerEvent("pointerdown", {
+              bubbles: true,
+              button: 0,
+              pointerId: 1,
+              clientX: 10,
+              clientY: 10,
+            }),
+          );
+          editor.dispatchEvent(
+            new PointerEvent("pointerup", {
+              bubbles: true,
+              pointerId: 1,
+              clientX: 30,
+              clientY: 30,
+            }),
+          );
+        });
+        expect(shape.position).toEqual(before);
+        expect(commits).toEqual([]);
+        expect(rendered.container.querySelector("textarea")).toBeNull();
+        expect(rendered.container.querySelector("[data-og-presentation-object] circle")).toBeNull();
+        await actRun(() =>
+          rendered.container
+            .querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]')!
+            .click(),
+        );
+        expect(zoomChanges).toHaveLength(1);
+        await actRun(() =>
+          rendered.container
+            .querySelector<HTMLButtonElement>('button[aria-label="Next slide"]')!
+            .click(),
+        );
+        expect(
+          rendered.container.querySelector('[role="application"]')?.getAttribute("aria-label"),
+        ).toBe("Slide 2 editor");
+        const state = rendered.container.querySelector("[data-og-presentation-editor]")!;
+        expect(state.getAttribute("data-og-command-state")).toBe(
+          reason === "prior_writer" ? "pending" : "error",
+        );
+        expect(state.getAttribute("aria-busy")).toBe(reason === "prior_writer" ? "true" : null);
+        expect(rendered.container.textContent).toContain(
+          reason === "prior_writer"
+            ? "Saving earlier changes…"
+            : "An earlier change needs attention",
+        );
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  }
+
+  test("a transient authoring block retains text drafts, permits cancellation, and permission loss clears them", async () => {
+    const presentation = makePresentation();
+    const shape = presentation.slides.items[0]!.shapes.items[0]!;
+    const commits: PresentationCommit[] = [];
+    const element = (reason?: "prior_writer", readOnly = false) => (
+      <PresentationEditor
+        presentation={presentation}
+        defaultSelectedObjectId={shape.id}
+        authoringBlockedReason={reason}
+        readOnly={readOnly}
+        onCommit={(commit) => {
+          commits.push(commit);
+        }}
+      />
+    );
+    const rendered = await renderComponent(element());
+    const start = async () => {
+      await actRun(() =>
+        rendered.container
+          .querySelector('[role="application"]')!
+          .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+      );
+      await flush();
+      const input = rendered.container.querySelector<HTMLTextAreaElement>("textarea")!;
+      await actRun(() => input.focus());
+      return input;
+    };
+    try {
+      const input = await start();
+      await actRun(() => replaceTextAreaValue(input, "Retained draft"));
+      await rendered.rerender(element("prior_writer"));
+      expect(input.value).toBe("Retained draft");
+      expect(input.readOnly).toBe(true);
+      await actRun(() => {
+        input.blur();
+        input.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }),
+        );
+      });
+      expect(rendered.container.querySelector("textarea")).toBe(input);
+      expect(commits).toEqual([]);
+      await rendered.rerender(element());
+      expect(input.readOnly).toBe(false);
+      await actRun(() => input.focus());
+      await actRun(() =>
+        input.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }),
+        ),
+      );
+      expect(shape.text.toString()).toBe("Retained draft");
+      expect(commits).toHaveLength(1);
+      const cancel = await start();
+      await actRun(() => replaceTextAreaValue(cancel, "Cancelled draft"));
+      await rendered.rerender(element("prior_writer"));
+      await actRun(() =>
+        cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+      );
+      expect(rendered.container.querySelector("textarea")).toBeNull();
+      expect(shape.text.toString()).toBe("Retained draft");
+      await rendered.rerender(element());
+      await start();
+      await rendered.rerender(element("prior_writer", true));
+      expect(rendered.container.querySelector("textarea")).toBeNull();
+      expect(commits).toHaveLength(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an active drag draft survives a transient block and lost capture until cancellation", async () => {
+    const presentation = makePresentation();
+    const shape = presentation.slides.items[0]!.shapes.items[0]!;
+    const commits: PresentationCommit[] = [];
+    const element = (reason?: "prior_writer", readOnly = false) => (
+      <PresentationEditor
+        presentation={presentation}
+        defaultSelectedObjectId={shape.id}
+        authoringBlockedReason={reason}
+        readOnly={readOnly}
+        onCommit={(commit) => {
+          commits.push(commit);
+        }}
+      />
+    );
+    const rendered = await renderComponent(element());
+    try {
+      const editor = rendered.container.querySelector<SVGSVGElement>('[role="application"]')!;
+      editor.getBoundingClientRect = () =>
+        ({ left: 0, top: 0, width: 1280, height: 720 }) as DOMRect;
+      const pointer = (type: string, x: number) =>
+        editor.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            button: 0,
+            pointerId: 7,
+            clientX: x,
+            clientY: 10,
+          }),
+        );
+      const draftLeft = () =>
+        rendered.container.querySelector("[data-og-presentation-object] rect")?.getAttribute("x");
+      await actRun(() => pointer("pointerdown", 10));
+      await actRun(() => pointer("pointermove", 30));
+      expect(draftLeft()).toBe("20");
+      await rendered.rerender(element("prior_writer"));
+      await actRun(() => pointer("pointerup", 30));
+      await actRun(() => pointer("lostpointercapture", 30));
+      expect(draftLeft()).toBe("20");
+      expect(shape.position.left).toBe(0);
+      expect(commits).toEqual([]);
+      await actRun(() => pointer("pointercancel", 30));
+      expect(draftLeft()).toBe("0");
+      await rendered.rerender(element());
+      await actRun(() => pointer("pointerdown", 10));
+      await actRun(() => pointer("pointermove", 40));
+      expect(draftLeft()).toBe("30");
+      await rendered.rerender(element("prior_writer", true));
+      expect(draftLeft()).toBe("0");
+      expect(commits).toEqual([]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a saved command retry waits for the authoring barrier to clear", async () => {
+    const presentation = makePresentation();
+    const shape = presentation.slides.items[0]!.shapes.items[0]!;
+    let attempts = 0;
+    const commit = () => {
+      if (++attempts === 1) throw new Error("synthetic save failure");
+    };
+    const element = (reason?: "prior_writer") => (
+      <PresentationEditor
+        presentation={presentation}
+        defaultSelectedObjectId={shape.id}
+        authoringBlockedReason={reason}
+        onCommit={commit}
+      />
+    );
+    const rendered = await renderComponent(element());
+    try {
+      await actRun(() =>
+        rendered.container
+          .querySelector('[role="application"]')!
+          .dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+      );
+      const retry = rendered.container.querySelector<HTMLButtonElement>('[role="alert"] button')!;
+      expect(retry).toBeTruthy();
+      await rendered.rerender(element("prior_writer"));
+      expect(retry.disabled).toBe(true);
+      await actRun(() => retry.click());
+      expect(attempts).toBe(1);
+      await rendered.rerender(element());
+      expect(retry.disabled).toBe(false);
+      await actRun(() => retry.click());
+      expect(attempts).toBe(2);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("hundreds of slides and objects keep a bounded DOM", async () => {
     const presentation = makePresentation(500, 500);
     const rendered = await renderComponent(<PresentationEditor presentation={presentation} />);

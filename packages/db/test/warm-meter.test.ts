@@ -3,7 +3,8 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   accrueWarmSeconds,
-  acquireLease,
+  acquireLease as acquireLeaseUnscoped,
+  withCreditDebitAttribution,
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
@@ -18,7 +19,13 @@ import {
   heartbeatLeaseHolderStatus,
   type Database,
   type DbClient,
+  type CreditDebitAttribution,
 } from "../src/index";
+
+// These fixtures use synthetic holders rather than real turn-attempt receipts.
+// Give them explicit trusted service attribution; never infer from holder text.
+const acquireLease: typeof acquireLeaseUnscoped = (db, input) =>
+  withCreditDebitAttribution({ kind: "service" }, () => acquireLeaseUnscoped(db, input));
 
 // P2.1 warm-time metering driven through the REAL packages/db query fns
 // (accrueWarmSeconds / forceDrainOverLimitViewerOnlyBoxes / listMeterableWarmLeases)
@@ -69,18 +76,21 @@ async function warmGroup(
   ids: { accountId: string; workspaceId: string; groupId: string },
   holders: { kind: "turn" | "viewer" | "direct" | "interaction"; holderId: string }[],
   warmBilling?: { mode: "usage_only" | "shadow" | "credits"; rateMicrosPerSecond: number },
+  attribution: CreditDebitAttribution = { kind: "service" },
 ): Promise<number> {
   for (const h of holders) {
-    await acquireLease(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.groupId,
-      kind: h.kind,
-      holderId: h.holderId,
-      backend: "modal",
-      ...(warmBilling ? { warmBilling } : {}),
-      leaseTtlMs: 90_000,
-    });
+    await withCreditDebitAttribution(attribution, () =>
+      acquireLeaseUnscoped(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        kind: h.kind,
+        holderId: h.holderId,
+        backend: "modal",
+        ...(warmBilling ? { warmBilling } : {}),
+        leaseTtlMs: 90_000,
+      }),
+    );
   }
   const committed = await commitWarmingToWarm(db, {
     accountId: ids.accountId,
@@ -195,6 +205,54 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
+  test("warm settlement uses frozen admission human, not later observers or cleanup services", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 10_000);
+    const epoch = await warmGroup(
+      ws,
+      [{ kind: "viewer", holderId: "initiating-viewer" }],
+      {
+        mode: "credits",
+        rateMicrosPerSecond: 100,
+      },
+      { kind: "human", initiatingHumanSubjectId: "human:initiator" },
+    );
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 3);
+    const result = await withCreditDebitAttribution(
+      { kind: "human", initiatingHumanSubjectId: "human:later-observer" },
+      () =>
+        accrueWarmSeconds(db, {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: ws.groupId,
+          expectedEpoch: epoch,
+          subjectId: "another-session-disclosure-label",
+          billingMode: "credits",
+          warmRateMicrosPerSecond: 900,
+        }),
+    );
+    expect(result.accrued).toBe(true);
+    const [debit] = await admin`
+      SELECT metadata FROM credit_ledger_entries
+      WHERE idempotency_key=${`debit:sandbox.warm_cost:${ws.groupId}:${epoch}:1`}`;
+    expect(debit?.metadata).toEqual({ initiatingHumanSubjectId: "human:initiator" });
+    const [memberUsage] = await admin`
+      SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
+      WHERE workspace_id=${ws.workspaceId} AND subject_id='human:initiator'`;
+    expect(Number(memberUsage?.used)).toBe(result.costMicros);
+    const [observerUsage] = await admin`
+      SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
+      WHERE workspace_id=${ws.workspaceId} AND subject_id='human:later-observer'`;
+    expect(Number(observerUsage?.used)).toBe(0);
+    await expect(
+      admin`UPDATE sandbox_leases SET
+        resume_state=resume_state #- '{opengeniWarmBilling,attribution}'
+        WHERE workspace_id=${ws.workspaceId} AND sandbox_group_id=${ws.groupId}`.then(
+        (rows) => rows,
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+  }, 60_000);
   test("paid admissions fence zero balance before cold create, warm join and draining re-arm; unpriced modes remain usable", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

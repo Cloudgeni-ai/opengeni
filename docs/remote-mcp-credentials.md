@@ -5,6 +5,30 @@ refresh credentials. Integrating backends provision connections through the
 same connection APIs used by interactive clients, under the canonical actor.
 Personal selections remain bound to the named user captured by accepted work.
 
+Generic OAuth connectors request `offline_access` when the authorization
+server advertises it, alongside the MCP resource scopes. Reviewed provider
+profiles retain their exact scope pins. An expired connection without a refresh
+token needs a new interactive OAuth grant; refresh cannot manufacture one.
+
+SDK transport teardown warnings use `mcp_cleanup_failed`, separately from
+`mcp_transport_failed`. A server that rejects session DELETE (for example, HTTP
+405) may still initialize, list tools, and execute tools successfully. Verify
+those phases before classifying a cleanup warning as connector unavailability.
+
+## Discovery bounds
+
+Tool discovery shares a 4,096-entry allowance across the prepared catalog. One
+provider may use that allowance; there is no separate 1,000-tool cutoff. Re-listing
+replaces the provider's prior contribution rather than counting it twice. The
+runtime still bounds each definition to 128 KiB, each provider list to 4 MiB,
+and the aggregate to 16 MiB. It does not truncate an oversized list or silently
+select a subset. A best-effort provider whose discovery fails contributes no
+tools for that turn; successful authentication alone does not prove that its
+catalog was admitted.
+Connector-permissions discovery and explicit tool-name updates use the same
+count allowance, so an admitted catalog can be managed without a lower cutoff.
+Duplicate names and repeated pagination cursors remain rejected.
+
 ## Attached accounts
 
 An enabled native connector can attach multiple authorized connections, including
@@ -28,6 +52,12 @@ Legacy unpinned selectors retain their existing eligible-account behavior.
 New catalog OAuth/API-key enables explicitly select this mode. Reconnects retain
 an existing selector or exact pin; adding an account never silently converts an
 existing exact installation into a selector.
+Slack's reviewed Web API bridge retains the official MCP catalog/OAuth identity
+and native accepted-account authority. It requires actual reported user scopes,
+normalizes legacy comma-packed grants, and uses scope-filtered discovery rather
+than authenticating to Slack's hosted MCP endpoint. The shared database quota and
+bot context limits are described in [Slack](slack-bot.md#unlisted-pilot-and-rollout).
+
 The dedicated Slack account setup enables a previously disabled stock Slack
 capability with this selector after successful account connection. Bot setup and
 reconnects of already-enabled capabilities do not rewrite their bindings.
@@ -40,13 +70,37 @@ workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
 
+Creating a session revalidates inherited workspace account identity. If an
+accepted account disappeared, needs reauthorization, or changed authorization
+generation, creation is refused. The first-party tool returns
+`session_create_connection_selection_unavailable` with `retryable: false`;
+HTTP creation returns `SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE` (409).
+Repeating the same accepted selection cannot refresh authority. A new authorized
+turn must select current eligible accounts; neither transport silently removes,
+refreshes or substitutes an account. Unknown database failures remain generic.
+
+Initial turns and follow-up messages resolve the same executable connector
+policy before freezing accounts. Workspace-default connectors participate even
+when absent from the stored creation snapshot; explicit lists and connector
+exclusions still limit the accepted accounts.
+
+Starting voice freezes eligible accounts under the authenticated request's
+authority on its durable lease. Live delegations and the final transcript
+handoff copy that exact snapshot, including after automatic lease expiry.
+Historical leases remain unmodified; new connections do not widen an existing
+call's authority. Physical provider use still checks live membership and
+connection revocation.
+
 The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
 save the selected pairs with `connectionAccountsFrozen: true` under the task's
 execution owner and revalidate them when an occurrence is accepted. A frozen
 empty list stays empty if accounts are connected later. Material edits preserve
-the accepted selection unless the owner explicitly replaces the account choices;
+the accepted selection unless the owner explicitly replaces the account choices.
+Removing an MCP tool also removes its inherited account choice, without changing
+the exact accounts of retained tools. Explicitly supplied choices for unselected
+tools are still rejected;
 historical tasks without the marker retain their prior selection semantics.
 Unavailable selected accounts permanently block the occurrence with
 `connection_account_unavailable`, rather than retrying another identity.
@@ -68,6 +122,12 @@ The host binding/delegation/resolver HTTP routes and corresponding SDK methods
 are removed. `OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON` no longer configures
 the runtime. Do not register a callback or copy a host binding into a native
 connection reference. Provision an ordinary connection and select it explicitly.
+
+Existing session attachments are not implicitly migrated by account selection.
+An authorized host can replace their saved binding in place using the
+[standalone native-account replacement](session-mcp-servers.md#standalone-native-account-replacement)
+operation, retaining the session's history and files. This requires a quiescent
+session and exact destination/version preconditions; accepted work is unchanged.
 
 See [product integration](product-integration.md),
 [connection authority](design/connection-authority-delegation.md), and the

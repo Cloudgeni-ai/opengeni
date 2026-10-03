@@ -1,0 +1,938 @@
+import { useState, type ReactNode } from "react";
+import {
+  BuildingIcon,
+  CheckIcon,
+  CopyIcon,
+  FolderIcon,
+  KeyRoundIcon,
+  MinusCircleIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  PlusIcon,
+  UnplugIcon,
+} from "lucide-react";
+import { toast } from "sonner";
+
+import { Button } from "@/components/ui/button";
+import { CopyField, copyText } from "@/components/ui/copy-field";
+import {
+  DetailBody,
+  DetailFact,
+  DetailFacts,
+  DetailFooter,
+  DetailHeader,
+  DetailSection,
+  useDetailPresentation,
+} from "@/components/ui/detail-sheet";
+import {
+  DetailAside,
+  DetailAsideItem,
+  DetailPageBody,
+  DetailPageHeader,
+} from "@/components/ui/detail-page";
+import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { Disclosure } from "@/components/ui/disclosure";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { EmptyState } from "@/components/ui/empty-state";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { RelativeTime } from "@/components/ui/relative-time";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { Switch } from "@/components/ui/switch";
+import { UsageMeterGroup } from "@/components/ui/usage-meter";
+
+import { KIT_NOW, KIT_TIME_ZONE, currentWorkspace, workspaces, you } from "../../fixtures";
+import { ProviderTile } from "./marks";
+import { useModelsPicks } from "./picks";
+import {
+  ORG_NAME,
+  effectiveSource,
+  findAccount,
+  makePrimary,
+  servedSummary,
+  updateAccount,
+  updateGateway,
+  useModels,
+  wait,
+  type CodexAccount,
+  type GatewayId,
+  type Scope,
+} from "./state";
+
+/* ----------------------------------------------------------------------------
+   The account detail: one place for everything about one model account. It is
+   its own page ("← Models", tile, title, chips, meta line, a main column and a
+   quiet aside card). The same sections also render in place under a row, for
+   question 12's other answer.
+   -------------------------------------------------------------------------- */
+
+const TIME = { now: KIT_NOW, timeZone: KIT_TIME_ZONE } as const;
+
+function DangerGhost({ children, onClick }: { children: ReactNode; onClick?: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+      className="-ml-3 text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+    >
+      {children}
+    </Button>
+  );
+}
+
+function RowButton({
+  children,
+  onClick,
+  label,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  label?: string;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      aria-label={label}
+      className="rounded-[10px] pointer-coarse:h-11"
+    >
+      {children}
+    </Button>
+  );
+}
+
+/**
+ * Buttons ("Rename", "Make primary") stay in the right column when controls
+ * sit on the right, and move under the text in the control-left list style,
+ * where the leading column is only for switches.
+ */
+export function buttonWidth(variant: string): "compact" | "auto" {
+  return variant === "control-left" ? "auto" : "compact";
+}
+
+/** The one-line "who manages this" note on a read-only account. */
+function ManagedNote({ children }: { children: ReactNode }) {
+  return <p className="m-0 py-4 text-sm leading-5 text-fg-muted">{children}</p>;
+}
+
+/** Where the account is used from the page being viewed. */
+export interface AccountView {
+  /** The settings area the page belongs to. */
+  pageScope: Scope;
+  /** Called when "Manage in organization settings" is chosen. */
+  onManageInOrganization?: (id: string) => void;
+  /** Called when the detail closes itself (after Disconnect). */
+  onClose?: () => void;
+}
+
+/** A state that needs attention. Healthy accounts show none (no green "Connected"). */
+export function accountStatus(
+  account: CodexAccount,
+  inUse: boolean,
+): { status: "paused" | "needs_reconnect"; label?: string; tone?: "neutral" } | null {
+  if (account.needsReconnect) return { status: "needs_reconnect" };
+  if (!account.useForNewWork) return { status: "paused" };
+  if (!inUse) return { status: "paused", label: "Not in use", tone: "neutral" };
+  return null;
+}
+
+/** The account belongs to the Codex pool new work uses right now. */
+export function accountInUse(
+  account: CodexAccount,
+  context: Pick<ReturnType<typeof useModels>, "data" | "questions" | "scenario">,
+): boolean {
+  if (account.scope === "organization" && context.scenario.scope === "organization") return true;
+  return effectiveSource(context.data, context.questions, context.scenario) === account.scope;
+}
+
+/* ----------------------------------------------------------------------------
+   Codex account.
+   -------------------------------------------------------------------------- */
+
+export function CodexAccountDetail({
+  scope,
+  id,
+  view,
+  showHeader = true,
+}: {
+  scope: Scope;
+  id: string;
+  view: AccountView;
+  showHeader?: boolean;
+}) {
+  const models = useModels();
+  const { data, scenario } = models;
+  const account = findAccount(data, scope, id);
+  const presentation = useDetailPresentation();
+  const picks = useModelsPicks();
+  if (!account) {
+    return (
+      <DetailBody>
+        <p className="py-10 text-center text-sm text-fg-muted">This account was disconnected.</p>
+      </DetailBody>
+    );
+  }
+  const readOnly = account.scope === "organization" && view.pageScope === "workspace";
+  const orgAdmin = scenario.viewer === "org_admin";
+  const status = accountStatus(account, accountInUse(account, models));
+  const scopeLabel =
+    account.scope === "organization"
+      ? view.pageScope === "organization"
+        ? "Organization account"
+        : `Shared by ${ORG_NAME}`
+      : "This workspace";
+  const statusBadge = status ? (
+    <StatusBadge status={status.status} tone={status.tone} variant={picks.statusHeader}>
+      {status.label}
+    </StatusBadge>
+  ) : null;
+
+  // Admins get "Manage in organization settings" in the header; everyone else one sentence.
+  const managedNote =
+    readOnly && !orgAdmin ? <ManagedNote>Managed by your organization.</ManagedNote> : null;
+  const sections = (
+    <>
+      <UsageSection account={account} />
+      {readOnly ? null : <SettingsSection account={account} />}
+      {account.scope === "organization" && !readOnly ? (
+        <AvailabilitySection account={account} />
+      ) : null}
+      <ResetsSection account={account} readOnly={readOnly} />
+    </>
+  );
+
+  if (presentation === "page") {
+    return (
+      <>
+        <DetailPageHeader
+          leading={<ProviderTile provider="codex" />}
+          title={account.name}
+          chips={statusBadge}
+          meta={[account.plan, scopeLabel]}
+          actions={
+            <CodexActions account={account} readOnly={readOnly} orgAdmin={orgAdmin} view={view} />
+          }
+        />
+        {/* No aside: it only repeated the header. The account ID is "Copy account ID" in ⋯. */}
+        <DetailPageBody>
+          {managedNote}
+          {sections}
+        </DetailPageBody>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {showHeader ? (
+        <DetailHeader
+          leading={<ProviderTile provider="codex" />}
+          title={account.name}
+          subtitle={`${account.plan} · ${scopeLabel}`}
+          // "Primary" is not repeated here: the Settings row below says it.
+          status={statusBadge}
+        />
+      ) : null}
+      <DetailBody>
+        {managedNote}
+        {sections}
+        <TechnicalDetails account={account} />
+      </DetailBody>
+      <CodexFooter account={account} readOnly={readOnly} orgAdmin={orgAdmin} view={view} />
+    </>
+  );
+}
+
+/** The page's actions: "Manage in organization settings" when read-only, otherwise ⋯. */
+function CodexActions({
+  account,
+  readOnly,
+  orgAdmin,
+  view,
+}: {
+  account: CodexAccount;
+  readOnly: boolean;
+  orgAdmin: boolean;
+  view: AccountView;
+}) {
+  const { openDialog } = useModels();
+  const copyId = (
+    <DropdownMenuItem
+      onSelect={() =>
+        void copyText(account.accountId).then((copied) =>
+          copied ? toast.success("ChatGPT account ID copied") : toast.error("Couldn't copy"),
+        )
+      }
+    >
+      <CopyIcon />
+      Copy account ID
+    </DropdownMenuItem>
+  );
+  if (readOnly) {
+    return (
+      <>
+        {orgAdmin && view.onManageInOrganization ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => view.onManageInOrganization?.(account.id)}
+            className="rounded-[10px] pointer-coarse:h-11"
+          >
+            Manage in organization settings
+          </Button>
+        ) : null}
+        <MoreMenu label={`More actions for ${account.name}`}>{copyId}</MoreMenu>
+      </>
+    );
+  }
+  return (
+    <MoreMenu label={`More actions for ${account.name}`}>
+      <DropdownMenuItem
+        onSelect={() => openDialog({ kind: "rename", scope: account.scope, id: account.id })}
+      >
+        <PencilIcon />
+        Rename
+      </DropdownMenuItem>
+      {copyId}
+      <DropdownMenuItem
+        variant="destructive"
+        onSelect={() =>
+          openDialog({
+            kind: "disconnect",
+            target: { kind: "codex", scope: account.scope, id: account.id },
+          })
+        }
+      >
+        <UnplugIcon />
+        Disconnect
+      </DropdownMenuItem>
+    </MoreMenu>
+  );
+}
+
+function MoreMenu({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label={label}
+          className="rounded-[10px] text-fg-muted hover:text-fg pointer-coarse:size-11"
+        >
+          <MoreHorizontalIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-44">
+        {children}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ScopeValue({ scope }: { scope: Scope }) {
+  return <>{scope === "organization" ? ORG_NAME : currentWorkspace.name}</>;
+}
+
+export function PrimaryChip({
+  account,
+  variant,
+}: {
+  account: CodexAccount;
+  variant: "text" | "outline" | "soft";
+}) {
+  const { data, questions } = useModels();
+  const pool = account.scope === "organization" ? data.orgAccounts : data.workspaceAccounts;
+  // "Primary" only means something when there is more than one account to pick from.
+  if (!account.isPrimary || pool.length < 2) return null;
+  return <MetaChip variant={variant}>{questions.q14 === "legacy" ? "Active" : "Primary"}</MetaChip>;
+}
+
+function UsageSection({ account }: { account: CodexAccount }) {
+  const { setData } = useModels();
+  const picks = useModelsPicks();
+  const [refreshing, setRefreshing] = useState(false);
+  return (
+    <DetailSection title="Usage">
+      <UsageMeterGroup
+        variant={picks.meter}
+        windows={account.usage.map((window) => ({
+          label: window.label,
+          percent: window.percentLeft,
+          resetsLabel: window.resetsLabel,
+        }))}
+        checked={<RelativeTime date={account.checkedAt} prefix="Checked" {...TIME} />}
+        refreshing={refreshing}
+        refreshDisabledReason={
+          account.needsReconnect ? "Sign in to ChatGPT again to check usage." : undefined
+        }
+        onRefresh={async () => {
+          setRefreshing(true);
+          await wait(1100);
+          setData((value) =>
+            updateAccount(value, account.scope, account.id, { checkedAt: KIT_NOW }),
+          );
+          setRefreshing(false);
+        }}
+      />
+    </DetailSection>
+  );
+}
+
+function SettingsSection({ account }: { account: CodexAccount }) {
+  const { data, setData, questions } = useModels();
+  const picks = useModelsPicks();
+  const [pending, setPending] = useState<"use" | "apps" | "primary" | null>(null);
+  const legacy = questions.q14 === "legacy";
+  const pool = account.scope === "organization" ? data.orgAccounts : data.workspaceAccounts;
+  const switchProps = { variant: picks.switchVariant, showStateText: picks.switchStateText };
+
+  const save = async (
+    key: "use" | "apps" | "primary",
+    patch: () => void,
+    message: string,
+  ): Promise<void> => {
+    setPending(key);
+    await wait(700);
+    patch();
+    setPending(null);
+    toast.success(message);
+  };
+
+  return (
+    <DetailSection title="Settings">
+      <SettingRowGroup className="-my-3">
+        <SettingRow
+          variant={picks.settingRow}
+          label={legacy ? "Use for new automatic turns" : "Available for new chats"}
+          description={
+            legacy
+              ? "Enabled accounts can be picked for new automatic turns."
+              : "Turn off to stop sending new chats and schedules to this account. Work already running continues."
+          }
+          control={
+            <Switch
+              {...switchProps}
+              checked={account.useForNewWork}
+              pending={pending === "use"}
+              onCheckedChange={(next) =>
+                void save(
+                  "use",
+                  () =>
+                    setData((value) =>
+                      updateAccount(value, account.scope, account.id, { useForNewWork: next }),
+                    ),
+                  next
+                    ? `${account.name} is used for new work again`
+                    : `${account.name} won't be used for new work`,
+                )
+              }
+            />
+          }
+        />
+        {pool.length > 1 ? (
+          <SettingRow
+            variant={picks.settingRow}
+            controlWidth={buttonWidth(picks.settingRow)}
+            label={legacy ? "Active account" : "Primary account"}
+            description={
+              account.isPrimary
+                ? legacy
+                  ? "Used when a session isn't pinned and Auto-rotate is off."
+                  : "New work starts here. With Primary only, it's the only account used."
+                : legacy
+                  ? "Make this the account unpinned sessions use."
+                  : "Make this the account new work starts with."
+            }
+            control={
+              account.isPrimary ? (
+                <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
+                  <CheckIcon aria-hidden="true" className="size-4 text-status-idle" />
+                  {legacy ? "Active" : "Primary"}
+                </span>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={pending === "primary"}
+                  onClick={() =>
+                    void save(
+                      "primary",
+                      () => setData((value) => makePrimary(value, account.scope, account.id)),
+                      `${account.name} is now the ${legacy ? "active" : "primary"} account`,
+                    )
+                  }
+                  className="rounded-[10px] pointer-coarse:h-11"
+                >
+                  {legacy ? "Make active" : "Make primary"}
+                </Button>
+              )
+            }
+          />
+        ) : null}
+        <SettingRow
+          variant={picks.settingRow}
+          label="Codex Apps"
+          description="Let agents use the ChatGPT apps connected to this account."
+          control={
+            <Switch
+              {...switchProps}
+              checked={account.codexApps}
+              pending={pending === "apps"}
+              onCheckedChange={(next) =>
+                void save(
+                  "apps",
+                  () =>
+                    setData((value) =>
+                      updateAccount(value, account.scope, account.id, { codexApps: next }),
+                    ),
+                  next ? "Codex Apps turned on" : "Codex Apps turned off",
+                )
+              }
+            />
+          }
+        />
+        {account.scope === "workspace" ? (
+          <ServedRow kind="codex" scope={account.scope} id={account.id} />
+        ) : null}
+      </SettingRowGroup>
+    </DetailSection>
+  );
+}
+
+function AvailabilitySection({ account }: { account: CodexAccount }) {
+  const { setData } = useModels();
+  const picks = useModelsPicks();
+  const availability = account.availability ?? {
+    allShared: true,
+    workspaces: [],
+    personal: true,
+  };
+  const switchProps = { variant: picks.switchVariant, showStateText: picks.switchStateText };
+  const setAvailability = (patch: Partial<typeof availability>, message: string) => {
+    setData((value) =>
+      updateAccount(value, account.scope, account.id, {
+        availability: { ...availability, ...patch },
+      }),
+    );
+    toast.success(message);
+  };
+  return (
+    <DetailSection
+      title="Access"
+      description="Which workspaces can use this account, and for which models."
+    >
+      <SettingRowGroup className="-my-3">
+        <SettingRow
+          variant={picks.settingRow}
+          label="All shared workspaces"
+          description="Includes workspaces created later."
+          control={
+            <Switch
+              {...switchProps}
+              checked={availability.allShared}
+              onCheckedChange={(next) =>
+                setAvailability(
+                  { allShared: next },
+                  next
+                    ? `${account.name} is available in every shared workspace`
+                    : "Choose the workspaces that can use it",
+                )
+              }
+            />
+          }
+        >
+          {availability.allShared
+            ? null
+            : workspaces.map((workspace) => {
+                const on = availability.workspaces.includes(workspace.id);
+                return (
+                  <SettingRow
+                    key={workspace.id}
+                    variant={picks.settingRow}
+                    label={workspace.name}
+                    control={
+                      <Switch
+                        {...switchProps}
+                        size="sm"
+                        checked={on}
+                        onCheckedChange={(next) =>
+                          setAvailability(
+                            {
+                              workspaces: next
+                                ? [...availability.workspaces, workspace.id]
+                                : availability.workspaces.filter((each) => each !== workspace.id),
+                            },
+                            next
+                              ? `${workspace.name} can use ${account.name}`
+                              : `${workspace.name} can't use ${account.name} for new work`,
+                          )
+                        }
+                      />
+                    }
+                  />
+                );
+              })}
+        </SettingRow>
+        <SettingRow
+          variant={picks.settingRow}
+          label="Personal workspaces"
+          description="Everyone's private Personal workspace can use it too."
+          control={
+            <Switch
+              {...switchProps}
+              checked={availability.personal}
+              onCheckedChange={(next) =>
+                setAvailability(
+                  { personal: next },
+                  next
+                    ? "Personal workspaces can use it"
+                    : "Personal workspaces can't use it for new work",
+                )
+              }
+            />
+          }
+        />
+        <ServedRow kind="codex" scope={account.scope} id={account.id} />
+      </SettingRowGroup>
+    </DetailSection>
+  );
+}
+
+/** "Models it can serve": at organization scope always, in workspaces only for question 15's other answer. */
+function ServedRow({ kind, scope, id }: { kind: "codex" | "gateway"; scope: Scope; id: string }) {
+  const { data, questions, openAllowed } = useModels();
+  if (scope === "workspace" && questions.q15 === "org_only") return null;
+  const served =
+    kind === "codex"
+      ? (findAccount(data, scope, id)?.modelsServed ?? "all")
+      : data.gateways[scope][id as GatewayId].modelsServed;
+  return (
+    <SettingNavRow
+      label="Models it can serve"
+      description={
+        scope === "organization"
+          ? "New models are included until you limit them."
+          : "The workspace's Allowed models still apply."
+      }
+      value={served === "all" ? "All models" : servedSummary(served)}
+      onOpen={() => openAllowed({ kind: "account", scope, id })}
+    />
+  );
+}
+
+function ResetsSection({ account, readOnly }: { account: CodexAccount; readOnly: boolean }) {
+  const { openDialog, scenario } = useModels();
+  const picks = useModelsPicks();
+  if (account.resets.length === 0) return null;
+  const yours = account.connectedBy === you.name && scenario.viewer === "org_admin";
+  const weekly = account.usage.find((window) => window.label === "Weekly");
+  const worthRedeeming = weekly?.percentLeft !== null && (weekly?.percentLeft ?? 100) < 100;
+  const who = yours ? "Only you can redeem them" : `Only ${account.connectedBy} can redeem them`;
+  return (
+    <DetailSection
+      title={`Usage limit resets (${account.resets.length})`}
+      description={`Each gives this account a fresh weekly limit. ${who}, as the person who connected it.`}
+    >
+      {/* The resets differ only in when they expire, so that is each row's label.
+          Redeem uses the one that expires first. */}
+      <SettingRowGroup className="-my-3" role="list" aria-label="Usage limit resets">
+        {account.resets.map((reset, index) => (
+          <SettingRow
+            key={reset.id}
+            role="listitem"
+            variant={picks.settingRow}
+            controlWidth={buttonWidth(picks.settingRow)}
+            label={reset.expiresLabel}
+            control={
+              index === 0 && yours && !readOnly && worthRedeeming ? (
+                <RowButton
+                  label={`Redeem a usage limit reset for ${account.name}`}
+                  onClick={() =>
+                    openDialog({ kind: "redeem", scope: account.scope, id: account.id })
+                  }
+                >
+                  Redeem
+                </RowButton>
+              ) : null
+            }
+          />
+        ))}
+      </SettingRowGroup>
+    </DetailSection>
+  );
+}
+
+function TechnicalDetails({ account }: { account: CodexAccount }) {
+  const picks = useModelsPicks();
+  return (
+    <div className="py-3">
+      <Disclosure
+        variant={picks.disclosure}
+        title="Technical details"
+        summary="Account ID, who connected it"
+        sheetDescription={account.name}
+      >
+        <DetailFacts className="pb-2">
+          <DetailFact label="Account ID">
+            <CopyField value={account.accountId} label="account ID" />
+          </DetailFact>
+          <DetailFact label="Connected by">
+            {account.connectedBy} · {account.connectedOn}
+          </DetailFact>
+        </DetailFacts>
+      </Disclosure>
+    </div>
+  );
+}
+
+function CodexFooter({
+  account,
+  readOnly,
+  orgAdmin,
+  view,
+}: {
+  account: CodexAccount;
+  readOnly: boolean;
+  orgAdmin: boolean;
+  view: AccountView;
+}) {
+  const { openDialog } = useModels();
+  const start = readOnly ? (
+    orgAdmin && view.onManageInOrganization ? (
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={() => view.onManageInOrganization?.(account.id)}
+        className="-ml-3 text-brand hover:bg-brand/10 hover:text-brand pointer-coarse:h-11"
+      >
+        Manage in organization settings
+      </Button>
+    ) : null
+  ) : (
+    <DangerGhost
+      onClick={() =>
+        openDialog({
+          kind: "disconnect",
+          target: { kind: "codex", scope: account.scope, id: account.id },
+        })
+      }
+    >
+      Disconnect
+    </DangerGhost>
+  );
+  if (!start) return null;
+  return <DetailFooter start={start} />;
+}
+
+/* ----------------------------------------------------------------------------
+   API-key providers (OpenRouter, Vercel AI Gateway).
+   -------------------------------------------------------------------------- */
+
+export function GatewayDetail({
+  scope,
+  id,
+  showHeader = true,
+}: {
+  scope: Scope;
+  id: GatewayId;
+  /** Accepted for parity with CodexAccountDetail; an API key has no organization link. */
+  view?: AccountView;
+  showHeader?: boolean;
+}) {
+  const { data, setData, openDialog, questions } = useModels();
+  const picks = useModelsPicks();
+  const presentation = useDetailPresentation();
+  const gateway = data.gateways[scope][id];
+  if (!gateway.connected) {
+    return (
+      <DetailBody>
+        <p className="py-10 text-center text-sm text-fg-muted">{gateway.name} was disconnected.</p>
+      </DetailBody>
+    );
+  }
+  const removeModel = (slug: string) => {
+    const before = gateway.customModels;
+    setData((value) =>
+      updateGateway(value, scope, id, {
+        customModels: before.filter((each) => each !== slug),
+      }),
+    );
+    showUndoToast({
+      title: `Removed ${slug}`,
+      description: "Agents can't pick it for new work.",
+      onUndo: () => setData((value) => updateGateway(value, scope, id, { customModels: before })),
+    });
+  };
+  const scopeLabel = scope === "organization" ? "Organization" : "Workspace";
+  const disconnect = () =>
+    openDialog({ kind: "disconnect", target: { kind: "gateway", scope, id } });
+  const shared = (
+    <>
+      <DetailSection
+        title="Custom models"
+        description="Extra model IDs agents can pick, billed to this key."
+        action={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => openDialog({ kind: "add-model", scope, id })}
+            className="-mr-2 rounded-[10px] pointer-coarse:h-11"
+          >
+            <PlusIcon aria-hidden="true" />
+            Add model
+          </Button>
+        }
+      >
+        {gateway.customModels.length === 0 ? (
+          <EmptyState
+            variant="inline"
+            title="No custom models yet."
+            description="Add a model ID so agents can pick it for new work."
+          />
+        ) : (
+          // Flush rows like the settings above them: the IDs line up with the
+          // section title and the hairlines match the sheet's other rows.
+          <SettingRowGroup
+            className="-my-3"
+            role="list"
+            aria-label={`Custom models on ${gateway.name}`}
+          >
+            {gateway.customModels.map((slug) => (
+              <SettingRow
+                key={slug}
+                role="listitem"
+                // A row menu, not a setting: it stays at the row's end in every style.
+                variant="control-right"
+                label={<span className="font-mono text-xs font-normal">{slug}</span>}
+                control={
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`More actions for ${slug}`}
+                        className="-mr-1.5 rounded-[10px] text-fg-subtle hover:text-fg pointer-coarse:size-11"
+                      >
+                        <MoreHorizontalIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem variant="destructive" onSelect={() => removeModel(slug)}>
+                        <MinusCircleIcon />
+                        Remove
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                }
+              />
+            ))}
+          </SettingRowGroup>
+        )}
+      </DetailSection>
+      {scope === "organization" || questions.q15 === "everywhere" ? (
+        <DetailSection title="Access">
+          <SettingRowGroup className="-my-3">
+            <ServedRow kind="gateway" scope={scope} id={id} />
+          </SettingRowGroup>
+        </DetailSection>
+      ) : null}
+    </>
+  );
+
+  if (presentation === "page") {
+    return (
+      <>
+        <DetailPageHeader
+          leading={<ProviderTile provider={id} />}
+          title={gateway.name}
+          chips={<StatusBadge status="connected" variant={picks.statusHeader} />}
+          meta={["API key", scopeLabel, `added ${gateway.connectedOn ?? "just now"}`]}
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => openDialog({ kind: "replace-key", scope, id })}
+                className="rounded-[10px] pointer-coarse:h-11"
+              >
+                Replace key
+              </Button>
+              <MoreMenu label={`More actions for ${gateway.name}`}>
+                <DropdownMenuItem variant="destructive" onSelect={disconnect}>
+                  <UnplugIcon />
+                  Disconnect
+                </DropdownMenuItem>
+              </MoreMenu>
+            </>
+          }
+        />
+        <DetailPageBody
+          aside={
+            <DetailAside label={`About ${gateway.name}`}>
+              <DetailAsideItem label="Key" icon={<KeyRoundIcon />}>
+                Ending <span className="font-mono text-xs">{gateway.keyHint ?? ""}</span>
+                <span className="text-fg-muted"> · stored encrypted</span>
+              </DetailAsideItem>
+              <DetailAsideItem
+                label="Belongs to"
+                icon={scope === "organization" ? <BuildingIcon /> : <FolderIcon />}
+              >
+                <ScopeValue scope={scope} />
+              </DetailAsideItem>
+              <DetailAsideItem label="Added">{gateway.connectedOn ?? "Just now"}</DetailAsideItem>
+            </DetailAside>
+          }
+        >
+          {shared}
+        </DetailPageBody>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {showHeader ? (
+        <DetailHeader
+          leading={<ProviderTile provider={id} />}
+          title={gateway.name}
+          subtitle={`API key · ${scopeLabel}`}
+          status={<StatusBadge status="connected" variant={picks.statusHeader} />}
+        />
+      ) : null}
+      <DetailBody>
+        <DetailSection title="Key">
+          <SettingRowGroup className="-my-3">
+            <SettingRow
+              variant={picks.settingRow}
+              controlWidth={buttonWidth(picks.settingRow)}
+              label={`Key ending ${gateway.keyHint ?? ""}`}
+              description={`Added ${gateway.connectedOn ?? "just now"}. Stored encrypted; nobody can read it back.`}
+              control={
+                <RowButton onClick={() => openDialog({ kind: "replace-key", scope, id })}>
+                  Replace key
+                </RowButton>
+              }
+            />
+          </SettingRowGroup>
+        </DetailSection>
+        {shared}
+      </DetailBody>
+      <DetailFooter start={<DangerGhost onClick={disconnect}>Disconnect</DangerGhost>} />
+    </>
+  );
+}

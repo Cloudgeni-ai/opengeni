@@ -33,6 +33,7 @@ import {
   type PresentationSlideProjection,
 } from "./presentation-editor";
 import { ArtifactSurface } from "./artifact-surface";
+import { useLatestTaskRunner } from "./latest-task-runner";
 import {
   asEditableArtifactError,
   editableArtifactAccessRevoked,
@@ -62,7 +63,7 @@ const DEFAULT_PRESENTATION_TEXT_STYLE: PresentationArtifactTextStyle = Object.fr
 
 export type EditablePresentationArtifactSurfaceProps = Omit<
   PresentationProjectionArtifactSurfaceProps,
-  "projection" | "commit" | "readOnly" | "busy" | "subtitle"
+  "projection" | "commit" | "readOnly" | "busy" | "subtitle" | "authoringBlockedReason"
 > & {
   session: EditableArtifactSession;
   subtitle?: ReactNode | undefined;
@@ -89,6 +90,7 @@ type PresentationProjectionState = {
 export function EditablePresentationArtifactSurface({
   session,
   title = "Presentation",
+  showHeader,
   subtitle,
   readOnly = false,
   onCommit,
@@ -104,31 +106,35 @@ export function EditablePresentationArtifactSurface({
     error: null,
   });
   const loadGeneration = useRef(0);
+  const scheduleLoad = useLatestTaskRunner(session);
   const sceneNodes = useRef(new Map<string, PresentationArtifactEditorSceneNode>());
 
   useEffect(() => {
     const generation = ++loadGeneration.current;
     let cancelled = false;
     setState((current) => ({ ...current, loading: true, error: null }));
-    void composePresentationEditorProjection(session).then(
-      (composed) => {
-        if (cancelled || generation !== loadGeneration.current) return;
-        sceneNodes.current = new Map(composed.sceneNodes);
-        setState({ composed, loading: false, error: null });
-      },
-      (cause) => {
-        if (cancelled || generation !== loadGeneration.current) return;
-        setState({
-          composed: null,
-          loading: false,
-          error: asEditableArtifactError(cause, "Could not open this presentation"),
-        });
-      },
-    );
+    scheduleLoad(async () => {
+      if (cancelled || generation !== loadGeneration.current) return;
+      await composePresentationEditorProjection(session).then(
+        (composed) => {
+          if (cancelled || generation !== loadGeneration.current) return;
+          sceneNodes.current = new Map(composed.sceneNodes);
+          setState({ composed, loading: false, error: null });
+        },
+        (cause) => {
+          if (cancelled || generation !== loadGeneration.current) return;
+          setState({
+            composed: null,
+            loading: false,
+            error: asEditableArtifactError(cause, "Could not open this presentation"),
+          });
+        },
+      );
+    });
     return () => {
       cancelled = true;
     };
-  }, [invalidator, retryEpoch, session]);
+  }, [invalidator, retryEpoch, scheduleLoad, session]);
 
   const refresh = useCallback(() => setRetryEpoch((value) => value + 1), []);
   const writable = !readOnly && view.writable;
@@ -137,6 +143,7 @@ export function EditablePresentationArtifactSurface({
       const composed = state.composed;
       if (!composed) throw new Error("Presentation projection is not ready");
       if (!writable) throw new Error("This presentation is read only");
+      if (view.authoringBlockedReason) throw new Error("An earlier change must settle first");
       if (
         commit.revision !== undefined &&
         String(commit.revision) !== String(composed.projection.revision)
@@ -256,7 +263,15 @@ export function EditablePresentationArtifactSurface({
       notifyPresentationCommit(onCommit, onCommandError, commit);
       refresh();
     },
-    [onCommandError, onCommit, refresh, session, state.composed, writable],
+    [
+      onCommandError,
+      onCommit,
+      refresh,
+      session,
+      state.composed,
+      view.authoringBlockedReason,
+      writable,
+    ],
   );
 
   const projection = state.composed?.projection ?? null;
@@ -266,6 +281,7 @@ export function EditablePresentationArtifactSurface({
     <PresentationProjectionArtifactSurface
       {...surfaceProps}
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         `${projection.slides.length} slide${projection.slides.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
@@ -273,6 +289,7 @@ export function EditablePresentationArtifactSurface({
       projection={projection}
       commit={writable ? applyCommit : undefined}
       readOnly={!writable}
+      authoringBlockedReason={view.authoringBlockedReason}
       busy={state.loading}
       onCommandError={onCommandError}
     />
@@ -280,6 +297,7 @@ export function EditablePresentationArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? status}
       actions={surfaceProps.actions}
       busy={!accessRevoked && !state.error}

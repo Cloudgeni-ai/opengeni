@@ -52,7 +52,7 @@ describe("rail creator monogram", () => {
     expect(monogram?.textContent).toBe("BN");
     expect(monogram?.getAttribute("title")).toBeNull();
     expect(monogram?.getAttribute("aria-hidden")).toBe("true");
-    expect(monogram?.getAttribute("style")).toContain("oklch(0.45 0.11 ");
+    expect(monogram?.getAttribute("style")).toContain("oklch(0.45 0.06 ");
     expect(monogram?.className).toContain("size-4");
     expect(monogram?.className).toContain("text-[8px] font-semibold leading-none text-white/90");
     // Monogram, then the status dot, then the relative time.

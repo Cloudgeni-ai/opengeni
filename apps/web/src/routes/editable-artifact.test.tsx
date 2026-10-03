@@ -33,9 +33,30 @@ mock.module("@/lib/editable-artifact-client", () => ({
   },
 }));
 mock.module("@opengeni/sdk/editable-artifacts/worker?worker&url", () => ({ default: "worker.js" }));
-mock.module("@opengeni/react/artifacts", () => ({
-  BrowserEditableArtifactWorkbench: ({ document }: { document: { title: string } }) => (
-    <h1>{document.title}</h1>
+// The shared view owns loading/error states; only the live editor is replaced.
+const workbenchModule = new URL(
+  "../../../../packages/react/src/components/artifacts/editable-artifact-workbench.tsx",
+  import.meta.url,
+).pathname;
+const actualWorkbench = await import(workbenchModule);
+mock.module(workbenchModule, () => ({
+  ...actualWorkbench,
+  EditableArtifactWorkbenchHost: ({
+    document,
+    spreadsheet,
+    presentation,
+  }: {
+    document: { title: string; showHeader: boolean };
+    spreadsheet: { showHeader: boolean };
+    presentation: { showHeader: boolean };
+  }) => (
+    <h1
+      data-document-header={String(document.showHeader)}
+      data-spreadsheet-header={String(spreadsheet.showHeader)}
+      data-presentation-header={String(presentation.showHeader)}
+    >
+      {document.title}
+    </h1>
   ),
 }));
 beforeAll(() => {
@@ -77,7 +98,7 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
           });
           const links = [...container.querySelectorAll("a")];
           expect(links.map((link) => link.textContent)).toEqual(
-            embedded ? [] : ["All artifacts", "Back to session"],
+            embedded ? [] : ["Artifacts", "Back to session"],
           );
           if (!embedded) {
             expect(links[0]!.getAttribute("href")).toBe(
@@ -94,6 +115,16 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
                 ? "Opening artifact"
                 : "Could not open this artifact",
           );
+          if (loadState === "ready") {
+            const workbench = container.querySelector("h1")!;
+            for (const attribute of [
+              "data-document-header",
+              "data-spreadsheet-header",
+              "data-presentation-header",
+            ]) {
+              expect(workbench.getAttribute(attribute)).toBe(String(!embedded));
+            }
+          }
           if (loadState === "error" && !embedded) {
             expect(container.textContent).toContain("Try again");
             expect(container.textContent).not.toMatch(/OpenGeni API/i);
@@ -110,7 +141,7 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
 
 for (const [status, title, retry] of [
   [404, "This artifact isn't available", false],
-  [403, "This artifact isn't available", false],
+  [403, "You can't open this artifact", false],
   [422, "This artifact link isn't valid", false],
   [503, "Could not open this artifact", true],
 ] as const) {
@@ -146,6 +177,9 @@ for (const [status, title, retry] of [
       expect(container.textContent).not.toMatch(/OpenGeni API/i);
       expect(container.textContent).not.toContain(String(status));
       if (status === 503) expect(container.textContent).toContain("Reference: req_edit-1");
+      // A permission refusal explains the missing access instead of "may have been removed".
+      expect(container.textContent?.includes("Ask a workspace admin")).toBe(status === 403);
+      expect(container.textContent?.includes("may have been removed")).toBe(status === 404);
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -1,11 +1,14 @@
 import { ContextTextReader } from "./context-text-reader";
-import type { SessionModelContextResponse } from "@opengeni/sdk";
+import { AGENT_PROMPT_MODULE_TITLES } from "@opengeni/contracts";
+import type { ModelContextInstructionLayer, SessionModelContextResponse } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ArrowLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { SessionEvent } from "@/types";
 
 const PAGE_SIZE = 30;
@@ -55,6 +58,56 @@ function labelFor(value: unknown): string {
 function tokenLabel(value: number | null | undefined) {
   return value == null ? "Unknown tokens" : "~" + value.toLocaleString() + " tokens";
 }
+
+/** One titled part of the sent instructions: a layer, or a prompt module inside one. */
+export type InstructionSection = {
+  key: string;
+  title: string;
+  text: string;
+  tokens: number | null;
+  /** 1 = a prompt module inside the operational contract. */
+  depth: 0 | 1;
+};
+
+/**
+ * The captured instruction layers as titled sections. A layer that reports
+ * its prompt modules (sessions with agent settings) is followed by one
+ * section per module, sliced from the layer by the reported lengths; when
+ * the lengths don't add up, the layer stays whole.
+ */
+export function instructionSections(
+  layers: readonly ModelContextInstructionLayer[],
+): InstructionSection[] {
+  const sections: InstructionSection[] = [];
+  for (const layer of layers) {
+    sections.push({
+      key: layer.id,
+      title: layer.title,
+      text: layer.content,
+      tokens: layer.estimatedTokens,
+      depth: 0,
+    });
+    const modules = layer.modules ?? [];
+    const separator = "\n\n";
+    const total =
+      modules.reduce((sum, module) => sum + module.chars, 0) +
+      Math.max(0, modules.length - 1) * separator.length;
+    if (modules.length === 0 || total !== layer.content.length) continue;
+    let offset = 0;
+    for (const module of modules) {
+      const text = layer.content.slice(offset, offset + module.chars);
+      offset += module.chars + separator.length;
+      sections.push({
+        key: `${layer.id}:${module.id}`,
+        title: AGENT_PROMPT_MODULE_TITLES[module.id] ?? module.id,
+        text,
+        tokens: Math.max(1, Math.round(module.chars / 4)),
+        depth: 1,
+      });
+    }
+  }
+  return sections;
+}
 export function ModelContextInspectorPane(props: {
   workspaceId: string;
   sessionId: string;
@@ -100,7 +153,7 @@ export function ModelContextInspectorPane(props: {
           setError(null);
         }
       } catch (caught) {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
+        if (!cancelled) setError(userErrorText(caught));
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -127,6 +180,9 @@ export function ModelContextInspectorPane(props: {
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [rawItem, setRawItem] = useState(false);
+  const [instructionSection, setInstructionSection] = useState<string | null>(null);
+  const sections = useMemo(() => instructionSections(snapshot?.layers ?? []), [snapshot?.layers]);
+  const openSection = sections.find((candidate) => candidate.key === instructionSection) ?? null;
   useEffect(() => {
     setSection("conversation");
     setQuery("");
@@ -182,6 +238,7 @@ export function ModelContextInspectorPane(props: {
     setQuery("");
     setPage(0);
     setRawItem(false);
+    setInstructionSection(null);
   };
   return (
     <div
@@ -192,8 +249,11 @@ export function ModelContextInspectorPane(props: {
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="text-sm font-medium">Captured model request</h3>
-            <p className="mt-1 text-2xs text-fg-subtle break-words">
-              {typeof payload?.model === "string" ? payload.model + " · " : ""}
+            <p
+              className="mt-1 text-2xs text-fg-subtle break-words"
+              title={typeof payload?.model === "string" ? payload.model : undefined}
+            >
+              {typeof payload?.model === "string" ? modelDisplayName(payload.model) + " · " : ""}
               {snapshot ? new Date(snapshot.capturedAt).toLocaleTimeString() : "No capture yet"}
             </p>
           </div>
@@ -214,7 +274,7 @@ export function ModelContextInspectorPane(props: {
         {pending ? (
           <Button
             size="xs"
-            variant="secondary"
+            variant="outline"
             className="h-auto whitespace-normal"
             onClick={() => {
               currentCapture.current = pending.snapshot
@@ -331,7 +391,7 @@ export function ModelContextInspectorPane(props: {
                   </h4>
                   <span className="text-xs text-fg-subtle">{tokenLabel(selectedRow.tokens)}</span>
                 </div>
-                <Button size="xs" variant="secondary" onClick={() => setRawItem(!rawItem)}>
+                <Button size="xs" variant="outline" onClick={() => setRawItem(!rawItem)}>
                   {rawItem ? "Read content" : "View item JSON"}
                 </Button>
                 <ContextTextReader
@@ -359,7 +419,7 @@ export function ModelContextInspectorPane(props: {
                       key={row.index}
                       type="button"
                       data-context-row
-                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2"
+                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-surface-2 focus-visible:outline focus-visible:outline-2"
                       onClick={() => {
                         setSelected(row.index);
                         setRawItem(false);
@@ -384,15 +444,74 @@ export function ModelContextInspectorPane(props: {
               </div>
             )
           ) : null}
-          {payload && section === "instructions" ? (
-            <ContextTextReader
-              key={"instructions:" + snapshot?.capturedAt}
-              text={
-                payload.instructions == null
-                  ? "No separate instructions field. System and developer messages appear in Conversation."
-                  : readable(payload.instructions)
-              }
-            />
+          {payload &&
+          section === "instructions" &&
+          sections.length > 0 &&
+          instructionSection === null ? (
+            <div data-testid="instruction-sections">
+              <p className="pb-2 text-xs text-fg-muted">
+                The instructions sent with this request, in order. Open a section to read it.
+              </p>
+              {[
+                {
+                  key: "__all",
+                  title: "Full text",
+                  text: readable(payload.instructions),
+                  tokens: partFor("instructions")?.estimatedTokens ?? null,
+                  depth: 0 as const,
+                },
+                ...sections,
+              ].map((row) => (
+                <button
+                  key={row.key}
+                  type="button"
+                  data-instruction-section={row.key}
+                  className={
+                    "group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2 " +
+                    (row.depth === 1 ? "pl-4" : "")
+                  }
+                  onClick={() => setInstructionSection(row.key)}
+                >
+                  <span
+                    className={
+                      "min-w-0 flex-1 truncate text-xs " +
+                      (row.depth === 1 ? "text-fg-muted" : "font-medium")
+                    }
+                  >
+                    {row.title}
+                  </span>
+                  <span className="shrink-0 text-2xs text-fg-subtle">{tokenLabel(row.tokens)}</span>
+                  <ChevronRightIcon className="size-3 shrink-0 text-fg-subtle" />
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {payload &&
+          section === "instructions" &&
+          (sections.length === 0 || instructionSection !== null) ? (
+            <div className="space-y-4">
+              {sections.length > 0 ? (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Button size="xs" variant="ghost" onClick={() => setInstructionSection(null)}>
+                    <ArrowLeftIcon className="size-3" />
+                    All sections
+                  </Button>
+                  <h4 className="text-sm font-medium break-words">
+                    {openSection?.title ?? "Full text"}
+                  </h4>
+                </div>
+              ) : null}
+              <ContextTextReader
+                key={"instructions:" + snapshot?.capturedAt + ":" + (instructionSection ?? "")}
+                text={
+                  openSection
+                    ? openSection.text
+                    : payload.instructions == null
+                      ? "No separate instructions field. System and developer messages appear in Conversation."
+                      : readable(payload.instructions)
+                }
+              />
+            </div>
           ) : null}
           {payload && section === "raw" ? (
             <ContextTextReader code key={"request:" + snapshot?.capturedAt} text={wire!.body!} />

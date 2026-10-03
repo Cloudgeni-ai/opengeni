@@ -11,6 +11,7 @@ import {
   environmentsEncryptionKeyBytes,
   configuredModels,
   getSettings,
+  productLabelForModelId,
   withCodexCatalogProvider,
   type Settings,
 } from "@opengeni/config";
@@ -77,6 +78,7 @@ import {
   upsertCodexSubscriptionCredential,
   withCodexCapacityMutation,
   withSessionCodexCapacityMutation,
+  activeCodexPlanExclusions,
   type CodexAccountStatus,
   type CodexCapacityWakeTarget,
 } from "@opengeni/db";
@@ -103,6 +105,20 @@ export function codexAccountJson(
     label: row.label,
     email: row.accountEmail,
     plan: row.planType,
+    planCheckedAt: row.planCheckedAt ?? null,
+    // The most recent observed plan change (for example "pro" before a move to
+    // "free"), kept as evidence until the plan changes again.
+    planChangedFrom: row.planPreviousType ?? null,
+    planChangedAt: row.planChangedAt ?? null,
+    // Models the CURRENT plan was proven not to include. Each leaves automatic
+    // selection until `retryAfter` (one request then re-checks it) or until a
+    // different plan is observed (refresh usage after an upgrade).
+    planExcludedModels: activeCodexPlanExclusions(row, new Date()).map((entry) => ({
+      model: entry.modelId,
+      label: productLabelForModelId(entry.modelId),
+      excludedAt: entry.excludedAt,
+      retryAfter: entry.expiresAt,
+    })),
     status: row.status,
     active: row.isActive,
     expiresAt: row.expiresAt,
@@ -197,7 +213,10 @@ function codexUsageJson(payload: CodexUsagePayload): {
   return { status: payload.status, usage: payload };
 }
 
-export function codexModelsForPicker(settings: Settings = getSettings()): Array<{
+export function codexModelsForPicker(
+  settings: Settings = getSettings(),
+  supportedSlugs?: readonly string[],
+): Array<{
   id: string;
   label: string;
   provider: string;
@@ -205,7 +224,11 @@ export function codexModelsForPicker(settings: Settings = getSettings()): Array<
   api: "responses";
 }> {
   return configuredModels(withCodexCatalogProvider(settings))
-    .filter((model) => model.providerId === CODEX_PROVIDER_ID)
+    .filter(
+      (model) =>
+        model.providerId === CODEX_PROVIDER_ID &&
+        (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
+    )
     .map((model) => ({
       id: model.id,
       label: model.label,
@@ -250,7 +273,7 @@ type ManagedCookieHuman = {
   browserSessionHash: string;
 };
 
-async function managedCookieHuman(
+export async function managedCookieHuman(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<ManagedCookieHuman | null> {
@@ -1291,21 +1314,24 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       now: new Date(),
     });
     let valid = false;
-    const models = codexModelsForPicker((await resolveCatalogSettings(db, settings)).settings);
+    const catalogSettings = (await resolveCatalogSettings(db, settings)).settings;
+    let models: ReturnType<typeof codexModelsForPicker> = [];
     let catalogError: string | null = null;
     try {
       const cred = status?.credentialId
         ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId)
         : null;
       if (cred) {
+        const token = await buildCodexTokenResolver(db, settings, workspaceId, cred.id).getToken();
         const live = await fetchCodexModels({
-          accessToken: cred.tokens.accessToken,
-          chatgptAccountId: cred.chatgptAccountId,
-          isFedramp: cred.isFedramp,
+          accessToken: token.accessToken,
+          chatgptAccountId: token.chatgptAccountId,
+          isFedramp: token.isFedramp,
           clientVersion: CODEX_CLIENT_VERSION,
         });
         if (live.ok) {
           valid = true;
+          models = codexModelsForPicker(catalogSettings, live.slugs);
         } else {
           catalogError = `Codex models request failed with status ${live.status}`;
         }

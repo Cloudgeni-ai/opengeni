@@ -5,6 +5,7 @@ import {
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
+  JEV_CODE_SEARCH_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
@@ -220,6 +221,34 @@ describe("deployment contract", () => {
     expect(outputs).toContain('output "observability"');
   });
 
+  test("Azure Terraform models managed Postgres availability, connection limits, and saturation alerts", () => {
+    const variables = readFileSync(
+      new URL("../../../deploy/terraform/azure/variables.tf", import.meta.url),
+      "utf8",
+    );
+    const main = readFileSync(
+      new URL("../../../deploy/terraform/azure/main.tf", import.meta.url),
+      "utf8",
+    );
+
+    expect(variables).toContain('variable "managed_postgres_availability"');
+    expect(variables).toContain('variable "managed_postgres_alerts"');
+    // Whitespace-tolerant: terraform fmt realigns the object when attributes change.
+    expect(variables).toMatch(/max_connections\s*=\s*optional\(number\)/);
+    expect(variables).toMatch(/update_timeout\s*=\s*optional\(string\)/);
+    expect(main).toContain('dynamic "high_availability"');
+    expect(main).toContain('dynamic "timeouts"');
+    expect(main).toContain('dynamic "maintenance_window"');
+    expect(main).toContain("high_availability[0].standby_availability_zone");
+    expect(main).toContain(
+      'resource "azurerm_postgresql_flexible_server_configuration" "max_connections"',
+    );
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_cpu"');
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "postgres_connections"');
+    expect(main).toContain('metric_name      = "active_connections"');
+    expect(main).toContain('metric_name      = "cpu_percent"');
+  });
+
   test("models AWS and GCP managed profiles with native object storage", () => {
     const aws = deploymentProfiles["aws-managed"];
     const gcp = deploymentProfiles["gcp-managed"];
@@ -306,11 +335,12 @@ describe("deployment contract", () => {
   test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
     const enabledEnv = {
       OPENGENI_MCP_OAUTH_ENABLED: "true",
-      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16",
       OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
     };
     const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
-    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+    for (const key of [...MCP_OAUTH_PASSTHROUGH_ENV, ...API_REQUEST_SOURCE_PASSTHROUGH_ENV]) {
       expect(enabledVars).toContain(key);
     }
     expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
@@ -321,9 +351,11 @@ describe("deployment contract", () => {
       enabledEnv,
     );
     expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
-    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_HOPS=2");
     expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
-    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.runtimeEnv).toContain("OPENGENI_API_TRUSTED_PROXY_CIDRS=10.224.0.0/16");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16"');
     expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
 
     const missingOrigin = generateRuntimeArtifacts(
@@ -354,6 +386,36 @@ describe("deployment contract", () => {
     const artifacts = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, env);
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STREAM_CONTROL_ENABLED=true");
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_STREAM_CONTROL_ENABLED: "true"');
+  });
+
+  test("passes an operator documentation link through only when configured", () => {
+    const configured = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_DOCUMENTATION_URL: "none" },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_DOCUMENTATION_URL=none");
+    expect(configured.helmValuesYaml).toContain('OPENGENI_DOCUMENTATION_URL: "none"');
+
+    const unset = generateRuntimeArtifacts(deploymentProfiles["local-kubernetes"], {}, {});
+    expect(unset.runtimeEnv).not.toContain("OPENGENI_DOCUMENTATION_URL");
+    expect(unset.helmValuesYaml).not.toContain("OPENGENI_DOCUMENTATION_URL");
+  });
+
+  test("refuses the retired MCP-only trusted proxy hop setting", () => {
+    expect(() =>
+      generateRuntimeArtifacts(
+        deploymentProfiles["local-kubernetes"],
+        {},
+        { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "1" },
+      ),
+    ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    const leftoverDefault = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "0" },
+    );
+    expect(leftoverDefault.runtimeEnv).not.toContain("TRUSTED_PROXY_HOPS");
   });
 
   test("carries the admitted sandbox warm tariff through runtime and Helm generation", () => {
@@ -1188,6 +1250,9 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_ENABLED: "true",
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+        OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai",
         OPENGENI_IMAGE_TAG: "release-prod",
         ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
@@ -1214,6 +1279,13 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_LEGAL_PRIVACY_POLICY_URL=https://opengeni.ai/privacy",
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      'OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms"',
+    );
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
@@ -1521,6 +1593,7 @@ describe("deployment contract", () => {
     expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
       expect.arrayContaining([
         "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
         "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
@@ -1777,6 +1850,42 @@ describe("deployment contract", () => {
       {},
     );
     for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes Jev code search settings through only when configured", () => {
+    expect(JEV_CODE_SEARCH_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_JEV_API_KEY",
+      "OPENGENI_JEV_BASE_URL",
+      "OPENGENI_JEV_MODEL",
+      "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
+      "OPENGENI_CODE_SEARCH_MODE",
+    ]);
+    const configured = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      { OPENGENI_JEV_API_KEY: "jev-key", OPENGENI_CODE_SEARCH_MODE: "opt_in" },
+    );
+    expect(configured.runtimeEnv).toContain("OPENGENI_JEV_API_KEY=jev-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_MODE=opt_in");
+    const absent = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {},
+    );
+    for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

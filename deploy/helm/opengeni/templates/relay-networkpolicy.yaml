@@ -27,8 +27,24 @@ spec:
             {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
           podSelector:
             {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+        {{- if not .Values.relay.metricsPort }}
         {{- with .Values.networkPolicy.monitoring }}
-        # Allow the metrics scraper (Prometheus) to reach GET /metrics on :8443.
+        # Legacy single-listener layout: the metrics scraper (Prometheus) reaches
+        # GET /metrics on the wss port.
+        - namespaceSelector:
+            {{- toYaml .namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+        {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.relay.containerPort }}
+    {{- if and .Values.relay.metricsPort .Values.networkPolicy.monitoring }}
+    # The internal metrics listener admits only the scraper, never the ingress
+    # controller.
+    - from:
+        {{- with .Values.networkPolicy.monitoring }}
         - namespaceSelector:
             {{- toYaml .namespaceSelector | nindent 12 }}
           podSelector:
@@ -36,7 +52,8 @@ spec:
         {{- end }}
       ports:
         - protocol: TCP
-          port: {{ .Values.relay.containerPort }}
+          port: {{ .Values.relay.metricsPort }}
+    {{- end }}
   # No egress rules: with Egress in policyTypes and an empty egress list, all
   # egress from the relay is denied.
   egress: []

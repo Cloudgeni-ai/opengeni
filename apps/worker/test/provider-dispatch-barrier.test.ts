@@ -100,7 +100,7 @@ describe("provider dispatch history barrier", () => {
       "const recordFallbackProviderDispatchAtWire = async",
     );
     const genericBarrier = streamSource.indexOf(
-      "await checkpointHistoryBeforeProviderDispatch(historySink);",
+      "await checkpointBeforeProviderDispatch();",
       genericCallback,
     );
     const genericAudit = streamSource.indexOf('type: "agent.model.request"', genericBarrier);
@@ -114,10 +114,7 @@ describe("provider dispatch history barrier", () => {
       const callbackAt = callback.index!;
       const nextCallbackAt = runSource.indexOf("onModelRequestEvent: async", callbackAt + 1);
       const callbackEnd = nextCallbackAt === -1 ? runSource.length : nextCallbackAt;
-      const barrierAt = runSource.indexOf(
-        "await checkpointHistoryBeforeProviderDispatch(historySink);",
-        callbackAt,
-      );
+      const barrierAt = runSource.indexOf("await checkpointBeforeProviderDispatch();", callbackAt);
       const auditAt = runSource.indexOf("await eventing.publish([", callbackAt);
       expect(barrierAt).toBeGreaterThan(callbackAt);
       expect(barrierAt).toBeLessThan(callbackEnd);

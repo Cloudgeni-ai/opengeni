@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, type AnchorHTMLAttributes, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { Markdown } from "@opengeni/react";
@@ -30,8 +30,9 @@ const client = {
     artifact,
   })),
 };
+let activeClient = client;
 mock.module("@/context", () => ({
-  useAppContext: () => ({ client, accessKeyVersion }),
+  useAppContext: () => ({ client: activeClient, accessKeyVersion }),
 }));
 mock.module("./pdf-file-preview", () => ({
   default: ({ title }: { title: string }) => {
@@ -39,10 +40,56 @@ mock.module("./pdf-file-preview", () => ({
     return <span>{title} rendered PDF</span>;
   },
 }));
+// Render router links as marked anchors so the fixture can tell them from raw
+// `<a href>` full page loads.
+mock.module("@tanstack/react-router", () => ({
+  Link: ({
+    to,
+    params,
+    search: _search,
+    children,
+    ...rest
+  }: {
+    to: string;
+    params?: Record<string, string>;
+    search?: unknown;
+    children?: ReactNode;
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a
+      {...rest}
+      data-router-link=""
+      href={to.replace(/\$(\w+)/g, (_, key: string) => params?.[key] ?? "")}
+    >
+      {children}
+    </a>
+  ),
+}));
 const { InlineChatArtifact, RetainedFilePreview, retainedPreviewKind } =
   await import("./retained-file-preview");
+// Keep syntax-highlighting infrastructure out of these lifecycle tests.
+mock.module("@opengeni/react", () => ({
+  Markdown,
+  PierreFile: ({ contents }: { contents: string }) => <pre>{contents}</pre>,
+}));
 let root: Root;
 let container: HTMLDivElement;
+
+async function waitForPreview(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+    }
+    // Commit the render before waiting: React.lazy module evaluation and the
+    // authenticated byte read can settle after the original act scope exits.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
 beforeEach(() => {
   artifact = {
     available: true,
@@ -61,7 +108,14 @@ beforeEach(() => {
     },
   };
   accessKeyVersion = 1;
+  activeClient = client;
   for (const fn of Object.values(client)) fn.mockClear();
+  // Unconsumed one-shot reads from a failed lazy-render test must not leak into
+  // later previews (especially the PDF Blob lifecycle assertion).
+  client.downloadRetainedArtifact.mockReset().mockImplementation(async () => ({
+    bytes: new Uint8Array([37, 80, 68, 70]),
+    artifact,
+  }));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -69,6 +123,169 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("text stays download-only outside the explicit workbench opt-in", async () => {
+  artifact = { ...artifact, contentType: "text/x-patch" };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="Patch"
+        filename="fix.patch"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Preview is not available");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+  await act(async () =>
+    root.render(<InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="Patch" />),
+  );
+  expect(container.textContent).not.toContain("Read-only source");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+});
+
+test("workbench text uses authenticated SDK bytes and keeps HTML inert", async () => {
+  artifact = { ...artifact, contentType: "text/html" };
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("<script>alert(1)</script>"),
+  });
+  await act(async () => {
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="HTML"
+        filename="file.html"
+        workbenchTextPreview
+      />,
+    );
+  });
+  await waitForPreview(() => expect(container.textContent).toContain("<script>alert(1)</script>"));
+  expect(client.downloadRetainedArtifact).toHaveBeenCalledWith(workspaceId, artifact, {
+    signal: expect.any(AbortSignal),
+  });
+  expect(container.querySelector("script")).toBeNull();
+});
+
+test("oversized workbench text is rejected before downloading", async () => {
+  artifact = { ...artifact, contentType: "text/plain", originalBytes: 262145 };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="Large"
+        workbenchTextPreview
+      />,
+    ),
+  );
+  await waitForPreview(() => expect(container.textContent).toContain("256 KiB"));
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+});
+
+test("workbench retry recovers and receipt changes abort stale text", async () => {
+  artifact = { ...artifact, contentType: "text/plain" };
+  client.downloadRetainedArtifact.mockRejectedValueOnce(new Error("checksum mismatch"));
+  const render = () => (
+    <RetainedFilePreview
+      workspaceId={workspaceId}
+      artifact={artifact}
+      title="Text"
+      workbenchTextPreview
+    />
+  );
+  await act(async () => root.render(render()));
+  await waitForPreview(() =>
+    expect(container.textContent).toContain("Preview could not be loaded"),
+  );
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("Verified retry"),
+  });
+  await act(async () => (container.querySelector("button") as HTMLButtonElement).click());
+  await waitForPreview(() => expect(container.textContent).toContain("Verified retry"));
+  let resolveOld!: (value: {
+    artifact: RetainedArtifactReference;
+    bytes: Uint8Array<ArrayBuffer>;
+  }) => void;
+  client.downloadRetainedArtifact.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  artifact = { ...artifact, sha256: "b".repeat(64) };
+  await act(async () => root.render(render()));
+  const oldSignal = (
+    client.downloadRetainedArtifact.mock.calls.at(-1) as unknown as [
+      string,
+      RetainedArtifactReference,
+      { signal: AbortSignal },
+    ]
+  )[2].signal;
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("New identity"),
+  });
+  accessKeyVersion++;
+  await act(async () => root.render(render()));
+  expect(oldSignal.aborted).toBe(true);
+  await act(async () => resolveOld({ artifact, bytes: new TextEncoder().encode("STALE SECRET") }));
+  await waitForPreview(() => expect(container.textContent).toContain("New identity"));
+  expect(container.textContent).not.toContain("STALE SECRET");
+});
+
+test("workbench hides stale content on client and workspace replacement", async () => {
+  artifact = { ...artifact, contentType: "text/plain" };
+  client.downloadRetainedArtifact.mockResolvedValueOnce({
+    artifact,
+    bytes: new TextEncoder().encode("Old client source"),
+  });
+  const render = (scope = workspaceId) => (
+    <RetainedFilePreview
+      workspaceId={scope}
+      artifact={artifact}
+      title="Text"
+      workbenchTextPreview
+    />
+  );
+  await act(async () => root.render(render()));
+  await waitForPreview(() => expect(container.textContent).toContain("Old client source"));
+  let resolveNew!: (value: {
+    artifact: RetainedArtifactReference;
+    bytes: Uint8Array<ArrayBuffer>;
+  }) => void;
+  activeClient = {
+    ...client,
+    downloadRetainedArtifact: mock(
+      () =>
+        new Promise((resolve) => {
+          resolveNew = resolve;
+        }),
+    ),
+  };
+  await act(async () => root.render(render()));
+  expect(container.textContent).toContain("Loading preview");
+  expect(container.textContent).not.toContain("Old client source");
+  await act(async () =>
+    resolveNew({ artifact, bytes: new TextEncoder().encode("New client source") }),
+  );
+  await waitForPreview(() => expect(container.textContent).toContain("New client source"));
+  await act(async () => root.render(render("44444444-4444-4444-8444-444444444444")));
+  expect(container.textContent).not.toContain("New client source");
+  expect(container.textContent).toContain("Loading preview");
+  const signal = (
+    activeClient.downloadRetainedArtifact.mock.calls.at(-1) as unknown as [
+      string,
+      RetainedArtifactReference,
+      { signal: AbortSignal },
+    ]
+  )[2].signal;
+  await act(async () => root.unmount());
+  expect(signal.aborted).toBe(true);
 });
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -144,7 +361,7 @@ test("PDF renderer failures stay inside the preview", async () => {
     ),
   );
   expect(container.textContent).toContain("Conversation remains");
-  expect(container.textContent).toContain("PDF preview unavailable");
+  await waitForPreview(() => expect(container.textContent).toContain("PDF preview unavailable"));
 });
 
 test("published link opens sidebar and embed renders playable video with stable chat space", async () => {
@@ -235,6 +452,7 @@ test("PDF bytes use a typed disposable Blob and revoke it when the preview close
       ),
     );
     expect(client.downloadRetainedArtifact).toHaveBeenCalledTimes(1);
+    await waitForPreview(() => expect(create).toHaveBeenCalledTimes(1));
     expect(create.mock.calls[0]![0].type).toBe("application/pdf");
     await act(async () => root.render(null));
     expect(revoke).toHaveBeenCalledWith("blob:test-pdf");
@@ -253,7 +471,10 @@ test("unavailable artifact retains an actionable link without requesting media",
   );
   await act(async () => container.querySelector("button")?.click());
   expect(container.textContent).toContain("Artifact unavailable");
-  expect(container.querySelector("a")?.getAttribute("href")).toContain(`/artifacts/files/${id}`);
+  const link = container.querySelector("a");
+  expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts/files/${id}`);
+  // A router link, not a raw anchor that reloads the whole app.
+  expect(link?.hasAttribute("data-router-link")).toBe(true);
   expect(client.createRetainedArtifactDownloadUrl).not.toHaveBeenCalled();
 });
 

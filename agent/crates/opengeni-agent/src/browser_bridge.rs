@@ -1520,7 +1520,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(
+            server.inventory().snapshot().devices,
+            Vec::<opengeni_agent_proto::v1::AttachedBrowserDeviceAnnouncement>::new()
+        );
         server.shutdown().await.expect("shutdown");
         assert!(!authority_path(directory.path()).exists());
     }
@@ -1554,7 +1557,10 @@ mod tests {
         .await
         .ok();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(
+            server.inventory().snapshot().devices,
+            Vec::<opengeni_agent_proto::v1::AttachedBrowserDeviceAnnouncement>::new()
+        );
         server.shutdown().await.expect("shutdown");
     }
 
@@ -1687,7 +1693,7 @@ mod tests {
         std::fs::write(&binary, b"fixture").expect("binary");
         let manifests = install_native_host_manifests(&binary, directory.path()).expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        assert!(!manifests.is_empty());
+        assert_ne!(manifests, Vec::<std::path::PathBuf>::new());
         for path in &manifests {
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).expect("manifest")).expect("json");

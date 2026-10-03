@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   BrowserSession as BrowserSessionSchema,
+  EPHEMERAL_CHROMIUM_DRIVER_ID,
   ComputerSession as ComputerSessionSchema,
 } from "@opengeni/contracts";
 import type {
@@ -19,7 +20,7 @@ import type {
   ComputerTarget,
   InteractionIntervention,
 } from "@opengeni/contracts";
-import type { InteractionTransport } from "@opengeni/sdk";
+import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
@@ -35,6 +36,109 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("attached Chrome discovery never loads unrelated workspace inventories", async () => {
+    const bridge = {
+      enrollmentId: randomUUID(),
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 0,
+      lastSeenAt: now,
+    };
+    const requests: unknown[] = [];
+    const unexpected = async () => {
+      throw new Error("Unrelated workspace inventory must not be loaded");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: unexpected,
+        listComputerSessions: unexpected,
+        listBrowserIdentities: unexpected,
+        listAttachedBrowsers: async (workspace, options) => {
+          requests.push({ workspace, options });
+          return { revision: 42, bridges: [bridge], devices: [] };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    for (const includeDisconnectedDevices of [undefined, true]) {
+      const result = await definitions[0]!.execute(
+        { scope: "attached_browsers", includeDisconnectedDevices },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        browserRevision: 42,
+        computerRevision: 42,
+        identityRevision: 42,
+        attachedBrowserRevision: 42,
+        browsers: [],
+        computers: [],
+        identities: [],
+        attachedBrowserBridges: [bridge],
+        attachedBrowsers: [],
+      });
+    }
+    expect(requests).toEqual([
+      { workspace: workspaceId, options: { includeDisconnected: false } },
+      { workspace: workspaceId, options: { includeDisconnected: true } },
+    ]);
+  });
+
+  test("browser reuse never crosses explicit ephemeral and private profile modes", async () => {
+    for (const requestedMode of ["private_profile", "ephemeral_context"] as const) {
+      const createRequests: Array<Record<string, unknown>> = [];
+      const other = discoveredBrowserSession(randomUUID(), sessionId);
+      other.headless = true;
+      other.driverId =
+        requestedMode === "private_profile" ? EPHEMERAL_CHROMIUM_DRIVER_ID : "chromium";
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [other] }),
+          createBrowserSession: async (_workspaceId, request) => {
+            createRequests.push(request as unknown as Record<string, unknown>);
+            return { session: { lifecycle: "starting" } } as never;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      await definitions[0]!.execute(
+        {
+          headless: true,
+          ...(requestedMode === "ephemeral_context" ? { storageMode: requestedMode } : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(createRequests).toHaveLength(1);
+      expect(createRequests[0]?.storageMode).toBe(
+        requestedMode === "ephemeral_context" ? requestedMode : undefined,
+      );
+    }
+  });
+
+  test("explicit browser selection rejects a storage-mode mismatch before using targets", async () => {
+    const session = discoveredBrowserSession(browserSessionId, sessionId);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ getBrowserSession: async () => session }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        { browserSessionId, storageMode: "ephemeral_context" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toThrow("storage mode does not match");
+  });
+
   test("opens managed Chromium headed by default for supported human sign-in", async () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
@@ -113,6 +217,7 @@ describe("interaction attempt tools", () => {
       "browser_screenshot",
       "browser_clipboard",
       "browser_debug",
+      "browser_downloads",
       "computer_targets",
       "computer_observe",
       "computer_clipboard",
@@ -129,7 +234,7 @@ describe("interaction attempt tools", () => {
       generation: 1,
       definitions,
     });
-    expect(environment.catalog.entries).toHaveLength(9);
+    expect(environment.catalog.entries).toHaveLength(10);
     expect(environment.catalog.entries[0]).toMatchObject({
       identity: { serverId: "interaction", toolName: "interaction_discover" },
       modelName: "interaction__interaction_discover",
@@ -404,13 +509,15 @@ describe("interaction attempt tools", () => {
     });
   });
 
-  test("keeps semantic Computer actions observation-fenced but free of pixel frame authority", async () => {
+  test("preserves an explicit semantic Computer observation without refreshing it or forwarding its pixel frame", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
     let request: ComputerActionRequest | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        observeComputerTarget: async () => observation,
+        observeComputerTarget: async () => {
+          throw new Error("explicit Computer fences must not trigger a fresh observation");
+        },
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           request = value;
           return computerReceipt(value.operationId, observation);
@@ -426,6 +533,9 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: observation.frameId,
         action: {
           type: "semantic",
           locator: { kind: "role", role: "button", name: "Save" },
@@ -739,6 +849,43 @@ describe("interaction attempt tools", () => {
     );
 
     expect(request).toMatchObject({ expectedFrameId: "frame-user-saw" });
+  });
+
+  test("preserves an explicitly fenced pointer frame without refreshing the observation", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    let request: ComputerActionRequest | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => {
+          throw new Error("explicit Computer fences must not trigger a fresh observation");
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          request = value;
+          return computerReceipt(value.operationId, observation);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        action: { type: "pointer", frameId: "frame-user-saw", action: "click", x: 10, y: 20 },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(request).toMatchObject({
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: "frame-user-saw",
+    });
+    expect(result.isError).not.toBe(true);
   });
 
   test("returns managed computer pixels as native image content", async () => {
@@ -1129,6 +1276,137 @@ describe("interaction attempt tools", () => {
       data: Buffer.from(image).toString("base64"),
       mimeType: "image/jpeg",
     });
+  });
+
+  test.each(["browser_screenshot", "browser_observe"] as const)(
+    "%s preserves a known capture timeout without replay or partial success",
+    async (toolName) => {
+      let captures = 0;
+      let observations = 0;
+      const target = browserTarget();
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            observations += 1;
+            return browserObservation(target);
+          },
+          captureBrowserTarget: async () => {
+            captures += 1;
+            throw new OpenGeniApiError(
+              504,
+              JSON.stringify({
+                error: {
+                  status: 504,
+                  code: "upstream_unavailable",
+                  message: "This tab did not produce a screenshot in time.",
+                  retryable: true,
+                  requestId: "capture-request-42",
+                },
+              }),
+              { mutation: false },
+            );
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [toolName],
+        permissions: ["sessions:read"],
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          ...(toolName === "browser_observe" ? { includeScreenshot: true } : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "upstream_unavailable",
+                message:
+                  "This tab did not produce a screenshot in time. Reference: capture-request-42.",
+                retryable: true,
+                requestId: "capture-request-42",
+              },
+            }),
+          },
+        ],
+        structuredContent: {
+          error: {
+            code: "upstream_unavailable",
+            message:
+              "This tab did not produce a screenshot in time. Reference: capture-request-42.",
+            retryable: true,
+            requestId: "capture-request-42",
+          },
+        },
+      });
+      expect(captures).toBe(1);
+      expect(observations).toBe(toolName === "browser_observe" ? 1 : 0);
+    },
+  );
+
+  test.each([
+    new Error("unexpected failure"),
+    new OpenGeniApiError(504, "uncertain", { outcomeUnknown: true }),
+  ])(
+    "does not convert unexpected or uncertain read failures to definite results: %s",
+    async (failure) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          captureBrowserTarget: async () => {
+            throw failure;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_screenshot"],
+        permissions: ["sessions:read"],
+      });
+      await expect(
+        definitions[0]!.execute(
+          { browserSessionId, targetId: browserTarget().id },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        ),
+      ).rejects.toBe(failure);
+    },
+  );
+
+  test("does not downgrade a failed browser mutation to a known read failure", async () => {
+    const failure = new OpenGeniApiError(504, "mutation failed", { outcomeUnknown: false });
+    let calls = 0;
+    const target = browserTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async () => {
+          calls += 1;
+          throw failure;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          expectedTargetGeneration: target.targetGeneration,
+          expectedDocumentGeneration: target.documentGeneration,
+          expectedFrameId: null,
+          action: { type: "scroll", deltaX: 0, deltaY: 100 },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toBe(failure);
+    expect(calls).toBe(1);
   });
 
   test("rejects a screenshot before the 16 MiB Code Mode result journal can overflow", async () => {

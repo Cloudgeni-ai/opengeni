@@ -1,3 +1,4 @@
+import { assertManagedUserAdmission, getManagedSession } from "@opengeni/core";
 import { randomUUID } from "node:crypto";
 import {
   BeginManagedAuthLoginTransactionRequest,
@@ -63,13 +64,11 @@ import { ensureManagedAccessForUser, getSession } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import {
-  MANAGED_AUTH_CLIENT_IP_HEADER,
-  requestWithManagedAuthClientAddress,
-} from "../auth/managed-auth";
-import { trustedRequestSourceAddress } from "../http/request-source";
 import { HTTPException } from "hono/http-exception";
+import { SIGNUP_ATTRIBUTION_AUTH_FIELD } from "../auth/signup-funnel-metrics";
 import { ApiHttpError } from "../http/api-error";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
 import { z } from "zod";
 
 const ManagedAuthSocialStartReceipt = z
@@ -102,12 +101,12 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.get("/v1/auth/get-session", async (context) => {
     if (deps.settings.managedAuthSessionSetMode === "legacy") {
       if (!deps.managedAuth) throw new HTTPException(404);
-      return await deps.managedAuth.handler(
-        requestWithManagedAuthClientAddress(
-          context.req.raw,
-          trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops),
-        ),
-      );
+      if (deps.settings.allowedUserEmails !== undefined) {
+        const session = await getManagedSession(context, deps.managedAuth, { db: deps.db });
+        context.header("cache-control", "no-store");
+        return context.json(session ? safeBetterAuthSession(session) : null);
+      }
+      return await deps.managedAuth.handler(context.req.raw);
     }
     context.header("cache-control", "no-store");
     const available = requireAvailable(deps);
@@ -202,6 +201,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
       headers: context.req.raw.headers,
       returnHeaders: true,
     });
+    assertManagedUserAdmission(deps.managedAuth!, ambient.response?.user);
     const authSessionId = ambient.response?.session?.id;
     if (typeof authSessionId !== "string") {
       throw managedAuthApiError(401, "managed_authentication_required");
@@ -267,7 +267,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
             ? managedAuthDerivedUuid("opengeni:managed-auth:return-intent", body.operationId)
             : null,
           returnPath: body.returnIntent ?? null,
-          expiresAt: new Date(Date.now() + (MANAGED_AUTH_TRANSACTION_TTL_SECONDS - 60) * 1_000),
+          expiresAt: new Date(Date.now() + 600_000),
         }),
       );
       setTransactionCookie(context, deps, transaction.id, transactionSecret);
@@ -298,7 +298,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         completed = await authenticateAndAdoptManagedAuthSession({
           db: deps.db,
           adapter: available.adapter,
-          isolatedHeaders: isolatedAuthRequestHeaders(context, deps),
+          isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
           authority,
           csrfHash: managedAuthCsrfHash(authority),
           operationId: body.operationId,
@@ -323,7 +323,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         }),
       );
     } catch (error) {
-      throwHttp(error);
+      throwHttp(error, context);
     }
   });
 
@@ -402,9 +402,12 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
                 expectedGeneration: body.expectedGeneration,
                 expectedActorEpoch: actorEpoch,
               },
+              // Content-free acquisition metrics read this from the OAuth
+              // state if the callback creates a new account.
+              ...(body.attribution ? { [SIGNUP_ATTRIBUTION_AUTH_FIELD]: body.attribution } : {}),
             },
           },
-          headers: isolatedAuthRequestHeaders(context, deps),
+          headers: isolatedManagedAuthHeaders(context.req.raw),
           returnHeaders: true,
         });
         const url = validatedManagedAuthSocialAuthorizationUrl({
@@ -1019,20 +1022,10 @@ function digest(deps: ApiRouteDeps, value: unknown): string {
 }
 
 function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): string {
-  const address = trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops);
   return digest(deps, {
     purpose: "managed-auth-login-transaction-rate-limit",
-    client: address.slice(0, 128),
+    client: trustedRequestSourceRateLimitKey(context, deps.settings),
   });
-}
-
-function isolatedAuthRequestHeaders(context: Context, deps: ApiRouteDeps): Headers {
-  const headers = isolatedManagedAuthHeaders(context.req.raw);
-  headers.set(
-    MANAGED_AUTH_CLIENT_IP_HEADER,
-    trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops),
-  );
-  return headers;
 }
 
 function allowedOrigins(deps: ApiRouteDeps): string[] {
@@ -1125,7 +1118,7 @@ function appendCookies(context: Context, cookies: readonly string[]): void {
   for (const cookie of cookies) context.header("set-cookie", cookie, { append: true });
 }
 
-function throwHttp(error: unknown): never {
+function throwHttp(error: unknown, context?: Context): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof ManagedAuthSessionSetGenerationConflictError) {
     throw managedAuthApiError(409, "generation_conflict", { cause: error, retryable: true });
@@ -1144,6 +1137,16 @@ function throwHttp(error: unknown): never {
   }
   if (error instanceof ManagedAuthActorMutationInFlightError) {
     throw managedAuthApiError(409, "actor_mutation_in_flight", { cause: error, retryable: true });
+  }
+  if (error instanceof ManagedAuthEmailThrottleError) {
+    // A per-email window lasts 15 minutes to an hour; tell the client when,
+    // unlike the short login-transaction backoff.
+    context?.header("Retry-After", String(error.retryAfterSeconds));
+    throw managedAuthApiError(429, "login_transaction_rate_limited", {
+      cause: error,
+      retryable: true,
+      retryAfterSeconds: error.retryAfterSeconds,
+    });
   }
   if (error instanceof ManagedAuthLoginTransactionRateLimitError) {
     throw managedAuthApiError(429, "login_transaction_rate_limited", {
@@ -1171,6 +1174,7 @@ function managedAuthApiError(
     cause?: unknown;
     retryable?: boolean;
     outcomeUnknown?: boolean;
+    retryAfterSeconds?: number;
   } = {},
 ): ApiHttpError {
   ManagedAuthSessionSetErrorCode.parse(code);
@@ -1195,7 +1199,12 @@ function managedAuthApiError(
     message: code,
     retryable: options.retryable ?? false,
     ...(options.outcomeUnknown === undefined ? {} : { outcomeUnknown: options.outcomeUnknown }),
-    details: { managedAuthCode: code },
+    details: {
+      managedAuthCode: code,
+      ...(options.retryAfterSeconds === undefined
+        ? {}
+        : { retryAfterSeconds: options.retryAfterSeconds }),
+    },
   });
   if (options.cause !== undefined) (error as Error & { cause?: unknown }).cause = options.cause;
   return error;

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   managedAuthRequiresEmailVerification,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthSocialSignupOptions,
   managedAuthUserCreateAdmission,
   managedAuthUserCreateOverride,
   resolveManagedAuthOAuthAttempt,
@@ -214,5 +215,59 @@ describe("managed auth OAuth transaction state", () => {
     expect(isolated.request.headers.get("cookie")).toBe("better-auth.state=oauth-state");
     expect(isolated.request.headers.has("authorization")).toBe(false);
     expect(isolated.request.headers.has("x-forwarded-user")).toBe(false);
+  });
+});
+
+describe("managed user allowlist", () => {
+  for (const provider of ["credential", "google", "github"]) {
+    test(`rejects unlisted ${provider} signup and admits listed signup`, () => {
+      const settings = {
+        environment: "production" as const,
+        allowedUserEmails: ["staff@example.com"],
+      };
+      expect(
+        managedAuthUserCreateAdmission(
+          settings,
+          { email: "outsider@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBe(false);
+      expect(
+        managedAuthUserCreateAdmission(
+          settings,
+          { email: "STAFF@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBeUndefined();
+    });
+  }
+});
+
+describe("paused new account sign-ups", () => {
+  for (const provider of ["credential", "google", "github"]) {
+    test(`refuses every new ${provider} user while sign-ups are paused`, () => {
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: false },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBe(false);
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: true },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBeUndefined();
+    });
+  }
+
+  test("uses the hard provider switch, not only the client-overridable implicit one", () => {
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: true })).toEqual({});
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: false })).toEqual({
+      disableImplicitSignUp: true,
+      disableSignUp: true,
+    });
   });
 });

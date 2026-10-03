@@ -1,7 +1,12 @@
+import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   nestedPostgresSqlState,
+  databaseFailureCode,
+  isRetryablePersistenceSqlState,
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
@@ -9,6 +14,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderRejection,
@@ -16,13 +22,23 @@ import {
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
-  isModalTaskExecStartDnsResolutionError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
+  isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
+  ResponsesStreamingTerminalError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
+  PROVIDER_QUOTA_EXHAUSTED_CODE,
+  type ProviderQuotaExhaustion,
+  type ProviderQuotaScope,
+  classifyProviderQuotaError,
+  providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  AnthropicRequestError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -33,12 +49,19 @@ import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
+  classifyCodexEntitlementRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
 } from "@opengeni/codex";
+import {
+  CodexPlanEntitlementError,
+  codexPlanEntitlementFailurePayload,
+  codexRequestRejectedFailurePayload,
+} from "./codex-plan-entitlement";
 import {
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
@@ -70,6 +93,12 @@ import {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+/**
+ * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
+ * answer a per-minute token limit with a `retry-after` of about a second, which
+ * alone would spend every automatic recovery before the window resets.
+ */
+export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 
 export class PostCompactionContinuationEmptyError extends Error {
@@ -113,7 +142,15 @@ export function providerRecoveryResult(input: {
       : null;
   const continueDelayMs =
     input.failureCode === "provider_rate_limited"
-      ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
+      ? Math.max(
+          providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+          PROVIDER_RATE_LIMIT_BACKOFF_MS[
+            Math.min(
+              Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+              PROVIDER_RATE_LIMIT_BACKOFF_MS.length - 1,
+            )
+          ]!,
+        )
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||
@@ -195,6 +232,13 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
+    const milliseconds = Number(
+      headerValue(value.headers, "retry-after-ms") ??
+        headerValue(value.responseHeaders, "retry-after-ms") ??
+        headerValue(body?.headers, "retry-after-ms") ??
+        undefined,
+    );
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.ceil(milliseconds);
     const directSeconds = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
@@ -322,6 +366,13 @@ function retryableDatabaseFailureCode(
   error: unknown,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  if (!persistenceFailure) {
+    const driver = findPostgresDriverError(error);
+    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
+    if (isRetryablePersistenceSqlState(driverSqlState)) {
+      return databaseFailureCode(driverSqlState);
+    }
+  }
   const sqlState = persistenceFailure?.details.sqlState ?? null;
   if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
     return "db_failure";
@@ -356,6 +407,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
@@ -363,6 +416,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -377,6 +437,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -463,8 +525,25 @@ export function sandboxLifecycleTransitionDiagnostic(
   return null;
 }
 
+export function modelPreparationFailureEventPayload(error: unknown, durationMs: number) {
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: transition !== null,
+    ...(transition
+      ? {
+          failureCategory: "drain_capture_wait",
+          failureStage: "lifecycle_wait",
+          failureCode: transition.reason,
+          retryable: true,
+        }
+      : {}),
+  };
+}
+
 /**
- * Recognize the one active-route transition that cannot finish inside its
+ * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine
  * without creating or leasing its managed home box. When an explicit attach
  * clears the active pointer back to home, the pointer commit is authoritative,
@@ -477,7 +556,11 @@ export function sandboxLifecycleTransitionDiagnostic(
  */
 export function sandboxRouteTransitionCode(
   error: unknown,
-): "home_unavailable_this_turn" | "workspace_root_changed_this_turn" | null {
+):
+  | "home_unavailable_this_turn"
+  | "workspace_root_changed_this_turn"
+  | "native_capabilities_changed_this_attempt"
+  | null {
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -490,6 +573,13 @@ export function sandboxRouteTransitionCode(
 
     try {
       const record = current as Record<string, unknown>;
+      if (
+        (current instanceof SandboxCapabilitiesChangedError ||
+          record.name === "SandboxCapabilitiesChangedError") &&
+        record.code === "native_capabilities_changed_this_attempt"
+      ) {
+        return "native_capabilities_changed_this_attempt";
+      }
       if (
         (current instanceof ActiveBackendUnresolvableError ||
           record.name === "ActiveBackendUnresolvableError") &&
@@ -613,6 +703,14 @@ export function compactionFailureReasonFromError(error: unknown): string {
       `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
     );
   }
+  // An exhausted provider quota is not retried (see agentRunFailurePayload),
+  // so name the refusal plainly instead of the raw diagnostic envelope.
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return compactionFailureReason(
+      `${providerQuotaExhaustedMessage(quota.scope)} Active history was preserved.`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -639,8 +737,12 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  quotaScope?: ProviderQuotaScope;
 } {
   const rejection = compactionProviderRejection(error);
+  // The same closed marker as a `provider_quota_exhausted` turn failure, so
+  // clients can name the exhausted limit and offer another model here too.
+  const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -648,6 +750,7 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(quota ? { quotaScope: quota.scope } : {}),
   };
 }
 
@@ -665,12 +768,19 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // invalidates only the exact participating artifacts and recovers the same
   // logical turn; when nothing can be invalidated it fails closed there.
   if (classifyCodexEncryptedArtifactRejection(error)) return true;
+  // A ChatGPT plan that no longer includes the model refuses the compaction
+  // request exactly as it refuses an ordinary one (often with an empty 400).
+  // Failure settlement re-checks the plan and, when it proves the loss,
+  // excludes that account for the model and fails the same turn over; an
+  // unexplained rejection still fails there with typed copy.
+  if (classifyCodexEntitlementRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 
 export function classifyContextWindowOverflowError(
   error: unknown,
 ): { message: string; code?: string; detail?: string } | null {
+  if (isProviderSafetyRefusal(error)) return null;
   const fields = collectErrorStrings(error);
   const matched = fields.find(
     (value) =>
@@ -737,6 +847,9 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
   }
   seen.add(value);
   const out: string[] = [];
+  // This diagnostic is already provider-owned and byte-bounded. Do not widen
+  // generic detail traversal to arbitrary application payloads.
+  if (value instanceof ResponsesStreamingTerminalError) out.push(value.detail);
   const record = value as Record<string, unknown>;
   for (const key of ["message", "code", "type", "name", "param"]) {
     const field = record[key];
@@ -799,9 +912,12 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "safety" ? error.detail : undefined;
+  }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
@@ -812,6 +928,9 @@ function isProviderSafetyRefusal(error: unknown): boolean {
 }
 
 export function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "unavailable";
+  }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
   const status =
@@ -843,6 +962,27 @@ export function isTransientProviderError(error: unknown): boolean {
   return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
+}
+
+/** An explicit `usage_limit_reached` type or code string anywhere on the error chain. */
+function hasCodexUsageLimitType(error: unknown): boolean {
+  return collectErrorStrings(error).some((value) => value.includes(CODEX_USAGE_LIMIT_ERROR_TYPE));
+}
+
+/**
+ * Recognize an exhausted API-key provider quota (a daily or monthly allowance,
+ * a free-tier day cap, or an account out of credits) as distinct from an
+ * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
+ * cannot succeed, so the turn fails promptly instead. Subscription transports
+ * own their quota semantics through credential rotation and durable capacity
+ * waits, so a Codex or SuperGrok transport error never classifies here.
+ */
+export function classifyProviderQuotaExhaustionError(
+  error: unknown,
+): ProviderQuotaExhaustion | null {
+  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
+  return classifyProviderQuotaError(error);
 }
 
 export type XaiCredentialFailure = {
@@ -919,13 +1059,58 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
   return null;
 }
 
+function isRawDatabaseQueryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "query" in error &&
+    typeof error.query === "string" &&
+    "params" in error &&
+    Array.isArray(error.params)
+  );
+}
+
+function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | undefined {
+  if (error instanceof AnthropicRequestError) return error;
+  return error instanceof Error && error.cause instanceof AnthropicRequestError
+    ? error.cause
+    : undefined;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  const anthropic = anthropicRequestDiagnostic(error);
+  if (anthropic) {
+    const authenticationRejected =
+      anthropic.status === 401 &&
+      (error === anthropic ||
+        (error instanceof Error && (error as Error & { status?: unknown }).status === 401));
+    return {
+      ...failure,
+      code:
+        failure.code ??
+        (authenticationRejected ? "anthropic_authentication_error" : anthropic.code),
+      retryable: failure.retryable ?? false,
+      ...(anthropic.detail ? { detail: anthropic.detail } : {}),
+      ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!anthropicRequestDiagnostic(error)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(
@@ -951,6 +1136,11 @@ function baseAgentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  quotaScope?: ProviderQuotaScope;
+  /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
+  planType?: string | null;
+  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  model?: string | null;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
@@ -964,7 +1154,11 @@ function baseAgentRunFailurePayload(
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
-    const underlying = isSessionEventPersistenceError(error.cause)
+    const databaseFailure =
+      isSessionEventPersistenceError(error.cause) ||
+      findPostgresDriverError(error.cause) !== null ||
+      isRawDatabaseQueryError(error.cause);
+    const underlying = databaseFailure
       ? agentRunFailurePayload(error.cause, options)
       : {
           error: error.cause instanceof Error ? error.cause.message : String(error.cause),
@@ -972,6 +1166,32 @@ function baseAgentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  // Raw ORM wrappers can contain the full SQL and its parameters. Classify a
+  // real driver before provider message heuristics; the original cause stays
+  // available to internal diagnostics. This payload grants no replay authority.
+  const postgresDriverError = findPostgresDriverError(error);
+  const rawOrmFailure = isRawDatabaseQueryError(error);
+  if ((postgresDriverError || rawOrmFailure) && !isSessionEventPersistenceError(error)) {
+    const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
+    const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
+    return {
+      error: "OpenGeni encountered a database error.",
+      code: databaseFailureCode(sqlState),
+      sqlState,
+      ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -982,6 +1202,41 @@ function baseAgentRunFailurePayload(
       code: "provider_safety_refusal",
       retryable: false,
       detail: safetyRefusalDiagnostic,
+    };
+  }
+  if (error instanceof ResponsesStreamingTerminalError) {
+    const quota =
+      error.category === "unknown" || error.category === "rate_limit"
+        ? classifyProviderQuotaExhaustionError({
+            code: error.code,
+            error: { code: error.code, type: error.type, message: error.detail },
+            retryAfterSeconds: error.retryAfterSeconds,
+          })
+        : null;
+    if (quota) {
+      return {
+        error: providerQuotaExhaustedMessage(quota.scope),
+        code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+        retryable: false,
+        quotaScope: quota.scope,
+        detail: error.detail,
+      };
+    }
+    return {
+      error:
+        error.category === "rate_limit"
+          ? "Model provider rate limit hit. Try again in a minute or lower the reasoning effort."
+          : error.category === "unavailable"
+            ? "The model provider is temporarily unavailable. The same turn will retry after a short delay."
+            : "The model provider rejected the response. Automatic retries stopped.",
+      code:
+        error.category === "rate_limit"
+          ? "provider_rate_limited"
+          : error.category === "unavailable"
+            ? "provider_unavailable"
+            : "provider_request_rejected",
+      retryable: error.category === "rate_limit" || error.category === "unavailable",
+      detail: error.detail,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -1022,10 +1277,29 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
-  if (isModalTaskExecStartDnsResolutionError(error)) {
+  if (isProviderCommandObservationUnavailableError(error)) {
     return {
       error:
-        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+        "A managed sandbox command cannot be observed. Its exact invocation and writer remain retained; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
+    };
+  }
+  if (isModalCommandStartOutcomeUnknownError(error)) {
+    return {
+      error:
+        "A managed sandbox command has an unknown outcome. Its original invocation remains fenced; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_start_outcome_unknown",
+      retryable: false,
+    };
+  }
+  if (
+    !isRoutingMutationOutcomeUnknownError(error) &&
+    isModalTaskExecStartPreDispatchUnavailableError(error)
+  ) {
+    return {
+      error:
+        "The managed sandbox command router was not ready before the command was sent. The same turn will retry after a short delay.",
       code: "sandbox_command_start_unavailable",
       retryable: true,
     };
@@ -1090,6 +1364,29 @@ function baseAgentRunFailurePayload(
       ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
     };
   }
+  // Codex plan entitlement: the settlement path normally re-checks the plan
+  // and records a precise payload. These branches keep any other path from
+  // surfacing the SDK's raw "400 status code (no body)" text.
+  if (error instanceof CodexPlanEntitlementError) {
+    return error.payload;
+  }
+  const entitlementRejection = classifyCodexEntitlementRejection(error);
+  if (entitlementRejection) {
+    return entitlementRejection.evidence === "plan_entitlement"
+      ? codexPlanEntitlementFailurePayload({
+          accountLabel: null,
+          planType: null,
+          planChanged: false,
+          modelId: null,
+          rejection: entitlementRejection,
+        })
+      : codexRequestRejectedFailurePayload({
+          accountLabel: null,
+          planType: null,
+          rejection: entitlementRejection,
+          planChecked: false,
+        });
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
@@ -1100,8 +1397,11 @@ function baseAgentRunFailurePayload(
   // `usage_limit_reached` shape must still outrank generic 429 retryability.
   // Credential quarantine/failover remains separately provenance-gated by
   // `isCodexTransportError`; this branch only chooses the truthful user payload.
+  // The looser "429 ... usage limit" wording counts only on a Codex transport
+  // error: an API-key provider's 429 that says "usage limit" is provider quota
+  // evidence, not a ChatGPT/Codex subscription cap.
   const usageLimit = classifyCodexUsageLimitError(error);
-  if (usageLimit) {
+  if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
   }
   const codexTimeout = classifyCodexResponseTimeoutError(error, {
@@ -1153,10 +1453,33 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
+  // An exhausted quota also arrives as HTTP 429 (or 402), but no retry within
+  // the finite same-turn budget can succeed. Fail the turn promptly with a
+  // distinct code so the client can offer another model; ordinary short rate
+  // limits fall through to the retryable branch below.
+  if (status === 402 && code === "anthropic_billing_error") {
+    return {
+      error: "Claude could not bill this request. Check the account's billing and payment details.",
+      code: "provider_billing_error",
+      retryable: false,
+      ...(message ? { detail: message } : {}),
+    };
+  }
+  const quota = classifyProviderQuotaExhaustionError(error);
+  if (quota) {
+    return {
+      error: providerQuotaExhaustedMessage(quota.scope),
+      code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+      retryable: false,
+      quotaScope: quota.scope,
+      ...(message ? { detail: message } : {}),
+    };
+  }
   if (
     status === 429 ||
-    code === "rate_limit_exceeded" ||
-    /(?:too many requests|rate.?limit|\b429\b)/i.test(message)
+    ((status === undefined || !Number.isFinite(status)) &&
+      (code === "rate_limit_exceeded" ||
+        /(?:too many requests|rate.?limit|\b429\b)/i.test(message)))
   ) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
@@ -1180,23 +1503,15 @@ function baseAgentRunFailurePayload(
     }
     return { error: message, code: "provider_unavailable", retryable: true };
   }
-  const postgresDriverError = findPostgresDriverError(error);
-  if (postgresDriverError) {
-    const database = safeDatabaseErrorFacts(postgresDriverError);
-    const sqlState = nestedPostgresSqlState(postgresDriverError);
-    if (sqlState !== null || Object.keys(database).length > 0) {
-      return {
-        error: message,
-        sqlState,
-        ...(Object.keys(database).length > 0 ? { database } : {}),
-      };
-    }
-  }
   return { error: message };
 }
 
 export type CodexCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit" | "quota";
+  /**
+   * `plan_entitlement` is produced only after a plan re-check proves the
+   * serving account's current plan does not include the requested model.
+   */
+  kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
 };
 
@@ -1217,7 +1532,11 @@ export function codexCredentialCooldownUntil(
   > | null,
   now: Date,
 ): Date | null {
-  if (failure.kind === "auth" || failure.kind === "forbidden") {
+  if (
+    failure.kind === "auth" ||
+    failure.kind === "forbidden" ||
+    failure.kind === "plan_entitlement"
+  ) {
     return null;
   }
   const providerReset =
@@ -1275,6 +1594,12 @@ export function classifyCodexCredentialFailure(error: unknown): CodexCredentialF
   // Their HTTP status codes are not Codex account state and must never walk the
   // subscription pool or replay a tool on another credential.
   if (!isCodexTransportError(error)) {
+    return null;
+  }
+  // Plan/model entitlement evidence (an explicit plan refusal, or an empty
+  // HTTP 400) is not account health or quota. The worker re-checks the plan
+  // first; only a proven entitlement loss walks the pool, as `plan_entitlement`.
+  if (classifyCodexEntitlementRejection(error)) {
     return null;
   }
   const usageLimit = classifyCodexUsageLimitError(error);
@@ -1381,3 +1706,29 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
+
+/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
+export function classifyClaudeCredentialFailure(
+  error: unknown,
+): (XaiCredentialFailure & { requestId?: string }) | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired)
+      return { kind: "auth", cooldownMs: null };
+    if (current instanceof AnthropicRequestError && current.status === 401)
+      return {
+        kind: "auth",
+        cooldownMs: null,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    if (current instanceof AnthropicRequestError && current.status === 429)
+      return {
+        kind: "rate_limit",
+        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    current = current.cause;
+  }
+  return null;
+}

@@ -9,7 +9,7 @@ import type {
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 const listConnections = mock(async (_workspaceId: string): Promise<ConnectionMetadata[]> => []);
@@ -123,8 +123,125 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
+// The one-field Replace key prompt renders its real form frame inline: the
+// Radix dialog around it is a portal.
+const actualFormDialog = await import("@/components/ui/form-dialog");
+mock.module("@/components/ui/form-dialog", () => ({
+  ...actualFormDialog,
+  FormDialog: ({
+    open,
+    onOpenChange,
+    size: _size,
+    trigger: _trigger,
+    ...frame
+  }: Parameters<typeof actualFormDialog.FormDialog>[0]) =>
+    open ? (
+      <div role="dialog">
+        <actualFormDialog.FormFrame
+          variant="inline"
+          {...frame}
+          onCancel={() => onOpenChange(false)}
+        />
+      </div>
+    ) : null,
+}));
+
+// Menus and the disconnect confirm as plain buttons: the real ones are Radix portals.
+mock.module("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, onSelect }: { children: ReactNode; onSelect?: () => void }) => (
+    <button type="button" onClick={() => onSelect?.()}>
+      {children}
+    </button>
+  ),
+}));
+mock.module("@/components/ui/destructive-confirm", () => ({
+  DestructiveConfirm: ({
+    open,
+    onConfirm,
+    onOpenChange,
+  }: {
+    open: boolean;
+    onConfirm?: () => unknown;
+    onOpenChange: (open: boolean) => void;
+  }) =>
+    open ? (
+      <button
+        type="button"
+        data-confirm-disconnect=""
+        onClick={() =>
+          void (async () => {
+            const result = await onConfirm?.();
+            if (result !== false) onOpenChange(false);
+          })()
+        }
+      >
+        Confirm
+      </button>
+    ) : null,
+}));
+
 const { AiGatewayConnectionCard, OpenRouterConnectionCard } =
   await import("./ai-gateway-connection");
+
+/** The status in the provider page header; "…" while it's still loading. */
+function statusText(container: HTMLElement): string {
+  return container.querySelector("[data-slot=status-badge]")?.textContent ?? "…";
+}
+
+/** Opens Connect from the page header and fills the key. */
+async function connectWithKey(container: HTMLElement, title: string, key: string) {
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === `Connect ${title}`)
+      ?.click();
+    await flush();
+  });
+  const input = container.querySelector<HTMLInputElement>(
+    `input[aria-label="${title === "OpenRouter" ? "OpenRouter API key" : "Vercel AI Gateway key"}"]`,
+  )!;
+  await setInputValue(input, key);
+  await act(async () => {
+    input.closest("form")!.requestSubmit();
+    await flush();
+  });
+  return input;
+}
+
+/** Opens Replace key and submits a new key; returns the dialog's input. */
+async function replaceKey(container: HTMLElement, key: string) {
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Replace key")
+      ?.click();
+    await flush();
+  });
+  const input = document.querySelector<HTMLInputElement>(
+    'input[aria-label="Vercel AI Gateway key"]',
+  )!;
+  await setInputValue(input, key);
+  await act(async () => {
+    input.closest("form")!.requestSubmit();
+    await flush();
+  });
+  return input;
+}
+
+/** Disconnect from the ⋯ menu, then confirm. */
+async function disconnectFromMenu(container: HTMLElement) {
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Disconnect")
+      ?.click();
+    await flush();
+  });
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>("[data-confirm-disconnect]")!.click();
+    await flush();
+  });
+}
 
 function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
   return {
@@ -369,7 +486,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      expect(container.textContent).toContain("Not connected");
+      expect(statusText(container)).toBe("Not connected");
       expect(container.textContent).toContain("No custom model slugs yet");
       const input = container.querySelector<HTMLInputElement>(
         'input[aria-label="Vercel AI Gateway model slug"]',
@@ -393,7 +510,7 @@ describe("AiGatewayConnectionCard custom models", () => {
         ),
         upstreamModelId: "anthropic/claude-sonnet-4.6",
       });
-      expect(add?.className).toContain("min-h-11");
+      expect(add?.className).toContain("pointer-coarse:h-11");
       expect(container.textContent).toContain("anthropic/claude-sonnet-4.6");
       expect(container.textContent).toContain("Waiting for a Gateway connection");
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
@@ -455,17 +572,16 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard();
 
     try {
-      const summary = container.querySelector("summary")!;
-      expect(summary.textContent).toContain("…");
-      expect(summary.textContent).not.toContain("Not connected");
+      expect(statusText(container)).toBe("…");
+      expect(container.textContent).not.toContain("Not connected");
 
       await act(async () => {
         pendingModels.reject(new Error("custom models unavailable"));
         await flush();
       });
 
-      expect(summary.textContent).toContain("Unavailable");
-      expect(summary.textContent).not.toContain("Not connected");
+      expect(statusText(container)).toBe("Unavailable");
+      expect(container.textContent).not.toContain("Not connected");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -534,24 +650,15 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard();
 
     try {
-      const keyInput = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Vercel AI Gateway key"]',
-      )!;
-      await setInputValue(keyInput, "fixture-key");
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Connect"))
-          ?.click();
-        await flush();
-      });
-      expect(container.querySelector("summary")?.textContent).toContain("…");
+      await connectWithKey(container, "Vercel AI Gateway", "fixture-key");
+      expect(statusText(container)).toBe("…");
       expect(container.textContent).toContain("Disconnect");
 
       await act(async () => {
         resolveInitialModels?.({ models: [] });
         await flush();
       });
-      expect(container.querySelector("summary")?.textContent).toContain("Connected");
+      expect(statusText(container)).toBe("Connected");
       expect(container.textContent).toContain("Disconnect");
       expect(createConnection).toHaveBeenCalledTimes(1);
     } finally {
@@ -583,19 +690,11 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      const keyInput = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Vercel AI Gateway key"]',
-      )!;
-      await setInputValue(keyInput, "fixture-key");
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Connect"))
-          ?.click();
-        await flush();
-      });
-      expect(container.querySelector("summary")?.textContent).toContain("…");
+      const keyInput = await connectWithKey(container, "Vercel AI Gateway", "fixture-key");
+      expect(statusText(container)).toBe("…");
       expect(container.textContent).toContain("Disconnect");
-      expect(keyInput.value).toBe("");
+      // Connected: the Connect page closed, taking the key field with it.
+      expect(keyInput.isConnected).toBe(false);
       expect(createConnection).toHaveBeenCalledTimes(2);
       expect(createConnection.mock.calls[0]?.[1].operationId).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
@@ -641,19 +740,12 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      const keyInput = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Vercel AI Gateway key"]',
-      )!;
-      await setInputValue(keyInput, "replacement-key");
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Replace"))
-          ?.click();
-        await flush();
-      });
+      const keyInput = await replaceKey(container, "replacement-key");
+      await flush();
 
       expect(container.textContent).toContain("Connected");
-      expect(keyInput.value).toBe("");
+      // Saved: the Replace key prompt closed, taking the key field with it.
+      expect(keyInput.isConnected).toBe(false);
       expect(updateConnection).toHaveBeenCalledTimes(2);
       expect(updateConnection.mock.calls[0]?.[2]).toMatchObject({
         expectedVersion: 1,
@@ -686,18 +778,10 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      const keyInput = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Vercel AI Gateway key"]',
-      )!;
-      await setInputValue(keyInput, "replacement-key");
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Replace"))
-          ?.click();
-        await flush();
-      });
+      const keyInput = await replaceKey(container, "replacement-key");
 
       expect(container.textContent).toContain("Connected");
+      expect(keyInput.isConnected).toBe(true);
       expect(keyInput.value).toBe("replacement-key");
       expect(updateConnection).toHaveBeenCalledTimes(2);
       expect(updateConnection.mock.calls[0]?.[2].operationId).not.toBe(unrelatedOperationId);
@@ -739,12 +823,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Disconnect"))
-          ?.click();
-        await flush();
-      });
+      await disconnectFromMenu(container);
 
       expect(deleteConnection).toHaveBeenCalledWith("workspace-a", selected.id);
       expect(container.textContent).toContain("Not connected");
@@ -778,12 +857,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Disconnect"))
-          ?.click();
-        await flush();
-      });
+      await disconnectFromMenu(container);
 
       expect(container.textContent).toContain("Connected");
       expect(container.textContent).toContain("Disconnect");
@@ -822,12 +896,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Disconnect"))
-          ?.click();
-        await flush();
-      });
+      await disconnectFromMenu(container);
 
       expect(container.textContent).toContain("Not connected");
       expect(container.textContent).not.toContain("Disconnect");
@@ -945,13 +1014,13 @@ describe("AiGatewayConnectionCard custom models", () => {
     const { container, root } = await renderCard(false);
 
     try {
-      expect(container.querySelector("summary")).toBeNull();
+      expect(container.textContent).toBe("");
       await act(async () => {
         resolveCatalog?.({ models: [] });
         resolveCustomModels?.({ models: [] });
         await flush();
       });
-      expect(container.querySelector("summary")).toBeNull();
+      expect(container.textContent).toBe("");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -969,7 +1038,11 @@ describe("AiGatewayConnectionCard custom models", () => {
     );
 
     try {
-      expect(container.querySelector('input[type="password"]')).not.toBeNull();
+      expect(
+        [...container.querySelectorAll("button")].some(
+          (button) => button.textContent?.trim() === "Connect Vercel AI Gateway",
+        ),
+      ).toBe(true);
       expect(
         container.querySelector('input[aria-label="Vercel AI Gateway model slug"]'),
       ).toBeNull();
@@ -1254,7 +1327,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("Unavailable");
       expect(container.textContent).not.toContain("No custom model slugs yet");
       const retry = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Retry",
+        (button) => button.textContent?.trim() === "Try again",
       );
       expect(retry).not.toBeUndefined();
       await act(async () => {
@@ -1292,7 +1365,6 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
 
       expect(container.textContent).toContain(created.upstreamModelId);
-      expect(container.textContent).toContain("1 model");
       expect(container.textContent).not.toContain("catalog unavailable");
       expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
     } finally {
@@ -1332,7 +1404,6 @@ describe("AiGatewayConnectionCard custom models", () => {
         await flush();
       });
       expect(container.textContent).toContain(created.upstreamModelId);
-      expect(container.textContent).toContain("1 model");
       expect(container.textContent).not.toContain("No custom model slugs yet");
       expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
     } finally {
@@ -1484,8 +1555,8 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(input.disabled).toBe(false);
       expect(input.value).toBe("");
       expect(document.activeElement).toBe(input);
-      expect(input.className).toContain("text-base");
-      expect(input.className).toContain("md:text-base");
+      expect(input.className).toContain("font-mono");
+      expect(input.className).toContain("pointer-coarse:text-base");
       expect(input.className).not.toContain("lg:text-xs");
       expect(input.className).not.toContain("pointer-fine:text-xs");
       expect(input.className).not.toContain("lg:pointer-coarse:text-base");
@@ -1670,23 +1741,12 @@ describe("AiGatewayConnectionCard custom models", () => {
 
     try {
       expect(container.textContent).toContain("OpenRouter");
+      expect(container.textContent).toContain("Your OpenRouter account");
       expect(container.textContent).toContain(
-        "The workspace's OpenRouter account is billed directly.",
-      );
-      expect(container.textContent).toContain(
-        "separate from deployment-provided OpenRouter models",
+        "Deployment-provided OpenRouter models remain separate",
       );
 
-      const keyInput = container.querySelector<HTMLInputElement>(
-        'input[aria-label="OpenRouter API key"]',
-      )!;
-      await setInputValue(keyInput, "workspace-openrouter-key");
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.includes("Connect"))
-          ?.click();
-        await flush();
-      });
+      await connectWithKey(container, "OpenRouter", "workspace-openrouter-key");
 
       expect(createConnection).toHaveBeenCalledWith("workspace-a", {
         providerDomain: "openrouter.ai",

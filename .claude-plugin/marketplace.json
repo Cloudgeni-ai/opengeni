@@ -1,0 +1,19 @@
+{
+  "name": "opengeni",
+  "owner": {
+    "name": "OpenGeni",
+    "url": "https://opengeni.ai"
+  },
+  "metadata": {
+    "description": "OpenGeni plugins for coding agents."
+  },
+  "plugins": [
+    {
+      "name": "opengeni",
+      "source": "./plugins/opengeni",
+      "description": "Set up SDK access, build products, and learn the OpenGeni offload workflow.",
+      "category": "development",
+      "tags": ["agents", "background-agents", "sdk"]
+    }
+  ]
+}

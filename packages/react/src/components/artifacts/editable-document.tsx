@@ -9,6 +9,7 @@ import {
   type EditableArtifactSession,
 } from "@opengeni/sdk/editable-artifacts";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { useLatestTaskRunner } from "./latest-task-runner";
 
 import {
   DocumentProjectionArtifactSurface,
@@ -70,6 +71,7 @@ type DocumentCommandState = {
 export function EditableDocumentArtifactSurface({
   session,
   title,
+  showHeader,
   subtitle,
   readOnly = false,
   onCommit,
@@ -86,6 +88,7 @@ export function EditableDocumentArtifactSurface({
     error: null,
   });
   const loadGeneration = useRef(0);
+  const scheduleLoad = useLatestTaskRunner(session);
   const commandStateRef = useRef<DocumentCommandState | null>(null);
   if (commandStateRef.current?.session !== session) {
     commandStateRef.current = {
@@ -106,45 +109,41 @@ export function EditableDocumentArtifactSurface({
         ? { ...current, loading: true, error: null }
         : { session, projection: null, loading: true, error: null },
     );
-    void composeDocumentEditorProjection(session).then(
-      (projection) => {
-        if (
-          cancelled ||
-          generation !== loadGeneration.current ||
-          commandStateRef.current !== commandState
-        ) {
-          return;
-        }
-        const nextParagraphText = paragraphTextById(projection);
-        for (const [localId, canonicalId] of commandState.optimisticParagraphIds) {
-          if (nextParagraphText.has(canonicalId)) continue;
-          const optimisticText =
-            commandState.paragraphText.get(canonicalId) ?? commandState.paragraphText.get(localId);
-          if (optimisticText !== undefined) nextParagraphText.set(canonicalId, optimisticText);
-        }
-        commandState.paragraphText = nextParagraphText;
-        setState({ session, projection, loading: false, error: null });
-      },
-      (cause) => {
-        if (
-          cancelled ||
-          generation !== loadGeneration.current ||
-          commandStateRef.current !== commandState
-        ) {
-          return;
-        }
-        setState({
-          session,
-          projection: null,
-          loading: false,
-          error: asEditableArtifactError(cause, "Could not open this document"),
-        });
-      },
-    );
+    const superseded = () =>
+      cancelled ||
+      generation !== loadGeneration.current ||
+      commandStateRef.current !== commandState;
+    scheduleLoad(async () => {
+      if (superseded()) return;
+      await composeDocumentEditorProjection(session).then(
+        (projection) => {
+          if (superseded()) return;
+          const nextParagraphText = paragraphTextById(projection);
+          for (const [localId, canonicalId] of commandState.optimisticParagraphIds) {
+            if (nextParagraphText.has(canonicalId)) continue;
+            const optimisticText =
+              commandState.paragraphText.get(canonicalId) ??
+              commandState.paragraphText.get(localId);
+            if (optimisticText !== undefined) nextParagraphText.set(canonicalId, optimisticText);
+          }
+          commandState.paragraphText = nextParagraphText;
+          setState({ session, projection, loading: false, error: null });
+        },
+        (cause) => {
+          if (superseded()) return;
+          setState({
+            session,
+            projection: null,
+            loading: false,
+            error: asEditableArtifactError(cause, "Could not open this document"),
+          });
+        },
+      );
+    });
     return () => {
       cancelled = true;
     };
-  }, [commandState, invalidator, retryEpoch, session]);
+  }, [commandState, invalidator, retryEpoch, scheduleLoad, session]);
 
   const refresh = useCallback(() => setRetryEpoch((value) => value + 1), []);
   const writable = !readOnly && view.writable;
@@ -260,6 +259,7 @@ export function EditableDocumentArtifactSurface({
     <DocumentProjectionArtifactSurface
       {...surfaceProps}
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         `${projection.blocks.length} block${projection.blocks.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
@@ -274,6 +274,7 @@ export function EditableDocumentArtifactSurface({
     <ArtifactSurface
       modality="document"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? status}
       busy={!accessRevoked && !state.error}
       className={surfaceProps.className}

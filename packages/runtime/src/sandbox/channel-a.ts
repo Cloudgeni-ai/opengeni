@@ -20,6 +20,9 @@
 // apply-patch-only path which cannot do binary, C4), falling back to
 // `createEditor` for text when `exec` is absent.
 
+import { createHash } from "node:crypto";
+import { confinedFileReadCommand, parseConfinedFileRead } from "./confined-file-read";
+import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
   FsChangedPayload,
@@ -60,6 +63,7 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
 import type { ProviderCommandSession } from "./provider-command-session";
 import {
   connectedMachinePathWithinRoot,
@@ -70,6 +74,20 @@ import {
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
 import { ModalProcessObservationUnavailableError } from "./errors";
+import {
+  directoryCheckFragment,
+  directoryCreateFragment,
+  fileCheckFragment,
+  filePutFragment,
+  parseWriteFilesOutput,
+  quotedByteLength,
+  WRITE_FILES_COMMAND_MAX_BYTES,
+  writeFilesPrelude,
+  writeFilesScript,
+  type WriteFilesOutput,
+  type WriteFilesScriptDirectory,
+  type WriteFilesScriptFile,
+} from "./write-files-script";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -160,6 +178,7 @@ export type ChannelASession = ProviderCommandSession & {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
@@ -175,6 +194,8 @@ export type ChannelASession = ProviderCommandSession & {
   }): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  /** Cleanup only: forget the local route after exact durable terminal proof. */
+  reconcileRetainedProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
@@ -223,6 +244,26 @@ export type ChannelARoutedWorkspaceImportBatchRequest = {
   workspaceRoot: string;
   revision: number;
   runAs?: string;
+};
+
+/** Create a directory's missing files without replacing anything. */
+export type FsWriteFilesRequest = {
+  /** Workspace-relative directory; created with its parents when missing. */
+  directory: string;
+  /** Paths are relative to `directory`. */
+  files: readonly { path: string; content: string; encoding?: "utf8" | "base64" }[];
+  route?: FileSystemRouteIdentity;
+};
+
+export type FsWriteFilesResponse = {
+  directory: string;
+  /** Request paths this call created, in request order. */
+  written: string[];
+  /** Request paths that already held exactly these bytes. */
+  unchanged: string[];
+  /** Whether this call created `directory` itself. */
+  createdDirectory: boolean;
+  revision: number;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
@@ -331,6 +372,168 @@ export type RepositoryDiscoveryResult = {
 };
 
 const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__";
+
+/** Raw ripgrep stdout kept on the box before encoding. */
+export const CODE_SEARCH_RG_MAX_BYTES = 64 * 1024 * 1024;
+// Providers retain about 1 MiB per output stream. Like Git capture, compressed
+// ripgrep output travels as 512 KiB chunks (~683 KiB base64) with room to spare.
+const CODE_SEARCH_RG_CHUNK_BYTES = 512 * 1024;
+const CODE_SEARCH_RG_FRAME_CHARS = 768 * 1024;
+/** Compressed bytes fetched per call at most; the rest is reported as a cut. */
+const CODE_SEARCH_RG_MAX_TRANSFER_BYTES = 8 * 1024 * 1024;
+const CODE_SEARCH_RG_TOKEN = /^opengeni-code-search\.[A-Za-z0-9]+$/;
+const CODE_SEARCH_RG_BEGIN = "__OPENGENI_CODE_SEARCH_RG_BEGIN__";
+const CODE_SEARCH_RG_END = "__OPENGENI_CODE_SEARCH_RG_END__";
+// Search: status:timedOut:compressedSize:token:rawSize:stored. A box without
+// ripgrep sends only `127:0`, and a chunk fetch sends `0:0:0:-` or `0:0:0:missing`.
+const CODE_SEARCH_RG_TRAILER = new RegExp(
+  `${CODE_SEARCH_RG_END}(\\d+):([01])(?::(\\d+):([A-Za-z0-9._-]+)(?::(\\d+):([01]))?)?__`,
+);
+const CODE_SEARCH_RG_STORE_FAILED =
+  "code search could not store its output on this machine; its temporary directory may be full";
+const CODE_SEARCH_KINDS_BEGIN = "__OPENGENI_CODE_SEARCH_KINDS_BEGIN__";
+const CODE_SEARCH_KINDS_END = "__OPENGENI_CODE_SEARCH_KINDS_END__";
+
+/** ripgrep excludes for the credential directories; appended last, so they win over any engine glob. */
+const CODE_SEARCH_CREDENTIAL_EXCLUDES = CODE_SEARCH_CREDENTIAL_DIRS.flatMap((dir) => [
+  "-g",
+  `!**/${dir.join("/")}/**`,
+]);
+
+/** Whether a relative path names a credential directory (or something inside one), in any case. */
+function isCodeSearchCredentialPath(path: string): boolean {
+  // `a/./b` and `a//b` name `a/b`
+  const segs = path
+    .toLowerCase()
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".");
+  return CODE_SEARCH_CREDENTIAL_DIRS.some((dir) =>
+    segs.some((_, i) => dir.every((d, j) => segs[i + j] === d)),
+  );
+}
+
+/** `case` pattern matching a lowercased `/path/` inside a credential directory. */
+const CODE_SEARCH_CREDENTIAL_CASE = CODE_SEARCH_CREDENTIAL_DIRS.map(
+  (dir) => `*/${dir.join("/")}/*`,
+).join("|");
+
+export type CodeSearchRipgrepOutcome = {
+  /** False when ripgrep is not installed on the box. */
+  available: boolean;
+  stdout: string;
+  /** rg exit status (0 matches, 1 none, 2 error); null after a timeout. */
+  exitCode: number | null;
+  /** Output hit the byte cap and was cut at a line boundary. */
+  truncated: boolean;
+  timedOut: boolean;
+};
+
+const CODE_SEARCH_RG_FLAGS: ReadonlySet<string> = new Set([
+  "--files",
+  "--null",
+  "--line-number",
+  "--with-filename",
+  "--no-heading",
+  "-i",
+  "-w",
+  "--no-require-git",
+  "--hidden",
+]);
+const CODE_SEARCH_RG_VALUE_FLAGS: ReadonlyMap<string, (value: string) => boolean> = new Map([
+  ["--color", (value: string) => value === "never"],
+  ["-m", (value: string) => /^[1-9]\d{0,5}$/.test(value)],
+  ["--max-columns", (value: string) => /^[1-9]\d{0,6}$/.test(value)],
+  ["--max-filesize", (value: string) => /^[1-9]\d{0,9}$/.test(value)],
+  ["-g", (value: string) => value.length > 0 && value.length <= 512],
+  ["-e", (value: string) => value.length > 0 && value.length <= 16_384],
+]);
+
+/**
+ * Accept only the ripgrep arguments `code_search` needs. Flags that run a
+ * program (`--pre`, `-z`) or read other files, and paths that leave the
+ * workspace, are rejected before a command is built. `--no-config` stops a
+ * `RIPGREP_CONFIG_PATH` on the box from adding flags.
+ */
+export function validateCodeSearchRipgrepArgs(
+  args: readonly string[],
+  workspaceRoot = "",
+): string[] {
+  const out: string[] = [];
+  let index = 0;
+  for (; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg.includes(NUL)) throw new ChannelAValidationError("ripgrep argument contains NUL");
+    if (arg === "--") break;
+    if (CODE_SEARCH_RG_FLAGS.has(arg)) {
+      out.push(arg);
+      continue;
+    }
+    const valid = CODE_SEARCH_RG_VALUE_FLAGS.get(arg);
+    const value = args[index + 1];
+    if (!valid || value === undefined || value.includes(NUL) || !valid(value)) {
+      throw new ChannelAValidationError(`ripgrep argument is not allowed: ${arg}`);
+    }
+    out.push(arg, value);
+    index++;
+  }
+  const paths = args.slice(index + 1);
+  if (index >= args.length || paths.length === 0) {
+    throw new ChannelAValidationError("ripgrep arguments must end with -- and paths");
+  }
+  // ripgrep searches an explicitly named path even when a glob excludes it
+  out.push(...CODE_SEARCH_CREDENTIAL_EXCLUDES, "--");
+  for (const path of paths) {
+    if (path.includes(NUL) || path.startsWith("-") || path.startsWith("/")) {
+      throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
+    }
+    const safe = assertSafeRelPathOrRoot(path, workspaceRoot) || ".";
+    if (isCodeSearchCredentialPath(safe)) {
+      throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
+    }
+    out.push(safe);
+  }
+  return ["--no-config", ...out];
+}
+
+/** The base64 body between the begin marker and the trailer at `trailerIndex`. */
+function decodeCodeSearchChunk(stdout: string, trailerIndex: number): Buffer {
+  const begin = stdout.indexOf(CODE_SEARCH_RG_BEGIN);
+  if (begin < 0 || begin > trailerIndex) {
+    throw new ChannelAUnavailableError("code search output frame is missing");
+  }
+  const encoded = stdout
+    .slice(begin + CODE_SEARCH_RG_BEGIN.length, trailerIndex)
+    .replace(/\s+/g, "");
+  // A frame longer than one chunk can only come from a broken or hostile box.
+  if (encoded.length > Math.ceil(CODE_SEARCH_RG_CHUNK_BYTES / 3) * 4) {
+    throw new ChannelAUnavailableError("code search output frame is malformed");
+  }
+  return Buffer.from(encoded, "base64");
+}
+
+/**
+ * Inflate at most `limit` bytes of box-controlled gzip. A sync flush decodes a
+ * cut stream as a prefix, and reading stops once `limit` is reached, so a
+ * small hostile frame cannot inflate to hundreds of megabytes in the worker.
+ */
+async function gunzipCodeSearchPrefix(input: Buffer, limit: number): Promise<Buffer> {
+  const gunzip = createGunzip({ finishFlush: zlibConstants.Z_SYNC_FLUSH, chunkSize: 64 * 1024 });
+  gunzip.end(input);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of gunzip as AsyncIterable<Buffer>) {
+      chunks.push(chunk);
+      size += chunk.length;
+      // Leaving the loop destroys the stream before it inflates further.
+      if (size >= limit) break;
+    }
+  } catch {
+    throw new ChannelAUnavailableError("code search output could not be decoded");
+  }
+  return Buffer.concat(chunks, size).subarray(0, limit);
+}
+
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
@@ -712,6 +915,33 @@ export class SandboxChannelAService {
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     this.assertFileSystemRoute(req.route);
+    if (req.workspaceOnly) {
+      const canonical = assertSafeRelPath(req.path, this.workspaceRoot);
+      const relative = isConnectedMachineAbsolutePath(canonical)
+        ? relativeConnectedMachinePath(this.workspaceRoot, canonical)
+        : canonical;
+      if (!relative || /[\u0000-\u001f\u007f\\]/u.test(relative)) {
+        throw new ChannelAValidationError("invalid workspace file path");
+      }
+      const result = await this.runReadOnly({
+        cmd: confinedFileReadCommand(this.workspaceRoot, relative, req.maxBytes),
+        login: false,
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1024,
+      });
+      if (result.exitCode === 66) throw new ChannelANotFoundError("workspace file not found");
+      if (result.exitCode === 67) {
+        throw new ChannelAValidationError("workspace file path must not contain symlinks");
+      }
+      const bytes =
+        result.sessionId === undefined && result.exitCode === 0
+          ? parseConfinedFileRead(result.stdout, req.maxBytes)
+          : null;
+      if (!bytes)
+        throw new ChannelAUnavailableError(
+          "Confined workspace reads are unavailable on this provider.",
+        );
+      return this.shapeRead(canonical, Buffer.from(bytes), req);
+    }
     const path =
       this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
         ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
@@ -764,7 +994,7 @@ export class SandboxChannelAService {
       `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       rejectLink,
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
@@ -794,7 +1024,7 @@ export class SandboxChannelAService {
       `parent=$(dirname -- ${shellQuote(abs)})`,
       locateParent,
       `target=$(opengeni_realpath_existing "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
@@ -845,7 +1075,7 @@ export class SandboxChannelAService {
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       ...(this.fileReadScope === "workspace"
         ? [
-            `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+            `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
           ]
         : []),
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
@@ -894,6 +1124,7 @@ export class SandboxChannelAService {
   }
 
   private shapeRead(path: string, bytes: Buffer, req: FsReadRequest): FsReadResponse {
+    bytes = bytes.subarray(0, req.maxBytes);
     const truncated = bytes.byteLength >= req.maxBytes;
     const isBinary = sniffBinary(bytes);
     const encoding = req.encoding === "base64" || isBinary ? "base64" : "utf8";
@@ -939,27 +1170,34 @@ export class SandboxChannelAService {
         rejectFinalSymlink: true,
       });
     }
-    // base64-decode heredoc — raw + binary capable, single round-trip, last-
-    // writer-wins (the I4 default; no read-modify-write race because we write
-    // the whole file). A non-existent parent with createParents:false surfaces a
-    // non-zero exit -> 400.
-    const b64 = bytes.toString("base64");
-    const { exitCode, stderr } = await this.run({
-      cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
-    });
-    if (exitCode !== null && exitCode !== 0) {
-      // createEditor fallback for text when exec-write failed and we have a
-      // text payload (binary cannot go through apply-patch).
-      if (req.encoding !== "base64" && this.session.createEditor) {
-        const ok = await this.tryEditorWrite(abs, req.content);
-        if (!ok)
+    // Large payloads must not become a shell argument. Provider writes carry
+    // bytes out of band; native agents use a verified chunked transaction.
+    // A failed mutation is never replayed through a second write path.
+    if (bytes.byteLength > 64 * 1024 && !this.runAs && this.session.writeFile) {
+      await this.session.writeFile({ path: abs, content: bytes, createParents: req.createParents });
+    } else {
+      // base64-decode heredoc — raw + binary capable, single round-trip, last-
+      // writer-wins (the I4 default; no read-modify-write race because we write
+      // the whole file). A non-existent parent with createParents:false surfaces a
+      // non-zero exit -> 400.
+      const b64 = bytes.toString("base64");
+      const { exitCode, stderr } = await this.run({
+        cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
+      });
+      if (exitCode !== null && exitCode !== 0) {
+        // createEditor fallback for text when exec-write failed and we have a
+        // text payload (binary cannot go through apply-patch).
+        if (req.encoding !== "base64" && this.session.createEditor) {
+          const ok = await this.tryEditorWrite(abs, req.content);
+          if (!ok)
+            throw new ChannelAValidationError(
+              `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
+            );
+        } else {
           throw new ChannelAValidationError(
             `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
           );
-      } else {
-        throw new ChannelAValidationError(
-          `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
-        );
+        }
       }
     }
     this.revision++;
@@ -968,6 +1206,330 @@ export class SandboxChannelAService {
       "write",
     );
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
+  }
+
+  /**
+   * Create every missing file beneath one workspace-relative directory in as
+   * few provider commands as possible, normally one. Nothing is replaced: an
+   * existing regular file with the same bytes is reported unchanged, while any
+   * other entry at a file path, a symbolic link on the directory path, or a
+   * path resolving outside the workspace fails before anything is written.
+   * A failed write can leave earlier files of the request in place (a later
+   * batch of a large request, or a later file of one batch); it then fails
+   * with ChannelAPartialMutationError. Repeating a request after any failure
+   * is safe because files it already wrote are reported unchanged.
+   */
+  async fsWriteFiles(req: FsWriteFilesRequest): Promise<FsWriteFilesResponse> {
+    this.assertFileSystemRoute(req.route);
+    const plan = this.planWriteFiles(req);
+    const prelude = writeFilesPrelude({
+      root: this.providerWorkspaceRoot(),
+      realpathFunction: PORTABLE_REALPATH_EXISTING_FUNCTION,
+      sha256Function: PORTABLE_SHA256_FILE_FUNCTION,
+    });
+    // A runAs wrapper quotes the command twice more, multiplying each quote.
+    const budget = this.runAs
+      ? Math.floor(WRITE_FILES_COMMAND_MAX_BYTES / 4)
+      : WRITE_FILES_COMMAND_MAX_BYTES;
+    // Prelude, the bash -c wrapper, and the trailing marker.
+    const fixedCost = prelude.reduce((total, line) => total + quotedByteLength(line), 0) + 256;
+    const written = new Set<number>();
+    const unchanged = new Set<number>();
+    const createdDirectories = new Set<number>();
+    const emittedSeparately = new Set<number>();
+    const scriptFile = (file: PlannedWriteFile, withContent: boolean): WriteFilesScriptFile => ({
+      index: file.index,
+      providerPath: file.providerPath,
+      sizeBytes: file.sizeBytes,
+      sha256: file.sha256,
+      ...(withContent ? { base64: file.base64 } : {}),
+    });
+    // "directories" packs only the files' parent directories into write
+    // commands, leaving the files themselves out of the batches.
+    const pack = (files: readonly PlannedWriteFile[], mode: "check" | "write" | "directories") => {
+      const batches: { files: PlannedWriteFile[]; directories: Set<number> }[] = [];
+      const oversize: PlannedWriteFile[] = [];
+      let current: { files: PlannedWriteFile[]; directories: Set<number> } | null = null;
+      let cost = 0;
+      const directoryCost = (index: number) => {
+        const directory = plan.directories[index]!;
+        return (
+          quotedByteLength(directoryCheckFragment(directory)) +
+          (mode === "check" ? 0 : quotedByteLength(directoryCreateFragment(directory)))
+        );
+      };
+      for (const file of files) {
+        const fileCost =
+          mode === "directories"
+            ? 0
+            : quotedByteLength(fileCheckFragment(scriptFile(file, false), mode)) +
+              (mode === "write" ? quotedByteLength(filePutFragment(scriptFile(file, true))) : 0);
+        const standalone =
+          fixedCost +
+          fileCost +
+          file.chain.reduce((total, index) => total + directoryCost(index), 0);
+        if (standalone > budget) {
+          oversize.push(file);
+          continue;
+        }
+        const added = file.chain
+          .filter((index) => !current?.directories.has(index))
+          .reduce((total, index) => total + directoryCost(index), 0);
+        if (current && cost + fileCost + added > budget) {
+          batches.push(current);
+          current = null;
+        }
+        if (!current) {
+          current = { files: [], directories: new Set() };
+          cost = fixedCost;
+        }
+        for (const index of file.chain) {
+          if (current.directories.has(index)) continue;
+          current.directories.add(index);
+          cost += directoryCost(index);
+        }
+        if (mode !== "directories") current.files.push(file);
+        cost += fileCost;
+      }
+      if (current) batches.push(current);
+      return { batches, oversize };
+    };
+    const command = (
+      mode: "check" | "write",
+      batch: { files: PlannedWriteFile[]; directories: Set<number> },
+    ): string => {
+      const cmd = internalBashCommand(
+        writeFilesScript({
+          prelude,
+          mode,
+          directories: [...batch.directories]
+            .sort((left, right) => left - right)
+            .map((index) => plan.directories[index]!),
+          files: batch.files.map((file) => scriptFile(file, mode === "write")),
+        }),
+      );
+      if (Buffer.byteLength(cmd, "utf8") > budget) {
+        throw new Error("workspace file batch exceeded its command budget");
+      }
+      return cmd;
+    };
+    const execute = async (
+      mode: "check" | "write",
+      batch: { files: PlannedWriteFile[]; directories: Set<number> },
+    ): Promise<WriteFilesOutput> => {
+      const cmd = command(mode, batch);
+      const result = mode === "check" ? await this.runReadOnly({ cmd }) : await this.run({ cmd });
+      const output = parseWriteFilesOutput(result.stdout);
+      for (const index of output.written) written.add(index);
+      for (const index of output.same) unchanged.add(index);
+      for (const index of output.createdDirectories) createdDirectories.add(index);
+      const reported = new Set([...output.same, ...output.missing, ...output.written]);
+      if (
+        result.sessionId !== undefined ||
+        output.failure ||
+        !output.complete ||
+        (result.exitCode !== null && result.exitCode !== 0) ||
+        batch.files.some((file) => !reported.has(file.index))
+      ) {
+        throw this.writeFilesError(plan, output, result.stderr);
+      }
+      return output;
+    };
+
+    try {
+      const whole = pack(plan.files, "write");
+      if (whole.oversize.length === 0 && whole.batches.length === 1) {
+        await execute("write", whole.batches[0]!);
+      } else {
+        // Too large for one command: prove every path first with read-only
+        // checks, then create only the missing files.
+        const checks = pack(plan.files, "check");
+        // A path whose directory chain alone overflows a command could never
+        // be proven or written; refuse the request instead of skipping it.
+        const unverifiable = checks.oversize[0];
+        if (unverifiable) {
+          throw new ChannelAValidationError(
+            `path is too deep to verify in one command: ${unverifiable.workspacePath}`,
+          );
+        }
+        const missing = new Set<number>();
+        for (const batch of checks.batches) {
+          for (const index of (await execute("check", batch)).missing) missing.add(index);
+        }
+        const remaining = pack(
+          plan.files.filter((file) => missing.has(file.index)),
+          "write",
+        );
+        for (const batch of remaining.batches) await execute("write", batch);
+        // A large file's directories are created by the checked script too, so
+        // they are confined, announced, and count toward createdDirectory.
+        // A chain too long even for that is left to the single-file path.
+        for (const batch of pack(remaining.oversize, "directories").batches) {
+          await execute("write", batch);
+        }
+        // A file too large to inline takes the single-file path, which moves
+        // bytes out of band when the provider can. It emits its own change.
+        for (const file of remaining.oversize) {
+          await this.fsWrite({
+            path: file.workspacePath,
+            content: file.base64,
+            encoding: "base64",
+            overwrite: false,
+            createParents: true,
+          });
+          written.add(file.index);
+          emittedSeparately.add(file.index);
+        }
+      }
+    } catch (error) {
+      await this.emitWriteFilesChanges(plan, written, createdDirectories, emittedSeparately).catch(
+        () => undefined,
+      );
+      if (written.size > 0 && !(error instanceof ChannelAPartialMutationError)) {
+        throw new ChannelAPartialMutationError(
+          "Workspace file batch failed after some files were written; repeating the same request keeps identical files and creates the rest",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    await this.emitWriteFilesChanges(plan, written, createdDirectories, emittedSeparately);
+    return {
+      directory: plan.directory,
+      written: plan.files.filter((file) => written.has(file.index)).map((file) => file.requestPath),
+      unchanged: plan.files
+        .filter((file) => unchanged.has(file.index) && !written.has(file.index))
+        .map((file) => file.requestPath),
+      createdDirectory: createdDirectories.has(plan.directoryIndex),
+      revision: this.revision,
+    };
+  }
+
+  private planWriteFiles(req: FsWriteFilesRequest): WriteFilesPlan {
+    const directory = strictWorkspaceRelativePath(req.directory, "directory");
+    if (req.files.length === 0) throw new ChannelAValidationError("files are required");
+    const directoryPaths = new Map<string, number>();
+    const directorySegments = directory.split("/");
+    const ancestors: string[] = [];
+    for (let depth = 1; depth <= directorySegments.length; depth += 1) {
+      ancestors.push(directorySegments.slice(0, depth).join("/"));
+    }
+    const filePaths = new Set<string>();
+    const prepared = req.files.map((file) => {
+      const requestPath = strictWorkspaceRelativePath(file.path, "file");
+      const workspacePath = `${directory}/${requestPath}`;
+      if (filePaths.has(workspacePath)) {
+        throw new ChannelAValidationError(`duplicate file path: ${requestPath}`);
+      }
+      filePaths.add(workspacePath);
+      const bytes =
+        file.encoding === "base64"
+          ? Buffer.from(file.content, "base64")
+          : Buffer.from(file.content, "utf8");
+      const segments = workspacePath.split("/");
+      const parents: string[] = [];
+      for (let depth = 1; depth < segments.length; depth += 1) {
+        parents.push(segments.slice(0, depth).join("/"));
+      }
+      return { requestPath, workspacePath, bytes, parents };
+    });
+    const allDirectories = new Set<string>(ancestors);
+    for (const file of prepared) for (const parent of file.parents) allDirectories.add(parent);
+    for (const path of allDirectories) {
+      if (filePaths.has(path)) {
+        throw new ChannelAValidationError(`path is both a file and a directory: ${path}`);
+      }
+    }
+    // Parents precede children, so creation runs shallowest first.
+    const ordered = [...allDirectories].sort(
+      (left, right) => left.split("/").length - right.split("/").length || (left < right ? -1 : 1),
+    );
+    const directories = ordered.map((workspacePath, index) => {
+      directoryPaths.set(workspacePath, index);
+      return { index, workspacePath, providerPath: this.joinRoot(workspacePath) };
+    });
+    const files = prepared.map((file, index) => ({
+      index,
+      requestPath: file.requestPath,
+      workspacePath: file.workspacePath,
+      providerPath: this.joinRoot(file.workspacePath),
+      sizeBytes: file.bytes.byteLength,
+      sha256: createHash("sha256").update(file.bytes).digest("hex"),
+      base64: file.bytes.toString("base64"),
+      chain: file.parents.map((parent) => directoryPaths.get(parent)!),
+    }));
+    return { directory, directories, files, directoryIndex: directoryPaths.get(directory)! };
+  }
+
+  private writeFilesError(plan: WriteFilesPlan, output: WriteFilesOutput, stderr: string): Error {
+    const failure = output.failure;
+    const target = failure?.target
+      ? failure.target.kind === "file"
+        ? plan.files[failure.target.index]?.workspacePath
+        : plan.directories[failure.target.index]?.workspacePath
+      : undefined;
+    const detail = stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : "";
+    switch (failure?.code) {
+      case "CONFLICT":
+        return new ChannelAConflictError(
+          `path exists with different content and was not overwritten: ${target ?? "unknown"}`,
+        );
+      case "UNVERIFIED":
+        return new ChannelAConflictError(
+          `path exists and could not be compared, so it was not overwritten: ${target ?? "unknown"}`,
+        );
+      case "NOT_DIR":
+        return new ChannelAConflictError(
+          `path exists and is not a directory: ${target ?? "unknown"}`,
+        );
+      case "SYMLINK":
+        return new ChannelAValidationError(
+          `directory path must not be a symbolic link: ${target ?? "unknown"}`,
+        );
+      case "ESCAPE":
+        return new ChannelAValidationError(
+          `path resolves outside workspace: ${target ?? "unknown"}`,
+        );
+      case "WRITE_FAILED":
+        return new ChannelAValidationError(`failed to write ${target ?? "unknown"}${detail}`);
+      case "NOT_FOUND":
+        if (!target) return new ChannelANotFoundError("workspace root not found");
+        break;
+      default:
+        break;
+    }
+    return new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
+  }
+
+  private async emitWriteFilesChanges(
+    plan: WriteFilesPlan,
+    written: ReadonlySet<number>,
+    createdDirectories: ReadonlySet<number>,
+    emittedSeparately: ReadonlySet<number>,
+  ): Promise<void> {
+    const changes: FsChangedPayload["changes"] = [
+      ...plan.directories
+        .filter((directory) => createdDirectories.has(directory.index))
+        .map((directory) => ({
+          path: directory.workspacePath,
+          kind: "created" as const,
+          isDir: true,
+          sizeBytes: null,
+        })),
+      ...plan.files
+        .filter((file) => written.has(file.index) && !emittedSeparately.has(file.index))
+        .map((file) => ({
+          path: file.workspacePath,
+          kind: "created" as const,
+          isDir: false,
+          sizeBytes: file.sizeBytes,
+        })),
+    ];
+    if (changes.length === 0) return;
+    this.revision++;
+    await this.emitFsChanged(changes, "write");
   }
 
   /** Import one logical batch of exact signed objects. A routing session keeps
@@ -1132,7 +1694,7 @@ export class SandboxChannelAService {
       `if test ! -e "$destination" && test ! -L "$destination"; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
       `test -f "$destination" && test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `target=$(opengeni_realpath_existing "$destination") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
       `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
       `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
       `if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf %s ${shellQuote(absentMarker)}; exit 0; fi`,
@@ -1269,7 +1831,7 @@ export class SandboxChannelAService {
       `test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
       `cd -P -- "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
       "parent_real=$(pwd -P)",
-      `case "$parent_real" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      `case "$parent_real" in "$root"|"\${root%/}/"*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
       'opengeni_target_matches() { test -f "$target" && test ! -L "$target" || return 1; bytes=$(wc -c <"$target" | tr -d " \\n") || return 1; test "$bytes" = ' +
         shellQuote(String(req.sizeBytes)) +
         ' || return 1; digest=$(opengeni_sha256_file "$target") || return 1; test "$digest" = ' +
@@ -1695,7 +2257,7 @@ export class SandboxChannelAService {
       'exec 5<"$file" || exit 66',
       "root=$(pwd -P) || exit 66",
       'target=$(opengeni_realpath_existing "$file") || exit 66',
-      'case "$target" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'case "$target" in "$root"|"${root%/}/"*) ;; *) exit 67 ;; esac',
       'test ! -L "$file" && test -f "$file" || exit 66',
       "opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "opened4_identity=$(opengeni_fd_identity 4) || exit 66",
@@ -1737,7 +2299,7 @@ export class SandboxChannelAService {
       '    exec 5<"$file" || exit 66',
       "    root=$(pwd -P) || exit 66",
       '    target_path=$(opengeni_realpath_existing "$file") || exit 66',
-      '    case "$target_path" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    case "$target_path" in "$root"|"${root%/}/"*) ;; *) exit 67 ;; esac',
       '    test ! -L "$file" && test -f "$file" || exit 66',
       "    opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "    opened4_identity=$(opengeni_fd_identity 4) || exit 66",
@@ -2278,6 +2840,261 @@ export class SandboxChannelAService {
     return (await this.detectReposDetailed()).repos;
   }
 
+  // ═════════════════════════ Code search (worker-only) ═══════════════════════
+
+  /**
+   * Run ripgrep read-only in the workspace root for the Jev `code_search` tool.
+   * Arguments are checked against a closed allowlist (no `--pre`, `-z` or other
+   * flags that run programs), so the command is provably read-only and skips
+   * durable mutation admission. stdout is capped at `maxBytes`, gzip+base64
+   * framed so providers that drop newlines or retain limited output cannot
+   * corrupt it, and bounded by a wall-clock watchdog (not GNU `timeout`, which
+   * stock macOS lacks). Resolves `available: false` when `rg` is not installed,
+   * and throws when the box could not store the output whole (a full
+   * temporary directory) rather than returning a prefix as complete.
+   */
+  async codeSearchRipgrep(
+    args: readonly string[],
+    options: { timeoutMs: number; maxBytes: number; maxTransferBytes?: number },
+  ): Promise<CodeSearchRipgrepOutcome> {
+    const argv = validateCodeSearchRipgrepArgs(args, this.workspaceRoot);
+    const maxBytes = Math.max(1, Math.min(CODE_SEARCH_RG_MAX_BYTES, Math.floor(options.maxBytes)));
+    const maxTransferBytes = Math.max(
+      CODE_SEARCH_RG_CHUNK_BYTES,
+      Math.min(
+        CODE_SEARCH_RG_MAX_TRANSFER_BYTES,
+        Math.floor(options.maxTransferBytes ?? CODE_SEARCH_RG_MAX_TRANSFER_BYTES),
+      ),
+    );
+    const seconds = Math.max(1, Math.min(120, Math.ceil(options.timeoutMs / 1_000)));
+    const script = [
+      // Remove output a previous call could not fetch (worker gone mid-transfer).
+      // The trailing slash makes find enter a symlinked /tmp, as on macOS.
+      `find "\${TMPDIR:-/tmp}/" -maxdepth 1 -name 'opengeni-code-search.*' -mmin +15 -exec rm -f {} + 2>/dev/null`,
+      'gz_file=$(mktemp "${TMPDIR:-/tmp}/opengeni-code-search.XXXXXX") || exit 70',
+      'status_file="${gz_file}.status"',
+      'timeout_file="${gz_file}.timed-out"',
+      "keep_gz=",
+      "search_pid=",
+      "watchdog_pid=",
+      'cleanup() { if [ -n "$search_pid" ]; then kill -TERM -- "-$search_pid" 2>/dev/null || kill "$search_pid" 2>/dev/null || true; fi; if [ -n "$watchdog_pid" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi; rm -f "$status_file" "$timeout_file"; [ -n "$keep_gz" ] || rm -f "$gz_file"; }',
+      "abort() { trap - EXIT; keep_gz=; cleanup; exit 143; }",
+      "trap cleanup EXIT",
+      "trap abort HUP INT TERM",
+      `if ! command -v rg >/dev/null 2>&1; then printf '${CODE_SEARCH_RG_END}127:0__'; exit 0; fi`,
+      // Job control gives the pipeline its own process group, so the watchdog
+      // and cleanup stop ripgrep itself rather than only the subshell. Output is
+      // compressed once, straight into the kept file: providers retain only
+      // about 1 MiB per output stream, and later chunks are fetched by name.
+      // That TERM stops only ripgrep and head. The subshell and gzip ignore it
+      // (bash 3.2 runs a trap before the pipeline ends), so a stopped search
+      // still stores a whole member and records every stage's status.
+      "set -m",
+      `( trap '' TERM; ( trap - TERM; exec rg ${argv.map(shellQuote).join(" ")} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
+      "search_pid=$!",
+      `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
+      "watchdog_pid=$!",
+      'wait "$search_pid" 2>/dev/null',
+      "search_pid=",
+      'kill "$watchdog_pid" 2>/dev/null || true',
+      'wait "$watchdog_pid" 2>/dev/null || true',
+      "watchdog_pid=",
+      "set +m",
+      "rg_status= head_status= gzip_status=",
+      'if [ -f "$status_file" ]; then read -r rg_status head_status gzip_status < "$status_file"; fi',
+      '[ -n "$rg_status" ] || rg_status=125',
+      "timed_out=0",
+      'if [ -f "$timeout_file" ]; then timed_out=1; fi',
+      // A full temporary directory cuts the member without a word, so decode it
+      // end to end: that yields the raw size and fails on a cut or corrupt member.
+      "stored=0",
+      'if raw_size=$(set -o pipefail; gzip -dc < "$gz_file" 2>/dev/null | wc -c | tr -d \' \') && [ "$head_status" = 0 ] && [ "$gzip_status" = 0 ]; then stored=1; fi',
+      '[ -n "$raw_size" ] || raw_size=0',
+      "gz_size=$(wc -c < \"$gz_file\" | tr -d ' ')",
+      '[ -n "$gz_size" ] || gz_size=0',
+      "token=-",
+      // The worker fails an unstored search that did not time out, so only
+      // keep output it will fetch.
+      `if [ "$gz_size" -gt ${CODE_SEARCH_RG_CHUNK_BYTES} ] && { [ "$stored" = 1 ] || [ "$timed_out" = 1 ]; }; then keep_gz=1; token=$(basename "$gz_file"); fi`,
+      `printf '${CODE_SEARCH_RG_BEGIN}'`,
+      `head -c ${CODE_SEARCH_RG_CHUNK_BYTES} "$gz_file" | base64 | tr -d '\\r\\n'`,
+      `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s:%s:%s__' "$rg_status" "$timed_out" "$gz_size" "$token" "$raw_size" "$stored"`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: internalBashCommand(script),
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: (seconds + 15) * 1_000,
+      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+    });
+    const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
+    if (!trailer) {
+      throw new ChannelAUnavailableError("code search did not complete in this workspace");
+    }
+    const exitCode = Number.parseInt(trailer[1]!, 10);
+    if (exitCode === 127) {
+      return { available: false, stdout: "", exitCode: null, truncated: false, timedOut: false };
+    }
+    if (trailer[3] === undefined || trailer[5] === undefined) {
+      throw new ChannelAUnavailableError("code search output trailer is malformed");
+    }
+    const timedOut = trailer[2] === "1";
+    // A stopped search keeps the whole lines it stored. Otherwise a lost
+    // status or a failed or corrupt store must not pass as complete output.
+    if (!timedOut && exitCode === 125) {
+      throw new ChannelAUnavailableError(
+        "code search did not record its status on this machine; its temporary directory may be full",
+      );
+    }
+    if (!timedOut && trailer[6] !== "1") {
+      throw new ChannelAUnavailableError(CODE_SEARCH_RG_STORE_FAILED);
+    }
+    const first = decodeCodeSearchChunk(stdout, trailer.index);
+    const reportedSize = Number.parseInt(trailer[3], 10);
+    const rawSize = Number.parseInt(trailer[5], 10);
+    const token = trailer[4] === "-" ? null : trailer[4]!;
+    const parts = [first];
+    let fetched = first.length;
+    if (token !== null && reportedSize > fetched) {
+      if (!CODE_SEARCH_RG_TOKEN.test(token)) {
+        throw new ChannelAUnavailableError("code search output frame is malformed");
+      }
+      // A box that lies about its size never gets more than the transfer cap
+      // fetched from it, nor more calls than that cap needs.
+      const target = Math.min(reportedSize, maxTransferBytes);
+      const maxCalls = Math.ceil(maxTransferBytes / CODE_SEARCH_RG_CHUNK_BYTES);
+      for (let call = 0; call < maxCalls && fetched < target; call++) {
+        const length = Math.min(CODE_SEARCH_RG_CHUNK_BYTES, target - fetched);
+        const chunk = await this.codeSearchRipgrepChunk(
+          token,
+          fetched,
+          length,
+          fetched + length >= target,
+        );
+        if (chunk === null) break;
+        parts.push(chunk);
+        fetched += chunk.length;
+        // A real box returns every byte asked for; a short chunk ends the
+        // transfer and is reported as a cut.
+        if (chunk.length < length) break;
+      }
+    }
+    const transferCut = fetched < reportedSize;
+    // The box already cut stdout at maxBytes + 1, so more decoded bytes than
+    // that come from a broken or hostile box and are dropped as a cut.
+    const compressed = Buffer.concat(parts);
+    const raw = compressed.length
+      ? await gunzipCodeSearchPrefix(compressed, maxBytes + 1)
+      : Buffer.alloc(0);
+    const rawCut = raw.length > maxBytes;
+    // With nothing cut, the output must be exactly what the box verified.
+    const sizeMismatch = !rawCut && !transferCut && !timedOut && raw.length !== rawSize;
+    const truncated = rawCut || transferCut || sizeMismatch;
+    let text = (rawCut ? raw.subarray(0, maxBytes) : raw).toString("utf8");
+    if (truncated || timedOut) {
+      // Drop the last partial line so every returned record is whole.
+      const lastNewline = text.lastIndexOf("\n");
+      text = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+    }
+    return {
+      available: true,
+      stdout: text,
+      exitCode: timedOut ? null : exitCode,
+      truncated,
+      timedOut,
+    };
+  }
+
+  /**
+   * Fetch one chunk of compressed ripgrep output kept on the box by a previous
+   * codeSearchRipgrep call. The last fetch deletes the file. Null when the
+   * file is gone.
+   */
+  private async codeSearchRipgrepChunk(
+    token: string,
+    offset: number,
+    length: number,
+    last: boolean,
+  ): Promise<Buffer | null> {
+    const script = [
+      'f="${TMPDIR:-/tmp}/$1"',
+      `if [ ! -f "$f" ]; then printf '${CODE_SEARCH_RG_END}0:0:0:missing__'; exit 0; fi`,
+      `printf '${CODE_SEARCH_RG_BEGIN}'`,
+      'tail -c +"$2" "$f" | head -c "$3" | base64 | tr -d \'\\r\\n\'',
+      `printf '${CODE_SEARCH_RG_END}0:0:0:-__'`,
+      'if [ "$4" = 1 ]; then rm -f "$f"; fi',
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: `${internalBashCommand(script)} opengeni-code-search ${shellQuote(token)} ${offset + 1} ${length} ${last ? 1 : 0}`,
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: 30_000,
+      maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
+    });
+    const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
+    if (!trailer) {
+      throw new ChannelAUnavailableError("code search did not complete in this workspace");
+    }
+    if (trailer[4] === "missing") return null;
+    const chunk = decodeCodeSearchChunk(stdout, trailer.index);
+    if (chunk.length > length) {
+      throw new ChannelAUnavailableError("code search output frame is malformed");
+    }
+    return chunk;
+  }
+
+  /** Classify workspace-relative paths for `code_search` path filters. */
+  async codeSearchPathKinds(
+    paths: readonly string[],
+  ): Promise<Record<string, "file" | "directory" | "missing">> {
+    const checked = paths.map((path) => {
+      if (path.startsWith("-")) throw new ChannelAValidationError(`invalid path: ${path}`);
+      return assertSafeRelPathOrRoot(path, this.workspaceRoot) || ".";
+    });
+    if (checked.length === 0) return {};
+    // A path that resolves, through any symlink, into a credential directory is
+    // reported missing: ripgrep follows a symlink named as a search root, so the
+    // engine's own checks on the relative path cannot see it. `phys` fails when
+    // it cannot resolve a path safely: without `realpath` (macOS before 13) a
+    // directory is resolved with `pwd -P` and a symlinked file is refused.
+    const script = [
+      "phys() {",
+      '  if command -v realpath >/dev/null 2>&1; then realpath "$1" 2>/dev/null; return 0; fi',
+      '  if [ -d "$1" ]; then (cd "$1" 2>/dev/null && pwd -P); return 0; fi',
+      '  if [ -L "$1" ]; then return 1; fi',
+      '  d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) && printf %s "$d/$(basename "$1")"',
+      "  return 0",
+      "}",
+      "denied() {",
+      '  r=$(phys "$1") || return 0',
+      '  for c in "/$1/" "$r/"; do',
+      "    c=$(printf %s \"$c\" | tr '[:upper:]' '[:lower:]')",
+      `    case "$c" in ${CODE_SEARCH_CREDENTIAL_CASE}) return 0 ;; esac`,
+      "  done",
+      "  return 1",
+      "}",
+      `printf '${CODE_SEARCH_KINDS_BEGIN}'`,
+      'for p in "$@"; do if denied "$p"; then printf m; elif [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
+      `printf '${CODE_SEARCH_KINDS_END}'`,
+    ].join("\n");
+    const { stdout } = await this.runReadOnly({
+      cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
+      workdir: this.providerWorkspaceRoot(),
+      yieldTimeMs: 20_000,
+      maxOutputTokens: 4_096,
+    });
+    const match = new RegExp(`${CODE_SEARCH_KINDS_BEGIN}([dfm]*)${CODE_SEARCH_KINDS_END}`).exec(
+      stdout,
+    );
+    if (!match || match[1]!.length !== checked.length) {
+      throw new ChannelAUnavailableError("code search path check did not complete");
+    }
+    const kinds: Record<string, "file" | "directory" | "missing"> = {};
+    paths.forEach((path, index) => {
+      const code = match[1]![index];
+      kinds[path] = code === "d" ? "directory" : code === "f" ? "file" : "missing";
+    });
+    return kinds;
+  }
+
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════
 
   /** Run a bounded command to physical completion and return buffered output.
@@ -2576,7 +3393,7 @@ export class SandboxChannelAService {
         `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         rejectLink,
         `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-        `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+        `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
         `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
         `cd -P -- "$target"`,
         `printf ${shellQuote(successPrefix)}`,
@@ -2760,6 +3577,41 @@ function addedLines(bytes: Buffer): GitDiffHunk["lines"] {
     newNo: index + 1,
     text,
   }));
+}
+
+type PlannedWriteFile = {
+  index: number;
+  requestPath: string;
+  workspacePath: string;
+  providerPath: string;
+  sizeBytes: number;
+  sha256: string;
+  base64: string;
+  /** Directory indexes from the shallowest ancestor to the file's parent. */
+  chain: number[];
+};
+
+type WriteFilesPlan = {
+  directory: string;
+  directories: (WriteFilesScriptDirectory & { workspacePath: string })[];
+  files: PlannedWriteFile[];
+  directoryIndex: number;
+};
+
+/** Batch writes accept only plain relative segments: no absolute paths, dot
+ * segments, backslashes, or control characters. */
+function strictWorkspaceRelativePath(path: string, kind: "directory" | "file"): string {
+  if (
+    typeof path !== "string" ||
+    !path ||
+    path.length > 4_096 ||
+    path.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(path) ||
+    path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new ChannelAValidationError(`${kind} path must be a plain relative path: ${path}`);
+  }
+  return path;
 }
 
 function normalizeRelPath(p: string): string {

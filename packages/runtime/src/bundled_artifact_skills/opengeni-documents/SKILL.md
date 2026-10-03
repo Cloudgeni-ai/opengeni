@@ -1,6 +1,6 @@
 ---
 name: opengeni-documents
-description: Create, inspect, edit, review, import, and export durable OpenGeni document artifacts and explicit DOCX file boundaries. Use for reports, briefs, proposals, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery.
+description: Create, inspect, edit, review, import, and export durable OpenGeni document artifacts and explicit DOCX file boundaries. Use when creating or editing a document Artifact or DOCX (reports, briefs, proposals, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery); ordinary chat answers do not need it.
 ---
 
 # OpenGeni documents
@@ -10,12 +10,15 @@ live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
 artifact state.
 
-This also applies when a report is a secondary output of another task, such as
-a Knowledge cleanup audit. Declare the report through the available goal tools
-before authoring; if the task has no goal and goal tools are available, create
-one with the report requirement. If a goal already exists, append the report
-requirement without replacing the standing objective. Ordinary chat answers,
-brief progress updates, internal worker findings, code navigation and explicitly requested local-file
+Create a document when the user asks for a document or file, or when a
+deliverable is large (multi-page) or clearly meant to be kept or shared;
+otherwise answer in chat. This also applies when a report is a secondary output
+of another task, such as a Knowledge cleanup audit. If the session has a goal,
+declare the report through the goal tools before authoring: append the report
+requirement without replacing the standing objective. Do not create a goal only
+to declare a document. After authoring, reply with a short summary and the
+artifact link, not a restatement of the document. Ordinary chat answers, brief
+progress updates, internal worker findings, code navigation and explicitly requested local-file
 work are not report deliverables.
 
 Read [references/api.md](references/api.md) before editing.
@@ -44,7 +47,10 @@ Skill was installed or explicitly checked out to the filesystem.
 2. Make the smallest coherent edit. One `opengeni__editable_artifact_apply`
    call is one atomic command batch. Use stable ids from inspection for existing
    objects and `openGeni.artifacts.ids.document(...)` for new objects in
-   CodeMode. A direct call must pass the inspected `headSequence` and
+   CodeMode. On a Connected Machine without the JS client, use the offline native
+   `codemode document-id <kind> <namespace>` helper described in `references/api.md`;
+   copy the exact namespace from the inspected summary, never invent it.
+   A direct call must pass the inspected `headSequence` and
    `stateHash`; CodeMode carries its last read head automatically.
 3. For one simple edit, call the artifact tools directly. For loops, several
    inspections, generated ids, or a multi-part batch, write auditable Bun code
@@ -54,10 +60,13 @@ Skill was installed or explicitly checked out to the filesystem.
    re-inspect and recompute; never force a stale rewrite.
 5. Use real paragraphs, styles, tables, sections, page breaks, comments, and
    tracked changes—not spaces, Unicode bullets, or flattened screenshots.
-6. Export only when the user needs DOCX/PDF/image delivery or visual QA.
-   `opengeni__editable_artifact_export_status` returns a durable workspace
-   `fileId`; it does not write into the sandbox. Download that file only if
-   local bytes are needed.
+6. Share the result as the live artifact's `artifactReference` link. Export
+   only formats the `opengeni__editable_artifact_export` tool description lists
+   (current deployments serve spreadsheet XLSX only, so no document DOCX/PDF/
+   image export); never attempt or promise an unlisted format. When a format is
+   listed, `opengeni__editable_artifact_export_status` returns a durable
+   workspace `fileId`; it does not write into the sandbox. Download that file
+   only if local bytes are needed.
 
 ## Fidelity and safety
 

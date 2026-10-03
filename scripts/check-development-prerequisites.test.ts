@@ -141,13 +141,50 @@ test("a remote relay needs no local compiler unless an explicit bind requests a 
 });
 
 describe("backend-aware read-only preflight", () => {
+  test("accepts modern Compose plugin versions and rejects legacy or invalid output", async () => {
+    for (const [version, supported] of [
+      ["Docker Compose version v2.39.0", true],
+      ["Docker Compose version v5.1.2", true],
+      ["Docker Compose version 10.0.0", true],
+      ["Docker Compose version v1.29.2", false],
+      ["docker-compose version 1.29.2, build 5becea4c", false],
+      ["unrecognized output", false],
+    ] as const) {
+      const { host } = fixture();
+      const probe = host.probe;
+      host.probe = (command, args) =>
+        command === "docker" && args[0] === "compose"
+          ? { ok: true, stdout: version }
+          : probe(command, args);
+      const result = await collectDevelopmentPrerequisites({ ...prebuilt, environment: {} }, host);
+      expect(result.errors.length, version).toBe(supported ? 0 : 1);
+    }
+  });
+
   test("Docker checks daemon, Compose, Buildx, but not native infrastructure", async () => {
     const { host, commands } = fixture();
     expect(await collectDevelopmentPrerequisites({ ...prebuilt, environment: {} }, host)).toEqual({
       backend: "docker",
       errors: [],
     });
-    expect(commands).toEqual(["docker info", "docker compose version", "docker buildx version"]);
+    expect(commands).toEqual([
+      "docker version --format {{.Server.Version}}",
+      "docker compose version",
+      "docker buildx version",
+    ]);
+  });
+
+  test("accepts a newer Docker Compose major version", async () => {
+    const { host } = fixture();
+    const probe = host.probe;
+    host.probe = (command, args) =>
+      command === "docker" && args.join(" ") === "compose version"
+        ? { ok: true, stdout: "Docker Compose version v5.1.2" }
+        : probe(command, args);
+    expect(await collectDevelopmentPrerequisites({ ...prebuilt, environment: {} }, host)).toEqual({
+      backend: "docker",
+      errors: [],
+    });
   });
 
   test("auto falls back to complete native checks when daemon probe fails", async () => {
@@ -260,7 +297,11 @@ describe("backend-aware read-only preflight", () => {
       (await collectDevelopmentPrerequisites({ artifactRuntime: "resolve", environment: {} }, host))
         .errors,
     ).toEqual([]);
-    expect(commands).toEqual(["docker info", "docker compose version", "docker buildx version"]);
+    expect(commands).toEqual([
+      "docker version --format {{.Server.Version}}",
+      "docker compose version",
+      "docker buildx version",
+    ]);
     const relay = await collectDevelopmentPrerequisites(
       { artifactRuntime: "resolve", environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } },
       host,

@@ -44,11 +44,197 @@ test("compact row offers one ghost Retry without duplicate controls or guidance"
   expect(container.querySelector("button")!.textContent).toBe("Retry");
   expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
   expect(container.querySelector("svg")).not.toBeNull();
-  expect(container.querySelector("details")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
   expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
   expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
     /bg-|border|rounded/,
   );
+});
+
+test("uncategorized preclaim details never grant Retry or bypass its blocker", async () => {
+  const detail = "getaddrinfo ENOTFOUND database.example.test\nsynthetic diagnostic";
+  const preclaim = {
+    ...failure,
+    reason: detail,
+    recordedDetail: detail,
+    failureCode: "pre_claim_failure",
+  };
+  let retries = 0;
+  const container = await render(<FailedSessionBanner failure={preclaim} />);
+  expect(container.querySelector("button")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe(detail);
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={preclaim}
+        actions={{
+          onRetry: async () => {
+            retries += 1;
+            return true;
+          },
+          retryBlocker: "permission",
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
+  expect(retries).toBe(0);
+});
+
+test("credential failures hide Retry until another model is chosen and keep raw detail folded", async () => {
+  const raw =
+    "401 Incorrect API key provided: sk-proj-****abcd. You can find your API key at https://platform.openai.com/account/api-keys.";
+  const credentialFailure = {
+    ...failure,
+    reason:
+      "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.",
+    recordedDetail: raw,
+  };
+  const container = await render(
+    <FailedSessionBanner failure={credentialFailure} actions={actions} canChooseModel />,
+  );
+  const banner = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(banner.querySelector("button")).toBeNull();
+  const details = banner.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")!.textContent).toBe("Details");
+  expect(details.querySelector("p")!.textContent).toBe(raw);
+  expect(banner.textContent?.replace(details.textContent ?? "", "")).toBe(
+    "The model provider rejected the credentials for this model. Choose another model below.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={credentialFailure} actions={actions} modelChanged />,
+    ),
+  );
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("billing and daily-limit failures keep Retry on the same model", async () => {
+  const banner = (raw: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: raw, recordedDetail: raw }}
+      actions={actions}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("402 Payment Required"));
+  for (const raw of [
+    "402 This request requires more credits. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more.",
+  ]) {
+    await act(async () => root!.render(banner(raw)));
+    const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+    expect(row.textContent).toContain("Choose another model below.");
+    expect(row.querySelectorAll("button")).toHaveLength(1);
+    expect(row.querySelector("button")!.textContent).toBe("Retry");
+  }
+});
+
+test("the free model's daily limit names it and offers credits, a subscription and Retry", async () => {
+  const detail =
+    "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.\n429 Rate limit exceeded: free-models-per-day.";
+  const daily = {
+    ...failure,
+    reason: detail.replace("\n", " "),
+    recordedDetail: detail,
+    failureCode: "provider_quota_exhausted",
+    quotaScope: "daily",
+  };
+  const banner = (props: {
+    freeModel?: boolean;
+    modelChanged?: boolean;
+    subscriptions?: { codex: boolean; supergrok: boolean };
+    canChooseModel?: boolean;
+    hasModelPicker?: boolean;
+  }) => (
+    <FailedSessionBanner
+      failure={daily}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      subscriptions={{ codex: true, supergrok: true }}
+      {...props}
+    />
+  );
+  const container = await render(banner({ freeModel: true }));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const headline = () => row().querySelector("span")!.textContent;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
+  expect(row().querySelector("details p")!.textContent).toBe(detail);
+
+  // A deployment without subscriptions never names them or links to them.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: false, supergrok: false } })),
+  );
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
+  );
+  expect(headline()).toContain("connect ChatGPT, or pick another model");
+  expect(labels()).toEqual(["Buy credits", "Connect ChatGPT", "Retry"]);
+
+  // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, canChooseModel: false, hasModelPicker: true })),
+  );
+  expect(headline()).toContain("or pick another model to keep going.");
+
+  // Once another model is picked, Retry runs on it and the remedies step aside.
+  await act(async () => root!.render(banner({ freeModel: true, modelChanged: true })));
+  expect(headline()).toBe("The free model has reached its daily limit.");
+  expect(labels()).toEqual(["Retry"]);
+
+  // Any other model keeps the generic daily-limit wording and actions.
+  await act(async () => root!.render(banner({ freeModel: false })));
+  expect(headline()).toBe("This model's daily limit has been reached. Choose another model below.");
+  expect(labels()).toEqual(["Retry"]);
+});
+
+test("the free model keeps ordinary wording for failures other than its daily limit", async () => {
+  const container = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      freeModel
+    />,
+  );
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "The model provider is rate limiting requests. Try again in a minute.",
+  );
+  expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {
@@ -192,7 +378,43 @@ test("sandbox projection gates compact Retry and structural failures override bi
   expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
 });
 
-test.each(["restored", "connected_machine"] as const)(
+test("a viewer who cannot use checkpoint recovery keeps Retry and sees no failed check", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => {
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+        );
+      },
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.textContent).not.toContain("checkpoint recovery");
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{ ...failure, structuralSandboxFailure: true }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    ),
+  );
+  expect(container.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as const)(
   "%s projection exposes only explicit compact Retry through the structural banner",
   async (route) => {
     let retries = 0;
@@ -203,10 +425,37 @@ test.each(["restored", "connected_machine"] as const)(
       client: {
         getSandboxRecovery: async () => ({
           version: 1 as const,
-          status: route === "restored" ? ("restored" as const) : ("unsupported" as const),
-          reason: route === "restored" ? null : "connected_machine_selected",
+          status:
+            route === "restored"
+              ? ("restored" as const)
+              : route === "automatic" || route === "fresh_workspace"
+                ? ("eligible" as const)
+                : ("unsupported" as const),
+          reason: route === "connected_machine" ? "connected_machine_selected" : null,
           operationId: route === "restored" ? "durable-operation" : null,
-          checkpoint: null,
+          automaticAvailable: route === "automatic" || route === "fresh_workspace",
+          ...(route === "automatic"
+            ? { automaticLane: "checkpoint" as const }
+            : route === "fresh_workspace"
+              ? { automaticLane: "fresh_workspace" as const }
+              : {}),
+          checkpoint:
+            route === "automatic"
+              ? {
+                  version: 1 as const,
+                  sessionId: "session-a",
+                  sandboxGroupId: "group-a",
+                  leaseId: "lease-a",
+                  routeEpoch: 0,
+                  authorityEpoch: 1,
+                  leaseEpoch: 2,
+                  workspaceGeneration: 12,
+                  archiveGeneration: 7,
+                  artifactId: "artifact-a",
+                  revision: "revision-a",
+                  capturedAt: "2026-09-20T08:00:00.000Z",
+                }
+              : null,
         }),
         recoverSandbox: async () => {
           throw new Error("Current route must not submit consent");
@@ -231,6 +480,14 @@ test.each(["restored", "connected_machine"] as const)(
     expect(retries).toBe(0);
     expect(container.querySelectorAll("button")).toHaveLength(1);
     expect(container.querySelector("button")!.textContent).toBe("Retry");
+    if (route === "automatic") {
+      expect(container.textContent).toContain("Retry will use the latest verified checkpoint from");
+      expect(container.textContent).toContain("Newer files are unavailable.");
+    }
+    if (route === "fresh_workspace")
+      expect(container.textContent).toContain(
+        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+      );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
     await act(async () =>
@@ -462,7 +719,11 @@ test("unknown provider evidence never invents expiry, reset or connection classi
       actions={actions}
     />,
   );
-  expect(container.textContent).toBe("Connection failed.Retry");
+  const row = container.querySelector('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe("The session stopped unexpectedly.");
+  expect(row.querySelector("details p")!.textContent).toBe("Connection failed.");
+  expect(row.querySelector("details")!.open).toBe(false);
+  expect(row.querySelector("button")!.textContent).toBe("Retry");
   expect(container.textContent).not.toMatch(/Codex|expired|reset|reconnect/i);
 });
 

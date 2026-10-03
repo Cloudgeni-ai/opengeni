@@ -3,6 +3,7 @@ import { useLightboxOptional } from "@opengeni/react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import type { FileAsset, ResourceRef } from "@/types";
 import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";
@@ -192,8 +193,8 @@ function MessageImagePreview({
       });
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
-      toast.error("Failed to download image", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't download the image", {
+        description: userErrorText(error),
       });
     }
   }
@@ -285,8 +286,8 @@ function MessageFileAttachment({
       });
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
-      toast.error("Failed to open file", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't open the file", {
+        description: userErrorText(error),
       });
     } finally {
       setBusy(false);

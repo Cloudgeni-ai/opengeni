@@ -1,3 +1,12 @@
+import { withDirectModelProviders } from "@opengeni/config";
+import { listConnectionsMetadata } from "@opengeni/db";
+import {
+  workspaceProviderApiKeyConnectionMetadataFromConnections,
+  listWorkspaceProviderCustomModelsByKind,
+  getOrganizationModelProviderCatalogForWorkspace,
+  type WorkspaceCustomModelProviderKind,
+} from "@opengeni/db";
+import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
@@ -19,6 +28,7 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  AgentConfigError,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
@@ -36,12 +46,14 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
+import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   createWorkspace,
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
+  getWorkspace,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
@@ -71,9 +83,6 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
-  workspaceOpenRouterConnectionActive,
-  organizationModelProviderConnectionActiveForWorkspace,
-  listOrganizationModelProviderCustomModelsForWorkspace,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -89,12 +98,17 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
+  isDeveloperSetupApiKeyContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
+  creditsDefaultSessionModel,
+  resolveDefaultSessionModelForSelections,
+  resolveWorkspaceModelSelection,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -107,7 +121,7 @@ import {
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
-import { buildWorkspaceModelCatalog } from "../model-catalog";
+import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
@@ -122,8 +136,12 @@ import {
   configuredOpenRouterWorkspaceProductModelIds,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  sandboxImageAllowlist,
+  agentConfigDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
+import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
+import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 
 export function canonicalWorkspacePolicyModelIds(
   settings: Settings,
@@ -193,6 +211,14 @@ export function workspaceMembersResponse(members: readonly WorkspaceMemberProjec
   });
 }
 
+export function workspaceUpdateRequestsSettings(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.prototype.hasOwnProperty.call(value, "settings")
+  );
+}
+
 export function workspaceUpdateRequestsAccountTransfer(value: unknown): boolean {
   return (
     typeof value === "object" &&
@@ -201,19 +227,53 @@ export function workspaceUpdateRequestsAccountTransfer(value: unknown): boolean 
   );
 }
 
+/**
+ * Owning organization for `PUT /v1/workspaces/external`. An organization API
+ * key can only ever create workspaces in its own organization, so an omitted
+ * `accountId` resolves to that organization. Every other caller - notably a
+ * human who may belong to several organizations - must name it explicitly;
+ * guessing a default there could create the workspace in the wrong tenant.
+ */
+export function externalWorkspaceAccountId(
+  context: AccessContext,
+  requested: string | undefined,
+): string {
+  if (requested !== undefined) return requested;
+  const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
+  if (organizationKey) return organizationKey.accountId;
+  throw new ApiHttpError(400, {
+    code: "validation_failed",
+    message:
+      "Invalid request body: accountId: required - pass the id of the organization that will own the workspace (only an organization API key may omit it).",
+    retryable: false,
+    details: {
+      code: "invalid_request_body",
+      issues: [{ path: "accountId", message: "Required" }],
+      omittedIssueCount: 0,
+    },
+  });
+}
+
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/external-members", async (c) => {
+    // Validate at the HTTP boundary so a malformed body is a 400, not a raw
+    // schema error from the application layer.
+    const body = await readRequestJson(c);
+    parseRequestBody(AddExternalWorkspaceMemberRequest, body);
     return c.json(
-      await addExternalWorkspaceMemberForRequest(
-        c,
-        deps,
-        c.req.param("workspaceId"),
-        await c.req.json(),
-      ),
+      await addExternalWorkspaceMemberForRequest(c, deps, c.req.param("workspaceId"), body),
     );
   });
   app.get("/v1/access/me", async (c) => {
     return c.json(await requireAccessContext(c, deps));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/access/grant", async (c) => {
+    // Inventory may be empty for an external actor. Resolve the selected
+    // workspace through the canonical membership/key-ceiling boundary.
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"));
+    c.header("cache-control", "private, no-store");
+    return c.json(grant);
   });
 
   app.get("/v1/workspaces", async (c) => {
@@ -254,8 +314,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put("/v1/workspaces/external", async (c) => {
     const context = await requireAccessContext(c, deps);
-    const payload = EnsureWorkspaceRequest.parse(await c.req.json());
-    requireAccountPermission(context, payload.accountId, "workspace:create");
+    const request = await parseRequestJson(c, EnsureWorkspaceRequest);
+    const accountId = externalWorkspaceAccountId(context, request.accountId);
+    const payload = { ...request, accountId };
+    requireAccountPermission(context, accountId, "workspace:create");
     try {
       const existing = await findWorkspaceByExternalIdentity(deps.db, {
         accountId: payload.accountId,
@@ -308,7 +370,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
-    const payload = CreateWorkspaceRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateWorkspaceRequest);
     const accountId = payload.accountId ?? context.defaultAccountId;
     if (!accountId) {
       throw new HTTPException(409, {
@@ -335,14 +397,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
-      await grantWorkspaceAccess(deps.db, {
-        accountId,
-        workspaceId: workspace.id,
-        subjectId: context.subjectId,
-        role: "owner",
-        permissions: allWorkspacePermissions,
-        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-      });
+      // Setup keys already have canonical same-organization workspace access.
+      // Do not widen that ceiling with an all-permissions creator membership.
+      if (!isDeveloperSetupApiKeyContext(context)) {
+        await grantWorkspaceAccess(deps.db, {
+          accountId,
+          workspaceId: workspace.id,
+          subjectId: context.subjectId,
+          role: "owner",
+          permissions: allWorkspacePermissions,
+          ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        });
+      }
       return c.json(Workspace.parse(workspace), 201);
     } catch (error) {
       if (error instanceof WorkspaceLimitExceededError) {
@@ -361,7 +427,25 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const body = await c.req.json();
+    const body = await readRequestJson(c);
+    if (workspaceUpdateRequestsSettings(body)) {
+      throw new ApiHttpError(400, {
+        code: "validation_failed",
+        message:
+          "Invalid request body: settings: workspace settings are not accepted here; send them to PATCH /v1/workspaces/:workspaceId/settings (SDK: updateWorkspaceSettings).",
+        retryable: false,
+        details: {
+          code: "invalid_request_body",
+          issues: [
+            {
+              path: "settings",
+              message: "Use PATCH /v1/workspaces/:workspaceId/settings",
+            },
+          ],
+          omittedIssueCount: 0,
+        },
+      });
+    }
     if (workspaceUpdateRequestsAccountTransfer(body)) {
       throw new ApiHttpError(409, {
         code: "conflict",
@@ -372,7 +456,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         details: { code: "workspace_transfer_unsupported" },
       });
     }
-    const payload = UpdateWorkspaceRequest.parse(body);
+    const payload = parseRequestBody(UpdateWorkspaceRequest, body);
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
@@ -394,6 +478,22 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, {
         message: "invalid workspace settings patch",
+      });
+    }
+    if (
+      parsed.data.sessionAgentDefaults !== undefined &&
+      !agentConfigDeploymentPolicy(deps.settings).admissionEnabled
+    ) {
+      throw new AgentConfigError(
+        "agent_config_not_enabled",
+        "agent configuration is not enabled on this deployment",
+      );
+    }
+    const requestedImage = parsed.data.defaultSandboxImage;
+    if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {
+      throw new HTTPException(422, {
+        message:
+          "defaultSandboxImage must be one of the images in this deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST",
       });
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
@@ -427,74 +527,100 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const catalogSettings = deps.resolveCatalogSettings();
+    const providerKinds: WorkspaceCustomModelProviderKind[] = [
+      "vercel_gateway",
+      "openrouter",
+      ...CLAUDE_CONNECTION_KINDS.filter(
+        (kind) => kind !== "claude_subscription" || deps.settings.claudeSubscriptionEnabled,
+      ),
+    ];
     const [
       connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
+      codexModelAvailability,
       xaiSubscriptionActive,
-      workspaceGatewayConnectionActive,
-      workspaceGatewayCustomModels,
-      openRouterConnectionActive,
-      workspaceOpenRouterCustomModels,
-      organizationGatewayConnectionActive,
-      organizationOpenRouterConnectionActive,
-      organizationGatewayCustomModels,
-      organizationOpenRouterCustomModels,
+      workspaceConnections,
+      workspaceCustomModels,
+      organizationProviders,
+      workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
-      deps.resolveCatalogSettings(),
+      catalogSettings,
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      catalogSettings.then(({ settings }) =>
+        loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
+      ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
-      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
-      listWorkspaceGatewayCustomModels(deps.db, {
+      listConnectionsMetadata(deps.db, workspaceId, null),
+      listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,
         workspaceId,
+        providerKinds,
       }),
-      workspaceOpenRouterConnectionActive(deps.db, workspaceId),
-      listWorkspaceOpenRouterCustomModels(deps.db, {
+      getOrganizationModelProviderCatalogForWorkspace(deps.db, {
         accountId: grant.accountId,
         workspaceId,
+        providerKinds,
       }),
-      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
+      getWorkspace(deps.db, workspaceId),
     ]);
+    const claudeConnections: ClaudeConnectionCatalog = {};
+    const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+    const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
+      workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) continue;
+      claudeConnections[kind] = organizationProviders[kind];
+      workspaceClaudeConnections[kind] = {
+        active: workspaceConnectionActive(kind),
+        models: workspaceCustomModels[kind],
+      };
+    }
+    const workspaceCatalogSettings = withDirectModelProviders(
+      resolvedCatalog.settings,
+      workspaceConnections,
+    );
+    const selections = resolveWorkspaceModelSelection({
+      claudeConnections,
+      workspaceClaudeConnections,
+      connectionModelRestrictions,
+      settings: workspaceCatalogSettings,
+      policy,
+      observations: codexModelAvailability,
+      codexSubscriptionActive,
+      xaiSubscriptionActive,
+      workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
+      workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,
+      workspaceOpenRouterConnectionActive: workspaceConnectionActive("openrouter"),
+      workspaceOpenRouterCustomModels: workspaceCustomModels.openrouter,
+      organizationGatewayConnectionActive: organizationProviders.vercel_gateway.active,
+      organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
+      organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
+      organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+    });
+    // The same precedence the server applies when a new chat, API create, or
+    // scheduled occurrence names no model; published so pickers show it.
+    const workspaceSettings = workspace?.settings ?? {};
+    const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
+      settings: workspaceCatalogSettings,
+      accountId: grant.accountId,
+      workspaceSettings,
+      selections,
+    });
     c.header("cache-control", "private, no-store");
     return c.json(
       WorkspaceModelCatalogResponse.parse(
-        buildWorkspaceModelCatalog({
-          connectionModelRestrictions,
-          settings: resolvedCatalog.settings,
-          policy,
-          codexSubscriptionActive,
-          xaiSubscriptionActive,
-          workspaceGatewayConnectionActive,
-          workspaceGatewayCustomModels,
-          workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-          workspaceOpenRouterCustomModels,
-          organizationGatewayConnectionActive,
-          organizationOpenRouterConnectionActive,
-          organizationGatewayCustomModels,
-          organizationOpenRouterCustomModels,
+        projectWorkspaceModelCatalog(selections, {
+          defaultSelection,
+          creditsSelection: creditsDefaultSessionModel({
+            settings: workspaceCatalogSettings,
+            selections,
+            workspaceSettings,
+          }),
         }),
       ),
     );
@@ -851,7 +977,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateWorkspaceModelPolicyRequest);
     const catalog = await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: grant.accountId,
       workspaceId,
@@ -969,7 +1095,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
-    const payload = SetWorkspaceDefaultRigRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, SetWorkspaceDefaultRigRequest);
     if (payload.rigId) {
       const rig = await getRig(deps.db, workspaceId, payload.rigId);
       if (!rig) {
@@ -1022,7 +1148,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
-    const payload = AddWorkspaceMemberRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1074,7 +1201,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
-    const payload = UpdateWorkspaceMemberRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

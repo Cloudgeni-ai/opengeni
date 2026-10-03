@@ -9,7 +9,8 @@ import {
 import {
   EmptyCompactionSummaryError,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
-  SUMMARY_BUFFER_TOKENS,
+  compactionSummaryOutputTokens,
+  buildSummaryItem,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
   compactionThresholdTokens,
@@ -58,7 +59,13 @@ export type MaybeCompactResult =
  * Codex, call Codex `/codex/responses` with `compaction_trigger` and persist the
  * opaque compaction item. Fail closed — never silently fall back to portable.
  */
-export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
+export type CompactionSummarizer = ((
+  settings: Settings,
+  input: CompactionItem[],
+) => Promise<string>) & {
+  /** Model-visible instructions and tool schemas outside the history estimate. */
+  estimatePrefixTokens?: () => number;
+};
 
 /** Returns the opaque Codex remote compaction v2 item. */
 export type RemoteCompactionV2Requester = (
@@ -81,7 +88,7 @@ export async function maybeCompactContext(
   // Injectable for tests; defaults to the real provider-aware model call.
   summarize: CompactionSummarizer = (s, m) =>
     summarizeForCompaction(s, m, {
-      maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+      maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
     }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
@@ -300,6 +307,7 @@ async function settleSkippedAfterStart(
   reason:
     | "no_history"
     | "replacement_not_smaller"
+    | "replacement_exceeds_model_budget"
     | "replacement_unchanged"
     | "summarization_failed",
 ): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
@@ -455,12 +463,23 @@ async function compactContextPortable(
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const outputReserve = compactionSummaryOutputTokens(settings.contextWindowTokens);
+  const structuralBudget = Math.min(
+    contextInputBudgetTokens(settings) || settings.contextWindowTokens - outputReserve,
+    settings.contextWindowTokens - outputReserve,
+  );
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  const summaryTokens = estimateTokens([buildSummaryItem(summaryBody)]);
   const replacementHistory = buildCompactionReplacementHistory(
     canonicalItems,
     summaryBody,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+    Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
   );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
+  if (estimatedTokensAfter + prefixTokens > structuralBudget) {
+    return await settleSkippedAfterStart(db, scope, options, "replacement_exceeds_model_budget");
+  }
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
   const summaryIndex =
@@ -520,7 +539,7 @@ async function compactContextPortable(
   };
 }
 
-async function summarizeWithCodexOverflowTrimming(
+export async function summarizeWithCodexOverflowTrimming(
   summarize: CompactionSummarizer,
   settings: Settings,
   activeHistory: CompactionItem[],
@@ -531,17 +550,32 @@ async function summarizeWithCodexOverflowTrimming(
 }> {
   // Codex's estimator is intentionally coarse. Keep the explicit checkpoint
   // request below both the effective input window and the raw window minus the
-  // requested summary, then leave 15% estimator headroom. This changes only the
-  // temporary summarizer input; durable active history remains untouched until
-  // applyContextCompaction succeeds under the attempt fence.
-  const summaryAwareBudget = Math.max(0, settings.contextWindowTokens - SUMMARY_BUFFER_TOKENS);
+  // requested summary. Preserve the full portable history copy on the first
+  // call whenever it fits; only trim further after an actual provider overflow.
+  // Durable active history remains untouched until applyContextCompaction.
+  const summaryAwareBudget = Math.max(
+    0,
+    settings.contextWindowTokens - compactionSummaryOutputTokens(settings.contextWindowTokens),
+  );
   const configuredInputBudget = contextInputBudgetTokens(settings);
   const structuralBudget = Math.min(
     configuredInputBudget > 0 ? configuredInputBudget : summaryAwareBudget,
     summaryAwareBudget,
   );
-  const initialBudget = Math.floor(structuralBudget * 0.85);
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  const initialBudget = Math.max(0, structuralBudget - prefixTokens);
   let preparation = prepareCompactionPromptInput(activeHistory, initialBudget);
+  // A checkpoint prompt without source history cannot summarize that history.
+  // Do not let a plausible-sounding reply replace durable active context.
+  const requireHistory = () => {
+    if (activeHistory.length > 0 && preparation.input.length === 1) {
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_input_budget",
+        reason: "no_history_fit",
+      });
+    }
+  };
+  requireHistory();
   try {
     return {
       summaryBody: await summarize(settings, preparation.input),
@@ -551,15 +585,16 @@ async function summarizeWithCodexOverflowTrimming(
   } catch (error) {
     if (!isContextWindowExceeded(error)) throw error;
     // The provider is more authoritative than the byte/4 estimate. Refit once
-    // to 70% of both the configured target and the actual prepared estimate;
+    // to 40% of both the available target and the actual prepared estimate;
     // then fail terminally with prior history intact. Never issue one failing
-    // request per oldest item. The production incident proved that the
-    // provider can count slightly more than twice the byte/4 estimate, so a
-    // half-size retry is the smallest honest bound for that observed skew.
+    // request per oldest item. The retry is bounded, not a guarantee: the
+    // provider can count slightly more than twice the byte/4 estimate. The
+    // prepared prefix has already been reserved from the available budget.
     const retryBudget = Math.floor(
-      Math.min(initialBudget * 0.5, preparation.estimatedInputTokens * 0.5),
+      Math.min(initialBudget * 0.4, preparation.estimatedInputTokens * 0.4),
     );
     preparation = prepareCompactionPromptInput(activeHistory, retryBudget);
+    requireHistory();
     return {
       summaryBody: await summarize(settings, preparation.input),
       preparation,

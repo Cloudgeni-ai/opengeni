@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { sessionAuthorizationOperationForHttp } from "../apps/api/src/routes/sessions";
 import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-tool-permissions";
+import { withFirstPartyToolClient } from "../apps/api/test/helpers/first-party-tool-client";
 
 // ---------------------------------------------------------------------------
 // Agent-access scope contract surface (migration 0427).
@@ -20,6 +21,24 @@ import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-
 const repo = join(import.meta.dir, "..");
 const SESSION_ROUTES = "apps/api/src/routes/sessions.ts";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+test("exact artifact association reads retain source session authorization", () => {
+  expect(
+    sessionAuthorizationOperationForHttp(
+      "GET",
+      `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/artifact-associations/artifact`,
+      SESSION_ID,
+    ),
+  ).toBe("session.read");
+});
+test("proxy-confined workspace reads retain exact session authorization", () => {
+  expect(
+    sessionAuthorizationOperationForHttp(
+      "POST",
+      `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/fs/read-workspace`,
+      SESSION_ID,
+    ),
+  ).toBe("session.files.read");
+});
 test("checkpoint preview and consent are session-control surfaces, not agent recovery tools", () => {
   for (const method of ["GET", "POST"]) {
     expect(
@@ -63,6 +82,11 @@ const MCP_DELEGATED_TOOLS: Record<
   string,
   { delegate: string; coreFile: string; coreMarker: string }
 > = {
+  session_set_model: {
+    delegate: "setSessionModel(",
+    coreFile: "packages/core/src/domain/sessions.ts",
+    coreMarker: "requireSessionAuthorization(",
+  },
   session_pause: {
     delegate: "controlAgentSessionWorkstream(",
     coreFile: "packages/core/src/application/session-commands.ts",
@@ -128,7 +152,66 @@ function samplePathname(path: string): string {
     .replace(/:[A-Za-z]+/gu, "x");
 }
 
+const TARGET_SESSION_INPUT_NAMES = new Set([
+  "sessionId",
+  "session_id",
+  "sourceSessionId",
+  "targetSessionId",
+  "targets",
+]);
+
+function schemaTakesTargetSession(
+  schema: unknown,
+  root: unknown = schema,
+  seen = new Set<object>(),
+): boolean {
+  if (schema === null || typeof schema !== "object" || seen.has(schema)) return false;
+  seen.add(schema);
+  const node = schema as Record<string, unknown>;
+  const properties = node.properties as Record<string, unknown> | undefined;
+  if (properties && Object.keys(properties).some((name) => TARGET_SESSION_INPUT_NAMES.has(name))) {
+    return true;
+  }
+  if (typeof node.$ref === "string" && node.$ref.startsWith("#/")) {
+    const referenced = node.$ref
+      .slice(2)
+      .split("/")
+      .reduce<unknown>((value, token) => {
+        if (value === null || typeof value !== "object") return undefined;
+        return (value as Record<string, unknown>)[token.replace(/~1/gu, "/").replace(/~0/gu, "~")];
+      }, root);
+    if (schemaTakesTargetSession(referenced, root, seen)) return true;
+  }
+  // Nested evidence/provenance labels are not target-session operations.
+  return ["allOf", "anyOf", "oneOf"].some((keyword) => {
+    const branches = node[keyword];
+    return (
+      Array.isArray(branches) &&
+      branches.some((branch) => schemaTakesTargetSession(branch, root, seen))
+    );
+  });
+}
+
 describe("agent-access scope stays enforced at every session entry point", () => {
+  test("import-ID appends resolve the importer before using the canonical target-session seam", async () => {
+    const routes = await read("apps/api/src/routes/session-history-imports.ts");
+    expect(routes).toContain("await appendArchivedSessionEventsForRequest(");
+    const core = await read("packages/core/src/application/archived-session-imports.ts");
+    expect(core).toContain("grantHasAgentAttemptAuthority(grant)");
+    const append = core.slice(
+      core.indexOf("export async function appendArchivedSessionEventsForRequest("),
+    );
+    expect(append).toContain("getArchivedSessionImportId(");
+    expect(append).toContain('operation: "session.append"');
+    expect(append).toContain('surface: "core"');
+    const lookup = append.indexOf("getArchivedSessionImportId(");
+    const authorization = append.indexOf("await requireSessionAuthorization(");
+    const mutation = append.indexOf("return appendArchivedSessionEvents(");
+    expect(lookup).toBeGreaterThan(0);
+    expect(authorization).toBeGreaterThan(lookup);
+    expect(mutation).toBeGreaterThan(authorization);
+  });
+
   test("message search is an authorized list projection even when narrowed to one session", async () => {
     const source = await read(SESSION_ROUTES);
     const start = source.indexOf('app.get("/v1/workspaces/:workspaceId/session-message-search"');
@@ -231,6 +314,15 @@ describe("agent-access scope stays enforced at every session entry point", () =>
 
   test("every first-party MCP tool that names a target session reaches the seam", async () => {
     const catalogued = new Set(Object.keys(FIRST_PARTY_TOOL_AUTHORIZATION));
+    // Discovery includes reused native contracts, spreads and referenced schemas;
+    // the source scan also covers registrations gated out of this agent catalog.
+    const advertisedTargetTools = await withFirstPartyToolClient(async (client) => {
+      const { tools } = await client.listTools();
+      return tools
+        .filter((tool) => schemaTakesTargetSession(tool.inputSchema))
+        .map((tool) => tool.name);
+    });
+    const advertisedTargetToolNames = new Set(advertisedTargetTools);
     const seen = new Set<string>();
     for (const file of await sourceFiles("apps/api/src/mcp")) {
       const source = await read(file);
@@ -240,6 +332,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
         const name = chunk.match(/^\s*"([^"]+)"/u)?.[1];
         if (!name || !catalogued.has(name)) continue;
         const takesTargetSession =
+          advertisedTargetToolNames.has(name) ||
           /\b(sessionId|session_id|sourceSessionId|targetSessionId)\s*:\s*z4?\s*\./u.test(chunk) ||
           /\btargets\s*:\s*z4?\s*\./u.test(chunk);
         if (!takesTargetSession) continue;
@@ -261,6 +354,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       }
     }
     for (const name of [
+      ...advertisedTargetTools,
       "session_get",
       "session_events",
       "session_wait",
@@ -309,7 +403,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     }
   });
 
-  test("browser and computer inventories are filtered through the seam for agent attempts", async () => {
+  test("browser and computer inventories use source-session access for every caller", async () => {
     for (const file of [
       "apps/api/src/routes/browser-sessions.ts",
       "apps/api/src/routes/computer-sessions.ts",
@@ -321,7 +415,8 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       );
     }
     const filter = await read("apps/api/src/interaction-agent-access.ts");
-    expect(filter).toContain("grantHasAgentAttemptAuthority(grant)");
+    expect(filter).not.toContain("grantHasAgentAttemptAuthority");
+    expect(filter).toContain('entry.relationship === "created"');
     expect(filter).toContain('operation: "session.read"');
   });
 });

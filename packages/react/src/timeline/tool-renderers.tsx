@@ -1,4 +1,5 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import {
   parseSandboxFileArtifactReceipt,
@@ -78,6 +79,7 @@ import {
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
@@ -838,21 +840,7 @@ function BrowserScreenshotRenderer(props: ToolRendererProps) {
   );
 }
 
-function RetainedSessionImageDisclosure({
-  artifact,
-  load,
-  title,
-  caption,
-  noun,
-  icon,
-  lightboxLabel,
-  batched,
-  failed,
-  cancelled,
-  filename,
-  defaultOpen,
-  children,
-}: {
+type RetainedSessionImageDisclosureProps = {
   artifact: RetainedArtifactReference;
   load: ToolRendererProps["loadRetainedArtifact"];
   title: string;
@@ -866,9 +854,51 @@ function RetainedSessionImageDisclosure({
   filename?: string;
   defaultOpen?: boolean;
   children?: ReactNode;
-}) {
+};
+
+function RetainedSessionImageDisclosure(props: RetainedSessionImageDisclosureProps) {
+  const compact = useContext(CompactActivityContext);
+  // The rolling progress label has no screenshot loader by design. Do not run
+  // the full image hook there: it would report the missing loader as an error.
+  if (compact) {
+    return (
+      <ActivityDisclosure
+        icon={props.icon}
+        title={props.title}
+        compactPreview={null}
+        failed={props.failed}
+        cancelled={props.cancelled}
+      />
+    );
+  }
+  return <LoadedRetainedSessionImageDisclosure {...props} />;
+}
+
+function LoadedRetainedSessionImageDisclosure({
+  artifact,
+  load,
+  title,
+  caption,
+  noun,
+  icon,
+  lightboxLabel,
+  batched,
+  failed,
+  cancelled,
+  filename,
+  defaultOpen,
+  children,
+}: RetainedSessionImageDisclosureProps) {
   const state = useRetainedImageObjectUrl(artifact, load);
   const downloadFilename = filename ?? retainedImageFilename(artifact);
+  const figure = {
+    src: state.kind === "ready" ? state.url : "",
+    caption,
+    alt: caption,
+    expandLabel: `Expand ${noun}`,
+    lightboxLabel,
+    downloadFilename,
+  };
 
   return (
     <ActivityDisclosure
@@ -889,14 +919,7 @@ function RetainedSessionImageDisclosure({
       }
       media={
         state.kind === "ready" ? (
-          <Thumbnail
-            src={state.url}
-            caption={caption}
-            alt={caption}
-            expandLabel={`Expand ${noun}`}
-            lightboxLabel={lightboxLabel}
-            downloadFilename={downloadFilename}
-          />
+          <Thumbnail {...figure} />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
         ) : (
@@ -905,14 +928,7 @@ function RetainedSessionImageDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure
-          src={state.url}
-          caption={caption}
-          alt={caption}
-          expandLabel={`Expand ${noun}`}
-          lightboxLabel={lightboxLabel}
-          downloadFilename={downloadFilename}
-        />
+        <ScreenshotFigure {...figure} />
       ) : state.kind === "loading" ? (
         <BodyNote>Loading the retained {noun}…</BodyNote>
       ) : state.kind === "unavailable" ? (
@@ -920,13 +936,27 @@ function RetainedSessionImageDisclosure({
           {noun === "screenshot" ? "Screenshot" : "Image"} {state.label}.
         </BodyNote>
       ) : (
-        <BodyNote tone="error">
-          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed: {state.message}
-        </BodyNote>
+        <ImageRetrievalError noun={noun} retry={state.retry} />
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
       {children}
     </ActivityDisclosure>
+  );
+}
+
+function ImageRetrievalError({ noun = "image", retry }: { noun?: string; retry: () => void }) {
+  return (
+    <BodyNote tone="error">
+      {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed.{" "}
+      <button
+        type="button"
+        aria-label={`Retry ${noun} retrieval`}
+        onClick={retry}
+        className="underline underline-offset-2"
+      >
+        Retry
+      </button>
+    </BodyNote>
   );
 }
 
@@ -1165,19 +1195,58 @@ function publishedSiteReceipt(output: unknown): PublishedSiteReceipt | null {
   };
 }
 
+const SITE_OPEN_CLASS =
+  "inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10";
+
 function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
-  const href = `/workspaces/${encodeURIComponent(receipt.workspaceId)}/artifacts/${encodeURIComponent(receipt.artifactId)}`;
-  return (
-    <a
-      href={href}
-      aria-label={`Open ${receipt.title}`}
-      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => event.stopPropagation()}
-    >
-      Open
-    </a>
-  );
+  const [pending, setPending] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // The console route only exists in the OpenGeni console; a host decides.
+  const resolution = useOpenGeniLinkResolver()?.({
+    kind: "site",
+    artifactId: receipt.artifactId,
+    workspaceId: receipt.workspaceId,
+  });
+  const destination = resolution?.href ? defaultUrlTransform(resolution.href) : "";
+  if (destination) {
+    return (
+      <a
+        href={destination}
+        aria-label={`Open ${receipt.title}`}
+        className={SITE_OPEN_CLASS}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        Open
+      </a>
+    );
+  }
+  if (resolution?.open) {
+    const open = resolution.open;
+    return (
+      <button
+        type="button"
+        aria-label={`Open ${receipt.title}`}
+        aria-busy={pending}
+        disabled={pending}
+        className={SITE_OPEN_CLASS}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (pending) return;
+          setPending(true);
+          setFailed(false);
+          void Promise.resolve()
+            .then(open)
+            .catch(() => setFailed(true))
+            .finally(() => setPending(false));
+        }}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        {pending ? "Opening…" : failed ? "Retry open" : "Open"}
+      </button>
+    );
+  }
+  return null;
 }
 
 function SiteArtifactRenderer({ item }: ToolRendererProps) {
@@ -1274,7 +1343,7 @@ function GeneratedImageDisclosure({
       ) : state.kind === "unavailable" ? (
         <BodyNote>Image {state.label}.</BodyNote>
       ) : (
-        <BodyNote tone="error">Image retrieval failed.</BodyNote>
+        <ImageRetrievalError retry={state.retry} />
       )}
       <BodyNote>
         {dimensions.width}×{dimensions.height} · {receipt.sandboxPath}

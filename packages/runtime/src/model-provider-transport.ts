@@ -81,6 +81,7 @@ export function isModelCallFetch(input: Parameters<typeof fetch>[0]): boolean {
   try {
     const pathname = new URL(rawUrl, "http://opengeni.local").pathname;
     return (
+      pathname.endsWith("/messages") ||
       pathname.endsWith("/responses") ||
       pathname.endsWith("/chat/completions") ||
       pathname.endsWith("/codex/responses")

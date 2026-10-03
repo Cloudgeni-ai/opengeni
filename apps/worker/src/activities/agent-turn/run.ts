@@ -1,4 +1,13 @@
-import { getSessionAuthorityProjection } from "@opengeni/db";
+import { withClaudeConnectionCredential } from "@opengeni/config";
+import {
+  getSessionAuthorityProjection,
+  readActiveSandbox,
+  getWorkspaceCredentialProvider,
+  resolveClaudeAccountCredential,
+  ClaudeSubscriptionReconnectRequired,
+} from "@opengeni/db";
+import { routingEnabled } from "../../sandbox-routing";
+import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -15,10 +24,12 @@ import {
   sandboxOperationMetricObserver,
   turnExecutionTelemetryKey,
   withTraceContext,
+  withMcpTelemetry,
 } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  awaitModelCallAdmission,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -29,11 +40,14 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   codexRequestStorage,
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
+import { codexUpstreamModelSlugs } from "@opengeni/config";
+import { parseModelProvidersJson } from "@opengeni/config";
+import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { createClaudeUsageObserver } from "./claude-usage-observer";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -88,10 +102,11 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity } from "./xai-capacity";
+import { selectXaiTurnCapacity, selectClaudeTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
+import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
 
 /**
@@ -168,6 +183,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       bus,
       runtime,
       summarizeContextForCompaction,
+      requestWorkerDrain,
+      turnFinalizationTimeoutMs,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -367,6 +384,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
+    const checkpointBeforeProviderDispatch = async () => {
+      await awaitModelCallAdmission();
+      await checkpointHistoryBeforeProviderDispatch(historySink, {
+        effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
+        routingEnabled: routingEnabled(settings),
+        readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+      });
+    };
 
     try {
       const claimed = await claimTurnAttempt({
@@ -504,8 +529,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if ("exit" in codexCapacity) return codexCapacity.exit;
             const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
+            const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+            if ("exit" in claudeCapacity) return claudeCapacity.exit;
           }
 
+          let selectedCapabilitySettings = capabilitySettings;
+          if (billingState.isClaudeTurn) {
+            const credentialId = providerTurn.effectiveClaudeCredentialId;
+            const subjectId = leases.claude.subjectId;
+            const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+            if (!credentialId || !subjectId || !authoritySnapshot)
+              throw new Error("Claude serving account has no accepted authority");
+            leases.claude.assertUsable();
+            const credential = await resolveClaudeAccountCredential(db, settings, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              credentialId,
+              authoritySnapshot,
+            });
+            providerTurn.effectiveClaudeCredentialVersion = credential.version;
+            if ("reconnectRequired" in credential) throw new ClaudeSubscriptionReconnectRequired();
+            selectedCapabilitySettings = withClaudeConnectionCredential(
+              capabilitySettings,
+              "claude_subscription",
+              JSON.stringify(credential.secret),
+              authoritySnapshot.scope === "organization" ? "organization" : "workspace",
+              {
+                connectionId: credentialId,
+                credentialVersion: credential.version,
+              },
+            );
+          }
           const governance = await prepareGovernanceAndModel({
             input,
             db,
@@ -516,7 +571,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             media,
             turn,
             session,
-            capabilitySettings,
+            capabilitySettings: selectedCapabilitySettings,
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
@@ -529,13 +584,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
             xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+            claudeCredentialId: providerTurn.effectiveClaudeCredentialId,
+            claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
           });
           const {
             runtimePreparationStartedAt,
             rigVersion,
             rigName,
             agentHumanInputEnabled,
+            codeSearchEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -601,10 +660,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
-                    resolveModel: buildModelResolver(
-                      CODEX_FALLBACK_MODEL_SLUGS,
-                      CODEX_FALLBACK_MODEL_SLUGS[0],
-                    ),
+                    resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
@@ -691,7 +747,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         );
                       }
                       if (event.phase === "started") {
-                        await checkpointHistoryBeforeProviderDispatch(historySink);
+                        await checkpointBeforeProviderDispatch();
                       }
                       const shouldRecordStartedAudit =
                         event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -771,8 +827,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               credentialId: providerTurn.effectiveXaiCredentialId,
               authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
-                webSearch: runSettings.webSearchEnabled,
-                xSearch: runSettings.webSearchEnabled,
+                webSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
+                xSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
               nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
@@ -844,7 +904,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   throw new Error("SuperGrok model request started before the turn event producer");
                 }
                 if (event.phase === "started") {
-                  await checkpointHistoryBeforeProviderDispatch(historySink);
+                  await checkpointBeforeProviderDispatch();
                 }
                 const shouldRecordStartedAudit =
                   event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -906,12 +966,73 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             providerTurn.xaiRequestContext = authorization.context;
           }
+          const claudeUsageObserver = await createClaudeUsageObserver(
+            parseModelProvidersJson(runSettings.modelProvidersJson),
+            providerTurn.latestClaudeUsage,
+            async () => null,
+          );
+          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
+              return claudeUsageObserver.prepareRequestWithObserver(
+                providerId,
+                headers,
+                async (binding) => {
+                  const credentialId = providerTurn.effectiveClaudeCredentialId;
+                  const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+                  const subjectId = leases.claude.subjectId;
+                  if (
+                    !credentialId ||
+                    !authoritySnapshot ||
+                    !subjectId ||
+                    binding.expectedConnectionId !== credentialId ||
+                    binding.expectedCredentialVersion !==
+                      providerTurn.effectiveClaudeCredentialVersion ||
+                    binding.scope !==
+                      (authoritySnapshot.scope === "organization" ? "organization" : "workspace")
+                  )
+                    throw new Error(
+                      "Claude physical request is outside its accepted serving account",
+                    );
+                  await leases.claude.renew("runtime_event");
+                  leases.claude.assertUsable();
+                  await assertModelConnectionAllowsTurn(db, {
+                    workspaceId: input.workspaceId,
+                    subjectId,
+                    modelId: turnExecutionPolicy.productModelId,
+                    claudeCredentialId: credentialId,
+                    claudeAuthoritySnapshot: authoritySnapshot,
+                  });
+                  const credential = await resolveClaudeAccountCredential(
+                    db,
+                    settings,
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      subjectId,
+                      credentialId,
+                      authoritySnapshot,
+                    },
+                    { expectedCredentialVersion: binding.expectedCredentialVersion },
+                  );
+                  if ("reconnectRequired" in credential)
+                    throw new ClaudeSubscriptionReconnectRequired();
+                  leases.claude.assertUsable();
+                  return {
+                    token: credential.secret.token,
+                    connectionId: credential.id,
+                    credentialVersion: credential.version,
+                  };
+                },
+              );
+            });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            providerTurn.xaiRequestContext
-              ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-              : withCodex(fn);
+            withClaudeUsage(() =>
+              providerTurn.xaiRequestContext
+                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                : withCodex(fn),
+            );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
@@ -927,25 +1048,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            xaiSessionTitleContext
-              ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-              : codexSessionTitleContext
-                ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                : fn();
+            withClaudeUsage(() =>
+              xaiSessionTitleContext
+                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                : codexSessionTitleContext
+                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                  : fn(),
+            );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
-            withCodex(() =>
-              withCodexRequestOverrides(
-                {
-                  betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
-                  turnMetadata: {
-                    request_kind: "compaction",
-                    compaction: {
-                      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
-                      strategy: "memento",
+            withClaudeUsage(() =>
+              withCodex(() =>
+                withCodexRequestOverrides(
+                  {
+                    betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+                    turnMetadata: {
+                      request_kind: "compaction",
+                      compaction: {
+                        implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                        strategy: "memento",
+                      },
                     },
                   },
-                },
-                fn,
+                  fn,
+                ),
               ),
             );
           const compactionPrep = await prepareCompaction({
@@ -971,6 +1096,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1085,13 +1211,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // set. A Connected Machine receives no platform Git credential, so its
           // resources stay exactly as stored. Resolution never fails the turn;
           // an unusable bound repository stays bare and is reported visibly.
-          const { turnResources, runtimeResources } = await waitForTurnOperation(
+          const hasCredentialProvider =
+            activeSandboxBackend !== "selfhosted" &&
+            (
+              await waitForTurnOperation(
+                getWorkspaceCredentialProvider(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                }),
+                cancellationSignal,
+                undefined,
+              )
+            )?.enabled === true;
+          const boundResources = await waitForTurnOperation(
             applyTurnGitHubRepositoryBindings({
               db,
               settings: runSettings,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               activeSandboxBackend,
+              hasCredentialProvider,
               claimedTurnResources,
               claimedRuntimeResources,
               publish: async (events) => {
@@ -1102,8 +1241,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             cancellationSignal,
             undefined,
           );
+          // An automatically attached (optional) repository that lost its
+          // allowlist entry or its GitHub App access since the session started
+          // sits this turn out with a warning, before the strict allowlist
+          // recheck and token mint below would fail the whole turn for it.
+          const {
+            turnResources,
+            runtimeResources,
+            retainsResource: retainsOptionalRepository,
+          } = await waitForTurnOperation(
+            dropUnavailableOptionalRepositories({
+              db,
+              settings: runSettings,
+              workspaceId: input.workspaceId,
+              activeSandboxBackend,
+              hostMintsGitCredentials: Boolean(connectionCredentials?.gitCredentials),
+              turnResources: boundResources.turnResources,
+              runtimeResources: boundResources.runtimeResources,
+              publish: async (events) => {
+                await eventing.publish!(events, true);
+              },
+              warn: (message, fields) => observability.warn(message, fields),
+            }),
+            cancellationSignal,
+            undefined,
+          );
 
           const runCredentials = await prepareRunCredentials({
+            turnTools,
+            localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
             input,
             settings,
             db,
@@ -1118,6 +1284,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxRuntime,
             turn,
             session,
+            turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
             workspaceVariableSet,
@@ -1134,6 +1301,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runCredentialResolver,
+            runMcpCredentials,
             establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
@@ -1256,6 +1424,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ];
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
+            runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+            runMcpCredentials,
             input,
             catalogSourceSettings,
             db,
@@ -1278,6 +1448,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             trigger,
             runSettings,
+            resolvedModel,
             lazyToolTransport,
             turnTools,
             connectionScope,
@@ -1289,6 +1460,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             credentialSubjectId,
             interactionInterventionResume,
             runWorkspaceMutationForSandbox,
+            codeSearchEnabled,
+            retainsOptionalRepository,
             throwIfWorkerShuttingDown,
             throwIfTurnCancelled,
           });
@@ -1332,6 +1505,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             supportsImageInput,
             agentHumanInputEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1352,6 +1526,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             connectorActionPolicy,
             trigger,
             preparationIndependentToolNames,
+            codeSearchAvailable: toolRuntime.codeSearchAvailable,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1460,6 +1635,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1633,6 +1809,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             providerTurn,
             leases,
             historySink,
+            checkpointBeforeProviderDispatch,
             media,
             toolResultSpill,
             claimedResult,
@@ -1725,6 +1902,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
     } finally {
       await finalizeTurnAttempt({
+        turnFinalizationTimeoutMs,
+        requestWorkerDrain,
         input,
         settings,
         db,
@@ -1773,14 +1952,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       { parent: null },
     );
     try {
-      return await withTraceContext(span, () => {
-        try {
-          resolvedServices.observability.info("worker execution started", { correlationId });
-        } catch {
-          // Correlation diagnostics never affect execution or admission.
-        }
-        return runAgentTurn(input, resolvedServices, span);
-      });
+      return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
+        withTraceContext(span, () => {
+          try {
+            resolvedServices.observability.info("worker execution started", { correlationId });
+          } catch {
+            // Correlation diagnostics never affect execution or admission.
+          }
+          return runAgentTurn(input, resolvedServices, span);
+        }),
+      );
     } catch (error) {
       span.end({ error });
       throw error;

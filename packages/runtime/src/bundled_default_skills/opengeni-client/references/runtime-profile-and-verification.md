@@ -154,4 +154,36 @@ silently linking identities or widening membership. Complete discoverable setup
 before handoff; identify operator-only blockers separately and do not depend on
 internal source, cluster access, prior chat memory, or undocumented local helpers.
 
+### Make the next step easy
+
+Keep the user-facing handoff short: what works, what was verified, and the next
+action needed to make it usable. Put detailed commands and configuration in the
+repository setup guide and link it. When setup is blocked, show a compact checklist
+in the conversation using existing text/link UI; no new setup-card renderer is
+required.
+
+For missing OpenGeni credentials, point to the selected deployment's Organization
+settings: the overview shows **Organization ID** with a copy control, and
+**Developer** contains **Create Organization API Key** plus another ID copy
+control. Prefer a verified settings link or returned setup action over an invented
+URL. Verify older/self-hosted UI availability before promising these controls.
+Explain the key type and required access for the implemented calls: workspace
+provisioning and chat writes need a write-capable organization key, not a read-only
+key. State its actual scope without inventing granular permission switches.
+
+Name the exact server configuration variables and secret-store destination. Fill
+verified non-secret IDs yourself when authorized and unambiguous. Give a secure
+interactive command or secret-manager action for the key; never ask the user to
+paste a secret into chat or put it in a browser variable. Follow with the actual
+deployment command/target and a first-question smoke test, including model/billing
+readiness when unverified. Complete authorized steps yourself; clearly identify
+any remaining owner login, secret entry, or deployment approval.
+
+Resolve ordinary missing tools using the project's supported installation or
+package-runner path where possible. Investigate dependency warnings enough to
+state their effect and available fix. Surface only material unresolved risks or
+user actions in plain language; keep routine audit counts and logs in the setup
+or verification notes. Do not claim a warning is harmless without evidence, or
+make unrelated upgrades merely to silence the report.
+
 If a durable customer integration Skill would reduce future rediscovery, generate one beside the integration code containing only stable, non-secret project facts and smoke probes. Do not turn the generic implementation Skill into the customer's analytics prompt, and do not make generated runtime behavior depend on the implementation workspace retaining this implementation Skill.

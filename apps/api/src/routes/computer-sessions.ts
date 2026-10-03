@@ -57,6 +57,7 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  hasPermission,
   requireAccessGrant,
   requireSessionAuthorization,
   relayConfigFromSettings,
@@ -117,6 +118,7 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -178,6 +180,23 @@ export async function captureModelComputerFrame(
   return captured;
 }
 
+/** One validated screen frame, served as sandboxed, non-embeddable user content. */
+export function computerScreenshotResponse(
+  frame: Pick<ComputerControlFrame, "data" | "mediaType" | "metadataHeader">,
+): Response {
+  // Copy exactly the image bytes: a Node Buffer view may share a larger
+  // backing allocation, which `.slice().buffer` would expose whole.
+  return new Response(Uint8Array.from(frame.data).buffer, {
+    status: 200,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": frame.mediaType,
+      "x-opengeni-computer-frame": frame.metadataHeader,
+      ...USER_CONTENT_SECURITY_HEADERS,
+    },
+  });
+}
+
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
  * durable authorization, placement fencing, lifecycle receipts, and routing. */
@@ -229,6 +248,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings);
     const authority = controllerAuthorityRoot(deps);
+    let prepared: Awaited<ReturnType<typeof prepareComputerSessionCreate>> | null = null;
 
     try {
       const existing = await findComputerSessionControlRecordByOperation(deps.db, {
@@ -242,7 +262,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
-      let prepared = existing
+      prepared = existing
         ? await prepareComputerSessionCreate(
             deps.db,
             computerCreateInput(grant, workspaceId, request, existing.session.placement),
@@ -408,6 +428,18 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
       );
     } catch (error) {
+      if (prepared) {
+        // A concurrent dispatch owns its exact binding, even if this request's
+        // placement failed. Settle only the still-undispatched create receipt.
+        await failComputerSessionOperation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          operationId: request.operationId,
+          computerSessionId: prepared.session.id,
+          onlyIfPreparedCreate: true,
+          error: interactionFailure(error),
+        }).catch(() => undefined);
+      }
       throw computerRouteError(error);
     }
   });
@@ -488,14 +520,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           }
         },
       );
-      return new Response(frame.data.slice().buffer, {
-        status: 200,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": frame.mediaType,
-          "x-opengeni-computer-frame": frame.metadataHeader,
-        },
-      });
+      return computerScreenshotResponse(frame);
     },
   );
 
@@ -628,11 +653,33 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          await client.createComputerViewGrant(reference, {
+          // Negotiate with the old strict-key request first. An older
+          // controller cannot enforce RFB input scopes; do not send it a
+          // scoped grant or expose its reusable upstream view bearer.
+          const viewGrant = await client.createComputerViewGrant(reference, {
             grantId,
             token,
             expiresAt,
           });
+          const managedRfbPlacement =
+            record.session.placement.kind === "sandbox_group" &&
+            record.session.platform === "linux";
+          const managedRfbTarget = managedRfbPlacement && target.kind === "screen";
+          const scopedRfb = managedRfbTarget && viewGrant.scopedRfbInput;
+          let inputAllowed = false;
+          if (scopedRfb) {
+            inputAllowed = await authorizeRfbInput(grant, record);
+            await client.createComputerViewGrant(reference, {
+              grantId,
+              token,
+              expiresAt,
+              rfbScope: {
+                targetId: target.id,
+                targetGeneration: target.targetGeneration,
+                inputAllowed,
+              },
+            });
+          }
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -702,10 +749,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 };
               })()
             : await (async () => {
-                const rfb =
-                  record.session.placement.kind === "sandbox_group" &&
-                  record.session.platform === "linux" &&
-                  target.kind === "screen";
+                const rfb = scopedRfb;
                 const protocols = rfb
                   ? [
                       "binary",
@@ -723,31 +767,33 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                       request.targetId,
                       request.stream,
                     );
-                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
-                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
-                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
-                    ? {
-                        openSandboxInteractionFrameProxy:
-                          deps.settings.openSandboxInteractionFrameProxy,
-                      }
-                    : {}),
-                })
-                  ? createInteractionFrameProxyAttachment({
-                      requestUrl: context.req.url,
-                      publicBaseUrl: deps.settings.publicBaseUrl,
-                      webBaseUrl: deps.settings.webBaseUrl,
-                      forwardedProto: context.req.header("x-forwarded-proto"),
-                      forwardedHost:
-                        context.req.header("x-forwarded-host") ?? context.req.header("host"),
-                      rootSecret: controllerAuthorityRoot(deps),
-                      upstreamUrl,
-                      upstreamProtocols: protocols,
-                      origin,
-                      expiresAt,
-                    })
-                  : { url: upstreamUrl, protocols };
+                const attachment =
+                  (!viewGrant.scopedRfbInput && managedRfbPlacement) ||
+                  placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                    openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                    ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                      ? {
+                          openSandboxInteractionFrameProxy:
+                            deps.settings.openSandboxInteractionFrameProxy,
+                        }
+                      : {}),
+                  })
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        publicBaseUrl: deps.settings.publicBaseUrl,
+                        webBaseUrl: deps.settings.webBaseUrl,
+                        forwardedProto: context.req.header("x-forwarded-proto"),
+                        forwardedHost:
+                          context.req.header("x-forwarded-host") ?? context.req.header("host"),
+                        rootSecret: controllerAuthorityRoot(deps),
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
                 return rfb
-                  ? { kind: "direct_rfb" as const, ...attachment }
+                  ? { kind: "direct_rfb" as const, inputAllowed, ...attachment }
                   : { kind: "direct_websocket" as const, ...attachment };
               })();
           return ComputerSessionAttachment.parse({
@@ -762,6 +808,37 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       return context.json(result, 201);
     },
   );
+
+  async function authorizeRfbInput(
+    grant: AccessGrant,
+    record: ComputerSessionControlRecord,
+  ): Promise<boolean> {
+    if (
+      deps.settings.sandboxDesktopInteractive === false ||
+      grant.principalKind === "agent_attempt" ||
+      !hasPermission(grant.permissions, "sessions:control") ||
+      record.session.capabilities?.pointerInput !== true ||
+      record.session.capabilities?.keyboardInput !== true
+    )
+      return false;
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId: record.sourceSessionId,
+        operation: "session.control",
+        surface: "http",
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof SessionAuthorizationDeniedError) return false;
+      if (error instanceof SessionAuthorizationUnavailableError) {
+        throw new HTTPException(503, {
+          message: "session authorization is unavailable",
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  }
 
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat",
@@ -1024,6 +1101,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",
+        ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
+          ? { retainedInstanceId: expectedPlacementInstanceId }
+          : {}),
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
@@ -1439,6 +1519,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       },
       os: placement.lease.os,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,

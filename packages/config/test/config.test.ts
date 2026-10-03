@@ -35,6 +35,7 @@ import {
   startupRetryOptions,
   streamTokenDegraded,
   temporalConnectionOptions,
+  trustedProxyCidrEntries,
 } from "../src";
 
 describe(".env.example", () => {
@@ -116,11 +117,111 @@ describe("optional resource credits and verified signup trial", () => {
   });
 });
 
+describe("usage allowance rolling activation", () => {
+  test("defaults producers off in every environment", () => {
+    for (const environment of ["local", "test", "production"]) {
+      expect(
+        withEnv({ OPENGENI_ENVIRONMENT: environment }, () => getSettings()).usageAllowancesEnabled,
+      ).toBe(false);
+    }
+  });
+  test("parses explicit activation and opt-out without boolean coercion", () => {
+    for (const enabled of ["true", "1", "on"]) {
+      expect(
+        withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: enabled }, () => getSettings())
+          .usageAllowancesEnabled,
+      ).toBe(true);
+    }
+    for (const disabled of ["false", "0", "off"]) {
+      expect(
+        withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: disabled }, () => getSettings())
+          .usageAllowancesEnabled,
+      ).toBe(false);
+    }
+    expect(() =>
+      withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: "invalid" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
+describe("API request source settings", () => {
+  test("ignores forwarded client addresses unless proxy hops are explicit", () => {
+    expect(withEnv({}, () => getSettings()).apiTrustedProxyHops).toBe(0);
+  });
+
+  test("bounds explicit trusted proxy hops", () => {
+    expect(
+      withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: "2" }, () => getSettings()).apiTrustedProxyHops,
+    ).toBe(2);
+    for (const invalid of ["17", "-1", "1.5", "one"]) {
+      expect(() =>
+        withEnv({ OPENGENI_API_TRUSTED_PROXY_HOPS: invalid }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("parses trusted proxy ranges and rejects malformed entries", () => {
+    expect(trustedProxyCidrEntries(" 10.224.0.0/16, 2001:db8::/32 ,192.0.2.1,")).toEqual([
+      { address: "10.224.0.0", prefix: 16, family: "ipv4" },
+      { address: "2001:db8::", prefix: 32, family: "ipv6" },
+      { address: "192.0.2.1", prefix: 32, family: "ipv4" },
+    ]);
+    for (const invalid of [
+      "10.0.0.0/33",
+      "10.0.0.0/",
+      "10.0.0/8",
+      "::/129",
+      "proxy.local",
+      "10.0.0.0/8x",
+    ]) {
+      expect(() => trustedProxyCidrEntries(invalid)).toThrow("OPENGENI_API_TRUSTED_PROXY_CIDRS");
+    }
+  });
+
+  test("refuses the retired MCP-only hop setting instead of ignoring it", () => {
+    for (const value of ["1", "2", " 1 "]) {
+      expect(() =>
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings()),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+      expect(() =>
+        withEnv(
+          { OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value, OPENGENI_API_TRUSTED_PROXY_HOPS: "1" },
+          () => getSettings(),
+        ),
+      ).toThrow("renamed to OPENGENI_API_TRUSTED_PROXY_HOPS");
+    }
+    // A leftover "0" from an older .env.example already means the default.
+    for (const value of ["0", ""]) {
+      expect(
+        withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: value }, () => getSettings())
+          .apiTrustedProxyHops,
+      ).toBe(0);
+    }
+  });
+
+  test("requires a proxy hop count before trusting proxy ranges", () => {
+    expect(() =>
+      withEnv({ OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16" }, () => getSettings()),
+    ).toThrow("requires OPENGENI_API_TRUSTED_PROXY_HOPS");
+    expect(() =>
+      withEnv(
+        { OPENGENI_API_TRUSTED_PROXY_HOPS: "1", OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/33" },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_API_TRUSTED_PROXY_CIDRS");
+    expect(
+      withEnv(
+        { OPENGENI_API_TRUSTED_PROXY_HOPS: "1", OPENGENI_API_TRUSTED_PROXY_CIDRS: "10.224.0.0/16" },
+        () => getSettings(),
+      ).apiTrustedProxyCidrs,
+    ).toBe("10.224.0.0/16");
+  });
+});
+
 describe("MCP OAuth settings", () => {
   test("defaults off and requires a credential-free public origin when enabled", () => {
     const defaults = withEnv({}, () => getSettings());
     expect(defaults.mcpOauthEnabled).toBe(false);
-    expect(defaults.mcpOauthTrustedProxyHops).toBe(0);
     expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
       "OPENGENI_PUBLIC_BASE_URL",
     );
@@ -133,16 +234,6 @@ describe("MCP OAuth settings", () => {
         () => getSettings(),
       ).mcpOauthEnabled,
     ).toBe(true);
-  });
-
-  test("bounds explicit trusted proxy hops", () => {
-    expect(
-      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2" }, () => getSettings())
-        .mcpOauthTrustedProxyHops,
-    ).toBe(2);
-    expect(() =>
-      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "17" }, () => getSettings()),
-    ).toThrow();
   });
 
   test("requires HTTPS outside local and test", () => {
@@ -339,6 +430,74 @@ describe("browser analytics configuration", () => {
       withEnv({ OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID: `G-${"A".repeat(31)}` }, () =>
         getSettings(),
       ),
+    ).toThrow();
+  });
+});
+
+describe("console documentation link configuration", () => {
+  test("defaults to the public OpenGeni docs", () => {
+    expect(withEnv({}, () => getSettings()).documentationUrl).toBe("https://docs.opengeni.ai");
+  });
+
+  test("accepts an operator-owned http(s) documentation URL", () => {
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: " https://docs.example.test/opengeni " }, () =>
+        getSettings(),
+      ).documentationUrl,
+    ).toBe("https://docs.example.test/opengeni");
+  });
+
+  test("hides the link when set to none", () => {
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: "none" }, () => getSettings()).documentationUrl,
+    ).toBeNull();
+    expect(
+      withEnv({ OPENGENI_DOCUMENTATION_URL: " None " }, () => getSettings()).documentationUrl,
+    ).toBeNull();
+  });
+
+  test("rejects values a browser link must not follow", () => {
+    for (const value of ["javascript:alert(1)", "ftp://docs.example.test", "docs", "false"]) {
+      expect(() => withEnv({ OPENGENI_DOCUMENTATION_URL: value }, () => getSettings())).toThrow(
+        "must be an absolute http(s) URL or none",
+      );
+    }
+  });
+});
+
+describe("legal document links", () => {
+  test("stay unset by default so self-hosted consoles show no operator policies", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.legalPrivacyPolicyUrl).toBeUndefined();
+    expect(settings.legalTermsOfServiceUrl).toBeUndefined();
+    expect(settings.supportEmail).toBeUndefined();
+  });
+
+  test("parse an operator support address and reject a value that is not one", () => {
+    expect(
+      withEnv({ OPENGENI_SUPPORT_EMAIL: " support@opengeni.ai " }, () => getSettings())
+        .supportEmail,
+    ).toBe("support@opengeni.ai");
+    for (const value of ["mailto:support@opengeni.ai", "support", "javascript:alert(1)"]) {
+      expect(() => withEnv({ OPENGENI_SUPPORT_EMAIL: value }, () => getSettings())).toThrow();
+    }
+  });
+
+  test("parse configured http(s) links and reject anything a browser should not follow", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+      },
+      () => getSettings(),
+    );
+    expect(settings.legalPrivacyPolicyUrl).toBe("https://opengeni.ai/privacy");
+    expect(settings.legalTermsOfServiceUrl).toBe("https://opengeni.ai/terms");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_PRIVACY_POLICY_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "/terms" }, () => getSettings()),
     ).toThrow();
   });
 });
@@ -582,6 +741,23 @@ describe("Google Drive integration settings", () => {
     ).toThrow();
     expect(() =>
       withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60001" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
+describe("managed auth new account sign-up switch", () => {
+  test("defaults open and accepts an explicit pause", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthNewSignupsEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "false" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "true" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(true);
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "paused" }, () => getSettings()),
     ).toThrow();
   });
 });
@@ -2510,6 +2686,130 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
+  });
+
+  test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.sandboxIdleCommandContainmentMs).toBe(1_800_000);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeGreaterThan(settings.sandboxIdleGraceMs);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeLessThan(settings.sandboxRotationLeadMs);
+    const shortLived = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      () => getSettings(),
+    );
+    // Derived strictly between the 150s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+  });
+
+  test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
+    for (const environment of [
+      {},
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+      },
+    ]) {
+      const baseline = withEnv(environment, () => getSettings());
+      expect(baseline.sandboxIdleCommandContainmentMs).toBeGreaterThan(0);
+      const disabled = withEnv(
+        { ...environment, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0" },
+        () => getSettings(),
+      );
+      expect(disabled.sandboxIdleCommandContainmentMs).toBeUndefined();
+      expect(disabled).toEqual({ ...baseline, sandboxIdleCommandContainmentMs: undefined });
+    }
+  });
+
+  test("idle command containment treats blank as unset and still rejects invalid windows", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: " " }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
+    for (const value of ["-1", "0.5", "not-a-number", "Infinity"]) {
+      expect(() =>
+        withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("disabled idle command containment does not bypass provider capture or lifetime validation", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "250000" }, () => getSettings()),
+    ).toThrow(/must exceed the legacy command stop grace/i);
+    expect(() =>
+      withEnv({ ...base, OPENGENI_MODAL_TIMEOUT_SECONDS: "86401" }, () => getSettings()),
+    ).toThrow(/<=86400/i);
+  });
+
+  test("an explicit idle command containment window must exceed idle grace and precede the deadline", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "2400000" }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(2_400_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
+  });
+
+  test("idle command containment must fire before an explicit Modal idle timeout", () => {
+    const modal = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+    };
+    // Default window derives below 1500s - reaper period - drain capture budget.
+    const derived = withEnv(modal, () => getSettings());
+    expect(derived.sandboxIdleCommandContainmentMs).toBeGreaterThan(derived.sandboxIdleGraceMs);
+    expect(
+      derived.sandboxLeaseReaperPeriodMs + derived.sandboxIdleCommandContainmentMs,
+    ).toBeLessThan(1_500_000);
+    expect(() =>
+      withEnv({ ...modal, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "1440000" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
+    // A derived window that cannot fit disables idle containment instead of
+    // failing boot: these idle timeouts boot exactly as before.
+    for (const seconds of ["960", "1000"]) {
+      expect(
+        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
+          .sandboxIdleCommandContainmentMs,
+      ).toBeUndefined();
+    }
+    // Without an explicit idle timeout the hard lifetime governs and 30m fits.
+    expect(
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+        },
+        () => getSettings(),
+      ).sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
   });
 
   test("an explicit rotation lead overrides the provider-relative default", () => {

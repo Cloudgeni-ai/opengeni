@@ -45,6 +45,7 @@ export type ConnectionAccountPickerProps = {
 export type ConnectionAccountControls = ConnectionAccountPickerProps & {
   loading?: boolean;
   error?: string | null;
+  accessDenied?: boolean;
   onRefresh?: () => void;
 };
 

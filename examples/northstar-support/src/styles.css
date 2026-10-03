@@ -68,13 +68,6 @@ body {
 
 /* The embedded agent is deliberately denser than OpenGeni's full-page UI.
    These are host-owned presentation choices; behavior stays in the SDK. */
-.northstar-agent-timeline > div:first-child {
-  padding: 18px 20px;
-}
-
-.northstar-agent-timeline > div:first-child > div {
-  gap: 14px;
-}
 
 .northstar-agent-copy p,
 .northstar-agent-copy li {
@@ -88,6 +81,6 @@ body {
   margin-bottom: 7px;
 }
 
-.northstar-agent-composer textarea:focus-visible {
+.northstar-agent-conversation [data-og-conversation-composer] textarea:focus-visible {
   outline: none;
 }

@@ -20,7 +20,7 @@ export function slackInstallFeedback(reason: string | null): {
   if (reason === "provider_denied")
     return {
       title: "Slack setup was cancelled",
-      description: "Allow OpenGeni in Slack to finish connecting your workspace.",
+      description: "Allow Opengeni in Slack to finish connecting your workspace.",
       retryable: true,
     };
   return {

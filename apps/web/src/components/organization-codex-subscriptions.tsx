@@ -1,299 +1,245 @@
-import { ConnectionAccessSettings } from "@/components/connection-access-settings";
-import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 import type {
   CodexAccount,
   CodexConnectPoll,
   CodexConnectStart,
   OrganizationCodexAccountsResponse,
 } from "@opengeni/sdk";
-import { Loader2Icon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { pollDeviceAuthorization } from "@opengeni/connect";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { SubscriptionAccountRow } from "@/components/subscription-account-row";
-import { ModelConnectionSection } from "@/components/model-connection-section";
-import { ChatGptMark } from "@/components/chatgpt-mark";
-import { CodexDeviceCodePanel } from "@/components/codex-connection";
-import { Button } from "@/components/ui/button";
-import { useAppContext } from "@/context";
+import { codexAccountName, planLabel } from "@/components/codex-connection";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 
-function accountDisplay(account: CodexAccount): string {
-  return account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "ChatGPT";
-}
+// The organization's shared Codex (ChatGPT) accounts: the data and every
+// mutation. Organization settings > Models presents them with the same rows
+// and account page anatomy as a workspace.
 
-export function OrganizationCodexSubscriptions(props: { organizationId: string }) {
-  const client = useAppContext().client;
-  return (
-    <OrganizationCodexSubscriptionsWithClient
-      key={props.organizationId}
-      {...props}
-      client={client}
-    />
-  );
-}
+export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCodexSubscriptions>;
 
-/** Isolated product fixture seam; production callers use OrganizationCodexSubscriptions. */
-export function OrganizationCodexSubscriptionsWithClient({
+export function useOrganizationCodexSubscriptions({
   organizationId,
   client,
-}: { organizationId: string } & { client: OpenGeniBrowserClient }) {
+  enabled = true,
+}: {
+  organizationId: string;
+  client: OpenGeniBrowserClient;
+  /** False for people who can't read the organization's accounts: nothing is read. */
+  enabled?: boolean;
+}) {
   const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [working, setWorking] = useState<string | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
+  const cancelled = useRef(false);
+  const pollAbort = useRef<AbortController | null>(null);
+
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!enabled) return;
     setLoadError(null);
     try {
       const result = await client.requestJson<OrganizationCodexAccountsResponse>(
         "GET",
         `/v1/organizations/${organizationId}/codex/accounts`,
       );
-      setData(result);
+      if (!cancelled.current) setData(result);
     } catch (error) {
+      if (cancelled.current) return;
       setData(null);
-      const message = error instanceof Error ? error.message : "Failed to load subscriptions";
-      setLoadError(message);
-      toast.error(message);
+      // Shown under "Couldn't load ..." as what to do; never the raw API message.
+      setLoadError(apiErrorAdvice(error));
     } finally {
-      setLoading(false);
+      if (!cancelled.current) setLoading(false);
     }
-  }, [client, organizationId]);
+  }, [client, organizationId, enabled]);
 
   useEffect(() => {
+    cancelled.current = false;
+    setLoading(enabled);
     void refresh();
-  }, [refresh]);
+    return () => {
+      cancelled.current = true;
+      pollAbort.current?.abort();
+    };
+  }, [refresh, enabled]);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(
+    async (options?: { onConnected?: (accountId: string | null) => void }) => {
+      const recordOutcome = beginModelConnectJourney("codex", "device_code");
+      setBusy(true);
+      try {
+        const start = await client.requestJson<CodexConnectStart>(
+          "POST",
+          `/v1/organizations/${organizationId}/codex/connect/start`,
+          {},
+        );
+        setPending({ userCode: start.userCode, verificationUri: start.verificationUri });
+        window.open(start.verificationUri, "_blank", "noopener,noreferrer");
+        pollAbort.current?.abort();
+        const controller = new AbortController();
+        pollAbort.current = controller;
+        // Bounded by the provider's 15-minute device window, like a workspace connect.
+        void pollDeviceAuthorization({
+          poll: () =>
+            client.requestJson<CodexConnectPoll>(
+              "POST",
+              `/v1/organizations/${organizationId}/codex/connect/poll`,
+              { state: start.state },
+            ),
+          expired: { status: "expired" } as CodexConnectPoll,
+          initialIntervalSeconds: Math.max(2, start.intervalSeconds),
+          expiresAtMs: Date.now() + 15 * 60_000,
+          signal: controller.signal,
+        })
+          .then(async (result) => {
+            if (!result || controller.signal.aborted || cancelled.current) return;
+            setPending(null);
+            if (result.status === "expired") {
+              recordOutcome("expired");
+              toast.error("The code expired before it was used. Try again.");
+              return;
+            }
+            if (result.status === "connected") {
+              recordOutcome("connected");
+              toast.success(
+                `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
+              );
+              await refresh();
+              options?.onConnected?.(
+                "accountId" in result && typeof result.accountId === "string"
+                  ? result.accountId
+                  : null,
+              );
+            }
+          })
+          .catch((error) => {
+            recordOutcome("outcome_unknown");
+            if (controller.signal.aborted || cancelled.current) return;
+            setPending(null);
+            toast.error("Couldn't confirm the ChatGPT sign-in", {
+              description: userErrorText(error),
+            });
+          });
+      } catch (error) {
+        recordOutcome("outcome_unknown");
+        setPending(null);
+        toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, organizationId, refresh],
+  );
+
+  const mutate = async (key: string, operation: () => Promise<unknown>, success: string) => {
     setBusy(true);
+    setWorking(key);
     try {
-      const start = await client.requestJson<CodexConnectStart>(
-        "POST",
-        `/v1/organizations/${organizationId}/codex/connect/start`,
-        {},
-      );
-      setPending({ userCode: start.userCode, verificationUri: start.verificationUri });
-      window.open(start.verificationUri, "_blank", "noopener,noreferrer");
-      const interval = Math.max(2, start.intervalSeconds) * 1000;
-      const poll = async (): Promise<void> => {
-        try {
-          const result = await client.requestJson<CodexConnectPoll>(
-            "POST",
-            `/v1/organizations/${organizationId}/codex/connect/poll`,
-            { state: start.state },
-          );
-          if (result.status === "pending") {
-            setTimeout(() => void poll(), interval);
-            return;
-          }
-          setPending(null);
-          if (result.status === "expired") {
-            toast.error("The code expired before it was authorized. Try again.");
-            return;
-          }
-          toast.success(`Organization Codex connected${result.plan ? ` (${result.plan})` : ""}`);
-          await refresh();
-        } catch (error) {
-          setPending(null);
-          toast.error(
-            error instanceof Error ? error.message : "Failed to verify Codex authorization",
-          );
-        }
-      };
-      setTimeout(() => void poll(), interval);
+      await operation();
+      await refresh();
+      toast.success(success);
     } catch (error) {
-      setPending(null);
-      toast.error(error instanceof Error ? error.message : "Failed to start Codex login");
+      toast.error("Couldn't update Codex", { description: userErrorText(error) });
     } finally {
       setBusy(false);
+      setWorking(null);
     }
-  }, [client, organizationId, refresh]);
+  };
 
-  const activate = async (accountId: string): Promise<void> => {
+  const activate = (account: CodexAccount) =>
+    mutate(
+      `activate:${account.id}`,
+      () =>
+        client.requestJson(
+          "POST",
+          `/v1/organizations/${organizationId}/codex/accounts/${account.id}/activate`,
+          {},
+        ),
+      `${codexAccountName(account)} is now the primary account`,
+    );
+
+  const setRotation = (rotationEnabled: boolean) =>
+    mutate(
+      "rotation",
+      () =>
+        client.requestJson("PATCH", `/v1/organizations/${organizationId}/codex/settings`, {
+          rotationEnabled,
+        }),
+      rotationEnabled
+        ? "New work is spread across the organization's accounts"
+        : "New work uses the organization's primary account only",
+    );
+
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
+  const rename = async (account: CodexAccount, label: string): Promise<void> => {
     setBusy(true);
+    setWorking(`rename:${account.id}`);
     try {
       await client.requestJson(
-        "POST",
-        `/v1/organizations/${organizationId}/codex/accounts/${accountId}/activate`,
-        {},
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${account.id}`,
+        { label: label.trim() || null },
       );
       await refresh();
-      toast.success("Organization default subscription updated");
+      toast.success("Name saved");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to switch subscription");
+      throw error instanceof Error && error.message
+        ? error
+        : new Error("Couldn't save the name.", { cause: error });
     } finally {
       setBusy(false);
+      setWorking(null);
     }
   };
 
-  const setRotation = async (rotationEnabled: boolean): Promise<void> => {
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
+  const disconnect = async (account: CodexAccount): Promise<void> => {
     setBusy(true);
-    try {
-      await client.requestJson("PATCH", `/v1/organizations/${organizationId}/codex/settings`, {
-        rotationEnabled,
-      });
-      await refresh();
-      toast.success("Organization rotation settings updated");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update rotation");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const disconnect = async (accountId: string): Promise<void> => {
-    setBusy(true);
+    setWorking(`disconnect:${account.id}`);
     try {
       await client.requestJson(
         "DELETE",
-        `/v1/organizations/${organizationId}/codex/accounts/${accountId}`,
+        `/v1/organizations/${organizationId}/codex/accounts/${account.id}`,
         {},
       );
       await refresh();
-      toast.success("Organization subscription disconnected");
+      toast.success(`Disconnected ${codexAccountName(account)}`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
+      throw error instanceof Error && error.message
+        ? error
+        : new Error(`Couldn't disconnect ${codexAccountName(account)}. Try again.`, {
+            cause: error,
+          });
     } finally {
       setBusy(false);
+      setWorking(null);
     }
   };
 
-  const accounts = data?.accounts ?? [];
-  return (
-    <ModelConnectionSection
-      title="Codex"
-      description="ChatGPT subscription · Shared with your workspaces"
-      mark={<ChatGptMark className="size-4" />}
-      status={
-        loading
-          ? "Loading…"
-          : loadError
-            ? "Unavailable"
-            : pending
-              ? "Awaiting sign-in"
-              : accounts.length === 0
-                ? "Not connected"
-                : accounts.some((account) => account.status === "active")
-                  ? "Connected"
-                  : "Needs attention"
-      }
-    >
-      <p className="text-xs leading-5 text-fg-subtle">
-        Use Codex models with a ChatGPT subscription. Usage is included in the connected plan.
-      </p>
-      {accounts.length > 1 ? (
-        <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
-          <input
-            type="checkbox"
-            className="size-4 accent-brand"
-            checked={data?.settings.rotationEnabled ?? false}
-            disabled={busy}
-            onChange={(event) => void setRotation(event.target.checked)}
-          />
-        </label>
-      ) : null}
-
-      {loading ? (
-        <p role="status" className="flex items-center gap-2 text-xs text-fg-muted">
-          <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
-        </p>
-      ) : loadError ? (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-danger/30 bg-danger/5 p-4"
-        >
-          <p className="text-xs text-danger">{loadError}</p>
-          <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
-            Retry
-          </Button>
-        </div>
-      ) : pending ? (
-        <CodexDeviceCodePanel
-          userCode={pending.userCode}
-          verificationUri={pending.verificationUri}
-        />
-      ) : accounts.length === 0 ? null : (
-        <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
-          {accounts.map((account) => {
-            const active = account.id === data?.activeAccountId;
-            return (
-              <SubscriptionAccountRow
-                key={account.id}
-                provider="Codex"
-                name={accountDisplay(account)}
-                label={account.label}
-                email={account.email}
-                plan={account.plan}
-                selected={active}
-                disabled={busy}
-                unavailable={account.status !== "active"}
-                group={`organization-codex-active-${organizationId}`}
-                selectionLabel={`Use ${accountDisplay(account)} as the organization default`}
-                expanded={expandedId === account.id}
-                onExpandedChange={(open) => setExpandedId(open ? account.id : null)}
-                onSelect={() => void activate(account.id)}
-                onRename={(label) => {
-                  setBusy(true);
-                  void client
-                    .requestJson(
-                      "PATCH",
-                      `/v1/organizations/${organizationId}/codex/accounts/${account.id}`,
-                      { label: label || null },
-                    )
-                    .then(refresh)
-                    .catch((error) =>
-                      toast.error(
-                        error instanceof Error ? error.message : "Failed to rename subscription",
-                      ),
-                    )
-                    .finally(() => setBusy(false));
-                }}
-              >
-                <p className="text-xs text-fg-subtle">
-                  {account.status === "active" ? "Connected" : account.status.replaceAll("_", " ")}
-                </p>
-                {account.lastError ? (
-                  <p className="text-xs text-status-waiting">{account.lastError}</p>
-                ) : null}
-                <div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    aria-label={`Disconnect ${accountDisplay(account)}`}
-                    onClick={() => void disconnect(account.id)}
-                  >
-                    <Trash2Icon className="size-3.5" /> Disconnect
-                  </Button>
-                </div>
-                <ConnectionAccessSettings
-                  client={client}
-                  organizationId={organizationId}
-                  kind="codex"
-                  connectionId={account.id}
-                  canManage
-                />
-              </SubscriptionAccountRow>
-            );
-          })}
-        </div>
-      )}
-      {!pending && !loading && !loadError ? (
-        <SubscriptionConnectAction
-          provider="Codex"
-          count={accounts.length}
-          busy={busy}
-          onConnect={() => void connect()}
-        />
-      ) : null}
-    </ModelConnectionSection>
-  );
+  return {
+    client,
+    organizationId,
+    data,
+    accounts: data?.accounts ?? [],
+    activeAccountId: data?.activeAccountId ?? null,
+    rotationEnabled: data?.settings.rotationEnabled ?? false,
+    loading,
+    loadError,
+    busy,
+    working,
+    pending,
+    refresh,
+    connect,
+    activate,
+    setRotation,
+    rename,
+    disconnect,
+  };
 }

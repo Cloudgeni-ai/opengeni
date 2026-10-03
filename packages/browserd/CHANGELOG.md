@@ -1,5 +1,160 @@
 # @opengeni/browserd
 
+## 0.2.5
+
+### Patch Changes
+
+- 45e1b4f: Separate desktop backend operations from OpenGeni's session controller and viewer. The native helper retains its existing transport and behavior; alternative desktop drivers can reuse the same receipts, media delivery and access boundary.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/interaction@0.4.46
+
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/interaction@0.4.45
+
+## 0.2.3
+
+### Patch Changes
+
+- d7e5c70: Defer native agent upgrades while browser or computer controllers remain open,
+  including queued creation and shutdown. Keep idle proof private to the host and
+  preserve ordinary work when controller state cannot be verified.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/interaction@0.4.44
+
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/interaction@0.4.43
+
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [509513d]
+  - @opengeni/interaction@0.4.42
+
+## 0.2.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+- 02af186: Add an optional verified Chrome headless-shell bundle for new managed headless profiles, preserving headed defaults and pinning profile recovery to the selected launcher.
+
+### Patch Changes
+
+- 2b0c23c: Disable Chromium's local AI model downloads in managed browsers, omit disposable model weights from profile checkpoints, and tolerate Linux processes disappearing during shutdown checks.
+- 78f1d59: Offer native dropdown choices in BrowserViewer when Chromium page frames omit the popup. Keep selection bound to the observed control and preserve normal input/change events, private-field redaction, and disabled options.
+- f3e3b2d: Continue exact-profile browser cleanup when an unrelated Linux process disappears during procfs discovery. Preserve unexpected read failures and the executable/profile ownership checks before signalling a process.
+- dc77d7f: Classify CDP transport failures from read-only browser target inventory and observation as retryable timeout or unavailable responses. Keep target mutations and journaled action outcome handling unchanged.
+- 8e2ba2b: Add a construction-only experimental Chromium context pool for bounded disposable verification, with context-scoped target authority and terminal failure handling. Dedicated managed browsers remain unchanged; no production path enables the pool.
+- ec707de: Negotiate bounded viewer typing batches from the active browser controller. Preserve
+  individual text events and input order while reducing request overhead; recheck the
+  original document fence before each action and discard uncertain queued input
+  without replay. Older controllers retain sequential input.
+- b870388: Recover a lost managed Lightpanda process through the existing browser lifecycle. Safe reads resume after recovery; stale actions remain fenced and ambiguous mutations are never replayed.
+- c5189e7: Replace existing Lightpanda input values during ordinary and protected fills,
+  including empty values, while preserving native input events and rejecting
+  unsupported or non-editable targets.
+- a63a029: Reject Lightpanda placeholder images as screenshots and correct screenshot
+  capabilities for existing semantic-only sessions. Keep DOM observation available.
+- 774369f: Drain managed Linux Chrome stderr into a bounded private diagnostic file so noisy browsers cannot block their CDP control channel.
+- 8693783: Keep bounded browser streams at a stable clip scale so raster rounding cannot make unchanged mobile pages oscillate in size.
+- Updated dependencies [1842911]
+- Updated dependencies [ab4d25f]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/interaction@0.4.41
+
+## 0.1.48
+
+### Patch Changes
+
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/interaction@0.4.40
+
+## 0.1.47
+
+### Patch Changes
+
+- Updated dependencies [23f4717]
+  - @opengeni/contracts@5.1.1
+  - @opengeni/interaction@0.4.39
+
 ## 0.1.46
 
 ### Patch Changes

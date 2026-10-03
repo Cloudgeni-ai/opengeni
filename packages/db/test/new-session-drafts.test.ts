@@ -13,6 +13,7 @@ import {
   bootstrapWorkspace,
   consumeNewSessionDraftInTransaction,
   createDb,
+  createRig,
   createSession,
   getNewSessionDraftInTransaction,
   grantWorkspaceAccess,
@@ -25,6 +26,7 @@ import {
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
   seedNewSessionDraftInTransaction,
+  setWorkspaceDefaultRig,
   withWorkspaceSubjectRls,
 } from "../src/index";
 import { parseBatchedBackfillMigration } from "../src/migrate";
@@ -719,7 +721,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/acme/private.git",
+          uri: "https://github.example.test/example/private.git",
           ref: "main",
           mountPath: "repos/private",
           provider: "github",
@@ -736,6 +738,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       tools: [{ kind: "mcp", id: "docs" }],
       toolsProvided: true,
       options: {
+        visibility: "private",
         sandboxBackend: "selfhosted",
         targetSandboxId,
         workingDir,
@@ -760,7 +763,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/acme/private.git",
+          uri: "https://github.example.test/example/private.git",
           ref: "main",
           mountPath: "repos/private",
           githubRepositoryId: 789,
@@ -772,6 +775,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       reasoningEffort: "low",
     });
     expect(seeded?.sessionOptions).toEqual({
+      visibility: "private",
       sandboxBackend: "selfhosted",
       targetSandboxId,
       workingDir,
@@ -821,6 +825,64 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         }),
     );
     expect(revisionZero).toBe(false);
+  });
+
+  test("remembers visibility changes across successive session creations", async () => {
+    const context = await fixture();
+    let revision = 0;
+    for (const visibility of ["private", "workspace", "private"] as const) {
+      const saved = await saveDraft(context, revision, { options: { visibility } });
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, saved.revision);
+      const seeded = await readDraft(context.grant.workspaceId!, context.subjectId);
+      expect(seeded?.revision).toBe(saved.revision + 1);
+      expect(seeded?.text).toBe("");
+      expect(publicNewSessionDraftOptions(seeded!)).toEqual({ visibility });
+      revision = seeded!.revision;
+    }
+  });
+
+  test("a Sandbox Environment choice covers only its session when the workspace has a default", async () => {
+    const seedWithRigChoice = async (withWorkspaceDefault: boolean) => {
+      const context = await fixture();
+      const workspaceId = context.grant.workspaceId!;
+      const rig = (name: string) =>
+        createRig(client.db, {
+          accountId: context.grant.accountId,
+          workspaceId,
+          name,
+          createdBy: "user:test",
+          initialVersion: { changelog: "v1" },
+        });
+      const chosen = await rig("chosen for one session");
+      if (withWorkspaceDefault) {
+        const workspaceDefault = await rig("workspace default");
+        await setWorkspaceDefaultRig(client.db, workspaceId, workspaceDefault.id);
+      }
+      const variableSetIds = [crypto.randomUUID()];
+      await saveDraft(context, 0, {
+        options: { rigId: chosen.id, variableSetIds, variableSetId: variableSetIds[0] },
+      });
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, 1);
+      const seeded = await readDraft(workspaceId, context.subjectId);
+      return { chosen, variableSetIds, options: publicNewSessionDraftOptions(seeded!) };
+    };
+
+    // The choice replaced the workspace default (and the default Variable Sets
+    // it carries) for that one session. The next form starts on the default
+    // again; added Variable Sets are still remembered because they only add.
+    const replacedDefault = await seedWithRigChoice(true);
+    expect(replacedDefault.options).not.toHaveProperty("rigId");
+    expect(replacedDefault.options).toMatchObject({
+      variableSetIds: replacedDefault.variableSetIds,
+      variableSetId: replacedDefault.variableSetIds[0],
+    });
+
+    // Without a workspace default nothing was replaced, so the choice is
+    // remembered like any other selection.
+    const noDefault = await seedWithRigChoice(false);
+    expect(noDefault.options).toMatchObject({ rigId: noDefault.chosen.id });
   });
 
   test("creates a realtime-first idle shell without a user event, turn, or workflow wake", async () => {

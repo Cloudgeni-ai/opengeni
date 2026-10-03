@@ -12,23 +12,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { durationLabel, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 type Control = Workspace["inferenceControl"];
-export function durationLabel(seconds: number): string {
-  const minutes = Math.max(1, Math.ceil(seconds / 60));
-  const hours = Math.floor(minutes / 60);
-  return hours ? `${hours} hr${minutes % 60 ? ` ${minutes % 60} min` : ""}` : `${minutes} min`;
-}
-export function workspaceTimerLabel(control: Control, now: number): string | null {
-  const timer = control.timer;
-  if (!timer) return control.state === "paused" ? "Paused until you resume" : null;
-  const remaining = (Date.parse(timer.dueAt) - now) / 1000;
-  if (remaining <= 0) return timer.action === "pause" ? "Pausing…" : "Resuming…";
-  return timer.action === "resume"
-    ? `Resumes in ${durationLabel(remaining)}`
-    : `Pauses in ${durationLabel(remaining)} · ${timer.pauseForSeconds ? `for ${durationLabel(timer.pauseForSeconds)}` : "until resumed"}`;
-}
-
 function DurationField(props: {
   label: string;
   special?: string;

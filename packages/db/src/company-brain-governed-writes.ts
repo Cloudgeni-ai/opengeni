@@ -811,9 +811,10 @@ function identityRequest(request: CompanyBrainGovernedWriteRequestType): unknown
 /**
  * Task-note promotion lands in exactly the same destination materialization as
  * a direct `propose_instruction_policy` / `propose_preference`, so the
- * agent-authored prompt budget has to be enforced here too. Without it the note
- * (bounded only by `TASK_NOTE_TEXT_MAX_BYTES`) is a way to write a long
- * procedure into an always-composed rule through the back door.
+ * destination budget has to be enforced here too. Instructions share the human
+ * editor's limit; preferences retain their independent agent budget. Without
+ * this check the note (bounded only by `TASK_NOTE_TEXT_MAX_BYTES`) could exceed
+ * the destination's limit.
  *
  * The note bytes stay exact evidence: this rejects the promotion rather than
  * truncating or rewriting anything, and it runs before any evidence, claim, or

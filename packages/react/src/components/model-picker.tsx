@@ -1,4 +1,5 @@
 import type { ClientModel } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ChevronDownIcon } from "lucide-react";
 import { useId, useMemo } from "react";
 import { groupPickerRowsByBillingClass, type PickerModelRow } from "../model-policy";
@@ -86,8 +87,10 @@ export function ModelPicker({
   );
   const billingGroups = useMemo(
     () =>
-      effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows, { codexOnly }) : [],
-    [effectiveRows, codexOnly],
+      effectiveRows.length > 0
+        ? groupPickerRowsByBillingClass(effectiveRows, { codexOnly, selectedId: value })
+        : [],
+    [effectiveRows, codexOnly, value],
   );
   const providerGroupList = useMemo(() => providerGroups(models, codexOnly), [models, codexOnly]);
   const useBillingGroups = Boolean(effectiveRows.length);
@@ -129,7 +132,7 @@ export function ModelPicker({
               <optgroup key={group.label} label={group.label}>
                 {group.models.map((model) => (
                   <option key={model.id} value={model.id} disabled={model.optionDisabled}>
-                    {model.label}
+                    {modelDisplayName(model)}
                   </option>
                 ))}
               </optgroup>

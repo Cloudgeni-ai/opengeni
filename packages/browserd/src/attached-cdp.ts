@@ -102,6 +102,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly attachedTabs = new Set<string>();
   private readonly browserName: string;
   private readonly browserVersion: string;
+  private readonly browserPlatform: NodeJS.Platform;
   private cursor = 0;
   private pollTask: Promise<void> | null = null;
   private stopped = false;
@@ -109,10 +110,14 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   constructor(
     private readonly bridge: AttachedBrowserBridgeTransport,
-    browser: { browserName: string; browserVersion: string },
+    browser: { browserName: string; browserVersion: string; platform?: NodeJS.Platform },
   ) {
     this.browserName = boundedString(browser.browserName, 1, 100, "browser name");
     this.browserVersion = boundedString(browser.browserVersion, 1, 256, "browser version");
+    // The attached bridge and browserd run on the browser's Connected Machine.
+    // Preserve its OS when synthesizing the browser-scoped version response;
+    // the shared driver uses this to choose native keyboard shortcuts.
+    this.browserPlatform = browser.platform ?? process.platform;
   }
 
   async send<T = Record<string, unknown>>(
@@ -227,7 +232,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       case "Browser.getVersion":
         return {
           product: `${this.browserName}/${this.browserVersion}`,
-          userAgent: `Mozilla/5.0 Chrome/${this.browserVersion}`,
+          userAgent: `Mozilla/5.0 (${this.browserPlatform === "darwin" ? "Macintosh; Intel Mac OS X" : this.browserPlatform === "win32" ? "Windows NT 10.0" : "X11; Linux"}) Chrome/${this.browserVersion}`,
         };
       case "Target.setDiscoverTargets":
         return {};
@@ -247,9 +252,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         };
       }
       case "Target.createTarget": {
+        const url = boundedUrl(params.url ?? "about:blank");
         const result = await this.bridge.request<{ tab: AttachedTab }>({
           type: "tabs.create",
-          url: boundedUrl(params.url ?? "about:blank"),
+          // Installed extensions exclude about: pages from target discovery
+          // and debugger attachment. Bootstrap an inert, network-free document
+          // instead; keep the exact new tab and all restricted-page guards.
+          url: url === "about:blank" ? "data:text/html," : url,
         });
         return { targetId: requireTab(result.tab).id };
       }

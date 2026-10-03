@@ -4,19 +4,44 @@ import type {
   OrganizationRetentionPolicy,
 } from "@/types";
 
+/** The organization settings pages, in nav order. */
+// Rail order: a person who opens a page they can't use lands on the first one they can.
 export const ORGANIZATION_ADMIN_SECTIONS = [
-  "overview",
-  "knowledge",
+  "general",
+  "people",
+  "workspaces",
+  "identity",
   "models",
   "integrations",
-  "people",
-  "recovery",
-  "retention",
-  "developer",
+  "insights",
   "billing",
+  "developer",
+  "security",
 ] as const;
 
 export type OrganizationAdminSection = (typeof ORGANIZATION_ADMIN_SECTIONS)[number];
+
+/** Section names older links still use, and the page each one now lives on. */
+export const LEGACY_ORGANIZATION_SECTIONS = {
+  overview: "general",
+  knowledge: "identity",
+  recovery: "security",
+  retention: "security",
+} as const satisfies Record<string, OrganizationAdminSection>;
+
+export type LegacyOrganizationAdminSection = keyof typeof LEGACY_ORGANIZATION_SECTIONS;
+
+/** Any section value a URL may carry, mapped onto today's page. */
+export function parseOrganizationSection(value: unknown): OrganizationAdminSection | undefined {
+  if ((ORGANIZATION_ADMIN_SECTIONS as readonly unknown[]).includes(value)) {
+    return value as OrganizationAdminSection;
+  }
+  if (typeof value === "string" && value in LEGACY_ORGANIZATION_SECTIONS) {
+    return LEGACY_ORGANIZATION_SECTIONS[value as LegacyOrganizationAdminSection];
+  }
+  return undefined;
+}
+
 export type OrganizationAdminResource =
   | "integrations"
   | "overview"

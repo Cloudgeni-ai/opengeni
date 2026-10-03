@@ -23,6 +23,7 @@ describe("first-party catalog logo assets", () => {
     expect(manifest.version).toBe(1);
     expect(manifest.entries.map((entry) => entry.capabilityId).sort()).toEqual([
       "api:fiken",
+      "api:github-app",
       "api:reddit",
       "api:x",
     ]);

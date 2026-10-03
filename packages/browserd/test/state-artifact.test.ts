@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createCipheriv, createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -14,6 +14,45 @@ const key = Buffer.alloc(32, 0x2a);
 const aad = Buffer.from("browser-state:test-workspace:test-object", "utf8");
 
 describe("encrypted browser profile artifacts", () => {
+  test("omits the Mac runtime version symlink only at the profile root", async () => {
+    await withDirectory(async (directory) => {
+      const profile = join(directory, "profile");
+      const artifact = join(directory, "profile.ogbs");
+      const restored = join(directory, "restored");
+      const nested = join(profile, "Default", "RunningChromeVersion");
+      await mkdir(join(profile, "Default"), { recursive: true });
+      const outside = join(directory, "outside");
+      await writeFile(outside, "must not be archived");
+      await symlink(outside, join(profile, "RunningChromeVersion"));
+      await writeFile(nested, "site-owned state");
+      const input = {
+        profileDirectory: profile,
+        artifactPath: artifact,
+        dataKey: key,
+        aad,
+        manifest: manifest(),
+      };
+      const captured = await captureEncryptedBrowserProfile(input);
+      expect(captured.fileCount).toBe(1);
+      await restoreEncryptedBrowserProfile({
+        artifactPath: artifact,
+        outputProfileDirectory: restored,
+        dataKey: key,
+        aad,
+        expectedArtifactDigest: captured.artifactDigest,
+        expectedContentDigest: captured.contentDigest,
+        expectedSizeBytes: captured.sizeBytes,
+      });
+      expect(await readdir(restored)).not.toContain("RunningChromeVersion");
+      expect(await readFile(join(restored, "Default", "RunningChromeVersion"), "utf8")).toBe(
+        "site-owned state",
+      );
+      await rm(nested);
+      await symlink(outside, nested);
+      await expectRejected(captureEncryptedBrowserProfile(input), "unsupported symbolic link");
+    });
+  });
+
   test("round-trips a bounded profile without runtime locks or disposable caches", async () => {
     await withDirectory(async (directory) => {
       const profile = join(directory, "profile");
@@ -21,12 +60,26 @@ describe("encrypted browser profile artifacts", () => {
       const restored = join(directory, "restored");
       await mkdir(join(profile, "Default", "IndexedDB"), { recursive: true });
       await mkdir(join(profile, "Default", "Cache"), { recursive: true });
+      await mkdir(join(profile, "Default", "IndexedDB", "OptGuideOnDeviceModel"), {
+        recursive: true,
+      });
+      await mkdir(join(profile, "OptGuideOnDeviceModel", "model-version"), {
+        recursive: true,
+      });
       await Promise.all([
         writeFile(join(profile, "Local State"), "local-state"),
         writeFile(join(profile, "Default", "Cookies"), Buffer.from([0, 1, 2, 3, 255])),
         writeFile(join(profile, "Default", "IndexedDB", "state.db"), "durable-state"),
         writeFile(join(profile, "Default", "empty"), ""),
+        writeFile(
+          join(profile, "Default", "IndexedDB", "OptGuideOnDeviceModel", "state"),
+          "site-state",
+        ),
         writeFile(join(profile, "Default", "Cache", "discard-me"), "cache"),
+        writeFile(
+          join(profile, "OptGuideOnDeviceModel", "model-version", "weights.bin"),
+          "disposable-model",
+        ),
         writeFile(join(profile, "SingletonLock"), "runtime-lock"),
       ]);
 
@@ -39,8 +92,8 @@ describe("encrypted browser profile artifacts", () => {
       });
       expect(captured).toMatchObject({
         format: BROWSER_PROFILE_ARTIFACT_FORMAT,
-        fileCount: 4,
-        profileBytes: 29,
+        fileCount: 5,
+        profileBytes: 39,
       });
       expect(captured.artifactDigest).toMatch(/^[0-9a-f]{64}$/u);
       expect(captured.contentDigest).toMatch(/^[0-9a-f]{64}$/u);
@@ -64,6 +117,13 @@ describe("encrypted browser profile artifacts", () => {
         "durable-state",
       );
       expect(await exists(join(restored, "Default", "Cache"))).toBe(false);
+      expect(await exists(join(restored, "OptGuideOnDeviceModel"))).toBe(false);
+      expect(
+        await readFile(
+          join(restored, "Default", "IndexedDB", "OptGuideOnDeviceModel", "state"),
+          "utf8",
+        ),
+      ).toBe("site-state");
       expect(await exists(join(restored, "SingletonLock"))).toBe(false);
     });
   });

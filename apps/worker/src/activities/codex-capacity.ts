@@ -1,9 +1,11 @@
 import {
-  connectionModelAllowed,
   armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
+  getClaudeCapacityWaitForSession,
+  resolveClaudeWaiterSubject,
+  reconcileClaudeCapacityWait as reconcileClaudeCapacityWaitDb,
   resolveXaiWaiterSubject,
   listCodexAccountStatuses,
   listPendingCodexCapacityWakeTargets,
@@ -17,6 +19,7 @@ import { refreshExhaustedXaiQuota } from "./xai-quota";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
+  codexAccountServesModel,
   isCodexCredentialEligible,
   isCodexCredentialHealthy,
   selectCodexCredentialLeaseForTurn,
@@ -96,8 +99,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
   context = {
     ...context,
     accounts: context.accounts.filter(
-      (account) =>
-        !context.modelId || connectionModelAllowed(account.allowedModelIds, context.modelId),
+      (account) => !context.modelId || codexAccountServesModel(account, context.modelId, now),
     ),
   };
   const selected = selectCodexCredentialLeaseForTurn({
@@ -277,10 +279,18 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     const xaiWaiter = codexWaiter
       ? null
       : await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
-    const waiter = codexWaiter ?? xaiWaiter;
+    const claudeWaiter =
+      codexWaiter || xaiWaiter
+        ? null
+        : await getClaudeCapacityWaitForSession(db, input.workspaceId, input.sessionId);
+    const waiter = codexWaiter ?? xaiWaiter ?? claudeWaiter;
     return waiter
       ? {
-          ...(xaiWaiter ? { provider: "xai" as const } : {}),
+          ...(xaiWaiter
+            ? { provider: "xai" as const }
+            : claudeWaiter
+              ? { provider: "claude" as const }
+              : {}),
           waiterId: waiter.id,
           generation: waiter.generation,
           // A capacity mutation may have committed while its Temporal signal
@@ -300,21 +310,17 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     input: ReconcileCodexCapacityWaitInput,
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
-    if (input.provider === "xai") {
-      const current = await getXaiCapacityWaitForSession(
-        resolved.db,
-        input.workspaceId,
-        input.sessionId,
-      );
+    if (input.provider === "xai" || input.provider === "claude") {
+      const claude = input.provider === "claude";
+      const getWaiter = claude ? getClaudeCapacityWaitForSession : getXaiCapacityWaitForSession;
+      const resolveAuthority = claude ? resolveClaudeWaiterSubject : resolveXaiWaiterSubject;
+      const reconcile = claude ? reconcileClaudeCapacityWaitDb : reconcileXaiCapacityWaitDb;
+      const current = await getWaiter(resolved.db, input.workspaceId, input.sessionId);
       if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
         return { action: "stale" };
       }
-      const authority = await resolveXaiWaiterSubject(
-        resolved.db,
-        input.workspaceId,
-        input.sessionId,
-      );
-      if (authority)
+      const authority = await resolveAuthority(resolved.db, input.workspaceId, input.sessionId);
+      if (authority && !claude)
         await refreshExhaustedXaiQuota({
           db: resolved.db,
           settings: resolved.settings,
@@ -325,7 +331,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
           subjectId: authority.subjectId,
           authoritySnapshot: authority.snapshot,
         });
-      const result = await reconcileXaiCapacityWaitDb(resolved.db, {
+      const result = await reconcile(resolved.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -343,7 +349,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       if (result.action === "waiting") {
         return {
           action: "waiting",
-          provider: "xai",
+          provider: input.provider,
           waiterId: result.waiter.id,
           generation: result.waiter.generation,
           nextCheckAt: result.waiter.nextCheckAt.toISOString(),

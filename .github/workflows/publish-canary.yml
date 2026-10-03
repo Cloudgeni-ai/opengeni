@@ -35,7 +35,6 @@ jobs:
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary.yml@refs/heads/main" ]]
 
@@ -44,6 +43,7 @@ jobs:
         with:
           ref: "${{ github.sha }}"
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Verify exact source
         env:
@@ -51,6 +51,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+          git checkout --quiet --detach "$SOURCE_SHA"
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
 
       - name: Set up Bun
@@ -71,6 +73,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
           OPENGENI_RELEASE: "1"
+        # npm verifies GITHUB_SHA against the signed workflow identity.
+        # Verify exact source above and the source-named receipt bind the checkout.
         run: bun scripts/publish-canary.ts
 
       - name: Retain exact Site package pins for this deployment

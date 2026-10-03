@@ -73,6 +73,16 @@ function compareAgentVersions(left: string, right: string): number | null {
   return a.prerelease.localeCompare(b.prerelease);
 }
 
+/** Older Mac updaters replace a single file inside a sealed app. They must
+ * bootstrap once through the official whole-app installer, never an RPC swap. */
+export function machineUpdateBlockedReason(os: string, version: string | null): string | null {
+  if (os !== "macos") return null;
+  const order = version ? compareAgentVersions(version, "0.1.29") : null;
+  return order !== null && order >= 0
+    ? null
+    : "Install OpenGeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+}
+
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
   const desiredVersion =
     enrollment.agentUpdateChannel === "beta"
@@ -102,6 +112,7 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
     updateChannel: enrollment.agentUpdateChannel,
     desiredVersion,
     versionState,
+    updateBlockedReason: machineUpdateBlockedReason(enrollment.os, enrollment.agentVersion),
     capabilities: {
       exec: capability("exec"),
       filesystem: capability("filesystem"),

@@ -169,6 +169,7 @@ export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
  * table. */
 export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+  "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
   "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
   "OPENGENI_SANDBOX_LEASE_TTL_MS",
   "OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS",
@@ -195,6 +196,16 @@ export const WORKSPACE_CONTROL_PASSTHROUGH_ENV: readonly string[] = [
  * `session_system_updates` kinds (an old worker throws on an unknown kind). */
 export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
+];
+
+/** Agent configuration rollout switches (sessions.agent_config, migration
+ * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
+ * only when set. Enable admission only after every worker runs a 0559-aware
+ * image; the default-for-new-sessions switch then turns omitted-`agent` new
+ * sessions into `{ capabilities: "all" }`. */
+export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED",
+  "OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS",
 ];
 
 /** Per-channel and per-DM Slack workspace routing. Default ON in
@@ -229,19 +240,41 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
+/** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
+ * a server runtime secret (the worker calls Jev; the API only checks that it is
+ * set); it never reaches a sandbox. Unset keeps the tool off. */
+export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_JEV_API_KEY",
+  "OPENGENI_JEV_BASE_URL",
+  "OPENGENI_JEV_MODEL",
+  "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
+  "OPENGENI_CODE_SEARCH_MODE",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
-export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = [
-  "OPENGENI_MCP_OAUTH_ENABLED",
-  "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
-];
+export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = ["OPENGENI_MCP_OAUTH_ENABLED"];
 
-/** Forwarded source addresses stay untrusted for API quotas unless the
- * operator explicitly trusts a fixed proxy chain. */
+/** Request-source trust for every API rate limit and auth session record.
+ * Unset means forwarded client addresses are ignored; a deployment behind a
+ * fixed, direct-access-blocked proxy chain declares its exact hop count. */
 export const API_REQUEST_SOURCE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_API_TRUSTED_PROXY_HOPS",
+  "OPENGENI_API_TRUSTED_PROXY_CIDRS",
 ];
+
+/** Generation would drop the retired MCP-only name without a trace, and the
+ * runtime would then key every client on the proxy peer. "0" already means
+ * the default, so only a value that asked for forwarded-address trust fails. */
+function assertNoRetiredTrustedProxyHops(env: Record<string, string | undefined>): void {
+  const retired = env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS?.trim();
+  if (retired && retired !== "0") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS was renamed to OPENGENI_API_TRUSTED_PROXY_HOPS, which now sets the client address for every API rate limit and auth session; rename the variable",
+    );
+  }
+}
 
 /** Control-plane secrets needed for a complete Connected Machine deployment.
  * The config layer permits graceful degradation when these are absent; a
@@ -1469,6 +1502,8 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_MODEL_CATALOG_SOURCE",
     "OPENGENI_MODEL_COST_POLICY_JSON",
     "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_CREDITS_DEFAULT_MODEL",
+    "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
@@ -1565,10 +1600,7 @@ export function requiredRuntimeEnvVars(
   if (env.OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS) {
     vars.push("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS");
   }
-  for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
-    if (env[key]) vars.push(key);
-  }
-  for (const key of API_REQUEST_SOURCE_PASSTHROUGH_ENV) {
+  for (const key of [...MCP_OAUTH_PASSTHROUGH_ENV, ...API_REQUEST_SOURCE_PASSTHROUGH_ENV]) {
     if (env[key]) vars.push(key);
   }
   if (mcpOauthDeploymentEnabled(env)) {
@@ -1662,6 +1694,7 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
+  assertNoRetiredTrustedProxyHops(env);
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
   addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
   addRuntimeConfigHelmValues(helmSetValues, contract, env);
@@ -2584,11 +2617,15 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY", env.OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY),
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
+    valueEnv("OPENGENI_DOCUMENTATION_URL", env.OPENGENI_DOCUMENTATION_URL),
+    valueEnv("OPENGENI_LEGAL_PRIVACY_POLICY_URL", env.OPENGENI_LEGAL_PRIVACY_POLICY_URL),
+    valueEnv("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL", env.OPENGENI_LEGAL_TERMS_OF_SERVICE_URL),
+    valueEnv("OPENGENI_SUPPORT_EMAIL", env.OPENGENI_SUPPORT_EMAIL),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
-    valueEnv("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS", env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS),
     valueEnv("OPENGENI_API_TRUSTED_PROXY_HOPS", env.OPENGENI_API_TRUSTED_PROXY_HOPS),
+    valueEnv("OPENGENI_API_TRUSTED_PROXY_CIDRS", env.OPENGENI_API_TRUSTED_PROXY_CIDRS),
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
@@ -2771,6 +2808,11 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
     valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
     valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
+    valueEnv("OPENGENI_CREDITS_DEFAULT_MODEL", env.OPENGENI_CREDITS_DEFAULT_MODEL),
+    valueEnv(
+      "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
+      env.OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT,
+    ),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
           env.OPENGENI_AZURE_OPENAI_BASE_URL
@@ -2939,6 +2981,9 @@ function runtimeEnvValues(
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
   for (const key of SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
@@ -2946,6 +2991,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 
@@ -3127,11 +3175,15 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY",
     "OPENGENI_ANALYTICS_POSTHOG_HOST",
     "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
+    "OPENGENI_DOCUMENTATION_URL",
+    "OPENGENI_LEGAL_PRIVACY_POLICY_URL",
+    "OPENGENI_LEGAL_TERMS_OF_SERVICE_URL",
+    "OPENGENI_SUPPORT_EMAIL",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",
-    "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
     "OPENGENI_API_TRUSTED_PROXY_HOPS",
+    "OPENGENI_API_TRUSTED_PROXY_CIDRS",
   ] as const) {
     const value = env[key];
     if (value) {

@@ -370,7 +370,9 @@ test.skipIf(!live)(
               banner.kind === "running" && Date.now() < deadline,
               "command did not settle within its budget",
             );
-            page = await route.writeStdin({
+            // Observation must not open an unsettled stdin admission: that
+            // would fence the supervisor's quiescence receipt during this poll.
+            page = await route.writeStdinForProcessRead({
               sessionId: banner.sessionId,
               chars: "",
               yieldTimeMs: 1_000,

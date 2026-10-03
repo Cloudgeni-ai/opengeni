@@ -9,6 +9,13 @@
       "modifications": "Recreated as safe passive SVG paths from the provider-published favicon for crisp display."
     },
     {
+      "capabilityId": "api:github-app",
+      "file": "github.svg",
+      "sourceUrl": "https://github.com/Cloudgeni-ai/opengeni/blob/main/apps/web/src/components/managed-social-auth-buttons.tsx",
+      "sourceLicense": "GitHub mark; nominative catalog use",
+      "modifications": "Reused the reviewed GitHub mark path already shipped in the sign-in button; added a white backing tile for dark surfaces."
+    },
+    {
       "capabilityId": "api:reddit",
       "file": "reddit.svg",
       "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/34c22501f9ac9f22b12f825677ccbab1fb22e14b/icons/reddit.svg",

@@ -35,8 +35,8 @@ Canonical implementation:
   `0380_autonomous_company_profile_agent_policy.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
-- admin presentation: Organization settings → Knowledge in
-  `apps/web/src/routes/org-settings.tsx`.
+- admin presentation: Organization settings → Organization identity in
+  `apps/web/src/components/organization/identity-page.tsx`.
 
 ## Scope and authority
 
@@ -265,7 +265,7 @@ receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
-Organization settings → Knowledge "Create with OpenGeni" prompt directs a session to. They register
+Organization settings → Organization identity "Create with OpenGeni" prompt directs a session to. They register
 only for exact worker-signed agent attempts with `workspace:read` plus
 `sessions:control`. Proposal input contains only identity and mission; the
 canonical compatibility lists are written empty before the exact profile is

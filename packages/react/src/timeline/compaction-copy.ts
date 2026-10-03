@@ -15,6 +15,8 @@ export function compactionSkipSubtitle(
       return "No active history to compact";
     case "replacement_not_smaller":
       return "Checkpoint would not reduce memory size";
+    case "replacement_exceeds_model_budget":
+      return "Checkpoint exceeds this model's context budget. Chat history is unchanged.";
     case "replacement_unchanged":
       return "Checkpoint made no progress";
     case "summarization_failed":

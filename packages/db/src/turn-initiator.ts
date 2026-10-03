@@ -1,5 +1,6 @@
 import {
   UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
+  readTurnExecutionPolicyV1,
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
@@ -20,7 +21,52 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
+/** A legacy task has no asserted service identity. Its occurrence is still
+ * initiated by the scheduler, not by the missing-attribution sentinel. */
+export function frozenScheduledOccurrenceInitiator(
+  task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
+  scheduler: FrozenTurnInitiator,
+): FrozenTurnInitiator {
+  if (
+    task.createdBy.kind !== "service" ||
+    task.createdBy.subjectId === UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID
+  ) {
+    return scheduler;
+  }
+  const { label: _label, ...serviceContext } = task.createdByContext;
+  return {
+    initiator:
+      task.createdBy.subjectId === "scheduler" && !task.createdBy.label
+        ? { ...task.createdBy, label: "OpenGeni scheduler" }
+        : task.createdBy,
+    context: { ...serviceContext, ...scheduler.context },
+    initiatingHumanSubjectId: null,
+  };
+}
+
 const MAX_AGENT_PROVENANCE_HOPS = 32;
+
+/** Read only private, server-frozen lineage/context, never request JSON. */
+export function frozenCredentialRestriction(
+  context: Readonly<Record<string, unknown>> | null | undefined,
+): "developer_setup" | undefined {
+  if (!context || !Object.hasOwn(context, "credentialRestriction")) return undefined;
+  if (context.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed frozen credential restriction");
+  }
+  return "developer_setup";
+}
+
+/** Every coalesced causal source retains its ceiling, not only the first one. */
+export function contextWithFrozenCredentialRestrictions(
+  context: TurnInitiatorContext,
+  sources: readonly (Readonly<Record<string, unknown>> | null | undefined)[],
+): TurnInitiatorContext {
+  const restrictions = [context, ...sources].map(frozenCredentialRestriction);
+  return restrictions.includes("developer_setup")
+    ? { ...context, credentialRestriction: "developer_setup" }
+    : context;
+}
 
 /**
  * Bound agent provenance without discarding its causal authority. Once the
@@ -88,6 +134,33 @@ function validAgentHops(value: unknown): Array<Record<string, unknown>> {
   );
 }
 
+/** Freeze the exact target turn's provenance without changing the new service principal. */
+export function contextForCausalTurn(
+  current: TurnInitiatorContext,
+  causal: FrozenTurnInitiator,
+  reference: { sessionId: string; turnId: string },
+): TurnInitiatorContext {
+  const { via, viaTruncated, ...context } = causal.context;
+  const hops = [
+    ...validAgentHops(via),
+    {
+      kind: causal.initiator.kind === "subject" ? "human" : "service",
+      ...reference,
+      initiator: causal.initiator,
+      context,
+    },
+  ];
+  const clipped = clipAgentProvenanceHops(hops);
+  return {
+    ...current,
+    ...(frozenCredentialRestriction(causal.context)
+      ? { credentialRestriction: "developer_setup" }
+      : {}),
+    via: clipped,
+    ...(viaTruncated === true || hops.length > clipped.length ? { viaTruncated: true } : {}),
+  };
+}
+
 export async function frozenInitiatorForCommandActor(
   db: Database,
   workspaceId: string,
@@ -123,8 +196,17 @@ export async function frozenInitiatorForCommandActor(
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
       initiatorContext: schema.sessionTurns.initiatorContext,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      metadata: schema.sessionTurns.metadata,
+      sessionMetadata: schema.sessions.metadata,
     })
     .from(schema.sessionTurns)
+    .innerJoin(
+      schema.sessions,
+      and(
+        eq(schema.sessions.workspaceId, schema.sessionTurns.workspaceId),
+        eq(schema.sessions.id, schema.sessionTurns.sessionId),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionTurns.workspaceId, workspaceId),
@@ -137,6 +219,16 @@ export async function frozenInitiatorForCommandActor(
     throw new Error(`Agent initiator turn not found: ${actor.turnId}`);
   }
   const storedContext = turn.initiatorContext ?? {};
+  const executionPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  const initialPolicy = readTurnExecutionPolicyV1(turn.sessionMetadata);
+  const restricted =
+    frozenCredentialRestriction(storedContext) === "developer_setup" ||
+    (executionPolicy.kind === "valid" &&
+      executionPolicy.policy.credentialRestriction === "developer_setup");
+  const inheritedRestriction =
+    restricted ||
+    (initialPolicy.kind === "valid" &&
+      initialPolicy.policy.credentialRestriction === "developer_setup");
   const inheritedHops = validAgentHops(storedContext.via);
   const hops = [
     ...inheritedHops,
@@ -153,6 +245,7 @@ export async function frozenInitiatorForCommandActor(
     initiator: initiatorFromStorage(turn.initiatorKind, turn.initiatorSubjectId, storedContext),
     context: {
       ...storedContext,
+      ...(inheritedRestriction ? { credentialRestriction: "developer_setup" } : {}),
       via: clipped,
       ...(hops.length > clipped.length ? { viaTruncated: true } : {}),
     },

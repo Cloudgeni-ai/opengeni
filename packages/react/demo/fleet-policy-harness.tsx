@@ -3,6 +3,10 @@ import { createRoot } from "react-dom/client";
 import { MessageTimeline } from "@opengeni/react";
 import { createFleetPolicyCanonicalProof } from "./fleet-policy-canonical-proof";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";

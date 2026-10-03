@@ -1,5 +1,129 @@
 # @opengeni/interaction
 
+## 0.4.46
+
+### Patch Changes
+
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+
+## 0.4.45
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
+## 0.4.44
+
+### Patch Changes
+
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+
+## 0.4.43
+
+### Patch Changes
+
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+
+## 0.4.42
+
+### Patch Changes
+
+- 509513d: Accept synchronous iterables when restoring operation journals, allowing controllers to recover durable receipts without retaining every observation graph in memory at once. Existing array inputs remain supported.
+
+## 0.4.41
+
+### Patch Changes
+
+- ab4d25f: Release settled interaction receipt memory after successful durable persistence. Optional journal readers restore exact hash-bound receipts on replay; unavailable or changed records fail closed without repeating input. Controllers without durable readers retain bounded-entry compressed receipts.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
+## 0.4.40
+
+### Patch Changes
+
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+
+## 0.4.39
+
+### Patch Changes
+
+- Updated dependencies [23f4717]
+  - @opengeni/contracts@5.1.1
+
 ## 0.4.38
 
 ### Patch Changes

@@ -73,8 +73,11 @@ import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-comp
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
+import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
 export type SessionChromeSignalId =
@@ -97,6 +100,8 @@ export type SessionChromeProps = {
   /** Authoritative execution status; omitted by older embedding hosts. */
   sessionStatus?: SessionStatus | undefined;
   queue: UseTurnQueueResult;
+  /** Open and focus an existing queued prompt without changing its delivery. */
+  queueFocusTarget?: { turnId: string; requestId: number } | undefined;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
   /** Focus the composer after a successful queue checkout has applied its draft.
@@ -433,6 +438,7 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
 export function SessionChrome({
   sessionStatus,
   queue,
+  queueFocusTarget,
   composer,
   onComposerFocus,
   goal,
@@ -448,6 +454,7 @@ export function SessionChrome({
   defaultActive = null,
   onActiveChange,
 }: SessionChromeProps) {
+  const formatError = useErrorMessage();
   const [activityRequested, setActivityOpen] = useState(
     Boolean(defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
   );
@@ -496,6 +503,40 @@ export function SessionChrome({
     }),
   );
   const active = activeControlled !== undefined ? activeControlled : activeUncontrolled;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const openedQueueTargetRef = useRef<string | null>(null);
+  const focusedQueueTargetRef = useRef<string | null>(null);
+  const queueTargetKey = queueFocusTarget
+    ? `${queueFocusTarget.turnId}:${queueFocusTarget.requestId}`
+    : null;
+  useEffect(() => {
+    if (!queueTargetKey || openedQueueTargetRef.current === queueTargetKey) return;
+    openedQueueTargetRef.current = queueTargetKey;
+    if (activeControlled === undefined) setActiveUncontrolled("queue");
+    onActiveChange?.("queue");
+  }, [queueTargetKey, activeControlled, onActiveChange]);
+  useEffect(() => {
+    if (!queueFocusTarget || active !== "queue" || focusedQueueTargetRef.current === queueTargetKey)
+      return;
+    const root = rootRef.current;
+    if (!root) return;
+    const focus = () => {
+      const row = Array.from(root.querySelectorAll<HTMLElement>("[data-queue-turn-id]")).find(
+        (element) => element.dataset.queueTurnId === queueFocusTarget.turnId,
+      );
+      if (!row) return false;
+      focusedQueueTargetRef.current = queueTargetKey;
+      row.focus({ preventScroll: true });
+      row.scrollIntoView?.({ block: "nearest" });
+      return true;
+    };
+    if (focus()) return;
+    const observer = new MutationObserver(() => {
+      if (focus()) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [queueFocusTarget, queueTargetKey, active, queuedTurns]);
   const activityOpen =
     activityRequested || Boolean(active && ["incoming", "agents", "commands"].includes(active));
   const activityVisibleRef = useRef(activityOpen);
@@ -787,6 +828,7 @@ export function SessionChrome({
         onRefresh={queue.refresh}
         onClearMutationError={queue.clearMutationError}
         onRetryOptimistic={composer?.retryOptimisticMessage}
+        onRestoreOptimistic={composer?.restoreOptimisticMessage}
         onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
@@ -869,6 +911,7 @@ export function SessionChrome({
       <div
         className={cn("og-session-chrome og-root w-full", className)}
         data-testid="session-chrome"
+        ref={rootRef}
         data-og-session-chrome=""
         data-og-session-chrome-open={open ? "true" : "false"}
       >
@@ -1036,6 +1079,7 @@ export function SessionChrome({
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
                             label="Steer first queued message"
+                            analyticsAction="steer"
                             text="Steer"
                             tip={QUEUE_STEER_TIP}
                             disabled={
@@ -1150,7 +1194,7 @@ export function SessionChrome({
           </AnimatePresence>
           {goal?.mutationError ? (
             <p role="alert" className="px-3 pb-2 text-og-xs text-og-danger">
-              Goal action not confirmed. {goal.mutationError.message}
+              Goal action not confirmed. {formatError(goal.mutationError)}
             </p>
           ) : null}
           <div
@@ -1292,6 +1336,7 @@ function QueuePanel({
   onRefresh,
   onClearMutationError,
   onRetryOptimistic,
+  onRestoreOptimistic,
   onRemoveOptimistic,
   readOnly,
   mutationFor,
@@ -1310,6 +1355,7 @@ function QueuePanel({
   onRefresh: () => Promise<void>;
   onClearMutationError: () => void;
   onRetryOptimistic?: ((clientEventId: string) => void) | undefined;
+  onRestoreOptimistic?: ((clientEventId: string) => void) | undefined;
   onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
@@ -1362,6 +1408,7 @@ function QueuePanel({
           <li
             key={turn.id}
             data-queue-turn-id={turn.id}
+            tabIndex={-1}
             className="group flex flex-col gap-1 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
           >
             <div className="flex items-start gap-1.5">
@@ -1375,9 +1422,10 @@ function QueuePanel({
                   {index + 1}
                 </span>
               )}
-              <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-                {presentation.text}
-              </p>
+              <CompactQueueItemContent
+                text={presentation.text}
+                annotations={turn.annotations ?? []}
+              />
               {showActions ? (
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
                   {onMove && turns.length > 1 ? (
@@ -1403,6 +1451,7 @@ function QueuePanel({
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
+                      analyticsAction="steer"
                       text="Steer"
                       tip={QUEUE_STEER_TIP}
                       disabled={settling || pending !== null}
@@ -1464,7 +1513,7 @@ function QueuePanel({
                   </button>
                   <button
                     type="button"
-                    className="rounded-og-sm bg-og-accent px-2 py-1 font-medium text-og-accent-fg hover:opacity-90 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                    className="rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onConfirmReplace}
                   >
                     Replace and edit
@@ -1492,25 +1541,39 @@ function QueuePanel({
             <span className="shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
               {turns.length + index + 1}
             </span>
-            <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
-              {message.text}
-            </p>
+            <div className="min-w-0 flex-1">
+              <CompactQueueItemContent text={message.text} annotations={message.annotations} />
+              {message.state === "failed" && message.error ? (
+                <p className="break-words text-og-xs">{message.error}</p>
+              ) : null}
+            </div>
             <span className="sr-only">
               {message.state === "failed"
-                ? "Not confirmed"
+                ? message.outcomeUnknown
+                  ? "Not confirmed"
+                  : "Message not sent"
                 : message.state === "sending"
                   ? "Placing in queue"
                   : "Queued"}
             </span>
             {message.state === "failed" ? (
               <div className="flex shrink-0 items-center gap-1 text-[10px]">
-                {onRetryOptimistic ? (
+                {message.retryable !== false && onRetryOptimistic ? (
                   <button
                     type="button"
                     className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     onClick={() => onRetryOptimistic(message.clientEventId)}
                   >
                     Retry
+                  </button>
+                ) : null}
+                {message.retryable === false && onRestoreOptimistic ? (
+                  <button
+                    type="button"
+                    className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    onClick={() => onRestoreOptimistic(message.clientEventId)}
+                  >
+                    Edit message
                   </button>
                 ) : null}
                 {onRemoveOptimistic ? (
@@ -1571,6 +1634,30 @@ function QueuePanel({
   );
 }
 
+function CompactQueueItemContent({
+  text,
+  annotations,
+}: {
+  text: string;
+  annotations: readonly TimelineAnnotationLike[];
+}) {
+  const content = queueItemContent(text, annotations.length);
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+      {content === "text" ? (
+        <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">{text}</p>
+      ) : content === "unavailable" ? (
+        <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg-muted italic">
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+        </p>
+      ) : null}
+      {annotations.length > 0 ? (
+        <TimelineAnnotationsChip annotations={annotations} className="shrink-0" compact />
+      ) : null}
+    </div>
+  );
+}
+
 function GoalPanel({
   goal,
   state,
@@ -1582,6 +1669,7 @@ function GoalPanel({
   elapsed: string | null;
   readOnly: boolean;
 }) {
+  const formatError = useErrorMessage();
   const record = goal.goal;
   if (!record) return null;
   const canToggle = !readOnly && (record.status === "active" || record.status === "paused");
@@ -1614,7 +1702,7 @@ function GoalPanel({
       ) : null}
       {record.continuation?.lastError ? (
         <p className="rounded-og-sm bg-og-status-waiting/10 px-1.5 py-1 text-og-xs leading-4 text-og-status-waiting">
-          {record.continuation.lastError}
+          {formatError(record.continuation.lastError)}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
@@ -1677,6 +1765,7 @@ const QUEUE_DELETE_TIP = "Delete this queued prompt";
 function IconAction({
   text,
   label,
+  analyticsAction,
   tip,
   onClick,
   disabled,
@@ -1684,6 +1773,8 @@ function IconAction({
   children,
 }: {
   label: string;
+  /** Stable, content-free control label a host's product analytics may read. */
+  analyticsAction?: "steer";
   text?: string;
   tip: ReactNode;
   onClick: () => void;
@@ -1697,6 +1788,7 @@ function IconAction({
         <button
           type="button"
           aria-label={label}
+          data-analytics-action={analyticsAction}
           disabled={disabled}
           onClick={onClick}
           className={cn(

@@ -4,8 +4,11 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+  OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
   evaluateOpenGeniSlackBotScopes,
+  hasOpenGeniSlackFileUploadScope,
   hasOpenGeniSlackBotSearchScopes,
+  hasOpenGeniSlackReactionScope,
   type AccessGrant,
   type ConnectionMetadata,
   type OpenGeniSlackBotDisplayName,
@@ -20,14 +23,20 @@ import {
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
+  buildSlackApiRateLimiter,
   claimSlackBotDeleteOperation,
   claimSlackBotPostOperation,
   claimSlackBotUpdateOperation,
   completeSlackBotDeleteOperation,
   completeSlackBotPostOperation,
   completeSlackBotUpdateOperation,
+  getScheduledTask,
   getSession,
+  getSlackBotPostOperation,
   listConnectionsMetadata,
+  prepareScheduledSlackBotMessage,
+  readScheduledSlackBotMessage,
+  ScheduledSlackBotMessageRefusedError,
   markSlackBotDeleteOperationProviderStarted,
   markSlackBotPostOperationProviderStarted,
   recordAuditEvent,
@@ -43,11 +52,14 @@ import {
   type FetchLike,
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import sharp from "sharp";
 
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const SLACK_FILE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const SLACK_REACTION_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+// Base64 plus MCP metadata must stay below the runtime's 1 MiB model-result cap.
+export const SLACK_MCP_IMAGE_MAX_BYTES = 640 * 1024;
 const SLACK_FILE_CONTENT_PAGE_CHARS = 50_000;
 const SLACK_TIMEOUT_MS = 10_000;
 const MAX_CHANNEL_PAGE = 200;
@@ -258,6 +270,7 @@ type SlackBotOperation =
   | "files.list"
   | "file.info"
   | "file.content.read"
+  | "file.upload"
   | "home.publish"
   | "message.post"
   | "message.update"
@@ -321,6 +334,66 @@ export class SlackBotProviderError extends Error {
     super(`Slack bot request failed: ${safeSlackCode(code)}`);
     this.name = "SlackBotProviderError";
   }
+}
+
+export function slackHistoryRateLimited(error: unknown): error is SlackBotProviderError {
+  return (
+    error instanceof SlackBotProviderError &&
+    (error.code === "http_429" || error.code === "rate_limited" || error.code === "ratelimited")
+  );
+}
+
+/**
+ * The post or update ledger already binds this operation id to different
+ * request bytes. Raised from the durable claim, before any Slack write, so a
+ * caller that knows an earlier release wrote other bytes for the same operation
+ * may retry once with those bytes.
+ */
+export class SlackBotOperationConflictError extends Error {
+  constructor(kind: "post" | "update" | "delete") {
+    super(`operationId is already bound to a different Slack ${kind} request`);
+    this.name = "SlackBotOperationConflictError";
+  }
+}
+
+/** Only Slack's one-time HTTPS upload endpoint may receive retained bytes. */
+export function slackFileUploadUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new SlackBotProviderError("invalid_upload_url");
+  }
+  if (
+    value.length > 4096 ||
+    url.protocol !== "https:" ||
+    url.hostname !== "files.slack.com" ||
+    url.port !== "" ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    !url.pathname.startsWith("/upload/v1/")
+  ) {
+    throw new SlackBotProviderError("invalid_upload_url");
+  }
+  return url;
+}
+
+/** A channel listing alone is not proof of delivery to the requested thread. */
+export function slackFileSharedToThread(
+  value: unknown,
+  input: { fileId: string; channelId: string; threadTimestamp: string; botUserId: string },
+): boolean {
+  const file = slackRecord(value);
+  if (file?.id !== input.fileId || file.user !== input.botUserId) return false;
+  const shares = slackRecord(file.shares);
+  return ["public", "private"].some((kind) => {
+    const entries = slackRecord(shares?.[kind])?.[input.channelId];
+    return (
+      Array.isArray(entries) &&
+      entries.some((entry) => slackRecord(entry)?.thread_ts === input.threadTimestamp)
+    );
+  });
 }
 
 export async function authorizeSlackSharedImageRead(
@@ -514,8 +587,209 @@ export async function resolveSlackBotConnectionForTool(input: {
   };
 }
 
+/**
+ * The one destination a scheduled run may post to as the OpenGeni bot: the
+ * channel a person chose on the task, through the bot connection frozen on the
+ * run's session. The agent never supplies a channel. Every call re-reads the
+ * task, so a person clearing or changing the channel takes effect at once.
+ */
+export async function resolveScheduledSlackBotPostTarget(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+}): Promise<
+  Awaited<ReturnType<typeof resolveSlackBotConnectionForTool>> & {
+    scheduledTaskId: string;
+    channelId: string;
+  }
+> {
+  const refuse = (reason: string): never => {
+    throw new Error(`Posting to the task's Slack channel is unavailable: ${reason}`);
+  };
+  if (!input.sessionId) refuse("this is not a scheduled task run");
+  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId!);
+  if (!session || !isTrustedScheduledSlackBotSession(session)) {
+    refuse("this is not a scheduled task run with an OpenGeni Slack bot");
+  }
+  const connectionId = scheduledSlackBotConnectionId(session!.metadata)!;
+  const scheduledTaskId = String(session!.metadata.scheduledTaskId);
+  const task = await getScheduledTask(input.db, input.grant.workspaceId, scheduledTaskId);
+  if (!task) refuse("the scheduled task was deleted");
+  if (task!.runMode === "existing_session") refuse("the task continues an existing chat");
+  if (task!.agentConfig.slackBotConnectionId !== connectionId) {
+    refuse("the task no longer uses this OpenGeni Slack bot");
+  }
+  const channelId = task!.agentConfig.slackBotChannelId;
+  if (!channelId) refuse("no one has chosen a Slack channel for this task");
+  const resolved = await resolveSlackBotConnectionForTool({
+    db: input.db,
+    grant: input.grant,
+    sessionId: input.sessionId,
+    requestedConnectionId: connectionId,
+  });
+  return { ...resolved, scheduledTaskId, channelId: channelId! };
+}
+
+/**
+ * Save one message for the task's channel without sending it. The returned id
+ * is server-owned and becomes the Slack post operation id, so retrying the
+ * send can never post the same message twice.
+ */
+export async function prepareScheduledSlackBotPost(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+  text: string;
+  threadTimestamp?: string | undefined;
+}) {
+  const target = await resolveScheduledSlackBotPostTarget(input);
+  const message = await prepareScheduledSlackBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId!,
+    scheduledTaskId: target.scheduledTaskId,
+    connectionId: target.connection.id,
+    connectionVersion: target.connection.version,
+    channelId: target.channelId,
+    threadTimestamp: input.threadTimestamp ?? null,
+    text: input.text,
+  }).catch((error: unknown) => {
+    if (error instanceof ScheduledSlackBotMessageRefusedError) {
+      throw new Error(`Posting to the task's Slack channel is unavailable: ${error.message}`);
+    }
+    throw error;
+  });
+  return {
+    messageId: message.id,
+    identity: "workspace_bot" as const,
+    channelId: message.channelId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    sent: false,
+  };
+}
+
+/**
+ * Send a message this run prepared, exactly as saved. The destination must
+ * still be the task's channel and the bot connection unchanged; otherwise the
+ * send is refused rather than redirected.
+ */
+export async function sendScheduledSlackBotPost(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string | null;
+  messageId: string;
+  slackFetch?: typeof fetch;
+  authorizeProviderRequest?: SlackProviderAuthorization;
+}) {
+  const target = await resolveScheduledSlackBotPostTarget(input);
+  const message = await readScheduledSlackBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId!,
+    id: input.messageId,
+  });
+  if (!message) {
+    throw new Error("This prepared Slack message does not exist in this chat");
+  }
+  const channelChanged =
+    message.channelId !== target.channelId || message.scheduledTaskId !== target.scheduledTaskId;
+  const botChanged =
+    message.connectionId !== target.connection.id ||
+    message.connectionVersion !== target.connection.version;
+  const client = createOpenGeniSlackBotClient(
+    {
+      db: input.db,
+      settings: input.settings,
+      ...(input.slackFetch ? { slackFetch: input.slackFetch } : {}),
+      ...(input.authorizeProviderRequest
+        ? { authorizeProviderRequest: input.authorizeProviderRequest }
+        : {}),
+    },
+    target,
+  );
+  const post = () =>
+    client.postMessage({
+      operationId: message.id,
+      channelId: message.channelId,
+      ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+      text: message.text,
+      requireActiveNonSharedChannel: true,
+    });
+  if (!channelChanged && !botChanged) return await post();
+  // The destination moved after this message was prepared, so it is never sent
+  // now. Say truthfully whether an earlier send already reached Slack, so the
+  // agent does not post the same content again believing nothing was sent.
+  const earlier = await getSlackBotPostOperation(
+    input.db,
+    input.grant.workspaceId,
+    message.connectionId,
+    message.id,
+  );
+  if (earlier?.status === "completed" && message.connectionId === target.connection.id) {
+    // Replays the recorded result from the post ledger; no Slack call is made.
+    return await post();
+  }
+  const reason = channelChanged
+    ? "The task's Slack channel changed after this message was prepared"
+    : "The OpenGeni Slack bot changed after this message was prepared";
+  if (earlier?.status === "completed") {
+    throw new Error(`${reason}. It had already been posted, so it was not sent again.`);
+  }
+  if (earlier && earlier.status !== "pending") {
+    throw new Error(
+      `${reason}. An earlier send was interrupted, so it may already have been posted to the previous channel; it was not sent again.`,
+    );
+  }
+  throw new Error(`${reason}, so it was not sent. Prepare a new message for the current channel.`);
+}
+
+/**
+ * Check, with the bot's token, that a person's chosen task channel is one the
+ * bot is a member of, active, and not shared with another organization.
+ */
+export async function verifyScheduledTaskSlackChannel(
+  deps: { db: Database; settings: Settings; slackFetch?: typeof fetch },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    channelId: string;
+  },
+): Promise<void> {
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    connectionId: input.connectionId,
+    subjectId: input.subjectId,
+  });
+  let channel: Awaited<ReturnType<OpenGeniSlackBotClient["verifyChannelAccess"]>>;
+  try {
+    channel = await client.verifyChannelAccess(input.channelId);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: `The OpenGeni bot cannot post in that Slack channel. Invite it to the channel first. (${safeFailureCode(error)})`,
+    });
+  }
+  if (
+    channel.isDirectMessage ||
+    channel.isArchived ||
+    channel.isShared ||
+    channel.isExternallyShared ||
+    channel.isOrgShared
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "Scheduled posts need an active Slack channel that is not shared with another organization",
+    });
+  }
+}
+
 export class OpenGeniSlackBotClient {
   private readonly resolveCredential: ReturnType<typeof buildConnectionTokenResolver>;
+  private readonly rateLimit: ReturnType<typeof buildSlackApiRateLimiter>;
 
   constructor(
     private readonly db: Database,
@@ -527,6 +801,17 @@ export class OpenGeniSlackBotClient {
     private readonly authorizeProviderRequest?: SlackProviderAuthorization,
   ) {
     this.resolveCredential = buildConnectionTokenResolver(db, settings);
+    this.rateLimit = buildSlackApiRateLimiter(db, settings);
+  }
+
+  private historyPageLimit(approvedLimit: number): number {
+    return this.settings.slackAccessMode === "full" ? approvedLimit : 15;
+  }
+
+  private postReconciliationPageLimit(): number {
+    // Ambiguous writes stay unknown when the one bounded pilot page cannot
+    // prove the provider identity. Never crawl or resend an unknown message.
+    return this.settings.slackAccessMode === "full" ? MAX_SLACK_POST_RECONCILIATION_PAGES : 1;
   }
 
   async listChannels(input: { limit?: number; cursor?: string } = {}) {
@@ -549,6 +834,138 @@ export class OpenGeniSlackBotClient {
   async verifyChannelAccess(channelId: string) {
     const headers = await this.headersFor("channel_history.read");
     return await this.requireMemberChannel(headers, channelId);
+  }
+
+  /** Server-only upload preparation; the temporary URL never enters a tool result. */
+  async allocateFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    filename: string;
+    sizeBytes: number;
+  }) {
+    this.requireFileUploadScope();
+    return this.withAudit("file.upload", async (authority) => {
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
+      const payload = await this.call(authority, "files.getUploadURLExternal", {
+        filename: input.filename,
+        length: String(input.sizeBytes),
+      });
+      const fileId = slackString(payload.file_id);
+      const uploadUrl = slackString(payload.upload_url);
+      if (!fileId || !/^F[A-Z0-9]{1,63}$/.test(fileId) || !uploadUrl) {
+        throw new SlackBotProviderError("invalid_upload_response");
+      }
+      return { fileId, uploadUrl: slackFileUploadUrl(uploadUrl) };
+    });
+  }
+
+  async transferFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    uploadUrl: URL;
+    bytes: Uint8Array;
+  }) {
+    this.requireFileUploadScope();
+    const uploadUrl = slackFileUploadUrl(input.uploadUrl.toString());
+    return this.withAudit("file.upload", async (authority) => {
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
+      // Reauthorize this exact destination and live attempt immediately before
+      // I/O, but do NOT forward the bot token to Slack's temporary upload URL.
+      await this.headersForDestination("file.upload", uploadUrl.toString());
+      let response: Response;
+      try {
+        response = await this.fetchImpl(uploadUrl, {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: Buffer.from(input.bytes),
+          redirect: "error",
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch {
+        throw new SlackBotProviderError("upload_transport_error");
+      }
+      await response.body?.cancel().catch(() => undefined);
+      if (!response.ok) {
+        throw new SlackBotProviderError(
+          `upload_http_${response.status}`,
+          slackRetryAfterMs(response),
+        );
+      }
+      return { uploaded: true };
+    });
+  }
+
+  async completeFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    threadTimestamp: string;
+    fileId: string;
+    title: string;
+  }) {
+    this.requireFileUploadScope();
+    return this.withAudit("file.upload", async (authority) => {
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
+      const payload = await this.call(authority, "files.completeUploadExternal", {
+        files: JSON.stringify([{ id: input.fileId, title: input.title }]),
+        channel_id: input.channelId,
+        thread_ts: input.threadTimestamp,
+      });
+      if (
+        !Array.isArray(payload.files) ||
+        !payload.files.some((file) => slackRecord(file)?.id === input.fileId)
+      ) {
+        throw new SlackBotProviderError("invalid_upload_completion_response");
+      }
+      return { fileId: input.fileId };
+    });
+  }
+
+  async reconcileFileUpload(input: {
+    channelId: string;
+    privateRecipientSlackUserId?: string;
+    threadTimestamp: string;
+    fileId: string;
+  }) {
+    this.requireFileUploadScope();
+    return this.withAudit("file.upload", async (authority) => {
+      await this.requireActiveNonSharedMemberChannel(
+        authority,
+        input.channelId,
+        input.privateRecipientSlackUserId,
+      );
+      let payload: SlackPayload;
+      try {
+        payload = await this.call(authority, "files.info", { file: input.fileId });
+      } catch (error) {
+        if (error instanceof SlackBotProviderError && error.code === "file_not_found")
+          return { shared: false };
+        throw error;
+      }
+      return {
+        shared: slackFileSharedToThread(payload.file, {
+          ...input,
+          botUserId: this.metadata.botUserId,
+        }),
+      };
+    });
+  }
+
+  private requireFileUploadScope() {
+    if (!hasOpenGeniSlackFileUploadScope(this.connection.grantedScopes)) {
+      throw new SlackBotProviderError("slack_bot_file_upload_scope_missing");
+    }
   }
 
   /**
@@ -604,7 +1021,13 @@ export class OpenGeniSlackBotClient {
       await input.authorizeRead?.();
       const payload = await this.call(headers, "conversations.history", {
         channel: input.channelId,
-        limit: String(boundedInt(input.limit, MAX_HISTORY_PAGE, 50)),
+        limit: String(
+          boundedInt(
+            input.limit,
+            this.historyPageLimit(MAX_HISTORY_PAGE),
+            this.historyPageLimit(50),
+          ),
+        ),
         ...(input.cursor ? { cursor: input.cursor } : {}),
         ...(input.latest ? { latest: input.latest } : {}),
         ...(input.latest && input.inclusive ? { inclusive: "true" } : {}),
@@ -633,7 +1056,13 @@ export class OpenGeniSlackBotClient {
       const payload = await this.call(headers, "conversations.replies", {
         channel: input.channelId,
         ts: input.threadTimestamp,
-        limit: String(boundedInt(input.limit, MAX_THREAD_PAGE, 50)),
+        limit: String(
+          boundedInt(
+            input.limit,
+            this.historyPageLimit(MAX_THREAD_PAGE),
+            this.historyPageLimit(50),
+          ),
+        ),
         ...(input.cursor ? { cursor: input.cursor } : {}),
         ...(input.oldest ? { oldest: input.oldest } : {}),
         ...(input.latest ? { latest: input.latest } : {}),
@@ -653,7 +1082,6 @@ export class OpenGeniSlackBotClient {
     messageTimestamp: string;
     checkpoint: unknown | null;
     checkpointBinding: SlackReactionContextCheckpointBinding;
-    saveCheckpoint: (checkpoint: SlackReactionContextCheckpoint) => Promise<void>;
   }) {
     return await this.withAudit("thread_replies.read", async (headers) => {
       const checkpointKey = environmentsEncryptionKeyBytes(this.settings);
@@ -666,84 +1094,61 @@ export class OpenGeniSlackBotClient {
         input.channelId,
         input.messageTimestamp,
       );
-      const restored = input.checkpoint
-        ? parseSlackReactionContextCheckpoint(
-            input.checkpoint,
-            input.checkpointBinding,
-            checkpointKey,
-          )
-        : null;
+      // Validate historical inbox checkpoints, but never use retained context as
+      // current provider truth or continue the old full-thread scan.
+      if (input.checkpoint) {
+        parseSlackReactionContextCheckpoint(
+          input.checkpoint,
+          input.checkpointBinding,
+          checkpointKey,
+        );
+      }
       const info = await this.requireMemberChannel(headers, input.channelId);
       if (info.isShared || info.isExternallyShared || info.isOrgShared) {
         throw new SlackBotProviderError("slack_connect_unsupported");
       }
-      const messages: ReturnType<typeof projectMessage>[] = restored
-        ? restored.state.messages.map(projectSlackReactionCheckpointMessage)
-        : [];
-      const seenMessageTimestamps = new Set(restored?.state.seenMessageTimestamps ?? []);
-      const seenCursors = new Set(restored?.state.seenCursors ?? []);
-      let cursor: string | null = restored?.state.nextCursor ?? null;
-      let nextCursor: string | null = cursor;
-      let threadTimestamp: string | null = restored?.state.threadTimestamp ?? null;
-      let reactedMessage: ReturnType<typeof projectMessage> | null = null;
-      const checkpointCreatedAtMs = restored?.state.createdAtMs ?? Date.now();
-      const firstPage = restored?.state.pageCount ?? 0;
-
-      for (let page = firstPage; page < MAX_REACTION_CONTEXT_PAGES; page += 1) {
+      if (!hasOpenGeniSlackReactionScope(this.connection.grantedScopes)) {
+        throw new SlackBotProviderError("slack_bot_reaction_scope_missing");
+      }
+      // This method is used only for a validated reaction summon. reactions.get
+      // supplies that exact reacted message even when it is far into a thread;
+      // it is not an alternate transport for arbitrary conversation history.
+      const reacted = await this.call(headers, "reactions.get", {
+        channel: input.channelId,
+        timestamp: input.messageTimestamp,
+        full: "true",
+      });
+      if (reacted.type !== "message" || reacted.channel !== input.channelId) {
+        throw new SlackBotProviderError("message_not_found");
+      }
+      const reactedMessage = projectMessage(reacted.message);
+      if (reactedMessage.timestamp !== input.messageTimestamp) {
+        throw new SlackBotProviderError("message_not_found");
+      }
+      const threadTimestamp = reactedMessage.threadTimestamp || reactedMessage.timestamp;
+      let messages = [reactedMessage];
+      let nextCursor: string | null = null;
+      let contextUnavailable = false;
+      try {
         const payload = await this.call(headers, "conversations.replies", {
           channel: input.channelId,
-          // Slack accepts either the parent timestamp or a message timestamp from
-          // inside the thread and returns the containing thread.
-          ts: input.messageTimestamp,
+          ts: threadTimestamp,
+          latest: reactedMessage.timestamp,
+          inclusive: "true",
           limit: String(MAX_REACTION_CONTEXT_MESSAGES),
-          ...(cursor ? { cursor } : {}),
         });
         const pageMessages = slackArray(payload.messages)
           .map(projectMessage)
           .filter((message) => message.timestamp.length > 0);
-        const first = pageMessages[0];
-        threadTimestamp ??= first?.threadTimestamp || first?.timestamp || null;
-        for (const message of pageMessages) {
-          if (seenMessageTimestamps.has(message.timestamp)) continue;
-          seenMessageTimestamps.add(message.timestamp);
-          messages.push(message);
-        }
-        reactedMessage =
-          reactedMessage ??
-          pageMessages.find((message) => message.timestamp === input.messageTimestamp) ??
-          null;
+        // Fresh exact message content wins over any duplicate context entry.
+        messages = [
+          ...pageMessages.filter((message) => message.timestamp !== reactedMessage.timestamp),
+          reactedMessage,
+        ];
         nextCursor = responseCursor(payload);
-        if (reactedMessage || !nextCursor) break;
-        if (seenCursors.has(nextCursor)) {
-          throw new SlackBotProviderError("reaction_pagination_invalid");
-        }
-        seenCursors.add(nextCursor);
-        const pageCount = page + 1;
-        if (pageCount >= MAX_REACTION_CONTEXT_PAGES) {
-          throw new SlackBotProviderError("reaction_pagination_exhausted");
-        }
-        const retainedMessages = selectSlackReactionCheckpointMessages(messages);
-        messages.splice(0, messages.length, ...retainedMessages);
-        await input.saveCheckpoint(
-          createSlackReactionContextCheckpoint(
-            input.checkpointBinding,
-            {
-              createdAtMs: checkpointCreatedAtMs,
-              pageCount,
-              nextCursor,
-              seenCursors: [...seenCursors],
-              seenMessageTimestamps: [...seenMessageTimestamps],
-              threadTimestamp,
-              messages: retainedMessages.map(slackReactionCheckpointMessage),
-            },
-            checkpointKey,
-          ),
-        );
-        cursor = nextCursor;
-      }
-
-      if (!reactedMessage || !threadTimestamp) {
-        throw new SlackBotProviderError("message_not_found");
+      } catch (error) {
+        if (!slackHistoryRateLimited(error)) throw error;
+        contextUnavailable = true;
       }
       const boundedMessages = selectSlackReactionContextMessages(
         messages,
@@ -754,7 +1159,9 @@ export class OpenGeniSlackBotClient {
         threadTimestamp,
         reactedMessage,
         messages: boundedMessages,
-        truncated: nextCursor !== null || seenMessageTimestamps.size > boundedMessages.length,
+        truncated:
+          contextUnavailable || nextCursor !== null || messages.length > boundedMessages.length,
+        ...(contextUnavailable ? { contextUnavailable: true } : {}),
       };
     });
   }
@@ -880,8 +1287,9 @@ export class OpenGeniSlackBotClient {
   }
 
   /**
-   * Workspace-wide public search through Slack's Real-time Search API
-   * (`assistant.search.context`) under the bot identity.
+   * Public search in a trusted Slack interaction through Real-time Search
+   * (`assistant.search.context`) under the bot identity. Unlisted deployments
+   * cannot use this API; approved deployments also need Slack's action token.
    *
    * The bot never carries private-search authority: `channel_types` is pinned
    * to `public_channel` server-side regardless of caller input, so private
@@ -891,6 +1299,8 @@ export class OpenGeniSlackBotClient {
    */
   async searchContext(input: {
     query: string;
+    /** Server-owned Slack interaction token, never an agent tool argument. */
+    actionToken?: string;
     contentTypes?: readonly ("messages" | "files" | "channels")[];
     includeBots?: boolean;
     /** UNIX seconds bounds on message timestamps. */
@@ -909,6 +1319,12 @@ export class OpenGeniSlackBotClient {
       ? [...new Set(input.contentTypes)]
       : ["messages"];
     return await this.withAudit("search.context", async (headers) => {
+      if (this.settings.slackAccessMode !== "full") {
+        throw new SlackBotProviderError("slack_bot_search_unavailable");
+      }
+      if (!input.actionToken) {
+        throw new SlackBotProviderError("slack_bot_search_action_required");
+      }
       // Inside the audit boundary so a fail-closed denial on a legacy install
       // leaves the same `failed` evidence as a provider rejection.
       if (!hasOpenGeniSlackBotSearchScopes(this.connection.grantedScopes)) {
@@ -916,6 +1332,7 @@ export class OpenGeniSlackBotClient {
       }
       const payload = await this.call(headers, "assistant.search.context", {
         query,
+        action_token: input.actionToken,
         channel_types: "public_channel",
         content_types: contentTypes.join(","),
         ...(input.includeBots ? { include_bots: "true" } : {}),
@@ -991,6 +1408,35 @@ export class OpenGeniSlackBotClient {
         "file.content.read",
         input,
       );
+      if (SLACK_REACTION_IMAGE_MIME_TYPES.has(normalizedContentType(file.mimetype))) {
+        if (input.offset !== undefined && input.offset !== 0) {
+          throw new SlackBotProviderError("invalid_file_offset");
+        }
+        // A context file is read only on explicit request. Keep the same
+        // non-shared channel boundary and byte validation as invocation images.
+        await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+        if (!fileIsSharedToChannel(fileRecord, input.channelId)) {
+          throw new SlackBotProviderError("file_not_shared_to_channel");
+        }
+        if (file.size !== null && (file.size < 1 || file.size > SLACK_REACTION_IMAGE_MAX_BYTES)) {
+          throw new SlackBotProviderError("invalid_file_size");
+        }
+        if (file.size !== null && file.size > SLACK_MCP_IMAGE_MAX_BYTES) {
+          throw new SlackBotProviderError("image_result_too_large");
+        }
+        const image = await this.downloadReactionImage({
+          fileId: file.id,
+          filename: file.name || file.title || file.id,
+          declaredMimeType: normalizedContentType(file.mimetype),
+          declaredSizeBytes: file.size,
+          downloadUrl: privateSlackFileUrl(fileRecord),
+        });
+        if (image.bytes.byteLength > SLACK_MCP_IMAGE_MAX_BYTES) {
+          throw new SlackBotProviderError("image_result_too_large");
+        }
+        await validateSlackMcpImage(image.bytes);
+        return { channel: info, file, image };
+      }
       const embeddedTranscript = embeddedHuddleTranscription(fileRecord, parentFileRecord);
       const { contentType, content } =
         embeddedTranscript ?? (await this.readPrivateFileText(fileRecord, "file.content.read"));
@@ -1075,7 +1521,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack post request");
+        throw new SlackBotOperationConflictError("post");
       }
       if (claim.kind === "in_progress") {
         throw new Error("Slack post operation is already in progress; retry the same operationId");
@@ -1217,7 +1663,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack update request");
+        throw new SlackBotOperationConflictError("update");
       }
       if (claim.kind === "in_progress") {
         throw new Error(
@@ -1311,7 +1757,7 @@ export class OpenGeniSlackBotClient {
         throw new Error("OpenGeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
-        throw new Error("operationId is already bound to a different Slack delete request");
+        throw new SlackBotOperationConflictError("delete");
       }
       if (claim.kind === "in_progress") {
         throw new Error(
@@ -1434,10 +1880,12 @@ export class OpenGeniSlackBotClient {
     let cursor: string | null = null;
     let matchedTimestamp: string | null = null;
     let exhausted = false;
-    for (let page = 0; page < MAX_SLACK_POST_RECONCILIATION_PAGES; page += 1) {
+    for (let page = 0; page < this.postReconciliationPageLimit(); page += 1) {
       const payload = await this.call(headers, method, {
         channel: input.channelId,
-        limit: String(input.threadTimestamp ? MAX_THREAD_PAGE : MAX_HISTORY_PAGE),
+        limit: String(
+          this.historyPageLimit(input.threadTimestamp ? MAX_THREAD_PAGE : MAX_HISTORY_PAGE),
+        ),
         ...(input.threadTimestamp ? { ts: input.threadTimestamp } : {}),
         ...(cursor ? { cursor } : {}),
       });
@@ -1494,6 +1942,7 @@ export class OpenGeniSlackBotClient {
   private async requireActiveNonSharedMemberChannel(
     headers: SlackCallAuthority,
     channelId: string,
+    privateRecipientSlackUserId?: string,
   ) {
     const projected = await this.requireMemberChannel(headers, channelId);
     if (projected.isArchived) {
@@ -1501,6 +1950,9 @@ export class OpenGeniSlackBotClient {
     }
     if (projected.isShared || projected.isExternallyShared || projected.isOrgShared) {
       throw new SlackBotProviderError("slack_connect_unsupported");
+    }
+    if (privateRecipientSlackUserId) {
+      assertSlackPrivateTaskRecipient(projected, privateRecipientSlackUserId);
     }
     return projected;
   }
@@ -1587,13 +2039,28 @@ export class OpenGeniSlackBotClient {
     method: string,
     params: Record<string, string>,
   ): Promise<SlackPayload> {
+    let providerRequestStarted = false;
     try {
-      const headers = await this.headersForDestination(
-        authority.operation,
-        `${SLACK_API_BASE}${method}`,
-      );
+      const destination = `${SLACK_API_BASE}${method}`;
+      // Refused or stale authority cannot consume another installation's quota.
+      await this.headersForDestination(authority.operation, destination, "preflight");
+      const retryAfterSeconds = await this.rateLimit(this.metadata.slackTeamId, method);
+      if (retryAfterSeconds > 0) {
+        throw new SlackBotProviderError("rate_limited", retryAfterSeconds * 1_000);
+      }
+      // Quota reservation is an await: recheck live authority after it, as the
+      // final await before each physical provider request.
+      const headers = await this.headersForDestination(authority.operation, destination);
+      providerRequestStarted = true;
       return (await slackApiFetchWithHeaders(this.fetchImpl, method, headers, params)).payload;
     } catch (error) {
+      if (providerRequestStarted && slackHistoryRateLimited(error)) {
+        await this.rateLimit(
+          this.metadata.slackTeamId,
+          method,
+          Math.max(1, Math.ceil((error.retryAfterMs ?? 60_000) / 1_000)),
+        );
+      }
       if (slackCredentialRejected(error)) {
         await setConnectionStatus(this.db, this.context.workspaceId, "needs_reauth", error.code, {
           id: this.connection.id,
@@ -1626,6 +2093,7 @@ export class OpenGeniSlackBotClient {
   private async headersForDestination(
     operation: SlackBotOperation,
     destinationUrl: string,
+    credentialResolutionMode: "execution" | "preflight" = "execution",
   ): Promise<Record<string, string>> {
     const result = await this.resolveCredential({
       workspaceId: this.context.workspaceId,
@@ -1635,10 +2103,14 @@ export class OpenGeniSlackBotClient {
         connectionId: this.connection.id,
         providerDomain: "slack.com",
         kind: "app_install",
-        scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+        scopes: [
+          ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
+          ...(operation === "file.upload" ? [OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE] : []),
+        ],
         subjectScope: "workspace",
       },
       destinationUrl,
+      credentialResolutionMode,
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
       throw new Error("OpenGeni Slack bot connection needs to be reinstalled");
@@ -1649,6 +2121,9 @@ export class OpenGeniSlackBotClient {
       this.connection.id,
     );
     const currentMetadata = openGeniSlackBotMetadata(current.metadata);
+    if (operation === "file.upload" && !hasOpenGeniSlackFileUploadScope(current.grantedScopes)) {
+      throw new SlackBotProviderError("slack_bot_file_upload_scope_missing");
+    }
     if (
       current.accountId !== this.context.accountId ||
       current.version !== this.connection.version ||
@@ -1665,7 +2140,11 @@ export class OpenGeniSlackBotClient {
     if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
       throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
-    if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest())) {
+    if (
+      credentialResolutionMode === "execution" &&
+      result.authorizeProviderRequest &&
+      !(await result.authorizeProviderRequest())
+    ) {
       throw new Error("OpenGeni Slack bot provider request is no longer authorized");
     }
     return result.headers;
@@ -1718,7 +2197,8 @@ export class OpenGeniSlackBotClient {
         method: "GET",
         headers: {
           ...headers,
-          accept: "text/*, application/json, application/xml, application/xhtml+xml",
+          accept:
+            "image/png, image/jpeg, image/webp, text/*, application/json, application/xml, application/xhtml+xml",
         },
         redirect: "manual",
         signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
@@ -1921,6 +2401,15 @@ export class OpenGeniSlackBotClient {
   }
 }
 
+/** Full decode guards the model image block against header-only or corrupt files. */
+export async function validateSlackMcpImage(bytes: Uint8Array): Promise<void> {
+  try {
+    await sharp(bytes, { limitInputPixels: 16_000_000, failOn: "error" }).stats();
+  } catch {
+    throw new SlackBotProviderError("invalid_file_content");
+  }
+}
+
 export function createOpenGeniSlackBotClient(
   deps: {
     db: Database;
@@ -2018,6 +2507,7 @@ async function slackApiFetchWithHeaders(
         "content-type": "application/x-www-form-urlencoded",
       },
       body,
+      redirect: "error",
       signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
     });
   } catch {
@@ -2095,6 +2585,7 @@ function projectChannel(value: unknown) {
     isMember: channel.is_member === true,
     isDirectMessage: channel.is_im === true,
     isMpim: channel.is_mpim === true,
+    userId: nullableBoundedSlackString(channel.user, 128),
     isArchived: channel.is_archived === true,
     isShared: channel.is_shared === true,
     isExternallyShared: channel.is_ext_shared === true,
@@ -2110,6 +2601,16 @@ function projectChannel(value: unknown) {
         ? channel.num_members
         : null,
   };
+}
+
+/** A private route needs live provider proof of the exact linked requester's bot IM. */
+export function assertSlackPrivateTaskRecipient(
+  channel: { isDirectMessage: boolean; isMpim: boolean; userId: string | null },
+  slackUserId: string,
+): void {
+  if (!channel.isDirectMessage || channel.isMpim || channel.userId !== slackUserId) {
+    throw new SlackBotProviderError("private_task_recipient_changed");
+  }
 }
 
 function projectSlackTaskPolicyUser(value: unknown, installationTeamId: string) {
@@ -2183,39 +2684,6 @@ function assertSlackReactionCheckpointBinding(
   ) {
     throw new SlackBotProviderError("reaction_checkpoint_invalid");
   }
-}
-
-function createSlackReactionContextCheckpoint(
-  binding: SlackReactionContextCheckpointBinding,
-  state: SlackReactionContextCheckpointUnsigned["state"],
-  key: Uint8Array,
-): SlackReactionContextCheckpoint {
-  const unsigned: SlackReactionContextCheckpointUnsigned = {
-    version: SLACK_REACTION_CONTEXT_CHECKPOINT_VERSION,
-    binding: { ...binding },
-    state: {
-      createdAtMs: state.createdAtMs,
-      pageCount: state.pageCount,
-      nextCursor: state.nextCursor,
-      seenCursors: [...state.seenCursors],
-      seenMessageTimestamps: [...state.seenMessageTimestamps],
-      threadTimestamp: state.threadTimestamp,
-      messages: state.messages.map((message) => ({
-        ...message,
-        files: message.files.map((file) => ({ ...file })),
-      })),
-    },
-  };
-  const checkpoint: SlackReactionContextCheckpoint = {
-    ...unsigned,
-    signature: slackReactionContextCheckpointSignature(unsigned, key),
-  };
-  if (
-    Buffer.byteLength(JSON.stringify(checkpoint), "utf8") > MAX_REACTION_CONTEXT_CHECKPOINT_BYTES
-  ) {
-    throw new SlackBotProviderError("reaction_checkpoint_too_large");
-  }
-  return checkpoint;
 }
 
 function parseSlackReactionContextCheckpoint(
@@ -2434,64 +2902,6 @@ function parseSlackReactionCheckpointMessage(value: unknown): SlackReactionCheck
     text: message.text,
     files,
   };
-}
-
-function slackReactionCheckpointMessage(
-  message: ReturnType<typeof projectMessage>,
-): SlackReactionCheckpointMessage {
-  const files: SlackReactionCheckpointMessage["files"] = [];
-  let fileLabelChars = 0;
-  for (const file of message.files) {
-    const label = file.title || file.name || file.id;
-    if (!label) continue;
-    const addedChars = label.length + (files.length > 0 ? 2 : 0);
-    if (
-      files.length >= MAX_REACTION_CONTEXT_CHECKPOINT_FILES ||
-      fileLabelChars + addedChars > MAX_REACTION_CONTEXT_CHECKPOINT_FILE_LABEL_CHARS
-    ) {
-      break;
-    }
-    files.push({ id: file.id, label });
-    fileLabelChars += addedChars;
-  }
-  return {
-    timestamp: message.timestamp,
-    userId: message.userId,
-    botId: message.botId,
-    threadTimestamp: message.threadTimestamp,
-    text: message.text,
-    files,
-  };
-}
-
-function projectSlackReactionCheckpointMessage(
-  message: SlackReactionCheckpointMessage,
-): ReturnType<typeof projectMessage> {
-  return {
-    timestamp: message.timestamp,
-    userId: message.userId,
-    botId: message.botId,
-    threadTimestamp: message.threadTimestamp,
-    text: message.text,
-    files: message.files.map((file) => ({
-      id: file.id,
-      name: "",
-      title: file.label,
-      mimetype: "",
-      filetype: "",
-      mode: "",
-      size: null,
-      originatingHuddleId: "",
-      huddleTranscriptFileId: "",
-    })),
-  };
-}
-
-function selectSlackReactionCheckpointMessages(
-  messages: ReturnType<typeof projectMessage>[],
-): ReturnType<typeof projectMessage>[] {
-  if (messages.length <= MAX_REACTION_CONTEXT_MESSAGES) return [...messages];
-  return [messages[0]!, ...messages.slice(-(MAX_REACTION_CONTEXT_MESSAGES - 1))];
 }
 
 function hasExactSlackCheckpointKeys(value: Record<string, unknown>, expected: string[]): boolean {

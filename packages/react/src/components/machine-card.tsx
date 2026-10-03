@@ -78,6 +78,7 @@ export function MachineCard({
   const canUpdate =
     Boolean(machine.enrollmentId && onUpdateAgent) &&
     !offline &&
+    !runtime?.updateBlockedReason &&
     (runtime?.versionState === "outdated" ||
       runtime?.versionState === "update_failed" ||
       dispatchConfirmationStalled);
@@ -233,6 +234,9 @@ export function MachineCard({
                     ? `Promoted v${runtime.desiredVersion}`
                     : "No promoted version configured")}
             </p>
+            {runtime.updateBlockedReason ? (
+              <p className="mt-1 text-og-fg-muted">{runtime.updateBlockedReason}</p>
+            ) : null}
           </div>
           {canUpdate ? (
             <button

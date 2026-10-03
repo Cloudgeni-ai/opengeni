@@ -101,6 +101,13 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("holderId: interactionHolderId(computerSessionId)");
     expect(source).toContain("return `computer-session:${computerSessionId}`");
     expect(source).toContain("expectedPlacementInstanceId");
+    const holder = source.slice(
+      source.indexOf("async function ensureInteractionHolder"),
+      source.indexOf("async function releaseInteractionHolder"),
+    );
+    expect(holder).toContain('imagePolicy: "new_creates_only"');
+    expect(holder).toContain("expectedEpoch: placement.lease.leaseEpoch");
+    expect(holder).toContain("rigVersionId: sourceSession.rigVersionId");
   });
 
   test("routes attached-device ComputerSessions through the exact connected agent fence", async () => {

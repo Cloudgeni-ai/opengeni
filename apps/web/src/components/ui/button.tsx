@@ -9,14 +9,16 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        // The one filled action per region: the "teal wash" - a quiet tinted
+        // fill, ink text and a 1px tinted edge, no shadow.
+        default:
+          "border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover",
         destructive:
-          "bg-destructive-filled text-destructive-foreground hover:bg-destructive-filled/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
-        outline:
-          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        ghost: "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
-        link: "text-primary underline-offset-4 hover:underline",
+          "bg-destructive-filled text-destructive-foreground hover:bg-destructive-filled/90 focus-visible:ring-destructive/40",
+        outline: "border border-border bg-surface text-fg hover:bg-surface-2",
+        secondary: "bg-secondary text-secondary-foreground hover:bg-surface-3 hover:text-fg",
+        ghost: "hover:bg-hover hover:text-fg",
+        link: "text-brand underline-offset-4 hover:underline",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",

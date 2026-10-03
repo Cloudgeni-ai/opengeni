@@ -52,6 +52,30 @@ describe("lossless PostgreSQL content boundaries", () => {
     expect(fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(value);
   });
 
+  test("preserves every UTF-16 code unit through versioned string and key storage", () => {
+    const chunks: string[] = [];
+    for (let start = 0; start < 65_536; start += 256) {
+      chunks.push(String.fromCharCode(...Array.from({ length: 256 }, (_, i) => start + i)));
+    }
+    const codeUnits = chunks.join("");
+    const value = { [codeUnits]: codeUnits, tail: `\udfff\0\ud800` };
+    const stored = toPostgresLosslessJson(value) as typeof value;
+    const restored = fromPostgresLosslessJson(stored, LOSSLESS_CONTENT_CODEC_VERSION);
+    expect(restored).toEqual(value);
+    expect(Object.keys(restored)).toEqual([codeUnits, "tail"]);
+    expect(fromPostgresLosslessJson(stored, null)).toBe(stored);
+  });
+
+  test("preserves a multi-megabyte tagged string and its boundary code units", () => {
+    const text = `\ud800\0${"large synthetic value 🙂".repeat(100_000)}\udfff`;
+    const restored = fromPostgresLosslessJson(
+      toPostgresLosslessJson({ text }) as { text: string },
+      LOSSLESS_CONTENT_CODEC_VERSION,
+    );
+    expect(restored.text).toBe(text);
+    expect(restored.text.length).toBe(text.length);
+  });
+
   test("preserves nested __proto__ as own JSON data through encode and decode", () => {
     const source = JSON.parse(
       `{"nested":{"__proto__":{"polluted":true},"safe":"x\\u0000y"}}`,

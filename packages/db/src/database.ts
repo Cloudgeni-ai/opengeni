@@ -116,6 +116,11 @@ export async function withSessionRlsActorContext<T>(
 type RlsContextSettings = {
   accountId: string;
   workspaceId: string;
+  subjectId: string;
+  privateFileOwnerSubjectId: string;
+  initiatingHumanSubjectId: string;
+  personalResourceHumanSubjectId: string;
+  personalResourceActorSubjectId: string;
 };
 
 /**
@@ -438,15 +443,30 @@ async function readRlsContextSettings(db: Database): Promise<RlsContextSettings>
   const [settings] = await rawRows<{
     account_id: string | null;
     workspace_id: string | null;
+    subject_id: string | null;
+    private_file_owner: string | null;
+    initiating_human_subject_id: string | null;
+    personal_resource_human_subject_id: string | null;
+    personal_resource_actor_subject_id: string | null;
   }>(
     db,
     sql`select
       current_setting('opengeni.account_id', true) as account_id,
-      current_setting('opengeni.workspace_id', true) as workspace_id`,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      current_setting('opengeni.subject_id', true) as subject_id,
+      current_setting('opengeni.private_file_owner', true) as private_file_owner,
+      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
+      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
+      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id`,
   );
   return {
     accountId: settings?.account_id ?? "",
     workspaceId: settings?.workspace_id ?? "",
+    subjectId: settings?.subject_id ?? "",
+    privateFileOwnerSubjectId: settings?.private_file_owner ?? "",
+    initiatingHumanSubjectId: settings?.initiating_human_subject_id ?? "",
+    personalResourceHumanSubjectId: settings?.personal_resource_human_subject_id ?? "",
+    personalResourceActorSubjectId: settings?.personal_resource_actor_subject_id ?? "",
   };
 }
 
@@ -472,15 +492,30 @@ async function restoreRlsContextSettings(
   const [restored] = await rawRows<{
     account_id: string;
     workspace_id: string;
+    subject_id: string;
+    private_file_owner: string;
+    initiating_human_subject_id: string;
+    personal_resource_human_subject_id: string;
+    personal_resource_actor_subject_id: string;
   }>(
     db,
     sql`select
       set_config('opengeni.account_id', ${settings.accountId}, true) as account_id,
-      set_config('opengeni.workspace_id', ${settings.workspaceId}, true) as workspace_id`,
+      set_config('opengeni.workspace_id', ${settings.workspaceId}, true) as workspace_id,
+      set_config('opengeni.subject_id', ${settings.subjectId}, true) as subject_id,
+      set_config('opengeni.private_file_owner', ${settings.privateFileOwnerSubjectId}, true) as private_file_owner,
+      set_config('opengeni.initiating_human_subject_id', ${settings.initiatingHumanSubjectId}, true) as initiating_human_subject_id,
+      set_config('opengeni.personal_resource_human_subject_id', ${settings.personalResourceHumanSubjectId}, true) as personal_resource_human_subject_id,
+      set_config('opengeni.personal_resource_actor_subject_id', ${settings.personalResourceActorSubjectId}, true) as personal_resource_actor_subject_id`,
   );
   if (
     restored?.account_id !== settings.accountId ||
-    restored.workspace_id !== settings.workspaceId
+    restored.workspace_id !== settings.workspaceId ||
+    restored.subject_id !== settings.subjectId ||
+    restored.private_file_owner !== settings.privateFileOwnerSubjectId ||
+    restored.initiating_human_subject_id !== settings.initiatingHumanSubjectId ||
+    restored.personal_resource_human_subject_id !== settings.personalResourceHumanSubjectId ||
+    restored.personal_resource_actor_subject_id !== settings.personalResourceActorSubjectId
   ) {
     throw new Error("RLS context could not be restored after a nested scope");
   }
@@ -538,7 +573,7 @@ export async function withRlsContext<T>(
         throw error;
       }
       // A nested transaction is a savepoint, and SET LOCAL survives successful
-      // savepoint release. Restore only the tenant scope the nested helper owns;
+      // savepoint release. Restore the parent tenant and actor proof together;
       // writer/protocol capabilities intentionally remain transaction-wide.
       if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
       return value;
@@ -958,6 +993,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
   fenceMode: "shared" | "none" = "shared",
+  organizationMembershipFence = false,
 ): Promise<T> {
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
@@ -972,6 +1008,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
     },
     transactionConfig,
     fenceMode,
+    organizationMembershipFence,
   );
 }
 

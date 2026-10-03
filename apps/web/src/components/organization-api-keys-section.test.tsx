@@ -1,10 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
-import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
 import type { ApiKey } from "@/types";
 
 const toastSuccess = mock((_message: string) => undefined);
@@ -21,21 +20,8 @@ mock.module("sonner", () => ({
   ),
 }));
 
-mock.module("@/components/ui/dialog", () => ({
-  Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
-    open ? <div>{children}</div> : null,
-  DialogContent: ({ children }: { children: ReactNode }) => (
-    <div data-testid="create-api-key-dialog">{children}</div>
-  ),
-  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
-  DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
-}));
-
-mock.module("@/components/ui/confirm-dialog", () => ({
-  destructiveActionFocusTarget,
-  ConfirmDialog: ({
+mock.module("@/components/ui/destructive-confirm", () => ({
+  DestructiveConfirm: ({
     open,
     title,
     confirmLabel,
@@ -56,6 +42,10 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
+// Radix detects DOM availability at import time, before the first render.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 const { OrganizationApiKeysSection } = await import("./organization-api-keys-section");
 
 const timestamp = "2026-08-20T10:00:00.000Z";
@@ -92,13 +82,6 @@ function button(root: ParentNode, label: string): HTMLButtonElement {
   return match;
 }
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
-
 beforeEach(() => {
   toastSuccess.mockClear();
   toastError.mockClear();
@@ -110,7 +93,51 @@ afterAll(() => {
 });
 
 describe("organization API keys section", () => {
-  test("explains the boundary and keeps the one-time secret in the create dialog", async () => {
+  test.each([
+    ["Developer setup", { access: "developer_setup" }, "expires after 24 hours"],
+    ["Read only", { access: "read" }, "Can't create or change anything"],
+  ] as const)(
+    "submits the exact %s choice on the existing create page",
+    async (label, choice, hint) => {
+      const createApiKey = mock(async () => ({ apiKey: key(), token: "og_setup_shown_once" }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <OrganizationApiKeysSection
+            organizationId="22222222-2222-4222-8222-222222222222"
+            canManage
+            view="new-key"
+            onViewChange={() => undefined}
+            listApiKeys={async () => []}
+            createApiKey={createApiKey}
+            deleteApiKey={async () => key()}
+          />,
+        );
+      });
+      const trigger = container.querySelector<HTMLButtonElement>('button[role="combobox"]');
+      if (!trigger) throw new Error("Missing access picker");
+      await act(async () => trigger.click());
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (candidate) => candidate.textContent?.startsWith(label),
+      );
+      if (!option) throw new Error(`Missing access choice: ${label}`);
+      expect(document.body.textContent).not.toContain("All permissions");
+      await act(async () => option.click());
+      expect(container.textContent).toContain(hint);
+      if (label === "Developer setup") {
+        expect(container.textContent).toContain("broad workspace administration");
+      }
+      await act(async () => container.querySelector("form")!.requestSubmit());
+      await flush();
+      expect(createApiKey).toHaveBeenCalledWith({ name: "Organization automation", ...choice });
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  );
+
+  test("explains the boundary and shows the one-time secret on the create page", async () => {
     const created = key({
       id: "33333333-3333-4333-8333-333333333333",
       name: "Organization automation",
@@ -141,42 +168,44 @@ describe("organization API keys section", () => {
     await flush();
 
     expect(listApiKeys).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain(
-      "Organization API keys can access organization workspaces, never personal workspaces.",
-    );
-    expect(container.textContent).toContain("22222222-2222-4222-8222-222222222222");
-    expect(container.textContent).toContain("client.ensureWorkspace");
+    expect(container.textContent).toContain("never Personal ones");
+    // The integration guide starts collapsed below the keys.
+    expect(container.textContent).toContain("Integration guide");
     expect(container.textContent).not.toContain("memoryEnabled");
     expect(container.textContent).toContain("No organization API keys yet");
-    await act(async () => button(container, "Create Organization API Key").click());
-    const dialog = document.body.querySelector('[data-testid="create-api-key-dialog"]');
-    if (!dialog) throw new Error("Missing create API key dialog");
-    expect(dialog.textContent).toContain("Provision and manage all organization workspaces");
-    expect(dialog.textContent).not.toContain("workspace:read");
-    expect(dialog.querySelector("[autofocus]")).toBeNull();
-    await act(async () => button(dialog, "Create Organization API Key").click());
+    await act(async () => button(container, "Create API key").click());
+    const form = container.querySelector("form");
+    if (!form) throw new Error("Missing Create API key page");
+    expect(container.textContent).toContain("can't open Personal workspaces");
+    expect(container.textContent).not.toContain("workspace:read");
+    await act(async () => form.requestSubmit());
     await flush();
 
     expect(createApiKey).toHaveBeenCalledWith({
       name: "Organization automation",
     });
-    expect(dialog.textContent).toContain("Organization API Key Created");
-    expect(dialog.textContent).toContain("og_secret_full_value");
-    expect(dialog.textContent).toContain("It will not be shown again");
-    expect(dialog.textContent).toContain("OPENGENI_ORGANIZATION_API_KEY");
-    expect(container.textContent).toContain("Organization automation");
+    expect(container.textContent).toContain("API key created");
+    expect(container.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe(
+      "og_secret_full_value",
+    );
+    expect(container.textContent).toContain("won't be able to see it again");
+    expect(container.textContent).toContain("OPENGENI_API_KEY");
     expect(container.textContent).toContain(
-      "Organization API key created. Copy the full secret before closing.",
+      "Organization API key created. Copy it before you leave this page.",
     );
 
-    await act(async () => button(dialog, "Copy API key").click());
+    const copy = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Copy new API key"]',
+    );
+    if (!copy) throw new Error("Missing copy button");
+    await act(async () => copy.click());
     await flush();
     expect(copied).toEqual(["og_secret_full_value"]);
-    expect(container.textContent).toContain("API key copied.");
-    expect(dialog.textContent).toContain("Copied");
 
-    await act(async () => button(dialog, "I've stored this key").click());
+    await act(async () => container.querySelector("form")!.requestSubmit());
+    await flush();
     expect(container.textContent).not.toContain("og_secret_full_value");
+    expect(container.textContent).toContain("Organization automation");
 
     await act(async () => root.unmount());
     container.remove();
@@ -218,11 +247,12 @@ describe("organization API keys section", () => {
     expect(deleteApiKey).toHaveBeenCalledWith(existing.id);
     expect(container.textContent).toContain("Revoked");
     expect(container.textContent).toContain("No active keys");
+    // A revoked key keeps its row but can't be revoked again.
     expect(
-      container.querySelector<HTMLButtonElement>(
+      container.querySelector(
         'button[aria-label="Revoke organization API key Deployment automation"]',
-      )?.disabled,
-    ).toBe(true);
+      ),
+    ).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();
@@ -248,8 +278,7 @@ describe("organization API keys section", () => {
     await flush();
 
     expect(listApiKeys).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("API key management unavailable");
-    expect(container.textContent).toContain("Unavailable");
+    expect(container.textContent).toContain("You can't manage organization API keys");
     expect(container.textContent).not.toContain("No organization API keys yet");
     expect(container.textContent).not.toContain("No active keys");
 
@@ -279,7 +308,6 @@ describe("organization API keys section", () => {
 
     const alert = container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("Couldn't load organization API keys");
-    expect(container.textContent).toContain("Unavailable");
     expect(container.textContent).not.toContain("No organization API keys yet");
     expect(container.textContent).not.toContain("No active keys");
 

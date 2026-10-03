@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { resolveTurnExecutionPolicyV1, UnsupportedLatencyModeError } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
+import { canonicalConfiguredModel, modelUnavailableHttpException } from "@opengeni/core";
 import { createApp } from "../src/app";
 import { parseSessionEventAdmission, parseSteerSessionAdmission } from "../src/routes/sessions";
 
@@ -37,6 +40,114 @@ function parserApp() {
 }
 
 describe("session admission error envelope", () => {
+  test("unsupported user.message latency is typed 422 and unrelated faults remain 500", async () => {
+    const server = app();
+    server.post("/v1/test/unsupported-latency", () => {
+      resolveTurnExecutionPolicyV1(testSettings(), {
+        modelId: "scripted-model",
+        requestedModelId: "scripted-model",
+        modelSource: "explicit",
+        reasoningEffort: "medium",
+        reasoningSource: "explicit",
+        latencyMode: "fast",
+        latencyModeSource: "explicit",
+      });
+      throw new Error("unsupported latency unexpectedly accepted");
+    });
+    server.post("/v1/test/unsupported-priority", () => {
+      throw new UnsupportedLatencyModeError("scripted-model", "priority", ["standard"]);
+    });
+    server.post("/v1/test/unrelated-failure", () => {
+      throw new Error("private-server-fault");
+    });
+    for (const mode of ["latency", "priority"]) {
+      const response = await server.request(`/v1/test/unsupported-${mode}`, { method: "POST" });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        error: {
+          status: 422,
+          code: "validation_failed",
+          retryable: false,
+          details: { code: "UNSUPPORTED_LATENCY_MODE", allowedLatencyModes: ["standard"] },
+        },
+      });
+    }
+    const unrelated = await server.request("/v1/test/unrelated-failure", { method: "POST" });
+    expect(unrelated.status).toBe(500);
+    expect(await unrelated.text()).not.toContain("private-server-fault");
+  });
+  test("a model missing from the live catalog is a typed, nonretryable model_unavailable 422", async () => {
+    const server = app();
+    const removedModel = "openrouter/vendor/retired-model:free";
+    server.post("/v1/test/removed-session-model", () => {
+      // The follow-up choke point: the session's stored model is resolved
+      // against the live catalog, which no longer lists it.
+      canonicalConfiguredModel(testSettings(), removedModel);
+      throw new Error("removed model unexpectedly accepted");
+    });
+    server.post("/v1/test/inactive-custom-model", () => {
+      throw modelUnavailableHttpException("workspace-custom/retired");
+    });
+    server.post("/v1/test/other-validation", () => {
+      throw new HTTPException(422, { message: "model is not available: hand-written" });
+    });
+    const removed = await server.request("/v1/test/removed-session-model", { method: "POST" });
+    expect(removed.status).toBe(422);
+    expect(await removed.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message: `model is not available: ${removedModel}`,
+        retryable: false,
+        details: { code: "model_unavailable", modelId: removedModel },
+      },
+    });
+    const custom = await server.request("/v1/test/inactive-custom-model", { method: "POST" });
+    expect(custom.status).toBe(422);
+    expect((await custom.json()).error.details).toEqual({
+      code: "model_unavailable",
+      modelId: "workspace-custom/retired",
+    });
+    // Only the typed cause carries the code; untyped 422s keep their old shape.
+    const other = await server.request("/v1/test/other-validation", { method: "POST" });
+    expect(other.status).toBe(422);
+    expect((await other.json()).error.details).toBeUndefined();
+  });
+
+  test("retains allowance scope, subject and reset in a nonretryable HTTP 402", async () => {
+    for (const scope of ["workspace", "member"] as const) {
+      const server = app();
+      server.post(`/v1/test/allowance-${scope}`, () => {
+        throw new HTTPException(402, {
+          message: "Usage allowance exhausted.",
+          cause: {
+            allowed: false,
+            code: "allowance_exhausted",
+            scope,
+            resetsAt: "2026-10-01T00:00:00.000Z",
+            ...(scope === "member" ? { subjectId: "external_user:initiator" } : {}),
+            message: "Usage allowance exhausted.",
+          },
+        });
+      });
+      const response = await server.request(`/v1/test/allowance-${scope}`, { method: "POST" });
+      expect(response.status).toBe(402);
+      expect(await response.json()).toMatchObject({
+        error: {
+          status: 402,
+          code: "allowance_exhausted",
+          message: "Usage allowance exhausted.",
+          retryable: false,
+          details: {
+            scope,
+            resetsAt: "2026-10-01T00:00:00.000Z",
+            ...(scope === "member" ? { subjectId: "external_user:initiator" } : {}),
+          },
+        },
+      });
+    }
+  });
+
   test("returns typed 422 for invalid and malformed user-message events", async () => {
     const server = parserApp();
     const privateValue = "PRIVATE-REMOVED-TOOL-OVERRIDE";

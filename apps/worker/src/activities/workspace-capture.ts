@@ -947,13 +947,24 @@ async function runCapture(
   }
 
   // ── 10. observe completion ────────────────────────────────────────────────
-  const durationMs = Date.now() - startedAt;
+  recordWorkspaceCaptureCompleted(observability, Date.now() - startedAt);
+}
+
+/** Count one committed logical capture and observe its end-to-end duration. */
+export function recordWorkspaceCaptureCompleted(
+  observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
+  durationMs: number,
+): void {
   observability.incrementCounter({
     name: "opengeni_workspace_capture_total",
     labels: { result: "ok" },
   });
+  // Distinct from the physical `opengeni_workspace_capture_duration_seconds`
+  // {backend,outcome} histogram the runtime hook records in this same
+  // registry: one name cannot carry two label sets.
   observability.observeHistogram({
-    name: "opengeni_workspace_capture_duration_seconds",
+    name: "opengeni_workspace_capture_revision_duration_seconds",
+    help: "Turn-end logical workspace revision capture duration for committed revisions.",
     value: durationMs / 1000,
   });
 }

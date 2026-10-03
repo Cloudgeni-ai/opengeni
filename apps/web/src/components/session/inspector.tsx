@@ -1,7 +1,7 @@
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
-import { buildTimeline } from "@opengeni/react";
+import { buildTimeline, labelReasoningEffort, ModelName } from "@opengeni/react";
 import { PreferenceToggleRow } from "@/components/transcription-settings";
 import {
   SessionStatus as SessionStatusBadge,
@@ -25,6 +25,7 @@ import { toast } from "sonner";
 
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
 import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
+import { sessionSandboxLabel } from "@/components/session/sandbox-switcher";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -38,6 +39,7 @@ import {
   retainSessionRestartAttemptAfterFailure,
   sessionRestartOperationController,
 } from "@/lib/session-restart-operation-controller";
+import { userErrorText } from "@/lib/api-error";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
@@ -105,7 +107,7 @@ export function SessionInspector(props: {
         description: "The new ordered selection applies to the next turn after sandbox rotation.",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = userErrorText(error);
       setRuntimeFailure(message);
       toast.error("Variable Sets were not updated", { description: message });
     } finally {
@@ -174,8 +176,9 @@ export function SessionInspector(props: {
   const activeMachine =
     fleet.machines.find((machine) => machine.active && machine.kind === "selfhosted") ?? null;
   // Compute context, honestly: don't fall back to the home backend while the
-  // fleet is still resolving — that reads "modal" even when a machine runs the
-  // turn. Show a loading/unavailable note until we actually know.
+  // fleet is still resolving - that reads "Cloud sandbox" even when a machine
+  // runs the turn. Show a loading/unavailable note until we actually know. The
+  // home box uses the neutral label, never its hosting vendor.
   const computeUnknown = fleet.machines.length === 0 && (fleet.loading || Boolean(fleet.error));
   const computeLabel = activeMachine ? "Machine" : "Sandbox";
   const computeValue = activeMachine
@@ -184,7 +187,7 @@ export function SessionInspector(props: {
       ? fleet.loading
         ? "Checking…"
         : "Unavailable"
-      : props.session.sandboxBackend;
+      : sessionSandboxLabel(props.session.sandboxBackend);
   const displayEvents = props.events;
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
@@ -280,8 +283,14 @@ export function SessionInspector(props: {
               </InspectorSection>
 
               <InspectorSection title="Runtime">
-                <InfoRow label="Model" value={props.session.model} />
-                <InfoRow label="Effort" value={props.session.reasoningEffort} />
+                <InfoRow
+                  label="Model"
+                  value={<ModelName model={props.session.model} markClassName="text-fg-muted" />}
+                />
+                <InfoRow
+                  label="Effort"
+                  value={labelReasoningEffort(props.session.reasoningEffort)}
+                />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />
                 <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
@@ -394,7 +403,6 @@ export function SessionInspector(props: {
                   <Button
                     type="button"
                     size="sm"
-                    variant="secondary"
                     disabled={
                       !selectedChanged ||
                       sessionHasVariableSetBlockingWork(props.session) ||
@@ -433,7 +441,7 @@ export function SessionInspector(props: {
                     <Button
                       type="button"
                       size="sm"
-                      variant="secondary"
+                      variant="outline"
                       disabled={savingVariableSets || restarting}
                       onClick={() => void restartWithSetup()}
                     >

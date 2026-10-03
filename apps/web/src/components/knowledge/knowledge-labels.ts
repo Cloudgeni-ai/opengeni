@@ -1,14 +1,35 @@
-import type { KnowledgeEntryKind } from "@opengeni/sdk";
+import type { KnowledgeEntryKind, KnowledgeEntryScope } from "@opengeni/sdk";
+import { BookOpenIcon, FileTextIcon, FolderIcon, type LucideIcon } from "lucide-react";
 
 export const KNOWLEDGE_KIND_LABEL: Record<KnowledgeEntryKind, string> = {
-  source: "Source text",
+  source: "File",
   fact: "Fact",
   decision: "Decision",
   requirement: "Requirement",
   incident: "Incident",
-  note: "General knowledge",
+  note: "General",
   group: "Collection",
 };
+
+/**
+ * The tile marks the kind of object: a collection, a file, or an entry. Types
+ * of entry (Fact, Decision, Incident) share the entry tile and are a quiet
+ * word in the meta line, never an icon each.
+ */
+export function knowledgeKindIcon(kind: KnowledgeEntryKind): LucideIcon {
+  if (kind === "group") return FolderIcon;
+  if (kind === "source") return FileTextIcon;
+  return BookOpenIcon;
+}
+
+/** The types people pick when they add or edit an entry, most common first. */
+export const KNOWLEDGE_PICKABLE_KINDS = [
+  "note",
+  "fact",
+  "decision",
+  "requirement",
+  "incident",
+] as const satisfies readonly KnowledgeEntryKind[];
 
 export const KNOWLEDGE_KIND_HELP: Record<KnowledgeEntryKind, string> = {
   source: "Saved original text, such as a contract passage or Slack conversation.",
@@ -21,10 +42,16 @@ export const KNOWLEDGE_KIND_HELP: Record<KnowledgeEntryKind, string> = {
     "Related knowledge collected around a customer, product, system, or subject. Entries can appear in several collections without being copied.",
 };
 
+export const KNOWLEDGE_SCOPE_LABEL: Record<KnowledgeEntryScope, string> = {
+  workspace: "Workspace",
+  personal: "Only me",
+  organization: "Organization",
+};
+
 export const KNOWLEDGE_SOURCE_LABEL: Record<string, string> = {
   file: "File",
   slack: "Slack",
-  conversation: "Conversation",
+  conversation: "Chat",
   repository: "Codebase",
   web: "Web",
   connector: "Connected source",

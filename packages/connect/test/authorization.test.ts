@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { authorizeConnectAttempt, type ConnectAttempt } from "../src";
+import { authorizeConnectAttempt, ConnectPopupClosedError, type ConnectAttempt } from "../src";
 
 const attempt: ConnectAttempt = {
   id: "attempt",
@@ -45,6 +45,76 @@ test("popup opens synchronously and only backend completion resolves it", async 
   expect(opened).toBe("https://provider.example/authorize?state=%2f");
   expect(await pending).toEqual(complete);
   expect(closed).toBe(true);
+});
+test("closing the provider window ends a pending authorization without waiting for its full timeout", async () => {
+  let closed = false;
+  let cleanup = false;
+  const started = Date.now();
+  const pending = authorizeConnectAttempt(
+    { get: async () => attempt },
+    attempt,
+    {
+      openPopup: () => ({
+        get closed() {
+          return closed;
+        },
+        close() {
+          cleanup = true;
+        },
+      }),
+      redirect: () => {},
+    },
+    { mode: "popup" },
+  );
+  closed = true;
+  await expect(pending).rejects.toBeInstanceOf(ConnectPopupClosedError);
+  expect(Date.now() - started).toBeLessThan(5_000);
+  expect(cleanup).toBe(true);
+});
+test("a callback that commits when the provider window closes still succeeds", async () => {
+  let closed = false;
+  const complete: ConnectAttempt = {
+    ...attempt,
+    revision: 2,
+    state: "complete",
+    credentialsCommitted: true,
+    nextAction: { type: "none" },
+  };
+  const pending = authorizeConnectAttempt(
+    { get: async () => (closed ? complete : attempt) },
+    attempt,
+    {
+      openPopup: () => ({
+        get closed() {
+          return closed;
+        },
+        close() {},
+      }),
+      redirect: () => {},
+    },
+    { mode: "popup" },
+  );
+  closed = true;
+  expect(await pending).toEqual(complete);
+});
+test("a scope mismatch after popup close remains an error, not a cancellation", async () => {
+  let closed = false;
+  const pending = authorizeConnectAttempt(
+    { get: async () => (closed ? { ...attempt, workspaceId: "other" } : attempt) },
+    attempt,
+    {
+      openPopup: () => ({
+        get closed() {
+          return closed;
+        },
+        close() {},
+      }),
+      redirect: () => {},
+    },
+    { mode: "popup" },
+  );
+  closed = true;
+  await expect(pending).rejects.toThrow("scope or revision mismatch");
 });
 test("blocked popup does not poll or silently redirect", () => {
   expect(() =>

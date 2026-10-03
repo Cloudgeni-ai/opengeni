@@ -1,9 +1,14 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
+import * as sessionPreviewSchema from "@opengeni/db/schema";
+import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
-import { resolveSiteSessionOrigin } from "../site-session-origin";
+import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
@@ -79,6 +84,8 @@ import {
   UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
@@ -142,6 +149,7 @@ import {
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
   getLatestStartedSessionTurn,
   listSessionTurns,
   projectEffectiveControlForRelatedAccess,
@@ -181,6 +189,7 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
   SessionVariableSetSelectionUnavailableError,
+  SessionCreateConnectionSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
@@ -283,6 +292,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequest,
@@ -303,11 +313,12 @@ import {
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
+  updateSessionAgent,
   updateSessionTitle,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionEffectiveToolsContext,
+  workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
   validateVariableSetAttachment,
 } from "@opengeni/core";
@@ -322,6 +333,7 @@ import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -362,6 +374,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
+  const withSiteCommandOrigin = <T>(c: Context, workspaceId: string, run: () => Promise<T>) =>
+    withOptionalSiteCommandOrigin(
+      db,
+      workspaceId,
+      c.req.header("x-opengeni-site-id"),
+      c.req.header("x-opengeni-site-version"),
+      run,
+    );
   const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
     leaseId: pty.leaseId,
     sandboxGroupId: pty.sandboxGroupId,
@@ -763,33 +783,50 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
-    let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
+    const projection = c.req.query("projection");
+    if (projection !== undefined && projection !== "summary")
+      throw new HTTPException(400, { message: 'projection must be "summary"' });
+    if (projection && !pageView)
+      throw new HTTPException(400, { message: 'summary projection requires view="page"' });
+    const summary = projection === "summary";
+    let page: Awaited<
+      ReturnType<typeof listSessionsForSubject | typeof listSessionEntriesForSubject>
+    >;
     try {
-      page = await listSessionsForSubject(db, workspaceId, {
-        subjectId: grant.subjectId,
-        limit: boundedLimit(query.limit),
-        materializeSnapshot: pageView,
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-        ...(query.search ? { search: query.search } : {}),
-        ...(query.pinsOnly ? { pinsOnly: true } : {}),
-        ...(query.archivedOnly ? { archivedOnly: true } : {}),
-        ...(query.sortBy ? { sortBy: query.sortBy } : {}),
-        ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
-        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
-        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
-        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
-        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
-        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
-        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
-        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
-        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
-        ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
-        ...(authorizationScope ? { authorizationScope } : {}),
-        // A managed human's own personal workspace has no membership row, so
-        // the list's removal fence must fall back to the organization-membership
-        // pointer, only with verified native or external owning-user provenance.
-        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-      });
+      page = await (summary ? listSessionEntriesForSubject : listSessionsForSubject)(
+        db,
+        workspaceId,
+        {
+          subjectId: grant.subjectId,
+          limit: boundedLimit(query.limit),
+          materializeSnapshot: pageView,
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+          ...(query.search ? { search: query.search } : {}),
+          ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includeTotals ? { includeTotals: true } : {}),
+          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
+          ...(query.includePinned === false ? { includePinned: false } : {}),
+          ...(query.archivedOnly ? { archivedOnly: true } : {}),
+          ...(query.sortBy ? { sortBy: query.sortBy } : {}),
+          ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
+          ...(query.parentSessionId !== undefined
+            ? { parentSessionId: query.parentSessionId }
+            : {}),
+          ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+          ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+          ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+          ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+          ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+          ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+          ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
+          // A managed human's own personal workspace has no membership row, so
+          // the list's removal fence must fall back to the organization-membership
+          // pointer, only with verified native or external owning-user provenance.
+          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+        },
+      );
     } catch (error) {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -810,7 +847,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
     const commandActivity = await backgroundCommandActivityForSessions(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -825,16 +861,38 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             [...page.pinned, ...page.sessions].map((session) => session.id),
           )
         : new Set<string>();
+    if ("projection" in page) {
+      const decorateEntry = (session: (typeof page.sessions)[number]) => ({
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(commandActivity.has(session.id)
+          ? { backgroundCommandActivity: commandActivity.get(session.id)! }
+          : {}),
+      });
+      return c.json({
+        ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        pinned: page.pinned.map(decorateEntry),
+        sessions: page.sessions.map(decorateEntry),
+      });
+    }
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+      ...page.pinned,
+      ...page.sessions,
+    ]);
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
+      const decorated = {
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(activity ? { backgroundCommandActivity: activity } : {}),
+      };
       return sessionWithEffectiveToolPolicy(
-        {
-          ...session,
-          hasSchedules: scheduleTargets.has(session.id),
-          ...(activity ? { backgroundCommandActivity: activity } : {}),
-        },
+        decorated,
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
+        policy.effectiveToolsContext,
       );
     };
     if (pageView) {
@@ -1198,15 +1256,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
-      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
-        beginSessionRealtimeInTransaction(scopedDb, {
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+        const accounts = await freezeSessionRealtimeConnectionAccounts({
+          db: scopedDb as unknown as Database,
+          settings,
+          grant,
+          workspaceId,
+          sessionId,
+        });
+        return beginSessionRealtimeInTransaction(scopedDb, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           ownerSubjectId: grant.subjectId,
           ...parsed.data,
-        }),
-      );
+          ...accounts,
+        });
+      });
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
       return c.json({ mode: result.mode, replay: result.replay }, result.replay ? 200 : 201);
@@ -1978,9 +2044,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.param("sessionId"),
       ...lineage.ancestors.map((session) => session.id),
     ];
+    const lineageSessions = [...lineage.ancestors];
     const collect = (nodes: LineageNode[]) => {
       for (const node of nodes) {
         sessionIds.push(node.session.id);
+        lineageSessions.push(node.session as Session);
         collect(node.children);
       }
     };
@@ -1996,7 +2064,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         session: { ...node.session, hasSchedules: targets.has(node.session.id) },
         children: decorateNodes(node.children),
       }));
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
+    const policy = await loadEffectivePolicyContext(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      lineageSessions,
+    );
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2005,6 +2078,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           { ...session, hasSchedules: targets.has(session.id) },
           policy.workspaceServerIds,
           policy.workspaceDefaultServerIds,
+          policy.effectiveToolsContext,
         ),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
@@ -2116,7 +2190,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       operation: "session.control",
       surface: "http",
     });
-    const payload = UpdateSessionChannelRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionChannelRequest);
     try {
       const updated = await setSessionChannel(db, {
         workspaceId,
@@ -2238,7 +2312,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = UpdateSessionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionRequest);
     const titleUpdate = await updateSessionTitle(deps, grant, sessionId, payload.title, "user");
     // A session-returning member route must preserve the caller's private pin
     // projection. Returning the generic mapSession() default here would reset a
@@ -2331,9 +2405,41 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const payload = UpdateSessionToolPolicyRequest.parse(await c.req.json().catch(() => null));
+    const payload = parseRequestBody(
+      UpdateSessionToolPolicyRequest,
+      await c.req.json().catch(() => null),
+    );
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Replace the session's agent configuration (capabilities, identity,
+  // instructions alias, renderer). Shares the tool-policy version CAS and
+  // applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionAgentRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionAgent(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -2405,7 +2511,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = ApplySessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, ApplySessionGoalRevisionRequest);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -2469,7 +2575,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = RejectSessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, RejectSessionGoalRevisionRequest);
       try {
         const result = await rejectSessionGoalRevisionWithEvent(db, {
           accountId: grant.accountId,
@@ -2497,7 +2603,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = RollbackSessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, RollbackSessionGoalRevisionRequest);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -2549,7 +2655,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = UpdateSessionGoalRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
@@ -2734,7 +2840,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    CompactSessionContextRequest.parse((await c.req.json().catch(() => ({}))) ?? {});
+    parseRequestBody(CompactSessionContextRequest, (await c.req.json().catch(() => ({}))) ?? {});
     // /compact sets one durable request. The worker clears it only in the same
     // fenced transaction that installs replacement history, so failed or stale
     // attempts cannot lose the request.
@@ -2925,6 +3031,90 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(page.events);
   });
 
+  // Selected search hit only: never use the audit event projection here, even
+  // in summary mode (it can contain modelContext or truncate visible text).
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const sessionId = c.req.param("sessionId");
+      await assertSessionExists(db, workspaceId, sessionId);
+      const eventId = c.req.param("eventId");
+      const rawSequence = c.req.query("sequence");
+      const sequence = Number(rawSequence);
+      if (
+        !z.string().uuid().safeParse(eventId).success ||
+        rawSequence === undefined ||
+        !/^\d+$/.test(rawSequence) ||
+        !Number.isSafeInteger(sequence) ||
+        sequence < 1 ||
+        sequence > 2_147_483_647
+      )
+        throw new HTTPException(400, { message: "Invalid message preview reference" });
+
+      const notFound = () => new HTTPException(404, { message: "message not found" });
+      const maxUnits = 12_000;
+      const eventTable = sessionPreviewSchema.sessionEvents;
+      // The slice helper supports structured result views too. Check only the
+      // JSON scalar *kind* before calling it; never fetch a structured text value.
+      const candidates = await withWorkspaceRls(db, workspaceId, (tx) =>
+        tx
+          .select({ kind: sql<string | null>`jsonb_typeof(${eventTable.payload}->'text')` })
+          .from(eventTable)
+          .where(
+            and(
+              eq(eventTable.workspaceId, workspaceId),
+              eq(eventTable.sessionId, sessionId),
+              eq(eventTable.id, eventId),
+              eq(eventTable.sequence, sequence),
+              sql`${eventTable.type} in ('user.message', 'agent.message.completed')`,
+            ),
+          )
+          .limit(1),
+      );
+      if (candidates[0]?.kind !== "string") throw notFound();
+      const read = (offset: number) =>
+        listSessionEventSlices(db, workspaceId, sessionId, {
+          sourceSequence: sequence,
+          sourceOffset: offset,
+          after: sequence - 1,
+          before: sequence + 1,
+          includeTypes: ["user.message", "agent.message.completed"],
+          view: "conversation",
+        });
+      const first = await read(0);
+      const event = first.events[0];
+      const slice = first.slices?.[sequence];
+      // Includes the slice reader's duplicate, late and unclaimed-prompt gates.
+      if (!event || event.id !== eventId || event.sequence !== sequence || !slice || slice.omitted)
+        throw notFound();
+      if (slice.total > maxUnits) return c.json({ status: "unavailable" as const });
+
+      let text = slice.text;
+      let offset = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
+      if (text.length > maxUnits) return c.json({ status: "unavailable" as const });
+      while (offset < slice.total) {
+        if (offset === 0) throw notFound();
+        const next = await read(offset);
+        const part = next.slices?.[sequence];
+        if (
+          next.events[0]?.id !== eventId ||
+          !part ||
+          part.omitted ||
+          part.unit !== slice.unit ||
+          part.total !== slice.total ||
+          part.offset !== offset
+        )
+          throw notFound();
+        text += part.text;
+        offset += slice.unit === "utf16" ? part.text.length : Array.from(part.text).length;
+        if (text.length > maxUnits) return c.json({ status: "unavailable" as const });
+      }
+      return c.json({ status: "available" as const, text });
+    },
+  );
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -3018,7 +3208,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, MoveSessionQueueItemRequest);
     try {
       const response = await moveHumanQueuePrompt(
         deps,
@@ -3045,7 +3235,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = EditSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, EditSessionQueueItemRequest);
     try {
       const response = await editHumanQueuePrompt(
         deps,
@@ -3072,7 +3262,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, SteerSessionQueueItemRequest);
     try {
       const response = await steerHumanQueuePrompt(
         deps,
@@ -3099,7 +3289,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, DeleteSessionQueueItemRequest);
     try {
       const response = await deleteHumanQueuePrompt(
         deps,
@@ -3139,7 +3329,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const payload = SaveComposerDraftRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, SaveComposerDraftRequest);
     try {
       return c.json(
         await saveHumanComposerDraft(
@@ -3317,28 +3507,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
-      result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-        text: payload.text,
-        annotations: payload.annotations,
-        modelContext: payload.modelContext ?? null,
-        resources: payload.resources,
-        model: payload.model ?? null,
-        reasoningEffort: payload.reasoningEffort ?? null,
-        latencyMode: payload.latencyMode ?? null,
-        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAccounts: payload.connectionAccounts,
-        ...(payload.personalResourceAttachment
-          ? { personalResourceAttachment: payload.personalResourceAttachment }
-          : {}),
-        authorization,
-        delivery: "steer",
-        origin: "human",
-        ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
-        ...(payload.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: payload.expectedDraftRevision }
-          : {}),
-        ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-      });
+      result = await withSiteCommandOrigin(c, workspaceId, () =>
+        acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+          text: payload.text,
+          annotations: payload.annotations,
+          modelContext: payload.modelContext ?? null,
+          resources: payload.resources,
+          model: payload.model ?? null,
+          reasoningEffort: payload.reasoningEffort ?? null,
+          latencyMode: payload.latencyMode ?? null,
+          mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+          connectionAccounts: payload.connectionAccounts,
+          ...(payload.personalResourceAttachment
+            ? { personalResourceAttachment: payload.personalResourceAttachment }
+            : {}),
+          authorization,
+          delivery: "steer",
+          origin: "human",
+          ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+          ...(payload.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: payload.expectedDraftRevision }
+            : {}),
+          ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+        }),
+      );
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -3357,12 +3549,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
+    const payload = parseRequestBody(
+      SubmitComposerDraftRequest,
+      await c.req.json().catch(() => null),
+    );
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
-        authorization,
-      });
+      result = await withSiteCommandOrigin(c, workspaceId, () =>
+        submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
+          authorization,
+        }),
+      );
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -3401,28 +3598,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event.type === "user.message") {
       let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
       try {
-        result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-          text: event.payload.text,
-          annotations: event.payload.annotations,
-          modelContext: event.payload.modelContext ?? null,
-          resources: event.payload.resources ?? [],
-          model: event.payload.model ?? null,
-          reasoningEffort: event.payload.reasoningEffort ?? null,
-          latencyMode: event.payload.latencyMode ?? null,
-          mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-          connectionAccounts: event.payload.connectionAccounts,
-          ...(event.payload.personalResourceAttachment
-            ? { personalResourceAttachment: event.payload.personalResourceAttachment }
-            : {}),
-          authorization,
-          ...(event.payload.controlEtag !== undefined
-            ? { controlEtag: event.payload.controlEtag }
-            : {}),
-          ...(event.payload.expectedDraftRevision !== undefined
-            ? { expectedDraftRevision: event.payload.expectedDraftRevision }
-            : {}),
-          ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-        });
+        result = await withSiteCommandOrigin(c, workspaceId, () =>
+          acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+            text: event.payload.text,
+            annotations: event.payload.annotations,
+            modelContext: event.payload.modelContext ?? null,
+            resources: event.payload.resources ?? [],
+            model: event.payload.model ?? null,
+            reasoningEffort: event.payload.reasoningEffort ?? null,
+            latencyMode: event.payload.latencyMode ?? null,
+            mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+            connectionAccounts: event.payload.connectionAccounts,
+            ...(event.payload.personalResourceAttachment
+              ? { personalResourceAttachment: event.payload.personalResourceAttachment }
+              : {}),
+            authorization,
+            ...(event.payload.controlEtag !== undefined
+              ? { controlEtag: event.payload.controlEtag }
+              : {}),
+            ...(event.payload.expectedDraftRevision !== undefined
+              ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+              : {}),
+            ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+          }),
+        );
       } catch (error) {
         return commandConflictResponse(c, error);
       }
@@ -3430,16 +3629,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result.accepted, 202);
     }
 
-    if (event.type === "user.approvalDecision") {
-      const accepted = await acceptSessionApprovalDecision(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-        respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
-        payload: event.payload,
-        clientEventId: event.clientEventId ?? null,
+    // Responses use the same header-only validation, permission and encryption
+    // boundary as Send/Steer. Persistence belongs to the response transaction,
+    // never a separate rotation that could commit without accepting the reply.
+    const updates = event.payload.mcpCredentialUpdates ?? [];
+    let mcpCredentialUpdates = [] as ReturnType<typeof validateSessionMcpCredentialUpdates>;
+    if (updates.length) {
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+        settings,
+        grant,
+        session,
+        updates,
       });
+    }
+
+    if (event.type === "user.approvalDecision") {
+      const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = event.payload;
+      let accepted;
+      try {
+        accepted = await acceptSessionApprovalDecision(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          payload,
+          mcpCredentialUpdates,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        throw error;
+      }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
           message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
@@ -3472,8 +3697,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
+          mcpCredentialUpdates,
         });
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
         if (error instanceof SkillHumanResponseError) {
           throw new HTTPException(
             error.code === "conflict" ? 409 : error.code === "forbidden" ? 403 : 422,
@@ -4236,6 +4465,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(out);
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read", "fs.read");
+    const req = await parseChannelABody(c, FsReadRequest);
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.fsRead({ ...req, workspaceOnly: true }),
+    );
+    return c.json(out);
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -4786,6 +5024,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -4844,6 +5083,8 @@ export function sessionAuthorizationOperationForHttp(
     return verb === "POST" ? "session.context.write" : null;
   }
   if (suffix === "/events/stream" && verb === "GET") return "session.stream.read";
+  if (/^\/events\/[^/]+\/message-preview$/.test(suffix) && verb === "GET")
+    return "session.events.read";
   if (suffix === "/events") {
     if (verb === "GET") return "session.events.read";
     if (verb === "POST") return "session.append";
@@ -4878,10 +5119,16 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
     return "session.viewer.control";
   }
-  if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
+  if (
+    suffix === "/fs/list" ||
+    suffix === "/fs/list-batch" ||
+    suffix === "/fs/read" ||
+    suffix === "/fs/read-workspace"
+  ) {
     return verb === "POST" ? "session.files.read" : null;
   }
   if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
+  if (suffix.startsWith("/artifact-associations/") && verb === "GET") return "session.read";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }
@@ -5036,6 +5283,9 @@ export function sessionListQuery(
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
+  includePinned: boolean;
+  includeTotals: boolean;
+  needsYouOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5081,6 +5331,23 @@ export function sessionListQuery(
     });
   }
   const pinsOnly = query.pinsOnly === "true";
+  if (query.includePinned !== undefined && !["true", "false"].includes(query.includePinned)) {
+    throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
+  }
+  const includePinned = query.includePinned !== "false";
+  for (const key of ["includeTotals", "needsYouOnly"]) {
+    if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
+      throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
+  }
+  const includeTotals = query.includeTotals === "true";
+  const needsYouOnly = query.needsYouOnly === "true";
+  if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
+    throw new HTTPException(400, { message: "includeTotals requires a root page" });
+  if (needsYouOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
+  if (pinsOnly && !includePinned) {
+    throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
+  }
   if (query.archivedOnly !== undefined && query.archivedOnly !== "true") {
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
@@ -5171,6 +5438,7 @@ export function sessionListQuery(
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
+    needsYouOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5202,6 +5470,9 @@ export function sessionListQuery(
     cursor,
     search: search || undefined,
     pinsOnly,
+    includePinned,
+    includeTotals,
+    needsYouOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -5561,6 +5832,24 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof UnsupportedLatencyModeError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.code,
+          modelId: error.modelId,
+          latencyMode: error.latencyMode,
+          allowedLatencyModes: [...error.allowedLatencyModes],
+        },
+      },
+      422,
+    );
+  }
+  if (error instanceof SessionCreateConnectionSelectionUnavailableError) {
+    return c.json({ code: error.code, message: error.message, retryable: false }, 409);
+  }
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return c.json(
       {
@@ -5621,6 +5910,24 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         currentRevision: error.cause.currentRevision,
       },
       409,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof AgentConfigError
+  ) {
+    // Typed agent-configuration failure: the specific code is details.code.
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          ...(error.cause.capability ? { capability: error.cause.capability } : {}),
+        },
+      },
+      422,
     );
   }
   if (error instanceof HTTPException && error.status === 422) {
@@ -5690,18 +5997,20 @@ function commandConflictResponse(c: Context, error: unknown): Response {
 type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
+  effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
 };
 
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
+  sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
   ]);
-  return { workspaceServerIds, workspaceDefaultServerIds };
+  return { ...policy, effectiveToolsContext };
 }
 
 async function withEffectivePolicy(
@@ -5710,11 +6019,12 @@ async function withEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId);
+  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
   return sessionWithEffectiveToolPolicy(
     session,
     policy.workspaceServerIds,
     policy.workspaceDefaultServerIds,
+    policy.effectiveToolsContext,
   );
 }
 
@@ -5725,6 +6035,7 @@ function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): 
       node.session as Session,
       policy.workspaceServerIds,
       policy.workspaceDefaultServerIds,
+      policy.effectiveToolsContext,
     ),
     children: mapLineageNodes(node.children, policy),
   }));

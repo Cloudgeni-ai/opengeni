@@ -8,9 +8,30 @@ import {
   type TurnSummaryFacetConfiguration,
 } from "../src";
 import type { MemoryItem } from "../src/timeline";
+import { formatElapsed } from "../src/timeline/turn-summary";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
+
+test("only the expanded outer work header is sticky; nested folds remain in flow", async () => {
+  const view = await renderComponent(
+    <TurnSummary items={[]} defaultOpen>
+      <TurnSummary items={[]} defaultOpen bare>
+        <p>Nested detail</p>
+      </TurnSummary>
+    </TurnSummary>,
+  );
+  try {
+    const outer = view.container.querySelector('[data-og-work-header="outer"]')!;
+    const nested = view.container.querySelector('[data-og-work-header="nested"]')!;
+    expect(outer.classList.contains("sticky")).toBe(true);
+    expect(nested.classList.contains("sticky")).toBe(false);
+    expect(view.container.querySelectorAll("[data-og-work-section]")).toHaveLength(1);
+    expect(outer.parentElement).toBe(view.container.querySelector("[data-og-work-section]"));
+  } finally {
+    await view.unmount();
+  }
+});
 
 function toolCall(
   id: string,
@@ -255,6 +276,67 @@ describe("TurnSummary facets", () => {
 
     expect(summaryText(rendered.container)).toBe("1 step");
     await rendered.unmount();
+  });
+});
+
+describe("TurnSummary status line", () => {
+  test("formats elapsed wall time with seconds below an hour", () => {
+    expect(formatElapsed(900)).toBe("0s");
+    expect(formatElapsed(14_000)).toBe("14s");
+    expect(formatElapsed(120_000)).toBe("2m");
+    expect(formatElapsed(134_000)).toBe("2m 14s");
+    expect(formatElapsed(3_900_000)).toBe("1h 05m");
+  });
+
+  test("a settled exchange states its span once and reads as a separator", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command"), toolCall("2", "exec_command")]}
+        outcome="complete"
+        durationMs={250_000}
+        status={{ kind: "worked", durationMs: 250_000 }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toBe("Worked for 4m 10s · 2 steps · 2 commands");
+    expect(r.container.querySelector("button .h-px")).not.toBeNull();
+    await r.unmount();
+  });
+
+  test("a sub-second settled span shows only the facets", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command")]}
+        outcome="complete"
+        status={{ kind: "worked", durationMs: 400 }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toBe("1 step · 1 command");
+    await r.unmount();
+  });
+
+  test("live work keeps one short line and previews only its current step", async () => {
+    const r = await renderComponent(
+      <TurnSummary
+        items={[toolCall("1", "exec_command"), toolCall("2", "exec_command", "running")]}
+        status={{
+          kind: "working",
+          since: new Date(Date.now() - 134_000).toISOString(),
+          preview: <span>Checking the second file.</span>,
+        }}
+      >
+        details
+      </TurnSummary>,
+    );
+    expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s · 2 steps$/);
+    expect(r.container.querySelector("[data-og-exchange-preview]")?.textContent).toBe(
+      "Checking the second file.",
+    );
+    expect(r.container.querySelector("[data-og-exchange-note]")).toBeNull();
+    await r.unmount();
   });
 });
 

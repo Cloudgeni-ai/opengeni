@@ -997,6 +997,95 @@ describe("useVoiceInput", () => {
     expect(sends).toHaveLength(0);
   });
 
+  test("a voice transcript completed during Send stays recoverable until the composer unlocks", async () => {
+    installMediaMocks();
+    const store = new MemoryVoiceRecordingStore();
+    let completeCreate!: () => void;
+    const createPending = new Promise<void>((resolve) => {
+      completeCreate = resolve;
+    });
+    let completeTranscription!: (result: { text: string; languages: string[] }) => void;
+    const transcriptionPending = new Promise<{ text: string; languages: string[] }>((resolve) => {
+      completeTranscription = resolve;
+    });
+    let draft = "send this";
+    const sends: string[] = [];
+
+    function Harness() {
+      const [value, setValue] = useState("send this");
+      const [creating, setCreating] = useState(false);
+      draft = value;
+      return (
+        <ChatComposer
+          composer={{
+            ...composerState(value, setValue, sends),
+            sending: creating,
+            send: async () => {
+              sends.push(value);
+              setCreating(true);
+              await createPending;
+              setCreating(false);
+              return true;
+            },
+          }}
+          disabled={creating}
+          transcription={{
+            client: { transcribeAudio: async () => await transcriptionPending } as never,
+            workspaceId: "ws-1",
+            capability,
+            workspaceEnabled: true,
+            createRecordingStore: () => store,
+            createOwnerId: () => "composer-pending-owner",
+          }}
+        />
+      );
+    }
+
+    mounted = await renderComponent(<Harness />);
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>("[aria-label='Start voice input']")
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      mounted?.container
+        .querySelector<HTMLButtonElement>("[aria-label='Stop and transcribe']")
+        ?.click();
+      await settle();
+    });
+    await act(async () => {
+      mounted?.container.querySelector<HTMLButtonElement>("[aria-label='Send message']")?.click();
+      await Promise.resolve();
+    });
+    expect(sends).toEqual(["send this"]);
+    await act(async () => {
+      completeTranscription({ text: "later words", languages: [] });
+      await settle();
+    });
+    expect(draft).toBe("send this");
+    const insert = mounted.container.querySelector<HTMLButtonElement>(
+      "[aria-label='Insert saved transcript']",
+    );
+    expect(insert?.disabled).toBe(true);
+    expect(store.manifests.size).toBe(1);
+    await act(async () => {
+      insert?.click();
+      await Promise.resolve();
+    });
+    expect(draft).toBe("send this");
+    await act(async () => {
+      completeCreate();
+      await createPending;
+    });
+    expect(insert?.disabled).toBe(false);
+    await act(async () => {
+      insert?.click();
+      await settle();
+    });
+    expect(draft).toBe("send this later words");
+  });
+
   test("composer cancel discards recording without transcription or send", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();

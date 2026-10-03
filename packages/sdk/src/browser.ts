@@ -4,6 +4,8 @@ export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 export {
   OpenGeniToolCallError,
@@ -32,9 +34,12 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
+  OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";

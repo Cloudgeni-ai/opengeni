@@ -1,10 +1,13 @@
+import { Link } from "@tanstack/react-router";
 import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { InlineChatImage } from "./inline-chat-image";
-import { DeferredChatMedia } from "./deferred-chat-media";
+import { DeferredChatMedia } from "@opengeni/react/artifacts";
+import { isRetainedTextPreview } from "./retained-text-preview-policy";
+const RetainedTextPreview = lazy(() => import("./retained-text-preview"));
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));
 
 export function retainedPreviewKind(contentType: string, filename?: string) {
@@ -33,11 +36,30 @@ type PreviewProps = {
   artifact: RetainedArtifactReference;
   title: string;
   filename?: string;
+  /** Explicit opt-in for the workbench; chat and other viewers stay unchanged. */
+  workbenchTextPreview?: boolean;
+  /** Let image detail pages fill the available viewer instead of the chat slot. */
+  fullSizeImage?: boolean;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
   const { accessKeyVersion } = useAppContext();
   if (!props.artifact.available) return <p role="status">Artifact unavailable.</p>;
+  if (
+    props.workbenchTextPreview &&
+    props.artifact.kind === "file" &&
+    isRetainedTextPreview(props.artifact.contentType, props.filename)
+  )
+    return (
+      <Suspense fallback={<p role="status">Loading preview…</p>}>
+        <RetainedTextPreview
+          key={JSON.stringify([props.workspaceId, accessKeyVersion, props.artifact])}
+          workspaceId={props.workspaceId}
+          artifact={props.artifact}
+          filename={props.filename}
+        />
+      </Suspense>
+    );
   return (
     <RetainedFilePreviewBody
       key={JSON.stringify([props.workspaceId, accessKeyVersion, props.artifact])}
@@ -51,6 +73,7 @@ function RetainedFilePreviewBody({
   artifact: initialArtifact,
   title,
   filename,
+  fullSizeImage,
 }: PreviewProps) {
   // The parent remounts on receipt changes, not object allocation on a rerender.
   const [artifact] = useState(initialArtifact);
@@ -113,7 +136,12 @@ function RetainedFilePreviewBody({
   }, [client, key, kind, workspaceId, artifact]);
   if (kind === "image")
     return (
-      <InlineChatImage workspaceId={workspaceId} artifactId={artifact.artifactId} alt={title} />
+      <InlineChatImage
+        workspaceId={workspaceId}
+        artifactId={artifact.artifactId}
+        alt={title}
+        viewer={fullSizeImage}
+      />
     );
   if (!kind)
     return (
@@ -281,12 +309,13 @@ function InlineArtifactBody({
           </Button>
         </p>
       )}
-      <a
-        href={`/workspaces/${workspaceId}/artifacts/files/${artifactId}`}
+      <Link
+        to="/workspaces/$workspaceId/artifacts/files/$artifactId"
+        params={{ workspaceId, artifactId }}
         className="text-sm underline"
       >
         Open {alt || "artifact"} in Artifacts
-      </a>
+      </Link>
     </div>
   );
 }

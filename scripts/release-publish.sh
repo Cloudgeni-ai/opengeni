@@ -24,6 +24,10 @@ export OPENGENI_RELEASE=1
 # right before bytes leave the building.
 bun run build:packages
 bun scripts/publish-closure-guard.ts
+# Check the frozen effective registry closure before rewriting manifests or
+# publishing any bytes. Every stable workflow uses this shared entry point;
+# each passes its already-admitted OPENGENI_EXPECTED_PACKAGES publication set.
+bun run test:effective-dependency-exports
 bun run test:ogtool-package
 
 # Rewrite `workspace:*` specs in the publishable packages to concrete `^x.y.z`

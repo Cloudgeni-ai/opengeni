@@ -1,10 +1,20 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
+import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
-import { SignInMethodsView, providerLabel } from "@/components/sign-in-methods";
+import {
+  SecurityPageBody,
+  SecurityPageHeader,
+  SignInMethodsPlaceholder,
+  SignInMethodsView,
+  providerLabel,
+} from "@/components/sign-in-methods";
 import { Button } from "@/components/ui/button";
+import { ErrorMessage } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@/components/ui/page-actions";
+import { SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 import {
@@ -29,7 +39,7 @@ export function PersonalSecurityRoute() {
     return (
       <ProblemPanel
         title="Sign-in methods unavailable"
-        description="Personal sign-in methods are managed by OpenGeni only on deployments with managed browser sign-in."
+        description="Personal sign-in methods are managed by Opengeni only on deployments with managed browser sign-in."
       />
     );
   }
@@ -88,7 +98,7 @@ function BrokerSecurity() {
         setReauthError(null);
         popup.open(() => accounts.beginReauth(slotId), {
           onError: () =>
-            setReauthError("Couldn't open sign-in. Allow popups for OpenGeni and try again."),
+            setReauthError("Couldn't open sign-in. Allow popups for Opengeni and try again."),
           onSettled: () => context.revalidatePrincipalAccess(),
         });
       }}
@@ -159,8 +169,8 @@ export function SecurityController({
             );
           setSuccess(
             usable.length
-              ? `Sign-in methods confirmed: ${usable.join(", ")}. You can use these to access your OpenGeni account.`
-              : "The provider returned to OpenGeni, but no usable sign-in method was confirmed. Review the methods below before continuing.",
+              ? `Sign-in methods confirmed: ${usable.join(", ")}. You can use these to access your Opengeni account.`
+              : "The provider returned to Opengeni, but no usable sign-in method was confirmed. Review the methods below before continuing.",
           );
         }
         if (callback === "error")
@@ -261,77 +271,105 @@ export function SecurityController({
     }
   }
   const password = inventory?.methods.find((method) => method.provider === "credential");
+  // While a change's result is unknown, keep saying so even after a refresh
+  // cleared the message: new changes stay locked until the same request is retried.
+  const shownError =
+    reauthError ??
+    error ??
+    (uncertain
+      ? "The result of your last change is unknown. Retry the same request, or refresh to check your methods."
+      : null);
   return (
     <PersonalSettingsShell email={inventory?.email ?? email}>
       {committed ? (
-        <div className="grid gap-4">
-          <h1 className="text-xl font-semibold">Sign-in methods updated</h1>
-          <div role="status">
-            <Notice tone="success">{success}</Notice>
-          </div>
-          {reauthError ? (
-            <div role="alert">
-              <Notice tone="failed">{reauthError}</Notice>
+        <div className="min-w-0">
+          <SecurityPageHeader />
+          <SecurityPageBody>
+            <div className="grid min-w-0 gap-3">
+              <div role="status">
+                <Notice
+                  tone="success"
+                  title="Sign-in methods updated"
+                  actionLayout="responsive"
+                  action={
+                    <Button size="sm" className="pointer-coarse:h-11" onClick={onReauthenticate}>
+                      Sign in again
+                    </Button>
+                  }
+                >
+                  {success}
+                </Notice>
+              </div>
+              {reauthError ? (
+                <div role="alert">
+                  <Notice tone="failed">{reauthError}</Notice>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-          <Button className="min-h-11 justify-self-start" onClick={onReauthenticate}>
-            Sign in again
-          </Button>
+          </SecurityPageBody>
         </div>
       ) : !inventory ? (
-        error ? (
-          <Notice tone="failed" title="Couldn't load sign-in methods">
-            {error}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={() => setRevision((value) => value + 1)}>
-                Retry
-              </Button>
-              <Button variant="ghost" onClick={onReauthenticate}>
-                Sign in again
-              </Button>
-            </div>
-          </Notice>
-        ) : (
-          <LoadingPanel label="Loading sign-in methods" />
-        )
+        <div className="min-w-0">
+          <SecurityPageHeader />
+          <SecurityPageBody>
+            <SignInMethodsPlaceholder>
+              {error ? (
+                <ErrorMessage
+                  className="py-4"
+                  title="Couldn't load sign-in methods."
+                  action={
+                    <>
+                      <RowButton onClick={() => setRevision((value) => value + 1)}>
+                        Try again
+                      </RowButton>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="pointer-coarse:h-11"
+                        onClick={onReauthenticate}
+                      >
+                        Sign in again
+                      </Button>
+                    </>
+                  }
+                >
+                  {error}
+                </ErrorMessage>
+              ) : (
+                <div role="status" aria-label="Loading sign-in methods">
+                  <SettingRowSkeleton />
+                  <SettingRowSkeleton />
+                  <SettingRowSkeleton />
+                </div>
+              )}
+            </SignInMethodsPlaceholder>
+          </SecurityPageBody>
+        </div>
       ) : (
-        <>
-          <SignInMethodsView
-            methods={inventory.methods
-              .filter((method) => method.provider !== "credential")
-              .map((method) => ({
-                provider: method.provider as "google" | "github",
-                connected: method.connected,
-                available: method.available,
-                email: method.connected ? inventory.email : null,
-                emailLabel: "Connected · OpenGeni account: ",
-                handle: null,
-                canDisconnect: method.canDisconnect,
-                reconnectRequired: method.implicitRelinkingSuppressed,
-              }))}
-            hasPassword={password?.connected ?? false}
-            passwordAvailable={password?.available ?? false}
-            busy={busy}
-            mutationLocked={uncertain !== null}
-            recentAuthRequired={requiresAuth}
-            error={reauthError ?? error}
-            success={success}
-            onReauthenticate={onReauthenticate}
-            onConnect={(provider) => {
-              void mutate("connect", { provider });
-            }}
-            onDisconnect={(provider) => mutate("disconnect", { provider })}
-            onPassword={(newPassword, currentPassword) =>
-              mutate("password", {
-                newPassword,
-                ...(currentPassword === undefined ? {} : { currentPassword }),
-              })
-            }
-          />
-          <div className="mt-4 flex flex-wrap gap-2">
-            {uncertain ? (
+        <SignInMethodsView
+          methods={inventory.methods
+            .filter((method) => method.provider !== "credential")
+            .map((method) => ({
+              provider: method.provider as "google" | "github",
+              connected: method.connected,
+              available: method.available,
+              email: method.connected ? inventory.email : null,
+              emailLabel: "Connected · Opengeni account: ",
+              handle: null,
+              canDisconnect: method.canDisconnect,
+              reconnectRequired: method.implicitRelinkingSuppressed,
+            }))}
+          hasPassword={password?.connected ?? false}
+          passwordAvailable={password?.available ?? false}
+          busy={busy}
+          mutationLocked={uncertain !== null}
+          recentAuthRequired={requiresAuth}
+          error={shownError}
+          errorAction={
+            uncertain ? (
               <Button
-                variant="secondary"
+                size="sm"
+                className="pointer-coarse:h-11"
                 disabled={busy}
                 onClick={() => {
                   if (inFlight.current) return;
@@ -347,16 +385,32 @@ export function SecurityController({
               >
                 Retry same request
               </Button>
-            ) : null}
+            ) : undefined
+          }
+          sectionAction={
             <Button
               variant="ghost"
+              size="sm"
               disabled={busy || identityChanged}
               onClick={() => setRevision((value) => value + 1)}
             >
+              <RefreshCwIcon aria-hidden="true" />
               Refresh sign-in methods
             </Button>
-          </div>
-        </>
+          }
+          success={success}
+          onReauthenticate={onReauthenticate}
+          onConnect={(provider) => {
+            void mutate("connect", { provider });
+          }}
+          onDisconnect={(provider) => mutate("disconnect", { provider })}
+          onPassword={(newPassword, currentPassword) =>
+            mutate("password", {
+              newPassword,
+              ...(currentPassword === undefined ? {} : { currentPassword }),
+            })
+          }
+        />
       )}
     </PersonalSettingsShell>
   );

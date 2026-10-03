@@ -6,7 +6,9 @@ import type {
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  ScheduledTaskPolicyDrift,
   ScheduledTaskRun,
+  ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
 } from "@/types";
 
@@ -69,6 +71,12 @@ export type ScheduledTaskFormState = {
   prompt: string;
   model: string;
   reasoningEffort: ReasoningEffort;
+  /**
+   * True while the model and reasoning shown are only the workspace's resolved
+   * default. The task is then saved without a model, so every run uses the
+   * default at that time (a later subscription or credit purchase included).
+   */
+  modelFollowsDefault?: boolean;
   scheduleType: "once" | "interval" | "calendar";
   runAt: string;
   intervalMinutes: number;
@@ -91,7 +99,14 @@ export type ScheduledTaskFormState = {
   mcpServerIds?: string[];
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
+  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  slackBotChannelId: string;
   resources: ResourceRef[];
+  /**
+   * What each run's agent can do. Undefined follows the workspace's agent
+   * defaults (nothing is sent); a value is frozen into the schedule.
+   */
+  agentCapabilities?: import("@opengeni/contracts").AgentCapabilities;
 };
 
 /**
@@ -136,6 +151,8 @@ export function newScheduledTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    /** The model/reasoning above are the resolved default, not a choice. */
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -147,6 +164,7 @@ export function newScheduledTaskFormState(
     prompt: "",
     model: defaults.model ?? "",
     reasoningEffort: defaults.reasoningEffort ?? "high",
+    ...(defaults.modelFollowsDefault ? { modelFollowsDefault: true } : {}),
     scheduleType: "once",
     runAt: localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)),
     intervalMinutes: 60,
@@ -162,6 +180,7 @@ export function newScheduledTaskFormState(
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
     slackBotConnectionId: "",
+    slackBotChannelId: "",
     resources,
   };
 }
@@ -177,6 +196,7 @@ export function recurringSessionTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -198,6 +218,7 @@ export function formStateFromScheduledTask(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
   } = {},
@@ -236,6 +257,12 @@ export function formStateFromScheduledTask(
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
     reasoningEffort: task.agentConfig.reasoningEffort ?? defaults.reasoningEffort ?? "high",
+    // A task saved without any model policy keeps following the default; one
+    // that names a model or reasoning keeps that choice.
+    modelFollowsDefault:
+      !task.agentConfig.model &&
+      !task.agentConfig.reasoningEffort &&
+      defaults.modelFollowsDefault === true,
     runMode: task.runMode,
     targetSessionId: task.targetSessionId ?? "",
     executionTarget:
@@ -250,6 +277,10 @@ export function formStateFromScheduledTask(
     workingDir: task.agentConfig.machineTarget?.workingDir ?? "",
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
+    slackBotChannelId: task.agentConfig.slackBotChannelId ?? "",
+    ...(task.agentConfig.agent?.capabilities !== undefined
+      ? { agentCapabilities: task.agentConfig.agent.capabilities }
+      : {}),
   };
 }
 
@@ -358,8 +389,18 @@ export function agentConfigFromFormState(
   if (form.includeOpenGeniTool) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
+  // Keep what the form doesn't edit (identity, renderer, instructions) as saved.
+  const { capabilities: _savedCapabilities, ...savedAgent } = existingTask?.agentConfig.agent ?? {};
+  const agent =
+    form.runMode === "existing_session"
+      ? undefined
+      : {
+          ...savedAgent,
+          ...(form.agentCapabilities !== undefined ? { capabilities: form.agentCapabilities } : {}),
+        };
   return {
     prompt: form.prompt.trim(),
+    ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     ...(existingTask?.agentConfig.knowledgeSource
       ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
       : {}),
@@ -367,8 +408,16 @@ export function agentConfigFromFormState(
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
-    ...(form.model ? { model: form.model } : {}),
-    reasoningEffort: form.reasoningEffort,
+    // A task that continues an existing chat never posts on its own.
+    ...(form.slackBotConnectionId && form.slackBotChannelId && form.runMode !== "existing_session"
+      ? { slackBotChannelId: form.slackBotChannelId }
+      : {}),
+    ...(form.modelFollowsDefault
+      ? {}
+      : {
+          ...(form.model ? { model: form.model } : {}),
+          reasoningEffort: form.reasoningEffort,
+        }),
     ...(form.runMode !== "existing_session" &&
     form.executionTarget === "machine" &&
     form.machineSandboxId
@@ -764,4 +813,151 @@ export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): s
     form.targetSessionId,
     form.knowledgeSource?.destination ?? null,
   ]);
+}
+
+const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], string> = {
+  missing_connection: "no account is connected for it",
+  expired: "its connection expired",
+  insufficient_scope: "its connection is missing a permission it needs",
+  refresh_failed: "its connection could not be renewed",
+  personal_authority_unavailable: "your personal account is not available to this schedule",
+  unsupported_auth: "its sign-in is not supported for scheduled runs",
+  resource_scope_unavailable: "the resources it was allowed to use are no longer available",
+};
+
+/** "Couldn't use Slack: your personal account is not available to this schedule." */
+export function scheduledTaskAccessFailureText(failure: ScheduledTaskRunAccessFailure): string {
+  const reason = ACCESS_FAILURE_REASON[failure.reason] ?? "it could not be reached";
+  return `Couldn't use ${failure.name}: ${reason}.`;
+}
+
+/** One sentence per failing connector, in the order the run hit them. */
+export function scheduledTaskAccessFailuresText(
+  failures: readonly ScheduledTaskRunAccessFailure[] | undefined,
+): string | null {
+  if (!failures || failures.length === 0) return null;
+  return failures.map(scheduledTaskAccessFailureText).join(" ");
+}
+
+/** "Gmail", "Gmail and Linear", "Gmail, Linear, Notion and 2 more". */
+export function namedList(names: readonly string[], limit = 3): string {
+  const unique = [...new Set(names)];
+  if (unique.length <= 1) return unique[0] ?? "";
+  if (unique.length <= limit) {
+    return `${unique.slice(0, -1).join(", ")} and ${unique[unique.length - 1]}`;
+  }
+  return `${unique.slice(0, limit).join(", ")} and ${unique.length - limit} more`;
+}
+
+function openGeniToolLabel(tool: string): string {
+  return tool.replaceAll("_", " ");
+}
+
+/** "The latest run is waiting for a person to approve a tool or answer a question." */
+export function scheduledTaskAwaitingHumanText(
+  awaitingHuman: { since: string; expiresAt: string | null } | null | undefined,
+): string | null {
+  if (!awaitingHuman) return null;
+  const base = "The latest run is waiting for a person to approve a tool or answer a question.";
+  return awaitingHuman.expiresAt
+    ? `${base} If nobody answers by ${formatTimestamp(awaitingHuman.expiresAt)}, the scheduler rejects it automatically.`
+    : base;
+}
+
+/** "The account chosen for Slack can no longer be used, so new runs cannot start." */
+export function scheduledTaskUnavailableAccountsText(
+  connectors: readonly { name: string }[] | undefined,
+): string | null {
+  if (!connectors || connectors.length === 0) return null;
+  return `The account chosen for ${namedList(connectors.map((item) => item.name))} can no longer be used, so new runs cannot start.`;
+}
+
+/**
+ * Plain sentences naming what the access refresh would change. Empty when the
+ * task is up to date (or the viewer cannot act on it). `omitUnavailableAccounts`
+ * leaves out the blocked-account sentence when a louder notice already says it.
+ */
+export function scheduledTaskPolicyDriftLines(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+  options: { omitUnavailableAccounts?: boolean } = {},
+): string[] {
+  if (!drift) return [];
+  const lines: string[] = [];
+  const names = (items: readonly { name: string }[]) => namedList(items.map((item) => item.name));
+  const unavailableAccounts = options.omitUnavailableAccounts
+    ? null
+    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts);
+  if (unavailableAccounts) lines.push(unavailableAccounts);
+  if (drift.attachableAccounts.length > 0) {
+    lines.push(
+      `${names(drift.attachableAccounts)} ${drift.attachableAccounts.length === 1 ? "has" : "have"} no account on this schedule, although one is now connected.`,
+    );
+  }
+  if (drift.missingConnectors.length > 0) {
+    lines.push(
+      `New schedules in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
+    );
+  }
+  if (drift.missingOpenGeniTools.length > 0) {
+    const count = drift.missingOpenGeniTools.length;
+    lines.push(
+      `${count} newer Opengeni ${count === 1 ? "tool is" : "tools are"} not available to it: ${namedList(
+        drift.missingOpenGeniTools.map(openGeniToolLabel),
+        4,
+      )}.`,
+    );
+  }
+  if (drift.unavailableConnectors.length > 0) {
+    lines.push(
+      `${names(drift.unavailableConnectors)} ${drift.unavailableConnectors.length === 1 ? "is" : "are"} no longer set up in this workspace and will be removed.`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * Defaults the owner chose to keep off one schedule, for the task head they
+ * looked at. Only additions a person may deliberately decline are dismissible:
+ * workspace default connectors and OpenGeni tools. A broken account or a
+ * connector the workspace removed is never hidden.
+ */
+export type ScheduledTaskDriftDismissal = {
+  executionDigest: string;
+  connectors: string[];
+  openGeniTools: string[];
+};
+
+export function scheduledTaskDriftIsDismissible(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+): boolean {
+  return Boolean(
+    drift && (drift.missingConnectors.length > 0 || drift.missingOpenGeniTools.length > 0),
+  );
+}
+
+/**
+ * The drift still worth showing after the owner's dismissal. A dismissal made
+ * for another task head no longer applies. Null when nothing is left.
+ */
+export function visibleScheduledTaskPolicyDrift(
+  drift: ScheduledTaskPolicyDrift | null | undefined,
+  dismissal: ScheduledTaskDriftDismissal | null,
+  executionDigest: string,
+): ScheduledTaskPolicyDrift | null {
+  if (!drift) return null;
+  if (!dismissal || dismissal.executionDigest !== executionDigest) return drift;
+  const connectors = new Set(dismissal.connectors);
+  const tools = new Set(dismissal.openGeniTools);
+  const visible: ScheduledTaskPolicyDrift = {
+    ...drift,
+    missingConnectors: drift.missingConnectors.filter((item) => !connectors.has(item.id)),
+    missingOpenGeniTools: drift.missingOpenGeniTools.filter((tool) => !tools.has(tool)),
+  };
+  return visible.missingConnectors.length > 0 ||
+    visible.missingOpenGeniTools.length > 0 ||
+    visible.unavailableAccounts.length > 0 ||
+    visible.attachableAccounts.length > 0 ||
+    visible.unavailableConnectors.length > 0
+    ? visible
+    : null;
 }

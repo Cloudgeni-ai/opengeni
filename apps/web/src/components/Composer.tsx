@@ -12,6 +12,7 @@ import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/browser";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";
+import { ComposerUsageNotice } from "@/components/usage/usage-entry";
 
 export function useDraftAttachments(
   workspaceId: string,
@@ -47,6 +48,8 @@ export function ConsoleComposer(props: {
   messages?: Partial<ChatComposerMessages>;
   /** Soft-hide dictate while realtime voice is active. */
   transcriptionSuppressed?: boolean;
+  /** Re-read the near/at-limit usage line when this changes (for example the session status). */
+  usageRefreshKey?: unknown;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
@@ -67,7 +70,12 @@ export function ConsoleComposer(props: {
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
-      {...(props.header ? { header: props.header } : {})}
+      header={
+        <>
+          <ComposerUsageNotice workspaceId={props.workspaceId} refreshKey={props.usageRefreshKey} />
+          {props.header}
+        </>
+      }
       // The actions menu owns attachments when supplied.
       attachButtonClassName={props.controlsLeading ? "hidden" : undefined}
       controlsStart={props.controls}

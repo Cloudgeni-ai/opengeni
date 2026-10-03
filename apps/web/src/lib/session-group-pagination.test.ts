@@ -4,6 +4,7 @@ import {
   sessionMatchesPaginationGroup,
   sessionPaginationGroupQuery,
   sessionPaginationLocalDateKey,
+  sessionPaginationProjectGroup,
   type SessionPaginationBrowseFilter,
   type SessionPaginationGroup,
 } from "./session-group-pagination";
@@ -50,6 +51,20 @@ describe("session group pagination", () => {
     expect(sessionPaginationGroupQuery(creator, BROWSE_ALL, NOW)).toEqual({
       createdBy: creator.creator,
     });
+  });
+
+  test("projects and Default have distinct server-filtered pagination cursors", () => {
+    const project = sessionPaginationProjectGroup("00000000-0000-4000-8000-000000000001", "UI/UX");
+    const unfiled = sessionPaginationProjectGroup(null, "Default");
+    expect(project.key).not.toBe(unfiled.key);
+    expect(sessionPaginationGroupQuery(project, BROWSE_ALL, NOW)).toEqual({
+      channelId: project.channelId,
+    });
+    expect(sessionPaginationGroupQuery(unfiled, BROWSE_ALL, NOW)).toEqual({ channelId: null });
+    expect(sessionMatchesPaginationGroup(row({ channelId: project.channelId }), project, NOW)).toBe(
+      true,
+    );
+    expect(sessionMatchesPaginationGroup(row(), unfiled, NOW)).toBe(true);
   });
 
   test("intersects a created-date bucket with the active browse range", () => {

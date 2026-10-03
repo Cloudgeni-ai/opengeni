@@ -24,8 +24,11 @@ Canonical implementation:
 - first-party MCP and HTTP topology surfaces: `apps/api/src/mcp/server.ts` and
   `apps/api/src/routes/sessions.ts`;
 - client surface: `OpenGeniClient.listAgentTopology` in
-  `packages/sdk/src/client.ts`; and
-- human presentation: `apps/web/src/components/related-work-advisory.tsx`.
+  `packages/sdk/src/client.ts`.
+
+The stock web app no longer renders these advisories: its Agents page (the only
+human presentation) was retired, and the topology API and the presentation
+rules below are unchanged for any client that shows them.
 
 ## Non-negotiable boundaries
 
@@ -267,9 +270,9 @@ Each session's `relatedWork` / `workDiscovery` projection contains:
 }
 ```
 
-The stock topology UI uses “Possible related work” and “Possible overlap,”
-shows the bounded match explanation, role/state/version/provenance/freshness,
-and states that the evidence does not reserve work, transfer ownership, or
+A UI that presents advisories should use “Possible related work” and “Possible overlap,”
+show the bounded match explanation, role/state/version/provenance/freshness,
+and state that the evidence does not reserve work, transfer ownership, or
 authorize another session.
 
 Consumers must preserve that meaning. A useful UI may offer a user-driven link

@@ -79,7 +79,7 @@ describe("codex subscription live E2E (requires a valid ~/.codex/auth.json)", ()
       clientVersion: CODEX_CLIENT_VERSION,
       getToken: async () => auth.token,
       refresh: async () => auth.token,
-      resolveModel: buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS, "gpt-5.6-sol"),
+      resolveModel: buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS),
     };
 
     const result = await codexRequestStorage.run(ctx, () =>

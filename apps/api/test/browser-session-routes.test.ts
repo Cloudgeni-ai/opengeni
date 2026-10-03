@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import type { FileAsset } from "@opengeni/contracts";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { CreateBrowserSessionRequest, type AccessGrant, type FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
+import { testSettings } from "@opengeni/testing";
+import { createApp } from "../src/app";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
+import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
   browserNeedsStandaloneDisplayStack,
   browserFileAuthoritySubjectId,
@@ -10,12 +15,415 @@ import {
   requireAuthorizedBrowserUploadFiles,
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
+  browserScreenshotError,
+  browserCreateInput,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
+
+test("automatic managed directory recovery preserves current authority and refused outcomes", async () => {
+  const directory = await mkdtemp("/tmp/og-api-working-recovery-");
+  const script = join(directory, "synthetic-route.ts");
+  await writeFile(script, `(${automaticBrowserRecoveryFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const results = JSON.parse(stdout) as {
+      scenario: string;
+      status: number;
+      reads: number;
+      creates: number;
+      intent: boolean | null;
+      sourceChecks: number;
+      touches: number;
+      lost: number;
+    }[];
+    expect(results).toEqual([
+      {
+        scenario: "recovered",
+        status: 200,
+        reads: 2,
+        creates: 1,
+        intent: true,
+        sourceChecks: 2,
+        touches: 2,
+        lost: 0,
+      },
+      ...["unknown", "unattested"].map((scenario) => ({
+        scenario,
+        status: 409,
+        reads: 1,
+        creates: 1,
+        intent: true,
+        sourceChecks: 2,
+        touches: 2,
+        lost: 0,
+      })),
+      ...["token-changed", "generation-changed", "route-changed", "machine-moved"].map(
+        (scenario) => ({
+          scenario,
+          status: 409,
+          reads: 1,
+          creates: 0,
+          intent: null,
+          sourceChecks: 2,
+          touches: 1,
+          lost: 0,
+        }),
+      ),
+      {
+        scenario: "holder-lost",
+        status: 409,
+        reads: 1,
+        creates: 0,
+        intent: null,
+        sourceChecks: 2,
+        touches: 2,
+        lost: 0,
+      },
+      {
+        scenario: "access-revoked",
+        status: 404,
+        reads: 1,
+        creates: 0,
+        intent: null,
+        sourceChecks: 2,
+        touches: 1,
+        lost: 0,
+      },
+      {
+        scenario: "ephemeral",
+        status: 409,
+        reads: 1,
+        creates: 0,
+        intent: null,
+        sourceChecks: 1,
+        touches: 1,
+        lost: 1,
+      },
+      {
+        scenario: "lightpanda",
+        status: 200,
+        reads: 2,
+        creates: 1,
+        intent: null,
+        sourceChecks: 1,
+        touches: 1,
+        lost: 0,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+async function automaticBrowserRecoveryFixture() {
+  const routeHref = process.argv[2]!;
+  const apiDirectory = new URL("..", routeHref).pathname;
+  const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
+  const { mock } = await import("bun:test");
+  const { randomUUID } = await import("node:crypto");
+  const { Hono } = (await import(resolveFromApi("hono"))) as typeof import("hono");
+  const { HTTPException: FixtureHTTPException } = (await import(
+    resolveFromApi("hono/http-exception")
+  )) as typeof import("hono/http-exception");
+  const db = (await import(resolveFromApi("@opengeni/db"))) as typeof import("@opengeni/db");
+  const core = (await import(resolveFromApi("@opengeni/core"))) as typeof import("@opengeni/core");
+  const { testSettings: fixtureSettings } = (await import(
+    resolveFromApi("@opengeni/testing")
+  )) as typeof import("@opengeni/testing");
+  const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
+  const accountId = randomUUID(),
+    workspaceId = randomUUID(),
+    browserSessionId = randomUUID();
+  const sourceSessionId = randomUUID(),
+    machineId = randomUUID(),
+    instanceId = randomUUID();
+  const controllerGeneration = randomUUID(),
+    rootSecret = "synthetic-controller-authority";
+  const grant = {
+    accountId,
+    workspaceId,
+    subjectId: "synthetic-user",
+    permissions: ["sessions:read"],
+  };
+  const baseRecord = {
+    sourceSessionId,
+    tokenGeneration: 1,
+    controllerHostSandboxGroupId: null,
+    networkRouteAuthority: null,
+    session: {
+      id: browserSessionId,
+      workspaceId,
+      lifecycle: "active",
+      placement: { kind: "connected_machine", sandboxId: machineId },
+      controller: {
+        controllerId: "opengeni-browserd",
+        controllerGeneration,
+        placementInstanceId: instanceId,
+      },
+      driverId: "opengeni.cdp.v1",
+      engine: "chromium",
+      headless: true,
+      linkedComputerSessionId: null,
+      networkRouteId: null,
+    },
+  };
+  let state = {
+    scenario: "recovered",
+    missing: false,
+    recovered: false,
+    reads: 0,
+    creates: [] as Record<string, unknown>[],
+    sourceChecks: 0,
+    touches: 0,
+    lost: 0,
+  };
+  mock.module(resolveFromApi("@opengeni/db"), () => ({
+    ...db,
+    getBrowserSessionControlRecord: async () => {
+      const record = structuredClone(baseRecord);
+      if (state.scenario === "ephemeral")
+        record.session.driverId = "opengeni.cdp.ephemeral-context.v1";
+      if (state.scenario === "lightpanda") record.session.engine = "lightpanda";
+      if (state.missing && state.scenario === "token-changed") record.tokenGeneration++;
+      if (state.missing && state.scenario === "generation-changed")
+        record.session.controller.controllerGeneration = randomUUID();
+      if (state.missing && state.scenario === "route-changed")
+        record.session.networkRouteId = randomUUID() as never;
+      return record;
+    },
+    getSession: async () => ({
+      id: sourceSessionId,
+      workspaceId,
+      activeSandboxId:
+        state.missing && state.scenario === "machine-moved" ? randomUUID() : machineId,
+    }),
+    touchBrowserSessionController: async () => {
+      state.touches++;
+      return !(state.missing && state.scenario === "holder-lost");
+    },
+    terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
+    markEphemeralBrowserSessionLost: async () => {
+      state.lost++;
+      return true;
+    },
+  }));
+  mock.module(resolveFromApi("@opengeni/core"), () => ({
+    ...core,
+    requireAccessGrant: async () => grant,
+    requireSessionAuthorization: async () => {
+      state.sourceChecks++;
+      if (state.missing && state.scenario === "access-revoked")
+        throw new core.SessionAuthorizationDeniedError("revoked");
+      return {};
+    },
+  }));
+  const success = (data: unknown) => Response.json({ protocolVersion: 1, ok: true, data });
+  const failure = (status: number, code: string) =>
+    Response.json(
+      {
+        protocolVersion: 1,
+        ok: false,
+        error: { code, message: "synthetic retained recovery state", retryable: false },
+      },
+      { status },
+    );
+  const expectedTokens = authority.deriveBrowserSessionControllerTokens({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement: baseRecord.session.placement,
+    placementInstanceId: instanceId,
+    browserSessionId,
+    controllerGeneration,
+    tokenGeneration: 1,
+  });
+  const expectedAdmin = authority.deriveBrowserControllerAdminToken({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement: baseRecord.session.placement,
+    placementInstanceId: instanceId,
+  });
+  const observation = {
+    protocolVersion: 1,
+    observationId: randomUUID(),
+    browserSessionId,
+    target: {
+      id: "synthetic-target",
+      browserSessionId,
+      controllerGeneration,
+      targetGeneration: "synthetic-target-generation",
+      documentGeneration: "synthetic-document",
+      kind: "page",
+      title: "Fixture",
+      url: "about:blank",
+      selected: true,
+      attached: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    frameId: "synthetic-frame",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (request.method === "GET" && path.endsWith("/targets")) {
+        state.reads++;
+        if (request.headers.get("authorization") !== `Bearer ${expectedTokens.viewToken}`)
+          throw new Error("synthetic view authority mismatch");
+        if (!state.recovered) {
+          state.missing = true;
+          return failure(401, "permission_denied");
+        }
+        return success([]);
+      }
+      if (request.method !== "POST" || path !== "/v1/browser-sessions")
+        throw new Error("unexpected synthetic controller request");
+      const body = (await request.json()) as Record<string, unknown>;
+      state.creates.push(body);
+      if (
+        request.headers.get("authorization") !== `Bearer ${expectedAdmin}` ||
+        body.browserSessionId !== browserSessionId ||
+        body.controllerGeneration !== controllerGeneration ||
+        body.tokenGeneration !== 1 ||
+        body.controlToken !== expectedTokens.controlToken ||
+        body.viewToken !== expectedTokens.viewToken ||
+        body.headed !== false ||
+        body.initialUrl !== undefined ||
+        body.restore !== undefined
+      )
+        throw new Error("synthetic recovery authority mismatch");
+      if (state.scenario !== "lightpanda" && body.recoverExistingWorkingDirectory !== true)
+        return failure(409, "resource_unavailable");
+      if (["unknown", "unattested"].includes(state.scenario))
+        return failure(409, "resource_unavailable");
+      state.recovered = true;
+      return success({ browserSessionId, controllerGeneration, observation });
+    },
+  });
+  const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
+  const channel = await import(channelHref);
+  mock.module(channelHref, () => ({
+    ...channel,
+    withChannelARead: async (
+      _services: unknown,
+      _context: unknown,
+      callback: (handle: unknown) => Promise<unknown>,
+    ) =>
+      await callback({
+        routingSession: {
+          prime: async () => ({
+            kind: "selfhosted",
+            sandboxId: machineId,
+            providerInstanceId: instanceId,
+            session: {
+              resolveExposedPort: async () => ({
+                host: "127.0.0.1",
+                port: server.port,
+                tls: false,
+              }),
+            },
+          }),
+        },
+      }),
+    withChannelA: async () => {
+      throw new Error("unexpected synthetic lifecycle operation");
+    },
+  }));
+  const { registerBrowserSessionRoutes } = await import(routeHref);
+  const app = new Hono();
+  app.onError((error, context) =>
+    context.json(
+      { message: error.message },
+      (error instanceof FixtureHTTPException ? error.status : 500) as never,
+    ),
+  );
+  registerBrowserSessionRoutes(app, {
+    settings: fixtureSettings({ delegationSecret: rootSecret }),
+    db: {},
+    bus: {},
+  } as never);
+  // Expected refusals remain observable through the HTTP result, without printing fixture tokens.
+  const errors: unknown[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    const results = [];
+    for (const scenario of [
+      "recovered",
+      "unknown",
+      "unattested",
+      "token-changed",
+      "generation-changed",
+      "route-changed",
+      "machine-moved",
+      "holder-lost",
+      "access-revoked",
+      "ephemeral",
+      "lightpanda",
+    ]) {
+      state = {
+        scenario,
+        missing: false,
+        recovered: false,
+        reads: 0,
+        creates: [],
+        sourceChecks: 0,
+        touches: 0,
+        lost: 0,
+      };
+      const response = await app.request(
+        `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets`,
+      );
+      const intent = state.creates[0]?.recoverExistingWorkingDirectory ?? null;
+      results.push({
+        scenario,
+        status: response.status,
+        reads: state.reads,
+        creates: state.creates.length,
+        intent,
+        sourceChecks: state.sourceChecks,
+        touches: state.touches,
+        lost: state.lost,
+      });
+    }
+    console.log(JSON.stringify(results));
+  } finally {
+    console.error = originalError;
+    await server.stop(true);
+  }
+}
 
 function readyFile(id = FILE_ID): FileAsset {
   return {
@@ -45,6 +453,131 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const internal = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message: "PRIVATE /home/user/profile secret",
+      retryable: true,
+      details: { privatePath: "/home/user/profile" },
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as Error).cause).toBe(internal);
+    app.get("/v1/test/browser-capture-timeout", () => {
+      throw projected;
+    });
+    const response = await app.request("http://localhost/v1/test/browser-capture-timeout", {
+      headers: { "x-opengeni-correlation-id": "capture-request-42" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          "This tab did not produce a screenshot in time. Other browser operations may still work.",
+        retryable: true,
+        requestId: "capture-request-42",
+      },
+    });
+  });
+
+  test("does not relabel another screenshot failure as a timeout", () => {
+    for (const error of [
+      new Error("unexpected"),
+      new BrowserControlRequestError(403, {
+        code: "permission_denied",
+        message: "protected authentication",
+        retryable: false,
+      }),
+      new BrowserControlRequestError(409, {
+        code: "outcome_unknown",
+        message: "uncertain",
+        retryable: false,
+      }),
+    ])
+      expect(browserScreenshotError(error)).toBe(error);
+  });
+
+  test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(source.indexOf("async function withBrowserPlacement"));
+    expect(placement).toContain("retainedInstanceId: expectedPlacementInstanceId");
+    expect(placement).toContain('expectedPlacement?.kind === "sandbox_group"');
+    expect(placement).toContain(
+      "assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId)",
+    );
+    const channel = await readFile(new URL("../src/sandbox/channel-a.ts", import.meta.url), "utf8");
+    expect(channel).toContain("retainedInstanceId: ctx.retainedInstanceId");
+    const holder = source.slice(
+      source.indexOf("async function ensureInteractionHolder"),
+      source.indexOf("async function releaseInteractionHolder"),
+    );
+    expect(holder).toContain('imagePolicy: "new_creates_only"');
+    expect(holder).toContain("expectedEpoch: placement.lease.leaseEpoch");
+    expect(holder).toContain("rigVersionId: sourceSession.rigVersionId");
+  });
+  test("explicit Lightpanda preserves Connected Machine placement and semantic capabilities", () => {
+    const grant: AccessGrant = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      subjectId: "browser-user",
+      permissions: ["sessions:control"],
+    };
+    const request = CreateBrowserSessionRequest.parse({
+      operationId: "44444444-4444-4444-8444-444444444444",
+      sessionId: FILE_ID,
+      engine: "lightpanda",
+    });
+    const placement = {
+      kind: "connected_machine" as const,
+      sandboxId: FILE_ID,
+    };
+    const input = browserCreateInput(grant, grant.workspaceId, request, placement);
+    expect(input).toMatchObject({
+      engine: "lightpanda",
+      driverId: "opengeni.lightpanda.cdp.v1",
+      headless: true,
+      placement,
+      identityId: null,
+      linkedComputerSessionId: null,
+      capabilities: {
+        liveFrames: false,
+        humanInput: false,
+        linkedComputer: false,
+      },
+    });
+    const defaultInput = browserCreateInput(
+      grant,
+      grant.workspaceId,
+      CreateBrowserSessionRequest.parse({
+        operationId: request.operationId,
+        sessionId: FILE_ID,
+      }),
+      placement,
+    );
+    expect(defaultInput.engine).toBe("chromium");
+    for (const unsupported of [
+      { kind: "attached_device" as const, deviceId: FILE_ID },
+      {
+        kind: "external_provider" as const,
+        providerId: "browserbase",
+        placementId: "default",
+      },
+    ]) {
+      expect(() => browserCreateInput(grant, grant.workspaceId, request, unsupported)).toThrow(
+        "Lightpanda requires a managed sandbox or Connected Machine browser placement",
+      );
+    }
+  });
+
   test("browser screenshot query validates capture options", () => {
     expect(parseBrowserScreenshotOptions(new URLSearchParams())).toEqual({});
     expect(
@@ -73,6 +606,9 @@ describe("BrowserSession route discipline", () => {
       Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-security-policy")).toBe(USER_CONTENT_SECURITY_POLICY);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
   test("registers the complete lifecycle, semantic control, diagnostics, and frame surface", async () => {

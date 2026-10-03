@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  DEFAULT_SESSION_BROWSE_PREFERENCES,
   readSessionBrowseGroupBy,
+  sessionBrowsePreferencesCustomized,
   sessionBrowsePreferenceStorageId,
   writeSessionBrowseGroupBy,
   readSessionBrowsePreferences,
@@ -17,6 +19,42 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem"> {
 }
 
 describe("session browse preferences", () => {
+  test("the default view is not a customized or filtered view", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:new", "workspace:personal");
+    expect(sessionBrowsePreferencesCustomized(DEFAULT_SESSION_BROWSE_PREFERENCES)).toBe(false);
+    expect(sessionBrowsePreferencesCustomized(readSessionBrowsePreferences(id, storage))).toBe(
+      false,
+    );
+    expect(
+      sessionBrowsePreferencesCustomized({
+        ...DEFAULT_SESSION_BROWSE_PREFERENCES,
+        groupBy: "activity",
+      }),
+    ).toBe(true);
+    expect(
+      sessionBrowsePreferencesCustomized({ ...DEFAULT_SESSION_BROWSE_PREFERENCES, status: "all" }),
+    ).toBe(true);
+    expect(
+      sessionBrowsePreferencesCustomized({
+        ...DEFAULT_SESSION_BROWSE_PREFERENCES,
+        showEmptyGroups: true,
+      }),
+    ).toBe(true);
+    expect(
+      sessionBrowsePreferencesCustomized({ ...DEFAULT_SESSION_BROWSE_PREFERENCES, sortBy: "name" }),
+    ).toBe(true);
+  });
+
+  test("remembers the Needs you view and treats it as a customized one", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
+    const view = { ...DEFAULT_SESSION_BROWSE_PREFERENCES, status: "needs-you" } as const;
+    writeSessionBrowsePreferences(id, view, storage);
+    expect(readSessionBrowsePreferences(id, storage).status).toBe("needs-you");
+    expect(sessionBrowsePreferencesCustomized(view)).toBe(true);
+  });
+
   test("persists the complete view independently for each workspace and subject", () => {
     const storage = memoryStorage();
     const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");

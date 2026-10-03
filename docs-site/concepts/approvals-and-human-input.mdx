@@ -36,4 +36,4 @@ If you send an ordinary message while the session is waiting on an approval or a
 
 Both waits appear on the session timeline in the web app, on embedded timelines built with `@opengeni/react`, and in the session's events through the API. A structured question from a child session can also be answered by an authorized agent in another session; tool approvals never can.
 
-The backend `createChatHandler` exposes unresolved approvals and questions through its history endpoint. Custom frontends must restore and render these pending requests and submit responses through its respond endpoint. For the full native React experience, use the existing session hooks and human-input components rather than a separate chat UI.
+In an embedded product, `SessionConversation` renders both. To answer them from your own UI or backend, see [Approvals & questions](/integrate/approvals-and-questions).

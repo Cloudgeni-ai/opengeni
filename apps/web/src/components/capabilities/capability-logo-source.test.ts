@@ -32,6 +32,9 @@ describe("capability logo source", () => {
     expect(capabilityLogoSource({ id: "api:x", logoAssetPath: null }, resolve)).toBe(
       "/capability-logos/x.svg",
     );
+    expect(capabilityLogoSource({ id: "api:github-app", logoAssetPath: null }, resolve)).toBe(
+      "/capability-logos/github.svg",
+    );
     expect(
       capabilityLogoSource(
         { id: "mcp:linear", logoAssetPath: "catalog-assets/linear.svg" },

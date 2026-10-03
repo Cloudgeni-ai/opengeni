@@ -106,6 +106,10 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/archived-session-imports.ts#appendTimeline": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/index.ts#switchSessionCodexAccount": {
     inserts: 1,
     contract: "canonical",
@@ -261,10 +265,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
+  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 3, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
-    // pending event, producer-side supersession event, goal.resumed
-    inserts: 3,
+    // pending event, producer-side supersession event, consumed-on-arrival
+    // cancellation, goal.resumed
+    inserts: 4,
     contract: "canonical",
   },
   "packages/db/src/index.ts#appendSessionEvents": { inserts: 1, contract: "canonical" },
@@ -297,6 +302,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/session-control.ts#mutateSessionControlInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
     inserts: 1,
     contract: "canonical",
   },
@@ -366,6 +375,7 @@ const callerOwnedControlWriters = new Set([
 ]);
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
+  appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
@@ -460,6 +470,82 @@ const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
     "cancelSessionSubtreeInTransaction",
   ],
 };
+
+const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
+const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
+// Links finished preview sessions to their seeded schedule runs (metadata only).
+const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
+const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
+const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
+
+/** Inert imports have no turns/attempts. Only these two activity-gated callers
+ * may delegate a timeline write after owning the workspace/session/cursor prefix. */
+function expectArchivedImportBoundary(source: string): void {
+  const sourceFile = parseSourceFile(ARCHIVED_IMPORT_PATH, source);
+  const functions = new Map<string, FunctionLikeDeclaration>();
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id) functions.set(node.id.name, node);
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  for (const caller of expectedOwnedSuffixCallers.appendTimeline!) {
+    const functionNode = functions.get(caller)!;
+    expect(functionNode, caller).toBeDefined();
+    expect(functionCalls(functionNode, "withWorkspaceSubjectSessionActivityRls"), caller).toBe(
+      true,
+    );
+    const activityCalls: t.CallExpression[] = [];
+    const visitActivity = (node: t.Node): void => {
+      if (isCallExpression(node) && callName(node) === "withWorkspaceSubjectSessionActivityRls") {
+        activityCalls.push(node);
+      }
+      forEachChild(node, visitActivity);
+    };
+    forEachChild(functionNode, visitActivity);
+    expect(activityCalls, caller).toHaveLength(1);
+    const membershipFence = activityCalls[0]!.arguments[6];
+    expect(membershipFence?.type, caller).toBe("Literal");
+    expect(
+      membershipFence && "value" in membershipFence ? membershipFence.value : null,
+      caller,
+    ).toBe(true);
+    const locks = callPositions(functionNode, "lockSessionEventWriteRows");
+    const writes = callPositions(functionNode, "appendTimeline");
+    expect(locks, caller).toHaveLength(1);
+    expect(writes, caller).toHaveLength(1);
+    expect(locks[0], caller).toBeLessThan(writes[0]!);
+    expect(
+      functionCallHasProperty(functionNode, "lockSessionEventWriteRows", "sessionIds"),
+      caller,
+    ).toBe(true);
+  }
+  expect(source).toContain("row.importedArchiveImportId !== input.importId");
+  expect(source).toContain("row.importedArchiveSubjectId !== input.subjectId");
+  expect(source).toContain("importedArchiveImportId: payload.importId");
+  expect(source).toContain("turnAssociation: null");
+  const migration = readFileSync(
+    join(repoRoot, "packages/db/drizzle/0560_archived_session_imports.sql"),
+    "utf8",
+  );
+  expect(migration).toContain("sessions_imported_archive_inert_check");
+  expect(migration).toContain("MESSAGE = 'SESSION_IMPORTED_READ_ONLY'");
+  // Turn and attempt guards cover updates as well as fresh admission: the
+  // historical attempt-binding guard alone only covers inserts.
+  expect(migration).toContain("CREATE TRIGGER session_turns_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turns");
+  expect(migration).toContain("CREATE TRIGGER session_turn_attempts_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turn_attempts");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_turn_attempts");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_history_items");
+}
+
+/** The DEV-only seed may only write to this worktree's loopback dev stack. */
+function expectDevSeedGuards(source: string): void {
+  expect(source).toContain('if (!flag("--yes"))');
+  expect(source).toContain("if (!LOOPBACK.has(url.hostname)) fail(");
+  expect(source).toContain("if (url.port !== runtime.OPENGENI_API_PORT)");
+  expect(source).toContain("set_config('opengeni.session_activity_gate_state', 'finalized', true)");
+}
 
 function productionTypeScriptFiles(): string[] {
   const files: string[] = [];
@@ -947,6 +1033,12 @@ describe("session_events writer inventory", () => {
         const key = `${file}#${enclosing.name}`;
         if (checked.has(key)) return;
         checked.add(key);
+        if (key === ARCHIVED_IMPORT_WRITER) {
+          // The unbranded suffix receives the create hook's Database handle;
+          // its closed caller inventory and import boundary are pinned below.
+          expectArchivedImportBoundary(source);
+          return;
+        }
         if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
           // The parser-backed maintenance migration cannot use the runtime
           // Drizzle activity handle. Its only writer updates dormant Skill
@@ -967,6 +1059,16 @@ describe("session_events writer inventory", () => {
             )
             .map((candidate) => relative(repoRoot, candidate).replaceAll("\\", "/"));
           expect(callers).toEqual(["packages/db/src/migrate.ts"]);
+          return;
+        }
+        if (key === DEV_SEED_CONVERSATION_WRITER || key === DEV_SEED_SCHEDULE_RUN_WRITER) {
+          // The DEV-only design-preview seed writes fixture history into the
+          // local dev stack through the migrations role, outside the runtime's
+          // Drizzle handle. seedConversations replays the full open -> finalized
+          // gate itself; seedScheduleRuns only tags those finished sessions'
+          // metadata with their seeded schedule run. Pin the local-only guards;
+          // do not exempt any other writer.
+          expectDevSeedGuards(source);
           return;
         }
         const body = enclosing.node.body;
@@ -1001,7 +1103,10 @@ describe("session_events writer inventory", () => {
         (path) => relative(repoRoot, path).replaceAll("\\", "/") !== "packages/db/src/database.ts",
       )
       .filter((path) => readFileSync(path, "utf8").includes("opengeni.session_activity_gate_"))
-      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"));
+      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"))
+      // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+      .filter((path) => path !== DEV_SEED_PATH);
+    expectDevSeedGuards(readFileSync(join(repoRoot, DEV_SEED_PATH), "utf8"));
     expect(violations).toEqual([]);
   });
 
@@ -1118,7 +1223,11 @@ describe("session_events writer inventory", () => {
         }
         if (isTaggedTemplateExpression(node)) {
           const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
+          if (
+            /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
+            // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+            `${file}#${namedTopLevelFunction(node)?.name}` !== DEV_SEED_CONVERSATION_WRITER
+          ) {
             rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
         }

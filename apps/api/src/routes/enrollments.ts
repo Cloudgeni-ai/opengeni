@@ -37,6 +37,7 @@ import {
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   RemoveEnrollmentRequest,
+  RenewEnrollmentRequest,
   RevokeEnrollmentResponse,
   type EnrollmentArch,
   type EnrollmentOs,
@@ -50,6 +51,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -64,9 +66,9 @@ import {
   mintEnrollToken,
   pollDeviceEnrollment,
   startDeviceEnrollment,
+  renewEnrollmentCredentials,
   toLookupResponse,
 } from "../sandbox/enrollment";
-import { trustedRequestSourceAddress } from "../http/request-source";
 
 export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
@@ -99,11 +101,26 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
-    const ip = trustedRequestSourceAddress(c, settings.apiTrustedProxyHops);
+    const ip = trustedRequestSourceRateLimitKey(c, settings);
     if (!limiter.take(ip)) {
       throw new HTTPException(429, { message: "too many requests; slow down" });
     }
   }
+
+  // Machine authentication: signed install-key proof + current enrollment grant.
+  app.post("/v1/enrollments/renew", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, exchangeLimiter);
+    const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data);
+    if (!credentials)
+      throw new HTTPException(401, {
+        message: "machine renewal not authorized",
+      });
+    c.header("Cache-Control", "no-store");
+    return c.json(EnrollTokenExchangeResponse.parse({ credentials }), 200);
+  });
 
   // ── POST /enrollments/device/start (agent-side, user-unauthenticated) ───────
   app.post("/v1/enrollments/device/start", async (c) => {

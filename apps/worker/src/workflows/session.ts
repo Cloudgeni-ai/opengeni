@@ -59,6 +59,56 @@ const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
 const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
 
 /**
+ * Provider capacity waits are shared: every waiter of one exhausted pool learns
+ * the same authoritative reset time, and one capacity mutation (for example the
+ * bounded refresh that verifies a quota reset) wakes every waiter at once, both
+ * as the typed capacity signal and as the generic durable workflow wake. Without
+ * spread, a reset resumes the whole backlog in the same few seconds and its
+ * turns stampede sandbox creation and the provider. Each workflow therefore
+ * delays its reconciliation by a bounded, replay-deterministic (Temporal-seeded
+ * `Math.random`) jitter: up to one minute past a scheduled reset timer and up to
+ * 30 seconds after a capacity or queue wake or an already-due waiter. A wake
+ * that lands inside a waiter's timer spread does not shorten it. The Postgres
+ * waiter stays authoritative; jitter only delays the same reconciliation
+ * activity and never creates queue rows, input, or inference. Interruptions are
+ * never delayed.
+ *
+ * The patch marker is not understood by workers built before it: rolling the
+ * worker image back past this change while a session has recorded the marker
+ * (it waited on capacity in its current run) fails that workflow's tasks as
+ * nondeterministic until a patched worker returns.
+ */
+export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
+/**
+ * A scheduled run's approval timeout sleeps on a durable Temporal timer. A
+ * history recorded by a worker that ignored the deadline has no timer command
+ * there, so replay only arms it behind this marker.
+ */
+export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
+export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
+export const CAPACITY_WAKE_JITTER_MAX_MS = 30_000;
+
+/**
+ * Pure + exported so the bound is unit-testable without a workflow environment.
+ * `overrideMaxMs` is the test-only SessionWorkflowInput ceiling; it can only
+ * narrow the production bound.
+ */
+export function capacityWakeJitterMs(
+  kind: "timer" | "wake",
+  sample: number,
+  overrideMaxMs?: number,
+): number {
+  const productionMax =
+    kind === "timer" ? CAPACITY_TIMER_WAKE_JITTER_MAX_MS : CAPACITY_WAKE_JITTER_MAX_MS;
+  const max =
+    overrideMaxMs !== undefined && Number.isFinite(overrideMaxMs)
+      ? Math.min(productionMax, Math.max(0, Math.trunc(overrideMaxMs)))
+      : productionMax;
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1 - Number.EPSILON) : 0;
+  return Math.floor(unit * max);
+}
+
+/**
  * How long the continuation loop must hold before re-admitting the next turn. 0 ⇒ no
  * hold (re-dispatch immediately — a rotation candidate is ready, or no idle delay was
  * requested). A rotation all-capped idle (`idleUntilReset`) ALWAYS holds at least
@@ -315,6 +365,14 @@ export function postClaimDatabaseRecoveryDetail(
   const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
   const hasProviderFailureCode = detail.providerFailureCode !== undefined;
   if (
+    (detail.sandboxSetupOutcomeUnknown !== undefined &&
+      detail.sandboxSetupOutcomeUnknown !== true) ||
+    (detail.sandboxSetupRecoveryExhausted !== undefined &&
+      detail.sandboxSetupRecoveryExhausted !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && detail.sandboxSetupRecoveryExhausted === true) ||
+    ((detail.sandboxSetupOutcomeUnknown === true ||
+      detail.sandboxSetupRecoveryExhausted === true) &&
+      hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||
@@ -369,6 +427,9 @@ export type SessionWorkflowInput = {
   // Test-only override for the durable capacity-wait continue-as-new
   // backstop. Production uses CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP.
   maxCapacityChecksPerRun?: number;
+  // Test-only ceiling for capacity-wake jitter (0 disables it) so real-server
+  // workflow tests stay fast. Production omits it and uses the bounds above.
+  capacityWakeJitterMaxMs?: number;
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
@@ -476,7 +537,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const timerMs = Number.isFinite(parsedDeadline)
         ? Math.max(0, parsedDeadline - Date.now())
         : 0;
+      const observedCause = (): activities.ReconcileCodexCapacityWaitInput["cause"] =>
+        wakeups !== seenWakeups
+          ? "queue"
+          : capacityWakeups !== seenCapacityWakeups
+            ? "signal"
+            : "timer";
       let cause: activities.ReconcileCodexCapacityWaitInput["cause"] = "timer";
+      let spread = false;
       if (wakeups !== seenWakeups) {
         cause = "queue";
       } else if (capacityWakeups !== seenCapacityWakeups) {
@@ -492,12 +560,48 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (interruptionWakeups !== seenInterruptionWakeups) {
           return;
         }
-        cause =
-          wakeups !== seenWakeups
-            ? "queue"
-            : capacityWakeups !== seenCapacityWakeups
-              ? "signal"
-              : "timer";
+        cause = observedCause();
+        // Histories recorded before the jitter replay without the marker and
+        // reconcile right at the deadline, exactly as they did.
+        if (cause === "timer" && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+          // The shared reset deadline itself fired. The first waiter to
+          // reconcile usually refreshes usage and wakes every other waiter; a
+          // waiter already inside its own spread keeps it instead of starting a
+          // second, shorter one, so the backlog resumes across the whole window.
+          spread = true;
+          const timerJitterMs = capacityWakeJitterMs(
+            "timer",
+            Math.random(),
+            input.capacityWakeJitterMaxMs,
+          );
+          if (timerJitterMs > 0) {
+            await condition(() => interruptionWakeups !== seenInterruptionWakeups, timerJitterMs);
+            if (interruptionWakeups !== seenInterruptionWakeups) {
+              return;
+            }
+          }
+          cause = observedCause();
+        }
+      }
+      if (!spread && patched(CAPACITY_WAKE_JITTER_PATCH)) {
+        // One capacity mutation wakes every waiter of the pool at once (the typed
+        // capacity signal and the generic durable wake), and a fresh run after
+        // continue-as-new, restart, or Resume sees every unobserved wake as an
+        // already-due waiter. Spread those reconciliations too. A later wake
+        // does not cut the pause short (that would re-synchronize the herd); a
+        // queued prompt stays behind the blocked turn either way, so only an
+        // interruption (Pause/Steer/Cancel) wins immediately.
+        const wakeJitterMs = capacityWakeJitterMs(
+          "wake",
+          Math.random(),
+          input.capacityWakeJitterMaxMs,
+        );
+        if (wakeJitterMs > 0) {
+          await condition(() => interruptionWakeups !== seenInterruptionWakeups, wakeJitterMs);
+          if (interruptionWakeups !== seenInterruptionWakeups) {
+            return;
+          }
+        }
       }
       const reconcileInput = {
         accountId: input.accountId,
@@ -535,6 +639,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
           ...(input.maxCapacityChecksPerRun !== undefined
             ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
+          ...(input.capacityWakeJitterMaxMs !== undefined
+            ? { capacityWakeJitterMaxMs: input.capacityWakeJitterMaxMs }
             : {}),
         });
       }
@@ -581,6 +688,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
           ...(input.maxCapacityChecksPerRun !== undefined
             ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
+          ...(input.capacityWakeJitterMaxMs !== undefined
+            ? { capacityWakeJitterMaxMs: input.capacityWakeJitterMaxMs }
             : {}),
         });
       }
@@ -695,8 +805,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenApprovalWakeups = approvalWakeups;
       const seenWakeups = wakeups;
       const seenInterruptionWakeups = interruptionWakeups;
+      const scheduledRunTimeout =
+        peek.scheduledRunTimeout && peek.expiresAt && patched(SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH)
+          ? peek.scheduledRunTimeout
+          : undefined;
       const timeoutMs =
-        (peek.humanInputRequestId || peek.interactionInterventionId) && peek.expiresAt
+        (peek.humanInputRequestId || peek.interactionInterventionId || scheduledRunTimeout) &&
+        peek.expiresAt
           ? humanInputDeadlineWaitMs(peek.expiresAt)
           : undefined;
       const wakeCondition = () =>
@@ -731,6 +846,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (expiry.action === "stale") {
           await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
         }
+      } else if (!woke && scheduledRunTimeout) {
+        // The scheduler answers for the unanswered person through the same
+        // acceptance boundary (a labelled system rejection/skip); the loop
+        // then re-peeks and resumes the turn like any decision.
+        const expiry = await activity.expireScheduledRunHumanWait({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: scheduledRunTimeout.turnId,
+          runId: scheduledRunTimeout.runId,
+        });
+        if (expiry.action === "stale") {
+          await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
+        }
       }
       continue;
     }
@@ -745,8 +874,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       if (settlement.action !== "held") continue;
 
       // The durable outbox owns the long deadline. Keep this workflow run open
-      // only for the same bounded close-race window used by ordinary idle; any
-      // signal is a hint to re-peek PostgreSQL truth.
+      // for its bounded close-race window; unlike ordinary idle, this held-wait
+      // path is unchanged. Any signal is a hint to re-peek PostgreSQL truth.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;
@@ -800,17 +929,24 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // idle-backoff goal keeps its durable obligation armed; the delayed
       // wake-outbox row at the pacing deadline or any producer signal restarts
       // the workflow. No Temporal timer is used for pacing.
-      const seenWakeups = wakeups;
-      const seenApprovalWakeups = approvalWakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
-      const woke = await condition(
-        () =>
-          interruptionWakeups !== seenInterruptionWakeups ||
-          wakeups !== seenWakeups ||
-          approvalWakeups !== seenApprovalWakeups,
-        "5s",
-      );
-      if (woke) continue;
+      // Evaluate at the changed command so old recorded timers still replay,
+      // while the next live idle cycle can close without a grace period.
+      if (!patched("session-normal-idle-no-grace-v1")) {
+        const seenWakeups = wakeups;
+        const seenApprovalWakeups = approvalWakeups;
+        const seenInterruptionWakeups = interruptionWakeups;
+        const woke = await condition(
+          () =>
+            interruptionWakeups !== seenInterruptionWakeups ||
+            wakeups !== seenWakeups ||
+            approvalWakeups !== seenApprovalWakeups,
+          "5s",
+        );
+        if (woke) continue;
+      }
+      // Keep both the durable recheck and the transactional idle/parent-outbox
+      // fence. A signal accepted during this activity chain makes us loop;
+      // later work restarts the same session via durable signalWithStart.
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

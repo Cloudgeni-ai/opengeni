@@ -1,4 +1,3 @@
-import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import {
   hasOpenGeniSlackReactionScope,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
@@ -30,6 +29,7 @@ import { useSlackInstallationDiscovery } from "@/components/capabilities/use-sla
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
@@ -63,7 +63,17 @@ async function memorySlackClient(client: ReturnType<typeof useAppContext>["clien
   return module.createMemorySlackClient(client);
 }
 
-export const SLACK_APP_DESCRIPTION = "Mention @OpenGeni or chat with the bot in Slack.";
+export const SLACK_APP_DESCRIPTION = "Mention @Opengeni or chat with the bot in Slack.";
+const SLACK_BOT_OUTCOMES = [
+  {
+    title: "Chat with Opengeni in Slack",
+    description: "Mention @Opengeni in a channel or send it a direct message.",
+  },
+  {
+    title: "Start work where the conversation is",
+    description: "Replies and progress stay in the Slack thread the request came from.",
+  },
+];
 export const SLACK_LOGO_URL =
   "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png";
 const OPENGENI_REACTION_EMOJI = "genie" as const;
@@ -200,14 +210,12 @@ export function useSlackIntegration({
   sheetOpen: boolean;
   refresh: () => Promise<void>;
   onRuntimeChanged: () => void;
-}): IntegrationAdapter & { catalogName: "OpenGeni bot" | "Your account" } {
+}): IntegrationAdapter & { catalogName: "Opengeni bot" | "Your account" } {
   const context = useAppContext();
   const client = context.client;
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
-  const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
   useEffect(() => {
-    setNewConnection(null);
     setConnectRequest(null);
   }, [workspaceId, context.accessContext.subjectId]);
   const completeConnect = useCallback(() => {
@@ -300,7 +308,20 @@ export function useSlackIntegration({
   const savedDestination = slackBotDocumentDestinationAuthority(botConnection?.metadata);
 
   const personalItem = personalSlackCapability(items);
-  const personalConnection = preferredHostedSlackConnection(connections ?? []);
+  const visiblePersonalConnections = (connections ?? []).filter(
+    (connection) =>
+      connection.workspaceId === workspaceId &&
+      (connection.subjectId === null || connection.subjectId === context.accessContext.subjectId),
+  );
+  // The account page represents this human first. A newer shared account must
+  // not replace their own account as the reconnect/disconnect target.
+  const personalConnection =
+    preferredHostedSlackConnection(
+      visiblePersonalConnections.filter((connection) => connection.subjectId !== null),
+    ) ??
+    preferredHostedSlackConnection(
+      visiblePersonalConnections.filter((connection) => connection.subjectId === null),
+    );
   const personalState = preview?.personal ?? personalSlackAccountState(personalConnection, loaded);
   const personalAvailable = personalItem !== null || readOnly;
 
@@ -316,7 +337,7 @@ export function useSlackIntegration({
       clearSlackInstallResult();
       setInstallError(null);
       void refresh();
-      toast.success("OpenGeni installed in Slack");
+      toast.success("Opengeni installed in Slack");
     } else {
       // Leave the bounded outcome in the URL so a reload cannot erase the
       // failure. It is explanatory text only, never installation authority.
@@ -419,16 +440,18 @@ export function useSlackIntegration({
       scope: { workspaceId, transport: connectTransport },
       providerId: "slack-personal",
       displayName: "Slack account",
-      description: "Let OpenGeni read and send Slack messages as you.",
+      description: "Let Opengeni read and send Slack messages as you.",
       logoUrl: SLACK_LOGO_URL,
       authorizeLabel: "Continue to Slack",
-      ownership: personalConnection?.subjectId ? "personal" : "workspace",
+      // Slack's hosted MCP is personal-only: every member connects their own
+      // account, so there is no ownership choice. Only an existing legacy
+      // workspace-owned row is repaired as what it is.
+      ownership: personalConnection && !personalConnection.subjectId ? "workspace" : "personal",
       returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
       ...(personalConnection ? { reconnectAccountId: personalConnection.id } : {}),
     };
-    if (personalConnection) setConnectRequest(request);
-    else setNewConnection(request);
+    setConnectRequest(request);
   }
 
   async function disconnectPersonal(): Promise<boolean> {
@@ -442,7 +465,7 @@ export function useSlackIntegration({
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your Slack account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -463,7 +486,7 @@ export function useSlackIntegration({
     setConnectRequest({
       scope: { workspaceId, transport: connectTransport },
       providerId: "slack-bot",
-      displayName: "OpenGeni Slack bot",
+      displayName: "Opengeni Slack bot",
       description: SLACK_APP_DESCRIPTION,
       logoUrl: SLACK_LOGO_URL,
       authorizeLabel: "Continue to Slack",
@@ -482,11 +505,11 @@ export function useSlackIntegration({
     try {
       await client.deleteConnection(workspaceId, botConnection.id);
       await refresh();
-      toast.success("OpenGeni Slack bot disconnected");
+      toast.success("Opengeni Slack bot disconnected");
       return true;
     } catch (error) {
-      toast.error("Couldn't disconnect the OpenGeni Slack bot", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't disconnect the Opengeni Slack bot", {
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -513,7 +536,7 @@ export function useSlackIntegration({
       toast.success("Slack knowledge destination saved");
     } catch (error) {
       toast.error("Couldn't save the Slack knowledge destination", {
-        description: error instanceof Error ? error.message : "Try again.",
+        description: userErrorText(error),
       });
     } finally {
       setDestinationBusy(false);
@@ -611,7 +634,7 @@ export function useSlackIntegration({
       toast.success(enabled ? "Decision publication turned on" : "Decision publication turned off");
     } catch (error) {
       toast.error("Could not save Slack publication settings", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setPublicationBusy(false);
@@ -737,7 +760,7 @@ export function useSlackIntegration({
     const access: IntegrationAccess | undefined =
       botConnection && botMetadata
         ? {
-            title: "What OpenGeni can see",
+            title: "What Opengeni can see",
             ...(canManageReaction && botActive && !readOnly && routingEnabled === true
               ? {
                   editLabel: "Manage routing",
@@ -745,7 +768,11 @@ export function useSlackIntegration({
                 }
               : {}),
             items: [
-              { name: "All public channels", meta: "searchable without joining" },
+              {
+                name: "Conversations Opengeni has joined",
+                meta: "recent messages and threads",
+              },
+              { name: "Direct messages to Opengeni", meta: "messages you send the bot" },
               ...(invitedChannels ?? []).map((channel) => {
                 const route = (channelRoutes ?? []).find(
                   (candidate) => candidate.slackChannelId === channel.id,
@@ -772,7 +799,7 @@ export function useSlackIntegration({
                     : `${invited} · asks once, then remembers`,
                 };
               }),
-              { name: "Anywhere else", meta: "tag @OpenGeni there to invite it" },
+              { name: "Other channels", meta: "invite Opengeni to read messages there" },
             ],
           }
         : undefined;
@@ -784,10 +811,10 @@ export function useSlackIntegration({
         id: "slack-reaction",
         label: "Start work with a reaction",
         description: scopeReady
-          ? `React with :${OPENGENI_REACTION_EMOJI}: on any message OpenGeni can see. ${
+          ? `React with :${OPENGENI_REACTION_EMOJI}: on any message Opengeni can see. ${
               reactionSettings.channelPolicy.mode === "allowlist"
                 ? `Works in ${reactionSettings.channelPolicy.channelIds.length} selected conversation${reactionSettings.channelPolicy.channelIds.length === 1 ? "" : "s"}.`
-                : "Works anywhere OpenGeni is a member."
+                : "Works anywhere Opengeni is a member."
             }`
           : "Reconnect Slack to allow reading reactions first.",
         checked: reactionSettings.enabled,
@@ -835,7 +862,7 @@ export function useSlackIntegration({
         id: "slack-child-requires-action-notice",
         label: "Tell me in Slack when a worker I started needs input",
         description:
-          "Posts one pointer to the blocked worker in the task's thread. You still answer on its OpenGeni card.",
+          "Posts one pointer to the blocked worker in the task's thread. You still answer on its Opengeni card.",
         checked: orchestrationNotices.childRequiresAction,
         disabled: !canManageReaction || !botActive || readOnly || orchestrationNoticeWriteInFlight,
         busy: orchestrationNoticeBusy === "childRequiresAction",
@@ -948,13 +975,14 @@ export function useSlackIntegration({
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
+      outcomes: SLACK_BOT_OUTCOMES,
       ...(botConnection && botMetadata
         ? {
             presentation: {
               summary: {
                 title: botMetadata.slackTeamName,
                 description: binding
-                  ? `${botHealthy ? "Connected for" : "Set up for"} ${binding.accountName}. ${routingEnabled === true ? "Start work in workspaces you have access to in this organization." : "Manage how OpenGeni connects to Slack here."}`
+                  ? `${botHealthy ? "Connected for" : "Set up for"} ${binding.accountName}. ${routingEnabled === true ? "Start work in workspaces you have access to in this organization." : "Manage how Opengeni connects to Slack here."}`
                   : SLACK_APP_DESCRIPTION,
               },
               ...(routingEnabled === true
@@ -1004,7 +1032,7 @@ export function useSlackIntegration({
     }
     if ("connection" in state) {
       facts.push({
-        label: "Your account",
+        label: state.connection.subjectId === null ? "Shared account" : "Your account",
         value:
           state.state === "connected"
             ? state.accessTokenRefreshDue
@@ -1031,7 +1059,7 @@ export function useSlackIntegration({
                 ? "The connection expired. Reconnect it to restore access."
                 : state.reason === "provider_rejected"
                   ? "Slack no longer accepts this connection. Reconnect it to restore access."
-                  : "OpenGeni could not use this connection. Reconnect it to restore access.",
+                  : "Opengeni could not use this connection. Reconnect it to restore access.",
           }
         : connectedPersonal && !personalItem?.enabled
           ? {
@@ -1077,18 +1105,34 @@ export function useSlackIntegration({
     return {
       id: "slack",
       name: "Slack",
-      description: "Let OpenGeni read and send Slack messages as you.",
+      description:
+        "connection" in state && state.connection.subjectId === null
+          ? "Let Opengeni read and send Slack messages through the shared account."
+          : "Let Opengeni read and send Slack messages as you.",
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
       ...(connectedPersonal
         ? {
             access: {
-              title: "What OpenGeni can see as you",
+              title:
+                state.connection.subjectId === null
+                  ? "What Opengeni can access through the shared account"
+                  : "What Opengeni can see as you",
               items: [
                 {
-                  name: "Everything you can see in Slack",
-                  meta: "including private channels and DMs",
+                  name:
+                    state.connection.subjectId === null
+                      ? "Channels and DMs the shared Slack account can access"
+                      : "Channels and DMs your Slack account can access",
+                  meta: "recent messages and threads allowed by your connection permissions",
+                },
+                {
+                  name:
+                    state.connection.subjectId === null
+                      ? "Send messages through the shared account"
+                      : "Send messages as you",
+                  meta: "workspace-wide message search is unavailable",
                 },
               ],
             },
@@ -1102,18 +1146,6 @@ export function useSlackIntegration({
 
   const dialogs = (
     <>
-      {newConnection && (
-        <ConnectionOwnershipDialog
-          name="Slack account"
-          value={newConnection.ownership}
-          onChange={(ownership) => setNewConnection({ ...newConnection, ownership })}
-          onContinue={() => {
-            setConnectRequest(newConnection);
-            setNewConnection(null);
-          }}
-          onClose={() => setNewConnection(null)}
-        />
-      )}
       {connectRequest && (
         <NativeConnectSetup
           transport={connectTransport}
@@ -1139,7 +1171,7 @@ export function useSlackIntegration({
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}
         title="Disconnect your Slack account?"
-        description="OpenGeni will stop using this Slack account connection. This does not disconnect the workspace bot or revoke access inside Slack."
+        description="Opengeni will stop using this Slack account connection. This does not disconnect the workspace bot or revoke access inside Slack."
         confirmLabel="Disconnect my Slack account"
         cancelAutoFocus
         onConfirm={disconnectPersonal}
@@ -1147,8 +1179,8 @@ export function useSlackIntegration({
       <ConfirmDialog
         open={botDisconnectOpen}
         onOpenChange={setBotDisconnectOpen}
-        title="Disconnect the OpenGeni Slack bot?"
-        description="This disconnects the bot for the whole organization, including channels routed to other workspaces. OpenGeni stops answering and scheduled Slack posts stop. Existing tasks and history remain. The app stays installed in Slack until you remove it there."
+        title="Disconnect the Opengeni Slack bot?"
+        description="This disconnects the bot for the whole organization, including channels routed to other workspaces. Opengeni stops answering and scheduled Slack posts stop. Existing tasks and history remain. The app stays installed in Slack until you remove it there."
         confirmLabel="Disconnect Slack bot"
         cancelAutoFocus
         onConfirm={disconnectBot}
@@ -1209,7 +1241,7 @@ export function useSlackIntegration({
     dialogs,
     catalogName:
       discovery.bindings.length > 0 || discovery.loading || discovery.failed || canInstallBot
-        ? "OpenGeni bot"
+        ? "Opengeni bot"
         : "Your account",
   };
 }

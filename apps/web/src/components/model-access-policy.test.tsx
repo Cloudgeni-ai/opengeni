@@ -54,8 +54,12 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
-const { ModelAccessPolicySection, modelAccessPolicyDraft, modelAccessPolicyRequest } =
+const { AllowedModelsFormPage, modelAccessPolicyDraft, modelAccessPolicyRequest } =
   await import("./model-access-policy");
+
+function ModelAccessPolicySection(props: { workspaceId: string; canManage: boolean }) {
+  return <AllowedModelsFormPage {...props} onClose={() => undefined} />;
+}
 
 function model(
   id: string,
@@ -101,6 +105,13 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
+/** A model's checkbox; Radix switches add a hidden one of their own inside a form. */
+const MODEL_BOX = 'input[type="checkbox"]:not([aria-hidden="true"])';
+
+function everyModelSwitch(container: HTMLElement) {
+  return container.querySelector<HTMLButtonElement>('button[role="switch"]');
+}
+
 function flush() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -137,6 +148,46 @@ beforeEach(() => {
 });
 
 describe("workspace model access policy editor", () => {
+  test("turning Allow every model off lists models to pick, and Save shows once something changed", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
+      allowedProviders: null,
+      allowedModels: null,
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<ModelAccessPolicySection workspaceId="workspace-a" canManage />);
+        await flush();
+      });
+      const footer = () => container.querySelector("footer")!;
+      expect(footer().closest("[data-slot=form-frame]")?.className).toContain(
+        "[&>form>footer]:hidden",
+      );
+      expect(container.querySelector(MODEL_BOX)).toBeNull();
+      await act(async () => everyModelSwitch(container)!.click());
+      const boxes = [...container.querySelectorAll<HTMLInputElement>(MODEL_BOX)];
+      expect(boxes).toHaveLength(3);
+      expect(boxes.every((box) => box.checked)).toBe(true);
+      expect(container.textContent).toContain("Codex");
+      expect(footer().closest("[data-slot=form-frame]")?.className ?? "").not.toContain(
+        "[&>form>footer]:hidden",
+      );
+      // Add a model by ID is a quiet button that reveals one field.
+      expect(container.querySelector("#allowed-models-add")).toBeNull();
+      const addById = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Add a model by ID",
+      );
+      await act(async () => addById?.click());
+      expect(container.querySelector("#allowed-models-add")).not.toBeNull();
+      expect(updateWorkspaceModelAccessPolicy).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("projects unrestricted policy to every visible model", () => {
     const draft = modelAccessPolicyDraft({ allowedProviders: null, allowedModels: null }, models);
     expect(draft.mode).toBe("unrestricted");
@@ -195,12 +246,7 @@ describe("workspace model access policy editor", () => {
         await flush();
       });
 
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>("button")?.click();
-        await flush();
-      });
-      expect(container.textContent).toContain("Refresh after the control plane update");
-      expect(container.textContent).toContain("Provider policy replacement unavailable");
+      expect(container.textContent).toContain("Refresh after the update finishes");
       expect(container.textContent).not.toContain("Choose exact models");
       expect(container.textContent).not.toContain("private-provider-id");
     } finally {
@@ -237,11 +283,7 @@ describe("workspace model access policy editor", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>("button")?.click();
-        await flush();
-      });
-      expect(container.textContent).toContain("Provider-level restriction active");
+      expect(container.textContent).toContain("Limited to whole providers");
       expect(container.textContent).not.toContain("private-provider-id");
 
       const chooseExact = [...container.querySelectorAll("button")].find((button) =>
@@ -249,15 +291,17 @@ describe("workspace model access policy editor", () => {
       );
       expect(chooseExact).toBeDefined();
       await act(async () => chooseExact?.click());
-      expect(container.textContent).toContain("Replace the provider-level model policy?");
-      expect(container.textContent).not.toContain("Limit this workspace to selected models");
+      expect(container.textContent).toContain("Replace the provider limit?");
+      expect(container.querySelector('[role="radiogroup"]')).toBeNull();
 
       const confirm = [...container.querySelectorAll("button")].find((button) =>
         button.textContent?.includes("Confirm replacement"),
       );
       await act(async () => confirm?.click());
-      expect(container.textContent).toContain("Provider-level restriction will be replaced");
-      expect(container.textContent).toContain("Limit this workspace to selected models");
+      expect(container.textContent).toContain("This replaces the provider limit");
+      expect(everyModelSwitch(container)?.getAttribute("aria-checked")).toBe("false");
+      // Models show by name; the ID only in the tooltip.
+      expect(container.querySelector('[title="codex/gpt-5.6-sol"]')).not.toBeNull();
       expect(container.textContent).not.toContain("private-provider-id");
     } finally {
       await act(async () => root.unmount());
@@ -292,10 +336,6 @@ describe("workspace model access policy editor", () => {
         await flush();
       });
 
-      await act(async () => {
-        container.querySelector<HTMLButtonElement>("button")?.click();
-        await flush();
-      });
       const chooseExact = [...container.querySelectorAll("button")].find((button) =>
         button.textContent?.includes("Choose exact models"),
       );
@@ -317,8 +357,8 @@ describe("workspace model access policy editor", () => {
         );
         await flush();
       });
-      expect(container.textContent).toContain("No additional restrictions");
-      expect(container.textContent).not.toContain("Provider-level restriction active");
+      expect(everyModelSwitch(container)?.getAttribute("aria-checked")).toBe("true");
+      expect(container.textContent).not.toContain("Limited to whole providers");
 
       await act(async () => {
         pendingSave.resolve({
@@ -329,8 +369,8 @@ describe("workspace model access policy editor", () => {
         await flush();
       });
 
-      expect(container.textContent).toContain("No additional restrictions");
-      expect(container.textContent).not.toContain("Provider-level restriction active");
+      expect(everyModelSwitch(container)?.getAttribute("aria-checked")).toBe("true");
+      expect(container.textContent).not.toContain("Limited to whole providers");
       expect(
         getWorkspaceModelAccessPolicy.mock.calls.filter(([workspaceId]) =>
           Object.is(workspaceId, workspaceA),

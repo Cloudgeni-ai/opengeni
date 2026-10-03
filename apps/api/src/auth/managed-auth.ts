@@ -1,5 +1,7 @@
-import { canonicalPublicOrigin, type Settings } from "@opengeni/config";
+import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
+  configureManagedUserAdmission,
   type ManagedAuth,
   type ManagedEmailMessage,
   type ManagedEmailTransport,
@@ -12,14 +14,25 @@ import {
   getCanonicalHumanExactLoginBindingForAuthUser,
   synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db/canonical-human-identities";
+import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
-import { createEmailVerificationToken } from "better-auth/api";
+import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 
+import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import {
+  createManagedAuthEmailThrottleHook,
+  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+} from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import {
+  createManagedAuthNewSignupsGate,
+  type ManagedAuthNewSignupsGate,
+} from "./new-signups-gate";
+import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -28,47 +41,15 @@ import {
   currentManagedSignInConnectIntent,
 } from "./managed-auth-attempt-context";
 
+// Only used when no Better Auth secret is configured (local development);
+// the email throttle key is a content-free digest either way.
+const MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY = "opengeni:managed-auth:email-throttle:local";
+
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
 // type-only slot. We re-export it from this construction site so existing
 // importers (`app.ts`) keep the same import path.
 export type { ManagedAuth };
-
-/**
- * The app-controlled header carrying the server-resolved client address into
- * Better Auth. It is configured as the ONLY `ipAddressHeaders` entry so a
- * caller-supplied forwarding header can never influence rate-limit keys or
- * session IP tracking; every `managedAuth.handler` call site must stamp it via
- * {@link requestWithManagedAuthClientAddress}.
- */
-export const MANAGED_AUTH_CLIENT_IP_HEADER = "x-opengeni-client-ip";
-
-// The exact client-address resolution the mounted handler's rate limiter and
-// session writer use; re-exported so tests can assert it without importing
-// better-auth outside the managed auth module.
-export { getIp as resolveManagedAuthClientAddress } from "better-auth/api";
-
-/**
- * Return `request` with the trusted client address stamped, overwriting any
- * caller-supplied value; `adjustHeaders` applies additional header rewrites
- * first. The body is moved explicitly because Bun's copy constructor does not
- * forward an already-buffered ReadableStream body (as produced by `bodyLimit`
- * middleware), which leaves downstream body reads hung.
- */
-export function requestWithManagedAuthClientAddress(
-  request: Request,
-  clientAddress: string,
-  adjustHeaders?: (headers: Headers) => void,
-): Request {
-  const headers = new Headers(request.headers);
-  adjustHeaders?.(headers);
-  headers.set(MANAGED_AUTH_CLIENT_IP_HEADER, clientAddress);
-  const init: RequestInit & { duplex?: "half" } = {
-    headers,
-    ...(request.body ? { body: request.body, duplex: "half" as const } : {}),
-  };
-  return new Request(request, init);
-}
 
 export function managedAuthRequiresEmailVerification(
   settings: Pick<Settings, "environment">,
@@ -84,11 +65,46 @@ export function managedAuthUserCreateOverride(
   return { data: { ...user, emailVerified: true } };
 }
 
+export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE =
+  "We're at capacity for new accounts right now. Please try again later.";
+
+/**
+ * Typed refusal for a new account while the deployment has paused sign-ups.
+ * Existing accounts are unaffected; the body mirrors Better Auth's
+ * `{ code, message }` error shape so browser and SDK callers parse it alike.
+ */
+export function managedAuthNewSignupsPausedResponse(): Response {
+  return Response.json(
+    {
+      code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+      message: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE,
+    },
+    { status: 403, headers: { "cache-control": "no-store" } },
+  );
+}
+
+/**
+ * Thrown from the user-create hook while the runtime switch has paused new
+ * sign-ups. Better Auth returns it as `403 { code: "NEW_SIGNUPS_PAUSED" }` on
+ * email sign-up, and its OAuth callback turns the message into the
+ * `error=signup_disabled` redirect it also uses for a static provider refusal.
+ */
+export class ManagedAuthNewSignupsPausedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", { code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, message: "signup disabled" });
+  }
+}
+
 export function managedAuthUserCreateAdmission(
-  settings: Pick<Settings, "environment">,
+  settings: Pick<Settings, "environment" | "allowedUserEmails"> &
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
   user: { emailVerified: boolean } & Record<string, unknown>,
   providerId: string,
 ): { data: typeof user } | false | undefined {
+  // Backstop for every Better Auth user-create path. Invited-user account
+  // setup does not create users through Better Auth, so it is unaffected.
+  if (settings.managedAuthNewSignupsEnabled === false) return false;
+  if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
   if (
     managedAuthRequiresEmailVerification(settings) &&
     providerId !== "credential" &&
@@ -97,6 +113,21 @@ export function managedAuthUserCreateAdmission(
     return false;
   }
   return managedAuthUserCreateOverride(settings, user);
+}
+
+/**
+ * Per-provider Better Auth options while sign-ups are paused. A social sign-in
+ * for an existing human still signs in (and may link a verified provider);
+ * an unknown human is redirected back with `error=signup_disabled`.
+ * `disableSignUp` is the hard switch: `disableImplicitSignUp` alone can be
+ * overridden by a client-supplied `requestSignUp`.
+ */
+export function managedAuthSocialSignupOptions(
+  settings: Pick<Settings, "managedAuthNewSignupsEnabled">,
+): { disableImplicitSignUp?: true; disableSignUp?: true } {
+  return settings.managedAuthNewSignupsEnabled
+    ? {}
+    : { disableImplicitSignUp: true, disableSignUp: true };
 }
 
 /** Keep Better Auth password policy and storage format behind this boundary. */
@@ -108,24 +139,126 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
   return await verifyPassword({ password, hash });
 }
 
+type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
+
+/**
+ * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
+ * attempt fails after 10 s instead of queueing requests indefinitely while the
+ * database is unreachable, and connections recycle like the main postgres-js
+ * pool so a pooler- or failover-replaced backend is not held forever.
+ */
+export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
+  max: 10,
+  connectionTimeoutMillis: 10_000,
+  idleTimeoutMillis: 30_000,
+  maxLifetimeSeconds: 1_800,
+  keepAlive: true,
+} as const satisfies PoolConfig;
+
+/**
+ * Better Auth's `pg` pool. When the server closes a connection (a restart,
+ * failover, or maintenance window) `pg` emits `error`: on the pool for an idle
+ * client, and on the client itself for one checked out by Better Auth's query
+ * layer. Without listeners either becomes an uncaught exception and the API's
+ * fatal process boundary exits. Both listeners record one content-free signal
+ * and keep serving. The pool has already discarded a failed idle client and
+ * opens a fresh connection for the next checkout; a checked-out client's
+ * in-flight query already rejects to its caller, and the pool discards the
+ * dead client on release. An idle client's error also reaches its own
+ * listener, so that listener records only while the client is checked out,
+ * and at most once per checkout.
+ */
+export function createManagedAuthDatabasePool(
+  databaseUrl: string,
+  observability?: ManagedAuthPoolObservability,
+): Pool {
+  const pool = new Pool({ connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS });
+  const checkedOut = new WeakSet<object>();
+  pool.on("acquire", (client) => checkedOut.add(client));
+  pool.on("release", (_error, client) => checkedOut.delete(client));
+  pool.on("connect", (client) => {
+    client.on("error", () => {
+      // One lost connection can emit twice (the server's termination
+      // message, then the socket end), so count it once.
+      if (checkedOut.delete(client)) {
+        recordManagedAuthPoolError(observability, "checked_out_connection_failed");
+      }
+    });
+  });
+  pool.on("error", () => recordManagedAuthPoolError(observability, "idle_connection_discarded"));
+  return pool;
+}
+
+export const MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC = {
+  name: "opengeni_managed_auth_database_pool_errors_total",
+  help: "Managed-auth database connections the server closed or lost, by pool state.",
+} as const;
+
+function recordManagedAuthPoolError(
+  observability: ManagedAuthPoolObservability | undefined,
+  outcome: "idle_connection_discarded" | "checked_out_connection_failed",
+): void {
+  try {
+    observability?.incrementCounter({
+      ...MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC,
+      labels: { outcome },
+    });
+    observability?.warn("Managed auth database connection failed", {
+      dependency: "managed_auth_database",
+      outcome,
+    });
+  } catch {
+    // An observer failure must not turn a recovered pool error into a crash.
+  }
+}
+
 export function createManagedAuth(
   settings: Settings,
   db: Database,
   managedEmailTransport: ManagedEmailTransport,
+  options: {
+    observability?: ManagedAuthPoolObservability;
+    newSignupsGate?: ManagedAuthNewSignupsGate;
+  } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
   }
+  // Content-free sign-up funnel counters; recording never fails an auth flow.
+  const funnel = options.observability
+    ? createSignupFunnelMetrics(options.observability)
+    : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
-  const pool = new Pool({ connectionString: settings.databaseUrl });
-  return betterAuth({
+  const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
+  // The deployment ceiling is static Better Auth configuration; the runtime
+  // switch is checked per user create in the hook below.
+  const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);
+  const newSignupsGate =
+    options.newSignupsGate ??
+    createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
+  const auth = betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
+    hooks: {
+      before: createManagedAuthEmailThrottleHook(
+        db,
+        settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
+      ),
+    },
     advanced: {
+      // Better Auth reads client addresses only from request headers. The API
+      // strips this header from every inbound request and re-stamps it on
+      // managed-auth routes with the trusted source address (transport peer,
+      // or the forwarded client when OPENGENI_API_TRUSTED_PROXY_HOPS declares
+      // a proxy chain), so callers cannot choose their rate-limit bucket or
+      // recorded session address.
+      ipAddress: {
+        ipAddressHeaders: [TRUSTED_CLIENT_ADDRESS_HEADER],
+      },
       useSecureCookies: settings.publicBaseUrl?.startsWith("https://") ?? false,
       ...(settings.betterAuthCookieDomain
         ? {
@@ -138,9 +271,6 @@ export function createManagedAuth(
       database: {
         generateId: () => crypto.randomUUID(),
       },
-      ipAddress: {
-        ipAddressHeaders: [MANAGED_AUTH_CLIENT_IP_HEADER],
-      },
     },
     rateLimit: {
       enabled: true,
@@ -149,6 +279,7 @@ export function createManagedAuth(
       fields: {
         lastRequest: "last_request",
       },
+      customRules: MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
     },
     user: {
       modelName: "auth_users",
@@ -248,6 +379,7 @@ export function createManagedAuth(
               clientId: settings.managedAuthGoogleClientId,
               clientSecret: settings.managedAuthGoogleClientSecret,
               prompt: "select_account" as const,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -256,6 +388,7 @@ export function createManagedAuth(
             github: {
               clientId: settings.managedAuthGithubClientId,
               clientSecret: settings.managedAuthGithubClientSecret,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -271,6 +404,9 @@ export function createManagedAuth(
     },
     emailAndPassword: {
       enabled: true,
+      // Sign-in, password reset, and verification stay enabled; only new
+      // account creation is refused while sign-ups are paused.
+      disableSignUp: !settings.managedAuthNewSignupsEnabled,
       // Local managed mode exists so the complete human/org tenancy flow can
       // be exercised without first configuring a transactional-email vendor.
       // Every non-local deployment retains the verified-email boundary.
@@ -279,13 +415,10 @@ export function createManagedAuth(
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendManagedAuthEmail(managedEmailTransport, {
-            kind: "email_verification",
-            to: user.email,
-            subject: "Verify your OpenGeni email",
-            text: `Verify your OpenGeni email: ${url}`,
-            html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-          });
+          await sendManagedAuthEmail(
+            managedEmailTransport,
+            emailVerificationMessage(user.email, url),
+          );
         }
       },
       sendResetPassword: async ({ user, url }) => {
@@ -300,16 +433,19 @@ export function createManagedAuth(
     },
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
+      // The first successful verification link click signs the user in (a
+      // reused link creates no session). Only legacy mode: session-set modes
+      // bind sign-in to an isolated browser transaction, and the provider
+      // session this would create is discarded there by design.
+      autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
       sendVerificationEmail: async ({ user, url }) => {
-        await sendManagedAuthEmail(managedEmailTransport, {
-          kind: "email_verification",
-          to: user.email,
-          subject: "Verify your OpenGeni email",
-          text: `Verify your OpenGeni email: ${url}`,
-          html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
-        });
+        await sendManagedAuthEmail(
+          managedEmailTransport,
+          emailVerificationMessage(user.email, url),
+        );
       },
       afterEmailVerification: async (user) => {
+        funnel?.recordEmailVerified();
         await ensureManagedAccessForUser(db, {
           userId: user.id,
           email: user.email,
@@ -343,6 +479,18 @@ export function createManagedAuth(
       session: {
         create: {
           before: async (session) => {
+            if (settings.allowedUserEmails !== undefined) {
+              const result = await pool.query<{ email: string; email_verified: boolean }>(
+                "select email, email_verified from auth_users where id = $1",
+                [session.userId],
+              );
+              const user = result.rows[0];
+              if (
+                !user?.email_verified ||
+                !managedUserEmailAllowed(settings.allowedUserEmails, user.email)
+              )
+                return false;
+            }
             const providerId = currentManagedAuthProviderId();
             await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
             const preflightProjection = await getCanonicalHumanIdentityProjection(
@@ -433,6 +581,7 @@ export function createManagedAuth(
             };
           },
           after: async (session) => {
+            funnel?.recordSignIn();
             recordCurrentManagedAuthSession(session.id);
             if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
             await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
@@ -441,9 +590,18 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) =>
-            managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
-          after: async (user) => {
+          before: async (user) => {
+            const admission = managedAuthUserCreateAdmission(
+              settings,
+              user,
+              currentManagedAuthProviderId(),
+            );
+            if (admission === false) return false;
+            if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
+            return admission;
+          },
+          after: async (user, context) => {
+            await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
               userId: user.id,
@@ -457,6 +615,8 @@ export function createManagedAuth(
       },
     },
   }) as ManagedAuth;
+  configureManagedUserAdmission(auth, settings.allowedUserEmails);
+  return auth;
 }
 
 export type ManagedAuthOAuthAttempt = {
@@ -607,6 +767,19 @@ export async function sendManagedAuthEmail(
 ): Promise<void> {
   const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
+}
+
+// Verification can sign the clicker in (autoSignInAfterVerification), so an
+// unsolicited verification email must say plainly that it can be ignored.
+function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
+  const ignore = "If you did not create an OpenGeni account, ignore this email.";
+  return {
+    kind: "email_verification",
+    to,
+    subject: "Verify your OpenGeni email",
+    text: `Verify your OpenGeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+  };
 }
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {

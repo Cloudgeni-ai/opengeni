@@ -6,8 +6,11 @@ const switcherSource = await Bun.file(
 ).text();
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
-const organizationAdminSource = await Bun.file(
-  `${import.meta.dir}/components/organization-admin.tsx`,
+const organizationShellSource = await Bun.file(
+  `${import.meta.dir}/components/settings/organization-settings-pages.ts`,
+).text();
+const peoplePageSource = await Bun.file(
+  `${import.meta.dir}/components/organization/people-page.tsx`,
 ).text();
 
 describe("managed self-context surfaces", () => {
@@ -33,7 +36,13 @@ describe("managed self-context surfaces", () => {
       "aria-label={personal ? `${workspace.name}, Personal workspace`",
     );
     expect(switcherSource).toContain('<span className="sr-only"> Paused</span>');
-    expect(switcherSource.match(/<PersonalWorkspaceBadge/g)?.length).toBeGreaterThanOrEqual(2);
+    // A Personal workspace reads as a lock tile and "Private · <organization>", not a chip.
+    expect(switcherSource).not.toContain("<PersonalWorkspaceBadge");
+    expect(switcherSource.match(/<WorkspaceGlyph/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(switcherSource).toContain("`Private · ${organizationLabel}`");
+    // The picker is startup code: importing the organization-settings access module
+    // pulls the settings chunks into the direct-session graph (bundle budget).
+    expect(switcherSource).not.toContain("@/lib/organization-settings-access");
     expect(switcherSource).toContain("workspaces={context.workspaces}");
     expect(switcherSource).toContain("export const WorkspaceSwitcherTrigger = forwardRef");
     expect(switcherSource).toContain("{props.collapsed ? (");
@@ -51,19 +60,23 @@ describe("managed self-context surfaces", () => {
     expect(settingsSource).toContain("personal ? (");
     expect(settingsSource).toContain("administrators and other members do not gain access");
     expect(settingsSource).toContain('import("./workspace-members-section")');
-    expect(settingsSource).toContain("<LazyMembersSection workspaceId={workspaceId}");
+    expect(settingsSource).toContain(
+      "<LazyMembersSection\n              workspaceId={workspaceId}",
+    );
   });
 
   test("separates organization administration from Personal content", () => {
-    expect(organizationAdminSource).toContain(
-      "Manage organization roles and shared workspace access. Personal workspaces and private",
+    expect(organizationShellSource).toContain(
+      "`Everyone in ${organizationName}, with one role each and a private Personal workspace.`",
     );
-    expect(organizationAdminSource).toContain("resources are never shared here.");
-    expect(organizationAdminSource).toContain(
-      "Create shared workspaces, then choose which organization members can use each one.",
+    expect(organizationShellSource).toContain(
+      "`Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`",
     );
-    expect(organizationAdminSource).toContain("Personal workspaces stay private.");
-    expect(organizationSource).toContain("<OrganizationPeopleSection");
-    expect(organizationSource).toContain("<OrganizationRetentionSection");
+    expect(peoplePageSource).toContain(
+      "Nobody else can open it, including owners and\n        admins.",
+    );
+    expect(organizationSource).toContain("<OrganizationPeoplePage");
+    // Retention lives on the Security & data page.
+    expect(organizationSource).toContain("<OrganizationSecurityPage");
   });
 });

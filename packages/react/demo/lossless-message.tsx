@@ -3,6 +3,10 @@ import { MessageTimeline, TooltipProvider, useSessionEvents } from "@opengeni/re
 import type { SessionEvent } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 // Deliberately above both former per-string and per-event preview thresholds.
 const text = Array.from(

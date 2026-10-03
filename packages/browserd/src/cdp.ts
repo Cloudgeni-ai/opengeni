@@ -42,8 +42,24 @@ export class CdpTransportError extends Error {
   }
 }
 
+export class CdpCommandTimeoutError extends CdpTransportError {
+  constructor(readonly method: string) {
+    super(`CDP ${method} timed out`);
+    this.name = "CdpCommandTimeoutError";
+  }
+}
+
+/** One attached target ended; the browser connection can still serve other targets. */
+export class CdpSessionDetachedError extends Error {
+  constructor(readonly method: string) {
+    super(`CDP ${method} target session detached`);
+    this.name = "CdpSessionDetachedError";
+  }
+}
+
 type PendingCommand = {
   method: string;
+  sessionId: string | undefined;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -59,6 +75,7 @@ export class CdpConnection {
   private readonly listeners = new Map<string, Set<EventListener>>();
   private messageTail: Promise<void> = Promise.resolve();
   private failure: CdpTransportError | null = null;
+  private readonly disconnectListeners = new Set<() => void>();
 
   private constructor(private readonly socket: WebSocket) {
     socket.binaryType = "arraybuffer";
@@ -150,7 +167,7 @@ export class CdpConnection {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.settlePending(id);
-        reject(new CdpTransportError(`CDP ${method} timed out`));
+        reject(new CdpCommandTimeoutError(method));
       }, timeoutMs);
       timer.unref?.();
       const abort = options.signal
@@ -162,6 +179,7 @@ export class CdpConnection {
       options.signal?.addEventListener("abort", abort!, { once: true });
       this.pending.set(id, {
         method,
+        sessionId: options.sessionId,
         resolve: (value) => resolve(value as T),
         reject,
         timer,
@@ -198,6 +216,7 @@ export class CdpConnection {
     } = {},
   ): Promise<CdpEvent> {
     const timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
+    if (this.failure) throw this.failure;
     if (options.signal?.aborted) throw new CdpTransportError(`CDP ${method} wait was aborted`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -218,13 +237,38 @@ export class CdpConnection {
         cleanup();
         reject(new CdpTransportError(`CDP ${method} wait was aborted`));
       };
+      const unsubscribeDetached = options.sessionId
+        ? this.on("Target.detachedFromTarget", (event) => {
+            if (event.params.sessionId !== options.sessionId) return;
+            cleanup();
+            reject(new CdpSessionDetachedError(method));
+          })
+        : () => undefined;
+      let unsubscribeDisconnected = () => {};
       const cleanup = () => {
         clearTimeout(timer);
         unsubscribe();
+        unsubscribeDetached();
+        unsubscribeDisconnected();
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
+      unsubscribeDisconnected = this.onDisconnect(() => {
+        cleanup();
+        reject(this.failure ?? new CdpTransportError("CDP connection closed"));
+      });
     });
+  }
+
+  onDisconnect(listener: () => void): () => void {
+    if (this.failure) {
+      listener();
+      return () => undefined;
+    }
+    this.disconnectListeners.add(listener);
+    return () => {
+      this.disconnectListeners.delete(listener);
+    };
   }
 
   close(): void {
@@ -272,6 +316,16 @@ export class CdpConnection {
       params: isRecord(message.params) ? message.params : {},
       sessionId: typeof message.sessionId === "string" ? message.sessionId : null,
     };
+    if (
+      event.method === "Target.detachedFromTarget" &&
+      typeof event.params.sessionId === "string"
+    ) {
+      for (const [id, pending] of this.pending) {
+        if (pending.sessionId !== event.params.sessionId) continue;
+        this.settlePending(id);
+        pending.reject(new CdpSessionDetachedError(pending.method));
+      }
+    }
     const keys = new Set([
       eventKey(event.method, event.sessionId),
       eventKey(event.method, null),
@@ -305,6 +359,14 @@ export class CdpConnection {
       pending.reject(error);
     }
     this.listeners.clear();
+    for (const listener of this.disconnectListeners) {
+      try {
+        listener();
+      } catch {
+        /* failure notification must not strand pending commands */
+      }
+    }
+    this.disconnectListeners.clear();
   }
 }
 

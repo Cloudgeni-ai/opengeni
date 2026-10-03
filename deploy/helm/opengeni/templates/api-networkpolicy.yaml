@@ -22,7 +22,7 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: web
-        {{- if and ((.Values.observability).collector).enabled ((.Values.observability).metrics).enabled }}
+        {{- if and ((.Values.observability).collector).enabled ((.Values.observability).metrics).enabled (not .Values.api.metricsPort) }}
         - podSelector:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
@@ -35,6 +35,26 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.api.containerPort }}
+    {{- if and .Values.api.metricsPort (or (and ((.Values.observability).collector).enabled ((.Values.observability).metrics).enabled) .Values.networkPolicy.monitoring) }}
+    # The internal metrics listener admits only the scrapers, never the ingress
+    # controller.
+    - from:
+        {{- if and ((.Values.observability).collector).enabled ((.Values.observability).metrics).enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: otel-collector
+        {{- end }}
+        {{- with .Values.networkPolicy.monitoring }}
+        - namespaceSelector:
+            {{- toYaml .namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.metricsPort }}
+    {{- end }}
   {{- if .Values.networkPolicy.egress.enabled }}
   egress:
     {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}

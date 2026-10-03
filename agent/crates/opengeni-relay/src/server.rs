@@ -7,7 +7,11 @@
 //!   On upgrade the connection runs the [`handshake`](conn::handshake) → splice
 //!   loop against the [`ChannelRegistry`].
 //! * `GET /healthz` — liveness/readiness probe (always `200 ok` when serving).
-//! * `GET /metrics` — the Prometheus-style operator aggregates.
+//! * `GET /metrics` - the Prometheus-style operator aggregates. When
+//!   [`RelayConfig::metrics_bind`] is set it is served ONLY on that dedicated
+//!   internal listener ([`metrics_router`]) and the public wss listener answers
+//!   `404`, so an ingress forwarding every path of the relay host cannot publish
+//!   it. Unset, it stays on the wss listener (the single-listener layout).
 //!
 //! The wss transport reuses the SAME framing as the agent ([`RelayMessage`]): each
 //! relay message is one WebSocket **binary** message (`tag || protobuf-body`). The
@@ -40,24 +44,39 @@ pub struct RelayState {
     pub(crate) config: Arc<RelayConfig>,
 }
 
-/// Build the relay router over a registry + config.
+/// Build the public (wss) relay router over a registry + config. It routes
+/// `GET /metrics` only when no dedicated metrics listener is configured.
 pub fn router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
+    let serves_metrics = config.metrics_listener_bind().is_none();
     let state = RelayState { registry, config };
-    Router::new()
+    let router = Router::new()
         .route("/stream", get(stream_upgrade))
-        .route("/healthz", get(healthz))
+        .route("/healthz", get(healthz));
+    let router = if serves_metrics {
+        router.route("/metrics", get(metrics_handler))
+    } else {
+        router
+    };
+    router.with_state(state)
+}
+
+/// Build the dedicated internal metrics router: only `GET /metrics`. Nothing else
+/// is routed here, so exposing this port to a scraper exposes nothing else.
+pub fn metrics_router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) -> Router {
+    Router::new()
         .route("/metrics", get(metrics_handler))
-        .with_state(state)
+        .with_state(RelayState { registry, config })
 }
 
 /// Serve the relay on `config.bind` until `shutdown` resolves. Spawns a background
-/// reaper that bounds half-open channel state. Returns the bound address (useful
-/// when binding to port 0 in tests).
+/// reaper that bounds half-open channel state, and the dedicated metrics listener
+/// when [`RelayConfig::metrics_bind`] is set. Returns the bound wss address
+/// (useful when binding to port 0 in tests).
 ///
 /// # Errors
 ///
-/// [`RelayError::Server`](crate::error::RelayError::Server) if the listener cannot
-/// bind.
+/// [`RelayError::Server`](crate::error::RelayError::Server) if either listener
+/// cannot bind, or if the metrics listener would share the wss listener's port.
 pub async fn serve(
     config: RelayConfig,
     metrics: RelayMetrics,
@@ -71,7 +90,22 @@ pub async fn serve(
     let addr = listener
         .local_addr()
         .map_err(|e| crate::error::RelayError::Server(format!("local_addr: {e}")))?;
-    tracing::info!(%addr, "relay listening");
+    let metrics_listener = bind_metrics_listener(&config, addr).await?;
+    let metrics_addr = metrics_listener
+        .as_ref()
+        .map(|(_, metrics_addr)| *metrics_addr);
+    tracing::info!(%addr, metrics_addr = ?metrics_addr, "relay listening");
+
+    // The dedicated metrics listener outlives the wss drain (scrapes keep working
+    // while in-flight streams finish) and stops after it.
+    let metrics_server = metrics_listener.map(|(metrics_listener, _)| {
+        let app = metrics_router(registry.clone(), config.clone());
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(metrics_listener, app).await {
+                tracing::error!(error = %e, "relay metrics listener failed");
+            }
+        })
+    });
 
     // The half-open reaper bounds transient state (a side that dialed but whose peer
     // never arrived). Cheap; runs every few seconds.
@@ -93,8 +127,36 @@ pub async fn serve(
         .await
         .map_err(|e| crate::error::RelayError::Server(format!("serve: {e}")));
     reaper.abort();
+    if let Some(metrics_server) = metrics_server {
+        metrics_server.abort();
+    }
     result?;
     Ok(addr)
+}
+
+/// Bind the dedicated metrics listener when one is configured. It must not share
+/// the wss listener's port: the check runs on the bound addresses, so it also
+/// catches a host-specific bind on the same port that the OS would accept.
+async fn bind_metrics_listener(
+    config: &RelayConfig,
+    wss_addr: SocketAddr,
+) -> crate::error::RelayResult<Option<(TcpListener, SocketAddr)>> {
+    let Some(metrics_bind) = config.metrics_listener_bind() else {
+        return Ok(None);
+    };
+    let listener = TcpListener::bind(metrics_bind).await.map_err(|e| {
+        crate::error::RelayError::Server(format!("bind metrics {metrics_bind}: {e}"))
+    })?;
+    let metrics_addr = listener
+        .local_addr()
+        .map_err(|e| crate::error::RelayError::Server(format!("metrics local_addr: {e}")))?;
+    if metrics_addr.port() == wss_addr.port() {
+        return Err(crate::error::RelayError::Server(format!(
+            "OPENGENI_RELAY_METRICS_BIND ({metrics_bind}) must use a different port than OPENGENI_RELAY_BIND ({})",
+            config.bind
+        )));
+    }
+    Ok(Some((listener, metrics_addr)))
 }
 
 /// `GET /healthz`.

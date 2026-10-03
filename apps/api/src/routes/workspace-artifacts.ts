@@ -37,6 +37,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
+import { userContentDispositionHeaders } from "../http/user-content";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -322,12 +323,15 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "private, no-store",
-          // Retained user HTML is never rendered inline on the API origin:
-          // callers fetch the bytes and render them inside their own sandboxed
-          // frame (the SDK's getWorkspaceArtifactHtml → iframe srcDoc path).
-          "Content-Disposition": "attachment",
+          // A Site runs its own scripts, but only inside an opaque origin: no
+          // same-origin access to the console, and no cross-site embedding.
           "Content-Security-Policy": "sandbox allow-scripts",
+          "Cross-Origin-Resource-Policy": "same-origin",
           "X-Content-Type-Options": "nosniff",
+          // Clients read this HTML with fetch and render it in their own frame
+          // (the console uses srcdoc). Opening the raw URL downloads it rather
+          // than running a publisher-authored page at an app-origin URL.
+          ...userContentDispositionHeaders("text/html", "site.html"),
         },
       },
     );

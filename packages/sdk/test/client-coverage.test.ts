@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
+import type { AccessContext, AccessCredential } from "../src/index";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -20,6 +21,22 @@ const BASE_ID = "77777777-7777-4777-8777-777777777777";
 const DOCUMENT_ID = "88888888-8888-4888-8888-888888888888";
 const TURN_A = "99999999-9999-4999-8999-999999999991";
 const TURN_B = "99999999-9999-4999-8999-999999999992";
+
+test("workspace-only file reads use a distinct route that older APIs reject", async () => {
+  const requests: string[] = [];
+  const client = new OpenGeniEmbeddingClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "dummy",
+    fetch: async (input) => {
+      requests.push(String(input));
+      return Response.json({ content: "", encoding: "base64", sizeBytes: 0 });
+    },
+  });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a", workspaceOnly: true });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" });
+  expect(requests[0]).toEndWith("/fs/read-workspace");
+  expect(requests[1]).toEndWith("/fs/read");
+});
 
 type RecordedRequest = {
   url: string;
@@ -507,6 +524,79 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(JSON.parse(requests[7]!.body!)).toEqual(command);
   });
 
+  test.each([
+    {
+      kind: "organization_api_key",
+      access: "full",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: null,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:create", "members:manage"],
+      note: "All shared workspaces in this organization; Personal workspaces are excluded.",
+    },
+    {
+      kind: "workspace_api_key",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: WORKSPACE_ID,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:read", "secrets:read"],
+      note: "Only this workspace; secrets:read is explicitly granted.",
+    },
+  ] satisfies AccessCredential[])(
+    "getAccessContext preserves $kind credential metadata and existing grants",
+    async (credential) => {
+      const access: AccessContext = {
+        mode: "managed",
+        subjectId: "api_key:test",
+        accountGrants: [
+          {
+            accountId: ENVIRONMENT_ID,
+            subjectId: "api_key:test",
+            permissions: ["account:read"],
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: ENVIRONMENT_ID,
+        defaultWorkspaceId: credential.workspaceId,
+        credential,
+      };
+      const { client, requests } = makeClient(() => jsonResponse(access));
+
+      const result = await client.getAccessContext();
+
+      expect(result).toEqual(access);
+      expect(result.credential).toEqual(credential);
+      expect(result.accountGrants).toEqual(access.accountGrants);
+      expect(result.workspaceGrants).toEqual(access.workspaceGrants);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.method).toBe("GET");
+      expect(new URL(requests[0]!.url).pathname).toBe("/v1/access/me");
+    },
+  );
+
+  test("getAccessContext accepts older servers without credential metadata", async () => {
+    const access: AccessContext = {
+      mode: "managed",
+      subjectId: "api_key:legacy",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          accountId: ENVIRONMENT_ID,
+          subjectId: "api_key:legacy",
+          permissions: ["workspace:read", "sessions:read"],
+        },
+      ],
+      defaultAccountId: ENVIRONMENT_ID,
+      defaultWorkspaceId: WORKSPACE_ID,
+    };
+    const { client } = makeClient(() => jsonResponse(access));
+
+    const result = await client.getAccessContext();
+
+    expect(result).toEqual(access);
+    expect(result.credential).toBeUndefined();
+    expect(result).not.toHaveProperty("credential");
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {
@@ -593,6 +683,15 @@ describe("OpenGeniClient access + workspaces", () => {
       "openai:gpt-5.6-sol:responses",
       "fireworks:accounts/fireworks/models/glm-5p2:chat",
     ]);
+  });
+
+  test("getClientConfig forwards an explicit workspace without losing request options", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ apiContractRevision: OPENGENI_API_CONTRACT_REVISION }),
+    );
+    const controller = new AbortController();
+    await client.getClientConfig({ workspaceId: "workspace/a b", signal: controller.signal });
+    expect(new URL(requests[0]!.url).searchParams.get("workspaceId")).toBe("workspace/a b");
   });
 
   test("getWorkspaceModelCatalog fetches authenticated selectability", async () => {
@@ -845,6 +944,18 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("sends a model-only patch without inventing a replacement config", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("PATCH");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+  });
+
   test("normalizes Connected Machine working directories before sending", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {
@@ -904,6 +1015,55 @@ describe("OpenGeniClient scheduled tasks", () => {
       `DELETE /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}`,
       `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/runs?limit=5`,
     ]);
+  });
+
+  test("refreshes access against the reviewed head and lists access attention", async () => {
+    const digest = "a".repeat(64);
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/attention")
+        ? jsonResponse({
+            tasks: [
+              {
+                taskId: TASK_ID,
+                taskName: "Post the daily summary",
+                executionDigest: digest,
+                runId: TASK_ID,
+                firedAt: "2026-09-17T08:00:00.000Z",
+                unavailableAccounts: [{ id: "gmail", name: "Gmail" }],
+                failures: [
+                  {
+                    serverId: "slack",
+                    name: "Slack",
+                    providerDomain: "slack.com",
+                    reason: "personal_authority_unavailable",
+                    count: 2,
+                    firstOccurredAt: "2026-09-17T08:00:05.000Z",
+                  },
+                ],
+              },
+            ],
+          })
+        : jsonResponse({ id: TASK_ID }),
+    );
+    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, {
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
+    const attention = await client.listScheduledTaskAccessAttention(WORKSPACE_ID);
+    expect(attention.map((item) => item.failures[0]?.reason)).toEqual([
+      "personal_authority_unavailable",
+    ]);
+    expect(attention[0]?.unavailableAccounts).toEqual([{ id: "gmail", name: "Gmail" }]);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/refresh-access`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/attention`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
   });
 });
 
@@ -1615,6 +1775,71 @@ describe("OpenGeniClient files", () => {
     ).toBe(true);
   });
 
+  test.each([
+    ["computer_screenshot", "image/png", true],
+    ["computer_screenshot", "image/jpeg", true],
+    ["computer_screenshot", "image/webp", true],
+    ["browser_screenshot", "image/png", true],
+    ["browser_screenshot", "image/jpeg", true],
+    ["browser_screenshot", "image/webp", true],
+    ["computer_screenshot", "image/svg+xml", false],
+    ["browser_screenshot", "image/svg+xml", false],
+    ["generated_image", "image/jpeg", false],
+  ] as const)(
+    "validates retained %s %s before screenshot download",
+    async (kind, contentType, supported) => {
+      const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      const metadata = {
+        available: true as const,
+        artifactId: FILE_ID,
+        kind,
+        contentType,
+        originalBytes: bytes.byteLength,
+        sha256,
+        retainedAt: "2026-09-24T00:00:00.000Z",
+        dimensions: { width: 1440, height: 900 },
+        retention: {
+          policy: "session_screenshot" as const,
+          expiresAt: "2026-10-24T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET" as const,
+          path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+          acceptRanges: "bytes" as const,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+      };
+      const { client, requests } = makeClient((request) =>
+        request.url.endsWith(`/artifacts/${FILE_ID}`)
+          ? jsonResponse(metadata)
+          : new Response(bytes, {
+              status: 206,
+              headers: {
+                "Accept-Ranges": "bytes",
+                "Content-Length": String(bytes.byteLength),
+                "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
+                "Content-Type": contentType,
+              },
+            }),
+      );
+
+      if (!supported) {
+        await expect(
+          client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID),
+        ).rejects.toThrow("retained screenshot metadata is invalid");
+        expect(requests).toHaveLength(1);
+        return;
+      }
+      const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+      expect(downloaded.metadata).toEqual(metadata);
+      expect(downloaded.bytes).toEqual(bytes);
+      expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
+    },
+  );
+
   test("validates a generated-image receipt before minting its zero-copy URL", async () => {
     const reference = {
       available: true as const,
@@ -2233,6 +2458,10 @@ describe("OpenGeniClient billing", () => {
       buckets: [],
       workspaces: [],
       nextWorkspaceCursor: null,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(
@@ -2255,6 +2484,15 @@ describe("OpenGeniClient billing", () => {
     expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
     expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
     expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+    await client.getOrganizationModelUsage({
+      accountId: "acc-1",
+      period: "week",
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(3);
+    expect(new URL(requests[2]!.url).pathname).toBe("/v1/billing/usage-models");
+    expect(new URL(requests[2]!.url).searchParams.get("period")).toBe("week");
+    expect(new URL(requests[2]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {
@@ -2277,6 +2515,7 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       returnUrl: "https://app.opengeni.ai/billing",
     });
+    await client.getBillingCheckout("cs_test_1", { accountId: "acc-1" });
     expect(
       requests.map(
         (request) =>
@@ -2288,6 +2527,7 @@ describe("OpenGeniClient billing", () => {
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
       "POST /v1/billing/portal",
+      "GET /v1/billing/checkout/cs_test_1?accountId=acc-1",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
     expect(JSON.parse(requests[4]!.body!)).toEqual({

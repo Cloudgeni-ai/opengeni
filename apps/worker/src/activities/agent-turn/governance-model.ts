@@ -20,10 +20,14 @@ import {
   renderWorkspaceGovernanceContext,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
+import {
+  codeSearchDeploymentPolicy,
+  settingsWithResolvedModelContext,
+  type Settings,
+} from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun } from "@opengeni/core";
+import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
   TurnActivityServices as ActivityServices,
@@ -44,8 +48,10 @@ import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceDefaultAgentIdentity,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
+import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
@@ -89,7 +95,15 @@ export type GovernanceModelOk = {
     | null;
   rigName: string | null;
   agentHumanInputEnabled: boolean;
+  /** Deployment and workspace allow the Jev-backed code_search tool. */
+  codeSearchEnabled: boolean;
   workspaceAgentInstructions: string | null | undefined;
+  /**
+   * Modular composer identity tier: the explicit workspace default identity,
+   * else the frozen legacy persona without `{{core}}`. Never dropped by
+   * instruction policies (only read for sessions with an agent configuration).
+   */
+  workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
@@ -230,8 +244,20 @@ export async function prepareGovernanceAndModel(
   workspaceRefs.rigVersionId = session.rigVersionId ?? "";
   if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+  // The session's decision was frozen when it was created, so only a
+  // deliberate switch-off (deployment or workspace Off), or undoing one,
+  // changes its tool list.
+  const codeSearchEnabled = codeSearchEnabledForTurn(
+    session.codeSearchEnabled,
+    workspace.settings,
+    codeSearchDeploymentPolicy(capabilitySettings),
+  );
   const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
+  const workspaceAgentIdentity = resolveWorkspaceDefaultAgentIdentity(
+    workspace.settings,
+    workspaceAgentInstructions,
+  ).identity;
   const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
   assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
@@ -276,8 +302,13 @@ export async function prepareGovernanceAndModel(
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
-  // A Rig is always a setup/check layer over the deployment platform sandbox.
-  const logicalSandboxSettings = capabilitySettings;
+  // A Rig is always a setup/check layer over the deployment platform sandbox,
+  // or over the workspace's allowlisted selection of one.
+  const logicalSandboxSettings = settingsWithWorkspaceSandboxImage(
+    capabilitySettings,
+    workspace.settings,
+    turn.sandboxBackend,
+  );
   const providerImageSelection = await resolveRigProviderImageForRun(
     logicalSandboxSettings,
     rigVersion,
@@ -460,7 +491,9 @@ export async function prepareGovernanceAndModel(
       rigVersion,
       rigName,
       agentHumanInputEnabled,
+      codeSearchEnabled,
       workspaceAgentInstructions,
+      workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceMemory,

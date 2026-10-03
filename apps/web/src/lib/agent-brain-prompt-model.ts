@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type AgentBrainPromptModelPreference = {
@@ -14,41 +15,37 @@ export type AgentBrainPromptModelSelection = {
   latencyMode: LatencyMode;
 };
 
-function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
-  if (model.cost === "free") {
-    return "Free in this deployment";
+/** Scope-free payer words for a catalog model; shared by the prompt routes. */
+export function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
+  // Scope-free payer words; who connected a key is a Models-settings fact.
+  if (model.cost === "free") return "Free in this deployment";
+  if (model.cost === "credits") return "Opengeni credits";
+  if (
+    model.provider === "organization-claude-subscription" ||
+    model.provider === "workspace-claude-subscription"
+  ) {
+    return "Claude plan";
   }
-  if (model.cost === "credits") {
-    return "OpenGeni credits";
-  }
-  if (model.cost === "workspace") {
-    return "Workspace AI Gateway";
-  }
-  if (model.cost === "subscription") {
-    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
-  }
-  if (model.source === "codex") {
-    return "Codex subscription";
-  }
-  if (model.source === "supergrok") {
-    return "SuperGrok subscription";
-  }
-  if (model.source === "workspace_gateway") {
-    return "Workspace AI Gateway";
-  }
+  if (model.cost === "workspace" || model.cost === "organization") return "API key";
+  if (model.source === "supergrok") return "SuperGrok plan";
+  if (model.cost === "subscription" || model.source === "codex") return "ChatGPT plan";
+  if (model.source === "workspace_gateway") return "API key";
   if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.billing?.upstreamPayer === "connected_subscription") {
     return model.credentialSource?.kind === "connected_subscription" &&
       model.credentialSource.provider === "xai"
-      ? "SuperGrok subscription"
-      : "Codex subscription";
+      ? "SuperGrok plan"
+      : "ChatGPT plan";
   }
-  if (model.billing?.upstreamPayer === "workspace") {
-    return "Workspace AI Gateway";
+  if (
+    model.billing?.upstreamPayer === "workspace" ||
+    model.billing?.upstreamPayer === "organization"
+  ) {
+    return "API key";
   }
-  return "External provider";
+  return "Provider account";
 }
 
 /**
@@ -96,7 +93,7 @@ export function resolveAgentBrainPromptModel(
       : "standard";
   return {
     model: model.id,
-    label: model.label,
+    label: modelDisplayName(model),
     paymentSource: paymentSourceFor(model),
     reasoningEffort,
     latencyMode,

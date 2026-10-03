@@ -6,6 +6,10 @@ import { KNOWLEDGE_MIGRATION_MARKER, migrateRetainedKnowledge } from "./knowledg
 import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 import {
+  CLAUDE_POOL_MIGRATION_MARKER,
+  migrateClaudeSubscriptionPoolCredentials,
+} from "./claude-subscription-pool-migration";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
@@ -39,7 +43,16 @@ export interface ConcurrentIndexMigration {
 }
 
 export type MigrationRuntimeOptions = {
+  /** Existing operator key; used only by the closed Claude maintenance conversion. */
+  environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
+  /**
+   * For managed Postgres where an administrator preinstalls pgvector but the
+   * migration owner cannot execute CREATE EXTENSION, verify the public vector
+   * type and omit only 0000's exact vector installation statement. The default
+   * continues to execute the shipped migration verbatim.
+   */
+  preinstalledVector?: boolean;
   /**
    * Exact database login roles that may run an OpenGeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
@@ -173,7 +186,32 @@ export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
+  options?: Pick<MigrationRuntimeOptions, "preinstalledVector" | "environmentsEncryptionKey">,
 ): Promise<void> {
+  if (file === "0000_initial.sql" && options?.preinstalledVector) {
+    sqlText = await initialMigrationWithPreinstalledVector(sql, sqlText);
+  }
+  if (sqlText.includes(CLAUDE_POOL_MIGRATION_MARKER)) {
+    if (file !== "0598_claude_subscription_account_pools.sql")
+      throw new Error("Claude account conversion is restricted to migration 0598");
+    const parts = sqlText.split(CLAUDE_POOL_MIGRATION_MARKER);
+    if (parts.length !== 2) throw new Error("0598 requires exactly one Claude conversion stage");
+    await sql.begin(async (transaction) => {
+      await transaction`CREATE TEMP TABLE claude_pool_conversion_0587(completed boolean NOT NULL) ON COMMIT DROP`;
+      await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+      await transaction.unsafe(parts[0]!);
+      await migrateClaudeSubscriptionPoolCredentials(
+        transaction,
+        options?.environmentsEncryptionKey,
+      );
+      await transaction`INSERT INTO pg_temp.claude_pool_conversion_0587 VALUES(true)`;
+      await transaction.unsafe(parts[1]!);
+      await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+    });
+    return;
+  }
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
     if (file !== "0433_unified_skill_lifecycle.sql")
       throw new Error("Skill metadata stage is restricted to migration 0433");
@@ -253,8 +291,13 @@ export async function executeMigrationFile(
     // makes a fresh database capable of applying maintenance migration 0138
     // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
+    // Bound ordinary DDL lock acquisition in that same implicit transaction.
+    // The migration body follows this preamble, so its own SET LOCAL can still
+    // override the default; a lock timeout aborts the whole body before the
+    // caller writes its separate success receipt.
     await sql.unsafe(
       `SELECT
+  pg_catalog.set_config('lock_timeout', '5s', true),
   pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
   pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${file === "0434_ordered_model_history.sql" ? "SET CONSTRAINTS ALL IMMEDIATE;\n" : ""}${sqlText}`,
     );
@@ -280,6 +323,46 @@ export async function executeMigrationFile(
   } finally {
     await sql`select set_config('lock_timeout', '0', false)`;
   }
+}
+
+const initialExtensionPreamble =
+  "CREATE EXTENSION IF NOT EXISTS pgcrypto;\nCREATE EXTENSION IF NOT EXISTS vector;\n";
+
+/** Never rewrite arbitrary migrations or trust a same-named type in another schema. */
+export async function initialMigrationWithPreinstalledVector(
+  sql: postgres.Sql,
+  sqlText: string,
+): Promise<string> {
+  if (!sqlText.startsWith(initialExtensionPreamble)) {
+    throw new Error("0000 initial extension preamble changed; review managed Postgres admission");
+  }
+  const [installed] = await sql<Array<{ present: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_extension extension
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = extension.extnamespace
+      JOIN pg_catalog.pg_type type ON type.typnamespace = namespace.oid AND type.typname = 'vector'
+      JOIN pg_catalog.pg_depend dependency
+        ON dependency.classid = 'pg_catalog.pg_type'::regclass
+       AND dependency.objid = type.oid
+       AND dependency.refclassid = 'pg_catalog.pg_extension'::regclass
+       AND dependency.refobjid = extension.oid AND dependency.deptype = 'e'
+      WHERE extension.extname = 'vector' AND namespace.nspname = 'public'
+    ) AS present
+  `;
+  if (!installed?.present) {
+    throw new Error("Preinstalled public pgvector extension and type are required");
+  }
+  return (
+    "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n" + sqlText.slice(initialExtensionPreamble.length)
+  );
+}
+
+function preinstalledVectorPolicy(options: MigrationRuntimeOptions | undefined): boolean {
+  if (options !== undefined) return options.preinstalledVector === true;
+  const configured = process.env.OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR;
+  if (configured === undefined || configured === "false") return false;
+  if (configured === "true") return true;
+  throw new Error("OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR must be true or false");
 }
 
 function deploymentDepthPolicy(
@@ -425,6 +508,7 @@ export async function migrate(
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const depthPolicy = deploymentDepthPolicy(runtimeOptions);
+  const preinstalledVector = preinstalledVectorPolicy(runtimeOptions);
   const sql = postgres(databaseUrl, { max: 1 });
   try {
     // Serialize concurrent migrate() runs; the session-level lock is released
@@ -477,7 +561,15 @@ export async function migrate(
       if (sqlText === undefined) {
         throw new Error(`Pending migration source was not loaded: ${file}`);
       }
-      await executeMigrationFile(sql, file, sqlText);
+      const configuredKey =
+        runtimeOptions?.environmentsEncryptionKey ??
+        (process.env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
+          ? new Uint8Array(Buffer.from(process.env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY, "base64"))
+          : undefined);
+      await executeMigrationFile(sql, file, sqlText, {
+        preinstalledVector,
+        ...(configuredKey ? { environmentsEncryptionKey: configuredKey } : {}),
+      });
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }
     // Reconcile even when all migration names were already recorded. This is

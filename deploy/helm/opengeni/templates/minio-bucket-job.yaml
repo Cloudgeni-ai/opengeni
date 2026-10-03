@@ -12,6 +12,9 @@ metadata:
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "5"
 spec:
+  {{- with $.Values.jobTtlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ . }}
+  {{- end }}
   backoffLimit: 3
   template:
     metadata:

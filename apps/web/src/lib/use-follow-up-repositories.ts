@@ -6,6 +6,7 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -97,6 +98,10 @@ export function useRepositoryCatalogRefresh(
   };
 }
 
+function withoutMounted<T>(pending: ReadonlySet<T>, mounted: ReadonlySet<T>): Set<T> {
+  return new Set([...pending].filter((id) => !mounted.has(id)));
+}
+
 function manualDraftSignature(draft: RepoDraft): string | null {
   try {
     const uri = normalizeRepositoryTransportUri(
@@ -117,7 +122,11 @@ function manualResourceSignature(resource: RepositoryResource): string {
  * resources are additive, so accepted resources become locked while only the
  * not-yet-sent selection remains editable.
  */
-export function useFollowUpRepositories(session: Session): {
+export function useFollowUpRepositories(
+  session: Session,
+  /** Starts workspace App setup from a click; the caller hosts the dialog. */
+  onConnectWorkspaceApp: () => void,
+): {
   pendingResources: ResourceRef[];
   error: string | null;
   selectionCount: number;
@@ -211,10 +220,19 @@ export function useFollowUpRepositories(session: Session): {
           mountedResources,
           manualRepos: pendingManualRepos,
           repositories: context.githubRepos,
-          selectedRepoIds: pendingRepoIds,
+          // A pending pick that became mounted elsewhere (for example from a
+          // conversation card) is already in the chat; never resend or
+          // conflict-check it against its own mount.
+          selectedRepoIds: withoutMounted(
+            pendingRepoIds,
+            mountedRepositorySelection.selectedRepoIds,
+          ),
           selectedRepoRefs: pendingRepoRefs,
           personalRepositories: context.personalGitHubRepositories,
-          selectedPersonalRepositoryIds: pendingPersonalRepoIds,
+          selectedPersonalRepositoryIds: withoutMounted(
+            pendingPersonalRepoIds,
+            mountedPersonalRepoIds,
+          ),
           selectedPersonalRepositoryRefs: pendingPersonalRepoRefs,
           personalCredentialBindingId: context.personalGitHubSelection?.credentialBindingId,
         }),
@@ -231,6 +249,8 @@ export function useFollowUpRepositories(session: Session): {
     context.personalGitHubRepositories,
     context.personalGitHubSelection?.credentialBindingId,
     mountedResources,
+    mountedPersonalRepoIds,
+    mountedRepositorySelection.selectedRepoIds,
     pendingManualRepos,
     pendingPersonalRepoIds,
     pendingPersonalRepoRefs,
@@ -584,12 +604,16 @@ export function useFollowUpRepositories(session: Session): {
       onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),
+      onConnectWorkspaceApp,
+      onConfigureInstallation: (installationId: number) =>
+        openGitHubInstallationSettings(context.client, session.workspaceId, installationId),
       onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
       catalogRefresh,
       context,
       disconnectRepositoryInstallation,
+      onConnectWorkspaceApp,
       lockedManualRepoIds,
       manualReposOpen,
       mountedManualRepos,

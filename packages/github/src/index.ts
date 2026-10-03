@@ -446,6 +446,20 @@ export function readSignedState(
   secret: string,
   now = Math.floor(Date.now() / 1000),
 ): GitHubSignedStatePayload | null {
+  const payload = inspectSignedState(state, secret);
+  if (!payload) return null;
+  const age = now - payload.iat;
+  return age >= 0 && age <= stateMaxAgeSeconds ? payload : null;
+}
+
+/**
+ * Verifies a signed state's signature and shape without its age limit.
+ *
+ * Only for explaining a failed callback (for example "this link expired" and
+ * which workspace page to return to). An aged payload is never authority: every
+ * authorizing read uses {@link readSignedState} or its own stricter lifetime.
+ */
+export function inspectSignedState(state: string, secret: string): GitHubSignedStatePayload | null {
   const [encoded, signature] = state.split(".", 2);
   if (!encoded || !signature) {
     return null;
@@ -468,8 +482,7 @@ export function readSignedState(
   ) {
     return null;
   }
-  const age = now - (payload as { iat: number }).iat;
-  return age >= 0 && age <= stateMaxAgeSeconds ? (payload as GitHubSignedStatePayload) : null;
+  return payload as GitHubSignedStatePayload;
 }
 
 export function verifySignedState(
@@ -892,6 +905,63 @@ export function createGitHubAppInstallationRepositoryLookup(
         : {};
     return repositoryFromPayload(record, input.installationId, account);
   };
+}
+
+/**
+ * The repositories among `repositoryIds` that this App installation can no
+ * longer mint a token for, because the repository was deleted, removed from
+ * the installation, or the installation itself is gone. It asks exactly the
+ * question the sandbox token mint asks: one metadata-read token scoped to the
+ * whole list, and only when GitHub refuses that, one probe per repository to
+ * find which. The probe tokens never leave this function and grant nothing.
+ * Any other failure (timeout, 5xx, rate limit) throws, because it proves
+ * nothing about a single repository.
+ */
+export async function findInaccessibleGitHubAppInstallationRepositories(
+  settings: Settings,
+  input: { installationId: number; repositoryIds: number[] },
+): Promise<number[]> {
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const repositoryIds = [...new Set(input.repositoryIds)];
+  if (
+    !Number.isSafeInteger(input.installationId) ||
+    input.installationId <= 0 ||
+    repositoryIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  ) {
+    throw new GitHubAppApiError("GitHub repository access check requires positive integer ids");
+  }
+  if (repositoryIds.length === 0) return [];
+  const jwt = await createGitHubAppJwt(settings);
+  const probe = async (ids: number[]): Promise<"accessible" | "inaccessible" | "gone"> => {
+    try {
+      await createInstallationToken(jwt, {
+        installationId: input.installationId,
+        repositoryIds: ids,
+        permissions: { metadata: "read" },
+        timeoutMs: githubRepositoryLookupTimeoutMs,
+      });
+      return "accessible";
+    } catch (error) {
+      if (error instanceof GitHubAppApiError) {
+        // 422: at least one repository does not exist or is not accessible to
+        // the installation. 404: the installation itself no longer exists.
+        if (error.status === 422) return "inaccessible";
+        if (error.status === 404) return "gone";
+      }
+      throw error;
+    }
+  };
+  const all = await probe(repositoryIds);
+  if (all === "accessible") return [];
+  if (all === "gone" || repositoryIds.length === 1) return repositoryIds;
+  const outcomes = await Promise.all(
+    repositoryIds.map(async (id) => ({ id, outcome: await probe([id]) })),
+  );
+  if (outcomes.some(({ outcome }) => outcome === "gone")) return repositoryIds;
+  return outcomes.flatMap(({ id, outcome }) => (outcome === "accessible" ? [] : [id]));
 }
 
 /**
@@ -1638,6 +1708,10 @@ function repositoryFromPayload(
     defaultBranch: String(payload.default_branch ?? "main"),
     accountLogin: String(account.login ?? fullName.split("/", 1)[0]),
     accountType: typeof account.type === "string" ? account.type : null,
+    ...(typeof payload.archived === "boolean" ? { archived: payload.archived } : {}),
+    ...(typeof payload.size === "number" && Number.isInteger(payload.size) && payload.size >= 0
+      ? { sizeKb: payload.size }
+      : {}),
   };
 }
 

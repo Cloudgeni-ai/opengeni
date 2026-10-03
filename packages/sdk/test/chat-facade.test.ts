@@ -4,6 +4,7 @@ import {
   chatIdempotencyKey,
   chatIdentityName,
   chatSessionId,
+  formatImportedHistory,
   OpenGeniChatError,
   uuidV5,
   type ChatChunk,
@@ -122,8 +123,10 @@ describe("Chat.send", () => {
 
     expect(server.creates).toHaveLength(1);
     expect(server.creates[0]).toEqual({
+      visibility: "private",
       agentAccess: "session",
-      memoryScope: "off",
+      memoryScope: "user",
+      agent: { renderer: "markdown" },
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
       idempotencyKey: `chat:${chat.sessionId}`,
@@ -189,6 +192,49 @@ describe("Chat.send", () => {
     expect(server.creates[2]!.modelContext).toBeUndefined();
   });
 
+  test("per-message model policy and modelContext reach create, send, and steer", async () => {
+    const server = fakeServer();
+    const chat = await server.og.chat({ tenant: "acme", conversation: "c_ctx", model: "base" });
+    await chat.send("hello", {
+      model: "fast-model",
+      reasoningEffort: "low",
+      modelContext: "Page: /dashboards/42",
+      importedHistory: [{ role: "user", text: "Earlier" }],
+    });
+    expect(server.creates[0]).toMatchObject({
+      model: "fast-model",
+      reasoningEffort: "low",
+      initialMessage: "hello",
+    });
+    expect(server.creates[0]!.modelContext).toBe(
+      [
+        "Earlier conversation imported from the product, oldest first:",
+        "user: Earlier",
+        "",
+        "Page: /dashboards/42",
+      ].join("\n"),
+    );
+
+    await chat.send("next", { model: "deep-model", modelContext: "Page: /dashboards/43" });
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "next", model: "deep-model", modelContext: "Page: /dashboards/43" },
+    });
+
+    await chat.steer("now", { reasoningEffort: "high", modelContext: "Page: /x" });
+    expect(server.requestsTo("POST", "/steer")[0]!.json()).toEqual({
+      text: "now",
+      reasoningEffort: "high",
+      modelContext: "Page: /x",
+    });
+  });
+
+  test("formatImportedHistory is exported and honors a tighter budget", () => {
+    const text = formatImportedHistory([{ role: "user", text: "x".repeat(500) }], 200);
+    expect(text!.length).toBeLessThanOrEqual(200);
+    expect(formatImportedHistory([])).toBeUndefined();
+  });
+
   test("a later send posts user.message and streams after the accepted sequence", async () => {
     const server = fakeServer();
     const chat = await server.og.chat({ tenant: "acme", conversation: "c_9" });
@@ -217,7 +263,7 @@ describe("Chat.send", () => {
     expect(server.requestsTo("POST", "/events")).toHaveLength(1);
   });
 
-  test("memory defaults follow agentAccess, false maps to off, and user memory requires a user", async () => {
+  test("private Knowledge defaults, false maps to off, and explicit user memory requires a user", async () => {
     const server = fakeServer();
     await (
       await server.og.chat({ tenant: "acme", user: "u_1", conversation: "a", agentAccess: "user" })
@@ -343,6 +389,210 @@ describe("Chat.stream", () => {
       expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text } });
     });
   }
+
+  test("commentary is activity: tools stream, the reply is only the answer", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: "Checking the ", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "logs.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking the logs.", messageId: "msg_note", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_logs", name: "search" } },
+        { type: "agent.toolCall.output", payload: { id: "call_logs", output: "ok" } },
+        {
+          type: "agent.message.delta",
+          payload: { text: "All ", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "clear.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "All clear.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        { type: "turn.completed", payload: { output: "All clear." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "commentary" });
+    const chunks = await collect(chat.stream("hello"));
+    expect(chunks.slice(0, -1)).toEqual([
+      { type: "tool", name: "search", status: "started", callId: "call_logs" },
+      { type: "tool", name: "search", status: "completed", callId: "call_logs" },
+      { type: "text", text: "All " },
+      { type: "text", text: "clear." },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: "All clear." } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "hello"],
+      ["assistant", "All clear."],
+    ]);
+  });
+
+  // Providers that report messages only after their whole response (the Agents
+  // SDK run-item order) complete a note after the answer already streamed.
+  test("a note completed after its answer streamed never repeats the answer", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: "Checking.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "It is ", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.delta",
+          payload: { text: "healthy.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking.", messageId: "msg_note", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "It is healthy.", messageId: "msg_answer", phase: "final_answer" },
+        },
+        { type: "turn.completed", payload: { output: "It is healthy." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "late-note" });
+    const chunks = await collect(chat.stream("hello"));
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([
+      { type: "text", text: "It is " },
+      { type: "text", text: "healthy." },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: "It is healthy." } });
+  });
+
+  test("undeclared messages of one response stay separate and complete by identity", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Summary: ok.", messageId: "msg_1" } },
+        { type: "agent.message.delta", payload: { text: "Details: ", messageId: "msg_2" } },
+        { type: "agent.message.delta", payload: { text: "fine.", messageId: "msg_2" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Summary: ok.", messageId: "msg_1", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Details: fine.", messageId: "msg_2", phase: "final_answer" },
+        },
+        // An older worker's phase-less settlement copy of the same answer.
+        { type: "agent.message.completed", payload: { text: "Details: fine." } },
+        { type: "turn.completed", payload: { output: "Details: fine." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "two-messages" });
+    const chunks = await collect(chat.stream("hello"));
+    const streamed = chunks
+      .filter((chunk) => chunk.type === "text")
+      .map((chunk) => chunk.text)
+      .join("");
+    expect(streamed).toBe("Summary: ok.\n\nDetails: fine.");
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: streamed } });
+  });
+
+  test("undeclared deltas later classified as commentary keep the reply equal to the stream", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Looking it up.", messageId: "msg_1" } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Looking it up.", messageId: "msg_1", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_1", name: "search" } },
+        { type: "agent.toolCall.output", payload: { id: "call_1", output: "ok" } },
+        { type: "agent.message.delta", payload: { text: "Found it.", messageId: "msg_2" } },
+        { type: "agent.message.completed", payload: { text: "Found it.", messageId: "msg_2" } },
+        { type: "turn.completed", payload: { output: "Found it." } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "undeclared" });
+    const chunks = await collect(chat.stream("hello"));
+    const streamed = chunks
+      .filter((chunk) => chunk.type === "text")
+      .map((chunk) => chunk.text)
+      .join("");
+    expect(streamed).toBe("Looking it up.\n\nFound it.");
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: streamed } });
+  });
+
+  test("a turn that settles with only commentary replies with its latest note", async () => {
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.completed",
+          payload: { text: "Starting two workers.", messageId: "msg_1", phase: "commentary" },
+        },
+        { type: "agent.toolCall.created", payload: { id: "call_spawn", name: "session_create" } },
+        { type: "agent.toolCall.output", payload: { id: "call_spawn", output: "ok" } },
+        {
+          type: "agent.message.completed",
+          payload: {
+            text: "Both workers are running; I will report back.",
+            messageId: "msg_2",
+            phase: "commentary",
+          },
+        },
+        { type: "turn.completed", payload: { output: "" } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "commentary-only" });
+    const chunks = await collect(chat.stream("hello"));
+    const note = "Both workers are running; I will report back.";
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([{ type: "text", text: note }]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: note } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "hello"],
+      ["assistant", note],
+    ]);
+  });
+
+  test("a status answer given before the turn waits again is the reply", async () => {
+    const status = "Two of the ten reviews are done; the rest are still running.";
+    const server = fakeServer({
+      reply: () => [
+        {
+          type: "agent.message.delta",
+          payload: { text: status, messageId: "msg_status", phase: "commentary" },
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: status, messageId: "msg_status", phase: "commentary" },
+        },
+        {
+          type: "agent.toolCall.created",
+          payload: { id: "call_wait", name: "opengeni__wait_for_input" },
+        },
+        {
+          type: "agent.toolCall.output",
+          payload: { id: "call_wait", output: { status: "waiting_for_input" } },
+        },
+        { type: "turn.completed", payload: { output: "", reply: status } },
+      ],
+    });
+    const chat = await server.og.chat({ tenant: "acme", conversation: "status-reply" });
+    const chunks = await collect(chat.stream("How far along are the reviews?"));
+    expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([
+      { type: "text", text: status },
+    ]);
+    expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: status } });
+    expect((await chat.history()).map((message) => [message.role, message.text])).toEqual([
+      ["user", "How far along are the reviews?"],
+      ["assistant", status],
+    ]);
+  });
 
   test("yields tool and text chunks in order and ends with done", async () => {
     const server = fakeServer({

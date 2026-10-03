@@ -7,12 +7,7 @@ name: Desktop image e2e
 # matters: on PRs that touch the desktop image context, and weekly as a backstop
 # so the Dockerfile can't silently rot between such PRs.
 on:
-  pull_request:
-    paths:
-      - "docker/desktop.Dockerfile"
-      - "docker/desktop/**"
-      - "apps/worker/test/desktop-image.e2e.ts"
-      - ".github/workflows/desktop-e2e.yml"
+  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore after the launch window.
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — weekly backstop
   workflow_dispatch:

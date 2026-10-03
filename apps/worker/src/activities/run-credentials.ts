@@ -5,12 +5,16 @@ import type {
   RunCredentialsRequest,
   Session,
   SessionTurn,
+  ToolRef,
 } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
 import { getSessionRootId, type Database } from "@opengeni/db";
 import {
   normalizeRunCredentialsResolution,
+  selectedSessionRemoteMcpTargets,
   type NormalizedRunCredentialMaterial,
 } from "@opengeni/runtime";
+import { workspaceCredentialProviderResolver } from "./workspace-credential-provider";
 
 export type RunCredentialResolutionContext = {
   db: Database;
@@ -18,10 +22,17 @@ export type RunCredentialResolutionContext = {
   accountId: string;
   workspaceId: string;
   session: Session;
-  turn: SessionTurn;
+  turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
   variableSet: { id: string; name: string } | null;
+  /** Enables the workspace's configured HTTP credential provider. */
+  settings?: Settings;
+  initiatingHumanSubjectId?: string | null;
+  /** Installed in-process API routes must never enter a product callback. */
+  localMcpServerIds?: readonly string[];
+  /** Exact execution selection, resolved once at the turn policy boundary. */
+  effectiveTools: readonly ToolRef[];
 };
 
 export type BoundRunCredentialResolver = {
@@ -32,7 +43,10 @@ export type BoundRunCredentialResolver = {
 };
 
 export function buildRunCredentialsRequest(
-  input: Omit<RunCredentialResolutionContext, "db" | "connectionCredentials"> & {
+  input: Omit<
+    RunCredentialResolutionContext,
+    "db" | "connectionCredentials" | "settings" | "initiatingHumanSubjectId" | "effectiveTools"
+  > & {
     rootSessionId: string;
     purpose: "provision" | "renewal";
     forceRefresh: boolean;
@@ -95,11 +109,36 @@ export function runCredentialModelNote(
  * Freeze the provider-neutral host credential request to this exact admitted
  * turn. The host selects connections and material; the worker never infers a
  * provider from repositories, environment names, or an OpenGeni variable set.
+ * A workspace that configured its own HTTP credential provider uses it in
+ * place of the deployment's injected port.
  */
 export async function bindRunCredentialResolver(
   input: RunCredentialResolutionContext,
 ): Promise<BoundRunCredentialResolver | null> {
-  const resolver = input.connectionCredentials?.runCredentials;
+  // Connected Machines own their credentials. Even provider lookup/callback
+  // must not be performed for a turn executing on the user's machine.
+  if (input.effectiveSandboxBackend === "selfhosted") return null;
+  const workspaceResolver = input.settings
+    ? await workspaceCredentialProviderResolver(
+        input.db,
+        input.settings,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        input.turn.initiatingHumanSubjectId ?? null,
+        {
+          mcpServers: selectedSessionRemoteMcpTargets(
+            input.settings,
+            input.session.mcpServers ?? [],
+            input.effectiveTools,
+            (input.localMcpServerIds ?? []).map((id) => ({ id })),
+          ),
+        },
+      )
+    : null;
+  const resolver =
+    workspaceResolver ??
+    (input.effectiveSandboxBackend === "none"
+      ? undefined
+      : input.connectionCredentials?.runCredentials);
   if (!resolver) return null;
   const rootSessionId = await getSessionRootId(input.db, input.workspaceId, input.session.id);
   if (!rootSessionId) {
@@ -110,22 +149,25 @@ export async function bindRunCredentialResolver(
     workspaceId: input.workspaceId,
     sessionId: input.session.id,
   };
+  // A renewable resolver belongs to one admitted turn, even if its caller
+  // subsequently replaces or mutates an in-memory session/turn projection.
+  const frozenRequest = structuredClone(
+    buildRunCredentialsRequest({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      session: input.session,
+      turn: input.turn,
+      attemptId: input.attemptId,
+      effectiveSandboxBackend: input.effectiveSandboxBackend,
+      variableSet: input.variableSet,
+      rootSessionId,
+      purpose: "provision",
+      forceRefresh: false,
+    }),
+  );
   return {
     resolve: async ({ purpose, forceRefresh }) => {
-      const resolution = await resolver(
-        buildRunCredentialsRequest({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          session: input.session,
-          turn: input.turn,
-          attemptId: input.attemptId,
-          effectiveSandboxBackend: input.effectiveSandboxBackend,
-          variableSet: input.variableSet,
-          rootSessionId,
-          purpose,
-          forceRefresh,
-        }),
-      );
+      const resolution = await resolver({ ...frozenRequest, purpose, forceRefresh });
       return normalizeRunCredentialsResolution(resolution, scope);
     },
   };

@@ -32,6 +32,7 @@ const SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION: u32 = 254;
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedSystemdDefinition {
+    CompatibleOwned,
     LegacyOwned,
     CurrentOwned,
     Unowned,
@@ -185,6 +186,7 @@ fn refresh_managed_systemd_definition() -> Result<bool, String> {
             );
             Ok(false)
         }
+        ManagedSystemdDefinition::CompatibleOwned => Ok(false),
         ManagedSystemdDefinition::CurrentOwned => {
             if cgroup_location == ManagedSystemdCgroup::Supervisor {
                 return Ok(false);
@@ -288,17 +290,8 @@ fn migrate_legacy_systemd_unit(
     let version = capture_systemctl(&["--version"])
         .ok()
         .and_then(|output| parse_systemd_version(&output));
-    if version.is_none_or(|version| version < SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION) {
-        tracing::warn!(
-            ?version,
-            required = SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION,
-            "systemd is too old for DelegateSubgroup; keeping the proven legacy unit and continuing without operation-cgroup capability"
-        );
-        return Ok(false);
-    }
-
     remove_legacy_opengeni_control_dropins(install_scope)?;
-    atomic_replace_managed_unit(unit_path, &service::render_systemd_unit(spec))?;
+    atomic_replace_managed_unit(unit_path, &render_systemd_for_version(spec, version))?;
     let scope_prefix = match install_scope {
         ServiceScope::User => Some("--user"),
         ServiceScope::System => None,
@@ -326,7 +319,7 @@ fn migrate_legacy_systemd_unit(
     }
     info!(
         path = %unit_path.display(),
-        "migrated the owned systemd unit; manager restart will enter the stable supervisor subgroup"
+        "migrated the owned systemd unit; manager restart will activate coordinated browser shutdown"
     );
     Ok(true)
 }
@@ -418,10 +411,14 @@ fn legacy_opengeni_control_dropin(name: &str, contents: &str) -> bool {
 
 #[cfg(any(target_os = "linux", test))]
 fn managed_systemd_definition(existing: &str, spec: &ServiceSpec) -> ManagedSystemdDefinition {
-    if existing == service::render_legacy_systemd_unit_before_supervisor_subgroup(spec) {
+    if existing == service::render_legacy_systemd_unit_before_supervisor_subgroup(spec)
+        || existing == service::render_legacy_systemd_unit_before_browser_shutdown(spec)
+    {
         ManagedSystemdDefinition::LegacyOwned
     } else if existing == service::render_systemd_unit(spec) {
         ManagedSystemdDefinition::CurrentOwned
+    } else if existing == service::render_systemd_unit_without_supervisor_subgroup(spec) {
+        ManagedSystemdDefinition::CompatibleOwned
     } else {
         ManagedSystemdDefinition::Unowned
     }
@@ -436,6 +433,14 @@ fn managed_systemd_cgroup(path: &str) -> Option<ManagedSystemdCgroup> {
         Some(ManagedSystemdCgroup::ServiceRoot)
     } else {
         None
+    }
+}
+
+fn render_systemd_for_version(spec: &ServiceSpec, version: Option<u32>) -> String {
+    if version.is_some_and(|version| version >= SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION) {
+        service::render_systemd_unit(spec)
+    } else {
+        service::render_systemd_unit_without_supervisor_subgroup(spec)
     }
 }
 
@@ -593,18 +598,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let systemd_version = capture_systemctl(&["--version"])
         .ok()
         .and_then(|output| parse_systemd_version(&output));
-    let subgroup_supported =
-        systemd_version.is_some_and(|version| version >= SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION);
-    let body = if subgroup_supported {
-        service::render_systemd_unit(spec)
-    } else {
-        tracing::warn!(
-            ?systemd_version,
-            required = SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION,
-            "systemd lacks DelegateSubgroup; installing the compatible service definition without operation-cgroup capability"
-        );
-        service::render_legacy_systemd_unit_before_supervisor_subgroup(spec)
-    };
+    let body = render_systemd_for_version(spec, systemd_version);
     if let Some(parent) = unit_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -1360,6 +1354,34 @@ mod tests {
         };
         let legacy = service::render_legacy_systemd_unit_before_supervisor_subgroup(&spec);
         let current = service::render_systemd_unit(&spec);
+        for version in [None, Some(249), Some(SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION)] {
+            // Installation and ownership-checked migration use this same selector.
+            let generated = render_systemd_for_version(&spec, version);
+            assert!(generated.contains("KillMode=mixed\n"));
+            assert!(generated.contains("TimeoutStopSec=90\n"));
+            let modern = version.is_some_and(|v| v >= SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION);
+            assert_eq!(generated.contains("DelegateSubgroup=supervisor\n"), modern);
+            assert_eq!(
+                managed_systemd_definition(&generated, &spec),
+                if modern {
+                    ManagedSystemdDefinition::CurrentOwned
+                } else {
+                    ManagedSystemdDefinition::CompatibleOwned
+                }
+            );
+        }
+        let previous = service::render_legacy_systemd_unit_before_browser_shutdown(&spec);
+        assert_eq!(
+            managed_systemd_definition(&previous, &spec),
+            ManagedSystemdDefinition::LegacyOwned
+        );
+        assert_eq!(
+            managed_systemd_definition(
+                &previous.replace("TimeoutStopSec=15", "TimeoutStopSec=20"),
+                &spec
+            ),
+            ManagedSystemdDefinition::Unowned
+        );
         assert_eq!(
             managed_systemd_definition(&legacy, &spec),
             ManagedSystemdDefinition::LegacyOwned

@@ -64,6 +64,15 @@ opengeni-agent disconnect <connection-id>
 
 ## Revoke
 
+Machine approval lasts until revoked. Updated agents automatically renew their
+30-day transport credentials before expiry, including when returning after a
+long offline period. You do not need to approve each monthly renewal. Renewal
+preserves the machine's existing sharing and screen-control permissions.
+
+Deployments need both the renewal API and an updated agent. Older agents whose
+credentials have already expired need one authorized reconnect; restarting the
+old agent alone does not refresh them.
+
 Revoke a machine from the Machines page. Revocation invalidates every existing grant and refuses further use until the machine is enrolled again.
 
 ## Programmatic enrollment

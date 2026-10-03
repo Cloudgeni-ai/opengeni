@@ -27,6 +27,7 @@ import {
   peekSessionWork,
   QueueCommandConflictError,
   saveComposerDraftInTransaction,
+  setSessionModelInTransaction,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   settleSessionAttemptInterruptions,
@@ -36,6 +37,7 @@ import {
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
+import { withEffectiveSessionPolicy } from "../src/session-execution-policy";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -142,6 +144,124 @@ async function storedEvents(workspaceId: string, eventIds: string[]) {
 }
 
 describe("latest started session policy", () => {
+  test("an explicit settings boundary survives older accepted turns starting later", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const submit = (override = {}) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "follow up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          ...override,
+        }),
+      );
+    const old = await submit({ model: "old-model", reasoningEffort: "low" });
+    const desired = { model: "new-model", reasoningEffort: "high", latencyMode: "standard" };
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: desired.model,
+        reasoningEffort: "high",
+      }),
+    );
+    // The projection may receive a row fetched before a concurrent settings
+    // write. It must read stored defaults and the boundary in one snapshot.
+    const [projected] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      withEffectiveSessionPolicy(db, workspaceId, [value.session]),
+    );
+    expect(projected).toMatchObject(desired);
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: old.turnId,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const inherited = await submit();
+    expect(await getSessionTurn(client.db, workspaceId, inherited.turnId)).toMatchObject(desired);
+    expect(
+      await getScheduledTargetSessionExecution(client.db, workspaceId, value.session.id),
+    ).toMatchObject(desired);
+    expect(await getSessionTurn(client.db, workspaceId, old.turnId)).toMatchObject({
+      model: "old-model",
+      reasoningEffort: "low",
+    });
+    // Approval resume replaces a turn's trigger, not its original admission.
+    const [approval] = await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      { type: "user.approvalDecision", payload: { approved: true } },
+    ]);
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessionTurns)
+        .set({ triggerEventId: approval!.id })
+        .where(eq(schema.sessionTurns.id, old.turnId)),
+    );
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      { type: "turn.started", turnId: old.turnId, payload: {} },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const [delivery] = await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "system.update.delivered",
+        payload: {},
+      },
+    ]);
+    const [automated] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          triggerEventId: delivery!.id,
+          temporalWorkflowId: `session-${value.session.id}`,
+          status: "completed",
+          source: "system",
+          position: 100,
+          prompt: "automated occurrence",
+          model: "occurrence-only",
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        })
+        .returning(),
+    );
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: automated!.id,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    const explicit = { model: "later-choice", reasoningEffort: "medium", latencyMode: "priority" };
+    const newer = await submit(explicit);
+    // A newly accepted choice still does not change defaults before it starts.
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(desired);
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: newer.turnId,
+        payload: {},
+      },
+    ]);
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(explicit);
+  });
+
   test("projects and inherits started policy, preserving explicit and queued policies", async () => {
     const value = await fixture(3);
     const workspaceId = value.grant.workspaceId!;
@@ -1700,4 +1820,115 @@ describe("canonical queue commands", () => {
     );
     expect(draft).toMatchObject({ revision: 1, text: "preserve me" });
   });
+});
+
+test("Send freezes Claude's private pool and keyed replay preserves it across account rotation", async () => {
+  const {
+    createClaudeSubscriptionAccount,
+    setInitialActiveClaudeCredential,
+    disconnectClaudeSubscriptionAccountAndRepick,
+    materializeClaudeSubscriptionAccountForRun,
+  } = await import("../src/claude-subscription-accounts");
+  const { getSessionTurnClaudeProviderAccountAuthoritySnapshot } = await import("../src");
+  const value = await fixture(0),
+    workspaceId = value.grant.workspaceId!,
+    subjectId = value.grant.subjectId;
+  const [personal] = await shared.admin<
+    { id: string }[]
+  >`insert into workspaces (account_id,name) values (${value.grant.accountId},'Personal fixture') returning id`;
+  await shared.admin`insert into organization_memberships (account_id,subject_id,status,personal_workspace_id) values (${value.grant.accountId},${subjectId},'active',${personal!.id})`;
+  const encryptionKey = Buffer.alloc(32, 53);
+  const scope = {
+    accountId: value.grant.accountId,
+    workspaceId,
+    subjectId,
+    scope: "user" as const,
+    encryptionKey,
+  };
+  const connect = () => {
+    const providerAccountId = crypto.randomUUID();
+    return createClaudeSubscriptionAccount(client.db, {
+      ...scope,
+      providerAccountId,
+      label: null,
+      accountEmail: "owner@example.test",
+      planType: "claude_max",
+      expiresAt: null,
+      secret: {
+        version: 1,
+        token: "sk-ant-oat01-fixture-" + crypto.randomUUID(),
+        identity: { accountUuid: providerAccountId, deviceId: "b".repeat(64) },
+      },
+    });
+  };
+  const first = await connect();
+  await setInitialActiveClaudeCredential(client.db, {
+    ...scope,
+    credentialId: first.account.id,
+    authoritySnapshot: first.authoritySnapshot,
+  });
+  const command = {
+    accountId: value.grant.accountId,
+    workspaceId,
+    sessionId: value.session.id,
+    subjectId,
+    actor: value.actor,
+    operationKey: crypto.randomUUID(),
+    delivery: "send" as const,
+    text: "Synthetic private subscription work",
+    resources: [],
+    model: "scripted-model",
+    reasoningEffort: "low" as const,
+    reasoningEffortFallback: "medium" as const,
+    source: "user" as const,
+  };
+  const send = () =>
+    withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
+      db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
+    );
+  const accepted = await send();
+  const snapshot = await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+    client.db,
+    workspaceId,
+    value.session.id,
+    accepted.turnId,
+  );
+  expect(snapshot).toEqual(first.authoritySnapshot);
+  await disconnectClaudeSubscriptionAccountAndRepick(client.db, {
+    ...scope,
+    credentialId: first.account.id,
+    authoritySnapshot: first.authoritySnapshot,
+  });
+  const second = await connect();
+  await setInitialActiveClaudeCredential(client.db, {
+    ...scope,
+    credentialId: second.account.id,
+    authoritySnapshot: second.authoritySnapshot,
+  });
+  // Account rotation stays within the accepted owner's pool; it does not
+  // replace that pool's authority with current caller selection.
+  expect(second.authoritySnapshot).toEqual(snapshot);
+  expect((await send()).turnId).toBe(accepted.turnId);
+  expect(
+    await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+      client.db,
+      workspaceId,
+      value.session.id,
+      accepted.turnId,
+    ),
+  ).toEqual(snapshot);
+  await expect(
+    materializeClaudeSubscriptionAccountForRun(client.db, {
+      ...scope,
+      credentialId: first.account.id,
+      authoritySnapshot: snapshot,
+    }),
+  ).rejects.toThrow();
+  expect(
+    await materializeClaudeSubscriptionAccountForRun(client.db, {
+      ...scope,
+      credentialId: second.account.id,
+      authoritySnapshot: snapshot,
+    }),
+  ).not.toBeNull();
 });

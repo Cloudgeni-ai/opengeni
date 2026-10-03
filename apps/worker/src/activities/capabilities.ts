@@ -1,4 +1,10 @@
 import {
+  CLAUDE_CONNECTION_KINDS,
+  claudeProviderId,
+  withClaudeConnectionCatalog,
+  withClaudeConnectionCredential,
+} from "@opengeni/config";
+import {
   environmentsEncryptionKeyBytes,
   type Settings,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -31,6 +37,10 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   getOrganizationModelProviderCustomModelForExecution,
   loadOrganizationModelProviderApiKey,
+  listWorkspaceProviderCustomModels,
+  getWorkspaceProviderCustomModelForExecution,
+  loadWorkspaceProviderApiKey,
+  assertModelConnectionAllowsTurn,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -248,7 +258,10 @@ export async function settingsWithOrganizationProviderCredentials(
   settings: Settings,
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const buildModels = async (providerKind: "vercel_gateway" | "openrouter", prefix: string) => {
+  const buildModels = async (
+    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription",
+    prefix: string,
+  ) => {
     const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
       accountId,
       workspaceId,
@@ -284,7 +297,59 @@ export async function settingsWithOrganizationProviderCredentials(
     workspaceId,
     providerKind: "openrouter",
   });
-  return openRouterKey
+  let result = openRouterKey
     ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
     : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
+    const models = await buildModels(kind, claudeProviderId(kind) + "/");
+    result = withClaudeConnectionCatalog(result, { [kind]: { models } });
+    const credential =
+      kind === "claude_subscription"
+        ? null
+        : await loadOrganizationModelProviderApiKey(db, settings, {
+            accountId,
+            workspaceId,
+            providerKind: kind,
+          });
+    if (credential)
+      result = withClaudeConnectionCredential(result, kind, credential, "organization", undefined);
+    const workspaceModels = await listWorkspaceProviderCustomModels(db, {
+      accountId,
+      workspaceId,
+      providerKind: kind,
+    });
+    const workspacePrefix = claudeProviderId(kind, "workspace") + "/";
+    const workspaceModelId = retainedProductModelId?.startsWith(workspacePrefix)
+      ? retainedProductModelId
+      : null;
+    if (workspaceModelId) {
+      const retained = await getWorkspaceProviderCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        providerKind: kind,
+        upstreamModelId: workspaceModelId.slice(workspacePrefix.length),
+      });
+      if (retained && !workspaceModels.some((model) => model.id === retained.id))
+        workspaceModels.push(retained);
+    }
+    result = withClaudeConnectionCatalog(
+      result,
+      { [kind]: { models: workspaceModels } },
+      "workspace",
+    );
+    const workspaceCredential =
+      kind === "claude_subscription"
+        ? null
+        : await loadWorkspaceProviderApiKey(db, settings, workspaceId, kind, workspaceModelId);
+    if (workspaceCredential)
+      result = withClaudeConnectionCredential(
+        result,
+        kind,
+        workspaceCredential,
+        "workspace",
+        undefined,
+      );
+  }
+  return result;
 }

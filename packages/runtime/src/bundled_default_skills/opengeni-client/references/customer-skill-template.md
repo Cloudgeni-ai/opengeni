@@ -17,7 +17,7 @@ Skill beside the product's integration code and review it whenever the installed
 - Organization ID: `[non-secret UUID]`
 - External source convention: `[stable product namespace, for example acme-support]`
 - Workspace isolation unit: `[tenant | end user | chat | another explicit sharing group]`
-- Credential environment variable: `OPENGENI_ORGANIZATION_API_KEY`
+- Credential environment variables: `OPENGENI_API_KEY`, `OPENGENI_API_BASE_URL` (always pass `baseUrl`)
 - Base URL environment variable: `OPENGENI_API_BASE_URL`
 - Organization environment variable: `OPENGENI_ORGANIZATION_ID`
 
@@ -71,7 +71,8 @@ the host-issued token; do not substitute organization-key behavior.
    configured pre-provisioned workspace ID instead.
 4. Apply explicit workspace settings through installed SDK methods.
 5. Create sessions with a stable idempotency key and product-owned inline
-   Skills, plus explicit minimal `tools` and `firstPartyMcpTools` selections.
+   Skills, plus an explicit `agent` (capabilities, identity) and `tools`
+   selection.
 6. Reject caller-supplied workspace/session IDs that do not match the product's
    persisted tenant relationship.
 7. Proxy event streaming with replay-by-sequence and duplicate suppression.

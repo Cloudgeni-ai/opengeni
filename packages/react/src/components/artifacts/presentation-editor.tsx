@@ -334,6 +334,7 @@ export type PresentationProjectionEditorProps = Omit<
 
 export type PresentationProjectionArtifactSurfaceProps = PresentationProjectionEditorProps & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   busy?: boolean | undefined;
@@ -350,6 +351,8 @@ export type PresentationEditorProps = {
   zoom?: number | undefined;
   defaultZoom?: number | undefined;
   readOnly?: boolean | undefined;
+  /** Temporarily fence commands while keeping the current editor draft. */
+  authoringBlockedReason?: "pending_conflict" | "prior_writer" | undefined;
   className?: string | undefined;
   onSlideChange?: ((slide: Slide, index: number) => void) | undefined;
   onSelectionChange?: ((object: PresentationObject | null, slide: Slide) => void) | undefined;
@@ -360,6 +363,7 @@ export type PresentationEditorProps = {
 
 export type PresentationArtifactSurfaceProps = PresentationEditorProps & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   busy?: boolean | undefined;
@@ -472,6 +476,7 @@ function PresentationEditorCore({
   zoom: controlledZoom,
   defaultZoom = 0.75,
   readOnly = false,
+  authoringBlockedReason,
   className,
   onSlideChange,
   onSelectionChange,
@@ -479,6 +484,14 @@ function PresentationEditorCore({
   onCommandError,
   onZoomChange,
 }: PresentationEditorProps) {
+  const mutationsBlocked = readOnly || authoringBlockedReason !== undefined;
+  const authoringStatus = readOnly
+    ? null
+    : authoringBlockedReason === "pending_conflict"
+      ? "An earlier change needs attention"
+      : authoringBlockedReason === "prior_writer"
+        ? "Saving earlier changes…"
+        : null;
   const slides = presentation.slides.items;
   const firstSlideId = slides[0]?.id ?? null;
   const [localSlideId, setLocalSlideId] = useState(
@@ -897,7 +910,7 @@ function PresentationEditorCore({
 
   const runCommit = useCallback(
     (key: string, command: PresentationCommit, rollback: () => void, retry: () => void) => {
-      if (!onCommit) return;
+      if (mutationsBlocked || !onCommit) return;
       const version = (commandVersionsRef.current.get(key) ?? 0) + 1;
       commandVersionsRef.current.set(key, version);
       const scope = commandScopeRef.current;
@@ -937,12 +950,12 @@ function PresentationEditorCore({
         },
       );
     },
-    [onCommandError, onCommit],
+    [mutationsBlocked, onCommandError, onCommit],
   );
 
   const commitPosition = useCallback(
     (entry: DisplayObject, kind: "move" | "resize", next: PresentationPosition) => {
-      if (!activeSlide || readOnly || entry.readOnly) return;
+      if (!activeSlide || mutationsBlocked || entry.readOnly) return;
       const before = copyPosition(entry.object.position);
       const after = normalizeEditorPosition(next);
       if (samePosition(before, after)) return;
@@ -971,11 +984,11 @@ function PresentationEditorCore({
         );
       submit();
     },
-    [activeSlide, readOnly, runCommit],
+    [activeSlide, mutationsBlocked, runCommit],
   );
 
   const insertSlide = useCallback(() => {
-    if (readOnly) return;
+    if (mutationsBlocked) return;
     const slideId = randomPresentationId();
     const index = activeIndex < 0 ? slides.length : activeIndex + 1;
     const command: PresentationCommit = { kind: "slide-insert", slideId, index };
@@ -991,10 +1004,10 @@ function PresentationEditorCore({
       );
     };
     submit();
-  }, [activeIndex, readOnly, runCommit, slides.length]);
+  }, [activeIndex, mutationsBlocked, runCommit, slides.length]);
 
   const deleteSlide = useCallback(() => {
-    if (readOnly || !activeSlide) return;
+    if (mutationsBlocked || !activeSlide) return;
     const command: PresentationCommit = {
       kind: "slide-delete",
       slideId: activeSlide.id,
@@ -1003,10 +1016,10 @@ function PresentationEditorCore({
     const submit = () =>
       runCommit(`slide-delete:${activeSlide.id}`, command, () => undefined, submit);
     submit();
-  }, [activeIndex, activeSlide, readOnly, runCommit]);
+  }, [activeIndex, activeSlide, mutationsBlocked, runCommit]);
 
   const insertTextBox = useCallback(() => {
-    if (readOnly || !activeSlide) return;
+    if (mutationsBlocked || !activeSlide) return;
     const objectId = randomPresentationId();
     const position = nextTextBoxPosition(objects, presentation.slideSize);
     const command: PresentationCommit = {
@@ -1028,10 +1041,10 @@ function PresentationEditorCore({
       );
     };
     submit();
-  }, [activeSlide, objects, presentation.slideSize, readOnly, runCommit]);
+  }, [activeSlide, objects, presentation.slideSize, mutationsBlocked, runCommit]);
 
   const deleteObject = useCallback(() => {
-    if (readOnly || !activeSlide || !selected || selected.readOnly) return;
+    if (mutationsBlocked || !activeSlide || !selected || selected.readOnly) return;
     const command: PresentationCommit = {
       kind: "object-delete",
       slideId: activeSlide.id,
@@ -1040,11 +1053,11 @@ function PresentationEditorCore({
     const submit = () =>
       runCommit(`object-delete:${activeSlide.id}:${selected.id}`, command, () => undefined, submit);
     submit();
-  }, [activeSlide, readOnly, runCommit, selected]);
+  }, [activeSlide, mutationsBlocked, runCommit, selected]);
 
   const startTextEdit = useCallback(
     (entry: DisplayObject | null) => {
-      if (readOnly || !entry || entry.readOnly || entry.kind !== "shape") return;
+      if (mutationsBlocked || !entry || entry.readOnly || entry.kind !== "shape") return;
       const shape = entry.object as PresentationShape;
       if (shape.geometry === "line") return;
       const before = shape.text.toString();
@@ -1054,7 +1067,7 @@ function PresentationEditorCore({
       setTextEdit(edit);
       setTextDraft(before);
     },
-    [activeSlide, readOnly],
+    [activeSlide, mutationsBlocked],
   );
 
   useEffect(() => {
@@ -1066,12 +1079,12 @@ function PresentationEditorCore({
   const finishTextEdit = useCallback(
     (cancel = false) => {
       const edit = textEditRef.current;
-      if (!edit) return;
+      if (!edit || (!cancel && authoringBlockedReason !== undefined)) return;
       textEditRef.current = null;
       setTextEdit(null);
       const { shape, before, slideId } = edit;
       if (!activeSlide || activeSlide.id !== slideId) return;
-      if (cancel || readOnly || before === textDraft) return;
+      if (cancel || mutationsBlocked || before === textDraft) return;
       shape.text.set(textDraft);
       setModelEpoch((value) => value + 1);
       const command: PresentationCommit = {
@@ -1097,7 +1110,7 @@ function PresentationEditorCore({
         );
       submit();
     },
-    [activeSlide, readOnly, runCommit, textDraft],
+    [activeSlide, authoringBlockedReason, mutationsBlocked, runCommit, textDraft],
   );
 
   const cycleObject = useCallback(
@@ -1197,7 +1210,7 @@ function PresentationEditorCore({
       }
       if (!selected || !event.key.startsWith("Arrow")) return;
       event.preventDefault();
-      if (readOnly || selected.readOnly) return;
+      if (mutationsBlocked || selected.readOnly) return;
       const amount = event.shiftKey ? 10 : 1;
       const dx = event.key === "ArrowLeft" ? -amount : event.key === "ArrowRight" ? amount : 0;
       const dy = event.key === "ArrowUp" ? -amount : event.key === "ArrowDown" ? amount : 0;
@@ -1220,7 +1233,7 @@ function PresentationEditorCore({
       commitPosition,
       cycleObject,
       fitSlide,
-      readOnly,
+      mutationsBlocked,
       selectObject,
       selected,
       startTextEdit,
@@ -1247,7 +1260,7 @@ function PresentationEditorCore({
       event.preventDefault();
       event.stopPropagation();
       selectObject(entry);
-      if (readOnly || entry.readOnly) return;
+      if (mutationsBlocked || entry.readOnly) return;
       const start = pointFromPointer(event);
       const before = copyPosition(entry.object.position);
       dragRef.current = {
@@ -1261,7 +1274,7 @@ function PresentationEditorCore({
       setDraftPosition({ objectId: entry.id, position: before });
       overlayRef.current?.setPointerCapture?.(event.pointerId);
     },
-    [pointFromPointer, readOnly, selectObject],
+    [pointFromPointer, mutationsBlocked, selectObject],
   );
 
   const handlePointerDown = useCallback(
@@ -1281,17 +1294,22 @@ function PresentationEditorCore({
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<SVGSVGElement>) => {
       const drag = dragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag || drag.pointerId !== event.pointerId || mutationsBlocked) return;
       const point = pointFromPointer(event);
       setDraftPosition({ objectId: drag.object.id, position: positionFromDrag(drag, point) });
     },
-    [pointFromPointer],
+    [mutationsBlocked, pointFromPointer],
   );
 
   const finishDrag = useCallback(
     (event: ReactPointerEvent<SVGSVGElement>, cancel = false) => {
       const drag = dragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (
+        !drag ||
+        drag.pointerId !== event.pointerId ||
+        (!cancel && authoringBlockedReason !== undefined)
+      )
+        return;
       dragRef.current = null;
       const captureTarget = overlayRef.current;
       if (captureTarget?.hasPointerCapture?.(event.pointerId)) {
@@ -1304,15 +1322,19 @@ function PresentationEditorCore({
       const point = pointFromPointer(event);
       commitPosition(entry, drag.mode, positionFromDrag(drag, point));
     },
-    [commitPosition, objectById, pointFromPointer],
+    [authoringBlockedReason, commitPosition, objectById, pointFromPointer],
   );
 
-  const handleLostPointerCapture = useCallback((event: ReactPointerEvent<SVGSVGElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    setDraftPosition(null);
-  }, []);
+  const handleLostPointerCapture = useCallback(
+    (event: ReactPointerEvent<SVGSVGElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId || authoringBlockedReason !== undefined)
+        return;
+      dragRef.current = null;
+      setDraftPosition(null);
+    },
+    [authoringBlockedReason],
+  );
 
   const railStart = Math.max(0, Math.floor(rail.scrollTop / RAIL_ITEM_HEIGHT) - RAIL_OVERSCAN);
   const railEnd = Math.min(
@@ -1339,8 +1361,16 @@ function PresentationEditorCore({
       style={{ minHeight: "22rem" }}
       data-og-presentation-editor
       data-og-painted-object-count={visibleObjectIndexes.length}
-      data-og-command-state={commandFailure ? "error" : pendingCommands > 0 ? "pending" : "idle"}
-      aria-busy={pendingCommands > 0 ? "true" : undefined}
+      data-og-command-state={
+        commandFailure || authoringBlockedReason === "pending_conflict"
+          ? "error"
+          : pendingCommands > 0 || authoringBlockedReason === "prior_writer"
+            ? "pending"
+            : "idle"
+      }
+      aria-busy={
+        pendingCommands > 0 || authoringBlockedReason === "prior_writer" ? "true" : undefined
+      }
     >
       <div
         role="toolbar"
@@ -1386,7 +1416,7 @@ function PresentationEditorCore({
           <button
             type="button"
             aria-label="Add slide"
-            disabled={readOnly}
+            disabled={mutationsBlocked}
             onClick={insertSlide}
             className="ml-0.5 grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
           >
@@ -1395,7 +1425,7 @@ function PresentationEditorCore({
           <button
             type="button"
             aria-label="Delete slide"
-            disabled={readOnly || !activeSlide}
+            disabled={mutationsBlocked || !activeSlide}
             onClick={deleteSlide}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
           >
@@ -1433,7 +1463,7 @@ function PresentationEditorCore({
           <button
             type="button"
             aria-label="Add text box"
-            disabled={readOnly || !activeSlide}
+            disabled={mutationsBlocked || !activeSlide}
             onClick={insertTextBox}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 [&>svg]:size-3.5"
           >
@@ -1442,7 +1472,7 @@ function PresentationEditorCore({
           <button
             type="button"
             aria-label="Delete selected object"
-            disabled={readOnly || !selected || selected.readOnly}
+            disabled={mutationsBlocked || !selected || selected.readOnly}
             onClick={deleteObject}
             className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-status-failed disabled:opacity-35 [&>svg]:size-3.5"
           >
@@ -1454,29 +1484,35 @@ function PresentationEditorCore({
           title={
             commandFailure
               ? "Change not saved"
-              : pendingCommands > 0
-                ? "Saving…"
-                : readOnly
-                  ? "View only"
-                  : selected
-                    ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
-                    : "Select an object to edit"
+              : authoringStatus
+                ? authoringStatus
+                : pendingCommands > 0
+                  ? "Saving…"
+                  : mutationsBlocked
+                    ? "View only"
+                    : selected
+                      ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
+                      : "Select an object to edit"
           }
         >
           {commandFailure
             ? "Change not saved"
-            : pendingCommands > 0
-              ? "Saving…"
-              : readOnly
-                ? "View only"
-                : selected
-                  ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
-                  : "Select an object to edit"}
+            : authoringStatus
+              ? authoringStatus
+              : pendingCommands > 0
+                ? "Saving…"
+                : mutationsBlocked
+                  ? "View only"
+                  : selected
+                    ? `${objectLabel(selected)}${selected.readOnly ? " · View only" : ""}`
+                    : "Select an object to edit"}
         </span>
       </div>
 
       <div role="status" aria-live="polite" className="sr-only">
-        {commandFailure?.message ?? (pendingCommands > 0 ? "Saving presentation changes" : "")}
+        {commandFailure?.message ??
+          authoringStatus ??
+          (pendingCommands > 0 ? "Saving presentation changes" : "")}
       </div>
 
       <div className="relative flex min-h-0 min-w-0 flex-1">
@@ -1681,7 +1717,10 @@ function PresentationEditorCore({
               <span className="truncate">{commandFailure.message}</span>
               <button
                 type="button"
-                onClick={commandFailure.retry}
+                disabled={mutationsBlocked}
+                onClick={() => {
+                  if (!mutationsBlocked) commandFailure.retry();
+                }}
                 className="shrink-0 rounded-og-xs px-1.5 py-0.5 font-medium outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
               >
                 Retry
@@ -1694,6 +1733,9 @@ function PresentationEditorCore({
               className="relative mx-auto shrink-0 overflow-hidden shadow-og-lg"
               style={{ width: stageWidth, height: stageHeight, backgroundColor: "#fff" }}
               data-og-presentation-stage
+              // The slide is white paper in both app themes, so its selection
+              // chrome uses the light palette to stay visible on it.
+              data-og-theme="light"
             >
               <canvas
                 ref={canvasRef}
@@ -1709,7 +1751,7 @@ function PresentationEditorCore({
                 aria-describedby={
                   selected ? `${instructionsId} ${selectionProxyId}` : instructionsId
                 }
-                aria-readonly={readOnly || selected?.readOnly || undefined}
+                aria-readonly={mutationsBlocked || selected?.readOnly || undefined}
                 viewBox={`0 0 ${presentation.slideSize.width} ${presentation.slideSize.height}`}
                 className="absolute inset-0 size-full touch-none outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
                 onKeyDown={handleCanvasKeyDown}
@@ -1731,17 +1773,17 @@ function PresentationEditorCore({
                       width={effectiveSelectedPosition.width}
                       height={effectiveSelectedPosition.height}
                       fill="transparent"
-                      stroke="var(--og-accent, #3b82f6)"
+                      stroke="var(--og-color-accent-deep)"
                       strokeWidth={2}
                       vectorEffect="non-scaling-stroke"
                       pointerEvents="none"
                     />
-                    {!readOnly && !selected.readOnly ? (
+                    {!mutationsBlocked && !selected.readOnly ? (
                       <circle
                         cx={effectiveSelectedPosition.left + effectiveSelectedPosition.width}
                         cy={effectiveSelectedPosition.top + effectiveSelectedPosition.height}
                         r={6 / zoom}
-                        fill="var(--og-accent, #3b82f6)"
+                        fill="var(--og-color-accent-deep)"
                         stroke="white"
                         strokeWidth={1.5}
                         vectorEffect="non-scaling-stroke"
@@ -1769,9 +1811,14 @@ function PresentationEditorCore({
                   ref={editorRef}
                   aria-label={`Edit ${textEdit.shape.name}`}
                   value={textDraft}
+                  readOnly={mutationsBlocked}
                   maxLength={1_000_000}
-                  onChange={(event) => setTextDraft(event.currentTarget.value)}
-                  onInput={(event) => setTextDraft(event.currentTarget.value)}
+                  onChange={(event) => {
+                    if (!mutationsBlocked) setTextDraft(event.currentTarget.value);
+                  }}
+                  onInput={(event) => {
+                    if (!mutationsBlocked) setTextDraft(event.currentTarget.value);
+                  }}
                   onBlur={() => finishTextEdit()}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") {
@@ -1819,6 +1866,7 @@ function PresentationEditorCore({
 export function PresentationArtifactSurface({
   presentation,
   title = "Presentation",
+  showHeader,
   subtitle,
   actions,
   busy,
@@ -1830,6 +1878,7 @@ export function PresentationArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
       actions={actions}
       busy={busy}
@@ -1844,6 +1893,7 @@ export function PresentationArtifactSurface({
 export function PresentationProjectionArtifactSurface({
   projection,
   title = "Presentation",
+  showHeader,
   subtitle,
   actions,
   busy,
@@ -1855,6 +1905,7 @@ export function PresentationProjectionArtifactSurface({
     <ArtifactSurface
       modality="presentation"
       title={title}
+      showHeader={showHeader}
       subtitle={subtitle ?? `${count} slide${count === 1 ? "" : "s"}`}
       actions={actions}
       busy={busy}

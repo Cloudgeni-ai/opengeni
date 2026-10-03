@@ -1,8 +1,9 @@
 import { ChevronDownIcon, GitBranchIcon } from "lucide-react";
-import { lazy, Suspense, type ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
+import { ComposerMenuRowsSkeleton, lazyComposerPanel } from "@/components/ui/composer-menu";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,10 +15,10 @@ import { cn } from "@/lib/utils";
 
 type FollowUpRepositoryPickerProps = RepositoryContextPickerProps;
 
-const LazyFollowUpRepositoryMenuBody = lazy(() =>
-  import("@/components/follow-up-repository-menu-body").then((module) => ({
-    default: module.FollowUpRepositoryMenuBody,
-  })),
+const LazyFollowUpRepositoryMenuBody = lazyComposerPanel(() =>
+  import("@/components/follow-up-repository-menu-body").then(
+    (module) => module.FollowUpRepositoryMenuBody,
+  ),
 );
 
 function selectedCount(props: FollowUpRepositoryPickerProps): number {
@@ -36,9 +37,9 @@ export function FollowUpRepositoryMenuBody(
   return (
     <Suspense
       fallback={
-        <div className="flex min-h-24 items-center justify-center gap-1 text-xs text-fg-muted">
+        <div className="flex min-h-0 flex-col">
           {props.leading}
-          <span>Loading repositories…</span>
+          <ComposerMenuRowsSkeleton rows={4} label="Loading repositories" />
         </div>
       }
     >

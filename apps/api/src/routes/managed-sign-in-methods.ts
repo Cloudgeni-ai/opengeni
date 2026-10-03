@@ -26,13 +26,11 @@ import { z } from "zod";
 import {
   isolatedManagedAuthOAuthCallbackRequest,
   hashManagedAuthPassword,
-  requestWithManagedAuthClientAddress,
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
-import { trustedRequestSourceAddress } from "../http/request-source";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
 
 const ConnectState = z.object({
@@ -412,12 +410,7 @@ export async function handleManagedSignInConnectCallback(
     throw new HTTPException(403);
   const isolated = await isolatedManagedAuthOAuthCallbackRequest(deps.managedAuth, context.req.raw);
   const response = await runManagedSignInConnect(proof.intentId, () =>
-    deps.managedAuth!.handler(
-      requestWithManagedAuthClientAddress(
-        isolated.request,
-        trustedRequestSourceAddress(context, deps.settings.apiTrustedProxyHops),
-      ),
-    ),
+    deps.managedAuth!.handler(isolated.request),
   );
   const [linked] = await rows<{ email: string }>(
     deps,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { act } from "react";
 import { defaultToolRegistry, type ToolCallItem } from "../src/timeline";
+import { RollingActivity } from "../src/timeline/rolling-activity";
 import { registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
@@ -40,6 +42,79 @@ const browserReceipt = {
 };
 
 describe("browser screenshot timeline", () => {
+  test("retries saved screenshot retrieval without changing the receipt or repeating capture", async () => {
+    const tool = item("interaction__browser_observe", browserReceipt);
+    const original = JSON.stringify(tool);
+    const Renderer = defaultToolRegistry.resolve(tool);
+    const calls: Array<{ receipt: string; signal?: AbortSignal }> = [];
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    const revoked: string[] = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:retried-screenshot",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: (url: string) => revoked.push(url),
+    });
+    const rendered = await renderComponent(
+      <Renderer
+        item={tool}
+        loadRetainedScreenshot={async (artifact, signal) => {
+          calls.push({ receipt: JSON.stringify(artifact), signal });
+          if (calls.length === 1) throw new Error("private storage detail");
+          return Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+        }}
+      />,
+    );
+    try {
+      await flush();
+      const trigger = rendered.container.querySelector('[role="button"]') as HTMLElement;
+      await act(async () => trigger.click());
+      const retry = rendered.container.querySelector(
+        'button[aria-label="Retry screenshot retrieval"]',
+      ) as HTMLButtonElement | null;
+      expect(retry).not.toBeNull();
+      expect(rendered.container.textContent).not.toContain("private storage detail");
+      expect(rendered.container.textContent).not.toContain("retrieval failed: retrieval failed");
+      expect(calls).toHaveLength(1);
+      await act(async () => retry!.click());
+      await flush();
+      expect(calls).toHaveLength(2);
+      expect(calls.map((call) => JSON.parse(call.receipt))).toEqual([
+        browserReceipt,
+        browserReceipt,
+      ]);
+      expect(calls[0]!.signal?.aborted).toBe(true);
+      expect(rendered.container.querySelector('img[src="blob:retried-screenshot"]')).not.toBeNull();
+      expect(
+        rendered.container.querySelector('button[aria-label="Retry screenshot retrieval"]'),
+      ).toBeNull();
+      expect(JSON.stringify(tool)).toBe(original);
+    } finally {
+      await rendered.unmount();
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+    expect(calls[1]!.signal?.aborted).toBe(true);
+    expect(revoked).toEqual(["blob:retried-screenshot"]);
+  });
+
+  test("rolling progress omits the image preview without claiming retrieval failed", async () => {
+    const rendered = await renderComponent(
+      <RollingActivity items={[item("interaction__browser_observe", browserReceipt)]} />,
+    );
+    await flush();
+    expect(rendered.container.textContent).toContain("Observed browser");
+    expect(rendered.container.textContent).not.toContain("retrieval is not configured");
+    expect(rendered.container.textContent).not.toContain("retrieval failed");
+    expect(rendered.container.querySelector(".og-reel-preview")).toBeNull();
+    await rendered.unmount();
+  });
+
   test("loads a session-authenticated browser screenshot without inline base64", async () => {
     const tool = item("interaction__browser_screenshot", browserReceipt);
     const Renderer = defaultToolRegistry.resolve(tool);

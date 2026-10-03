@@ -82,6 +82,14 @@ invalid Unicode are rejected. A native-looking ID does not impersonate a native
 user. Workspace mapping identity passed to `ensureWorkspace` is a separate
 concept from this acting-user identity.
 
+Use an immutable database/auth subject ID, never an editable username, email or
+display name. Renaming must keep the same external ID and private history;
+reassigning a username must not reassign the previous actor's identity. History
+collision on username reuse is conditional on the host allowing reuse, not a
+guarantee about every host. Derive the ID anew from current authentication rather
+than a mounted component's old user object; apply the
+[identity/session epoch fence](product-shapes-and-ui.md#bind-asynchronous-ui-work-to-the-current-identity-and-session).
+
 User mode lazily establishes an external identity but does not grant access to a
 shared workspace. An explicitly authorized service onboarding operation may use:
 
@@ -101,6 +109,29 @@ permissions conflict instead of overwriting a subsequently reduced grant. Instal
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
+
+Check the host user's current enabled state, tenant membership and role on every
+session read/control route and every provider call. A still-valid token or an
+old `sessions:control` onboarding grant is not proof of current host authority.
+Block newly disallowed requests immediately and reconcile OpenGeni grants using
+the authorized membership lifecycle below; do not silently re-onboard or widen
+them on a user request. Permission-changing revocation can cancel running work.
+Per-user workspaces and deliberate team/site sharing are valid product choices,
+but neither replaces these current host-policy checks.
+
+### Read the member inventory: SDK versus REST
+
+```ts
+const members = await serviceClient.listWorkspaceMembers(authorizedWorkspaceId);
+console.log(members.length); // WorkspaceMember[]: iterate the array directly
+```
+
+The SDK unwraps the raw REST response. `GET /v1/workspaces/:workspaceId/members`
+returns `{ members: WorkspaceMember[] }`, but `listWorkspaceMembers()` returns
+`WorkspaceMember[]`, not that envelope. Do not read
+`(await serviceClient.listWorkspaceMembers(...)).members`. Inspect each installed
+SDK method's return type; other list methods may have different shapes. This
+inventory read needs `workspace:read` and does not grant or restore membership.
 
 ### Removal and account-wide lifecycle
 
@@ -387,8 +418,11 @@ approval is incomplete setup, not a connected account. Discovery currently suppo
 at most 99 existing installations plus the new-install option; a larger result
 fails explicitly instead of silently selecting or dropping installations.
 
-`slack-bot` is a workspace bot installation, while `slack-personal` is the official
-personal Slack MCP authorization flow. Do not substitute one for the other.
+`slack-bot` is a workspace bot installation. `slack-personal` uses Slack user OAuth
+with OpenGeni's API-backed MCP tools for authorized conversations, recent messages
+and threads, users, and sending messages. It does not require installing the bot.
+General workspace-wide message search is unavailable. Do not substitute one flow
+for the other.
 `x` and `reddit` use the existing social-account domain and OAuth scopes. Workspace
 social setup requires workspace administration; personal setup requires a verified
 owning user. Native and host clients share callback receipts and exact returns.

@@ -2,6 +2,7 @@
 
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { stageCuaRuntime } from "../packages/browserd/scripts/stage-cua-runtime";
 
 type ComponentDigests = {
   browserd: string;
@@ -104,6 +105,7 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
     await run(command, repositoryRoot);
   }
   await run(["cargo", "build", "--release", "-p", "opengeni-computer-native"], agentRoot);
+  const cuaManifest = process.platform === "darwin" ? await stageCuaRuntime(process.arch) : null;
 
   const agentBrowser = join(browserdRoot, "dist", `agent-browser${executableSuffix}`);
   const computerNative = join(
@@ -124,6 +126,7 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
     OPENGENI_EMBEDDED_AGENT_BROWSER: agentBrowser,
     OPENGENI_EMBEDDED_COMPUTER_NATIVE: computerNative,
     OPENGENI_RUNTIME_BUILD_ID: buildId,
+    ...(cuaManifest ? { OPENGENI_EMBEDDED_CUA_RUNTIME: cuaManifest } : {}),
   });
 
   const directory = join(repositoryRoot, ".agent", "local-runtime", buildId);

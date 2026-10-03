@@ -1346,7 +1346,11 @@ export class SelfhostedSession {
       base?: string | (() => Promise<string | undefined>),
     ): Promise<((source: string, sourceBase: string) => Promise<void>) | undefined> => {
       const bytes = encoder.encode(content);
-      if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES) {
+      // Atomic publication and exact base checks matter for small edits too:
+      // a direct fsWrite can be interrupted after truncating the destination.
+      // Preserve legacy small moves into write-only destinations: their lazy
+      // base reader would introduce a new destination-read requirement.
+      if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES && typeof base === "function") {
         await this.writeFile({ path, content, createParents: true });
         return;
       }
@@ -1366,64 +1370,7 @@ export class SelfhostedSession {
           retryable: false,
         });
       }
-      const requestTransfer = async (
-        requestId: string,
-        op: NonNullable<ControlRequest["op"]>,
-      ): Promise<ControlResponse> => {
-        const startedAt = Date.now();
-        try {
-          const current = await this.admitOperation(false);
-          if (
-            !current.transactionalFsWriteSupported ||
-            current.subject !== initial.subject ||
-            current.connectionInstanceId !== initial.connectionInstanceId
-          ) {
-            throw new Error(
-              "The authorized machine connection changed during the file transfer; the operation was not replayed.",
-            );
-          }
-          const response = await this.controlRpc.request(
-            current.subject,
-            {
-              requestId,
-              epoch: this.epoch,
-              op,
-              resourcePolicy: undefined,
-            },
-            { timeoutMs: this.timeoutMs },
-          );
-          if (response.requestId !== requestId)
-            throw new Error("The machine returned a mismatched file-transfer response identity.");
-          const error = response.error
-            ? agentErrorToControlError(response.error, requestId)
-            : undefined;
-          this.emitOp({
-            op: op.$case,
-            outcome: error || !response.result ? "failed" : "ok",
-            healed: false,
-            retries: 0,
-            durationMs: Date.now() - startedAt,
-            machineId: this.agentId,
-            ...(error
-              ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
-              : {}),
-          });
-          return response;
-        } catch (error) {
-          this.emitOp({
-            op: op.$case,
-            outcome: "failed",
-            healed: false,
-            retries: 0,
-            durationMs: Date.now() - startedAt,
-            machineId: this.agentId,
-            ...(error instanceof SelfhostedControlError
-              ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
-              : {}),
-          });
-          throw error;
-        }
-      };
+      const requestTransfer = this.fileTransferRequest(initial);
       const resolvedBase = typeof base === "function" ? await base() : base;
       const transferStartedAt = Date.now();
       try {
@@ -1583,14 +1530,100 @@ export class SelfhostedSession {
     return content;
   }
 
+  private fileTransferRequest(initial: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>) {
+    return async (
+      requestId: string,
+      op: NonNullable<ControlRequest["op"]>,
+    ): Promise<ControlResponse> => {
+      const startedAt = Date.now();
+      try {
+        const current = await this.admitOperation(false);
+        if (
+          !current.transactionalFsWriteSupported ||
+          current.subject !== initial.subject ||
+          current.connectionInstanceId !== initial.connectionInstanceId
+        ) {
+          throw new Error(
+            "The authorized machine connection changed during the file transfer; the operation was not replayed.",
+          );
+        }
+        const response = await this.controlRpc.request(
+          current.subject,
+          {
+            requestId,
+            epoch: this.epoch,
+            op,
+            resourcePolicy: undefined,
+          },
+          { timeoutMs: this.timeoutMs },
+        );
+        if (response.requestId !== requestId)
+          throw new Error("The machine returned a mismatched file-transfer response identity.");
+        const error = response.error
+          ? agentErrorToControlError(response.error, requestId)
+          : undefined;
+        this.emitOp({
+          op: op.$case,
+          outcome: error || !response.result ? "failed" : "ok",
+          healed: false,
+          retries: 0,
+          durationMs: Date.now() - startedAt,
+          machineId: this.agentId,
+          ...(error
+            ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
+            : {}),
+        });
+        return response;
+      } catch (error) {
+        this.emitOp({
+          op: op.$case,
+          outcome: "failed",
+          healed: false,
+          retries: 0,
+          durationMs: Date.now() - startedAt,
+          machineId: this.agentId,
+          ...(error instanceof SelfhostedControlError
+            ? { code: error.code, reason: error.reason, faultClass: selfhostedFaultClass(error) }
+            : {}),
+        });
+        throw error;
+      }
+    };
+  }
+
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
   async writeFile(args: {
     path: string;
     content: string | Uint8Array;
     createParents?: boolean;
     append?: boolean;
+    runAs?: string;
   }): Promise<number> {
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
+    if (args.runAs) {
+      throw new SelfhostedControlError({
+        code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+        message: "Native file writes do not support runAs impersonation; no file was written.",
+        reason: null,
+        retryable: false,
+      });
+    }
+    if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
+      const initial = await this.admitOperation(false);
+      if (initial.transactionalFsWriteSupported) {
+        const baseContent = (await this.pathExists(args.path))
+          ? await this.readFile({ path: args.path })
+          : undefined;
+        await transferEditorFile({
+          path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
+          content,
+          ...(baseContent === undefined ? {} : { baseContent }),
+          createParents: args.createParents ?? true,
+          request: this.fileTransferRequest(initial),
+        });
+        return content.byteLength;
+      }
+    }
     const result = await this.call({
       $case: "fsWrite",
       fsWrite: {

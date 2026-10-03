@@ -15,7 +15,11 @@ message.
 3. A turn claim locks and selects a bounded group, assigns the receiving turn,
    serializes one deterministic system message, and inserts that exact message
    into `session_history_items` in the same transaction that marks every member
-   `delivered`.
+   `delivered`. The message states the batch's `deliveredAt` and each member's
+   `createdAt` as minute-precision UTC with the weekday (a scheduled occurrence
+   promoted to a user-role task carries the same `Delivered:` and `Created:`
+   lines), so a turn that no human message started still knows the current
+   time. Both values are the durable row timestamps, never the rendering clock.
    A `requires_action` resume is the one two-phase form of that boundary: the
    resumed attempt first persists the interrupted call/result pair, then
    idempotently re-enters its exact claim to attach only machine inputs whose
@@ -41,28 +45,66 @@ The wait belongs to the session, not its goal: it persists the exact declaring
 turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
 (a child terminal/action notice, Agent message or Steer, schedule, media result,
 or background-command result) makes the session runnable. The next claim
-delivers the batch, and the newer finished turn retires the wait with
+delivers the batch, and that newer finished turn retires the wait with
 `session.wait.finished{outcome:"input"}`. `deferred` child notices remain
 pending without ending a current wait; they are delivered when the wait times
 out, is superseded, or immediate input arrives. When the database deadline
 passes unchanged, settlement clears the wait and atomically queues one typed
 `session_wait_timeout` input plus its workflow wake.
 
+The wait is retired only by a newer finished turn that a person did not start,
+by a person's turn that consumed immediate machine input, or by its own timeout.
+A person's turn (`source` `user` or `api`, or an operator's manual `/compact`)
+still runs immediately, but unless that turn calls `wait_for_input` again, the
+wait keeps its declaring turn, reason, and deadline. The exception is a queued
+person's turn that claims pending `immediate` machine input as coalesced
+context, for example a child result that arrived just before the question ran:
+it consumed what the wait was for, so it retires the wait like the system turn
+it replaced. The same holds when the person's turn read part of a child
+result (its answer or a goal continuation it reports) that was superseded as
+`consumed_by_parent_read`: the result never wakes the parent, so the read
+retires the wait. Re-reading only parts that a completed attempt had already
+read when the wait was declared leaves it held. Coalesced `deferred` notices
+alone do not retire it.
+This is what lets a status question asked while a child runs get its answer and
+still leave the child's later result able to wake a goalless parent; without
+it, the answer turn retired the wait and the result stayed pending with nothing
+to wake it. Goal, system, scheduled, and other machine-input turns still
+supersede the wait. If the person's message replaced the task and the agent
+neither waits again nor stops the child, the child's result or the deadline
+wakes the agent once more; the deadline bounds that cost.
+`sessionInputWaitDecidingTurnSql` in `packages/db/src/index.ts` is the single
+predicate for this rule. Worker peek and settlement, wake and claim admission,
+public `inputWait`, and waiting-descendant counts all read it.
+The operational instructions still tell the agent to answer and then call
+`wait_for_input` again while the awaited work is still in flight, reusing the
+earlier reason and only the time left before the earlier deadline, because
+each turn's wait sets a fresh deadline from its timeout.
+
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input
 remains pending, or an idle session still owns an expired input wait. Future holds acknowledge
 the early signal so settlement can re-arm their deadline without retaining an
 earlier retry time. A closing
-workflow cannot acknowledge away that obligation. Claim, supersession, and
+workflow cannot acknowledge away that obligation.
+An immediate update that reaches an idle session whose wake is still
+undelivered joins that revision instead of opening another one. The row is
+often future-dated (the `wait_for_input` deadline or goal idle backoff), so the
+update pulls it to now and its producer still signals after commit; without
+that signal the input would wait for the periodic dispatcher tick. The extra
+signal is a hint only: one claim consumes the whole pending batch, and the
+acknowledgement rules above keep the revision open until it does. Terminal
+background-command settlement registers the same wake but does not signal from
+its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 without ongoing intent do not create new work.
 
 Public session reads expose `inputWait` only for an idle, active-control session
-whose newest finished turn is the declaring turn. Queued/running, paused,
-terminal, or superseded waits project as null. The deadline stays visible after
-it passes until settlement: the web header and rail say “recheck due”, not
-“running”. Waiting descendants contribute to working aggregates independently
-of personal unread state. SSE wait, status, and pending-input events refresh the
+whose newest finished turn that can decide the wait is the declaring turn.
+Queued/running, paused, terminal, or superseded waits project as null. The
+deadline stays visible after it passes until settlement: the web header and
+rail say “recheck due”, not “running”. Waiting descendants contribute to
+working aggregates independently of personal unread state. SSE wait, status, and pending-input events refresh the
 detail projection; an older status event cannot override a newer detail read.
 
 ## Wake classes and child lifecycle notices
@@ -88,7 +130,7 @@ rows:
 
 | Kind | Class | Produced by | Dedupe |
 | --- | --- | --- | --- |
-| `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary (unchanged) | `child-completion:<child>:...` |
+| `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary; an idle result carries the child's `finalAnswer` | `child-completion:<child>:...` |
 | `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
@@ -101,10 +143,28 @@ marks the still-pending `child_requires_action` of that boundary `superseded`
 (one accepted response advances the boundary; a later re-freeze is a new
 generation and a new notice), a newer `child_progress` supersedes the older
 pending one, and the parent timeline records `system.update.cancelled` with
-`reason: superseded_by_resolution | superseded_by_newer_progress`. Like child
-results, an immediate child notice may autonomously wake a parent with either
+`reason: superseded_by_resolution | superseded_by_newer_progress`. Supersession
+and the parent's claim order both follow delivery order, so the reaper claims a
+backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
+the claim returns its rows sorted instead of in heap order (migration 0528). Like
+child results, an immediate child notice may autonomously wake a parent with either
 an active goal or a current session-level wait. Without either durable
 obligation, child lifecycle notices remain pending until new intent arrives.
+
+A failed or cancelled child reports from its settlement transaction. An idle
+child reports at its workflow's terminal-for-now idle boundary: after goal
+evaluation, the workflow re-peeks PostgreSQL and runs `markSessionIdle` without
+an unconditional grace timer. That transaction rechecks control, active and
+queued work and runnable machine input, suppresses completion for a held input
+wait or active goal, and commits the episode-deduplicated `child_terminal_result`
+outbox row with its
+frozen answer. Delivery can precede the workflow run's actual close; a signal
+accepted during the close activity chain causes another durable peek, and
+later work can start a new workflow run of the same session through the durable
+`signalWithStart` wake path. Follow-ups need not coalesce with the completed
+episode. The `session-normal-idle-no-grace-v1` patch preserves recorded legacy
+5 s timer commands for replay. Held input-wait and other lifecycle timers are
+unchanged.
 
 Terminal background-command settlement follows the same proof-first rule as
 the command lifecycle. The transaction that changes the exact command row from
@@ -142,6 +202,91 @@ unparseable row (`status = failed`, bounded `last_error`) and keeps delivering
 the rest, and the claim path marks a pending row whose kind or payload it
 cannot parse `failed` with a visible `system.update.cancelled{reason:
 "unrecognized_kind"}` instead of throwing.
+
+An idle `child_terminal_result` is result-bearing. The idle settlement that
+commits its outbox row also freezes the child's newest result-bearing
+`turn.completed` output as optional `payload.finalAnswer` (`sequence`, `text`,
+`truncated`, `totalBytes`, and `nextAction` when truncated). The copy is at
+most `CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES` (8 KiB) UTF-8 bytes
+including its marker: a longer answer keeps its head and tail around an
+explicit omitted-bytes marker, never splits a character, and `nextAction`
+names the exact `session_events` `view: "results"` read of the full answer.
+The complete answer stays only in the child's own durable event. No answer is
+copied when the child's newest turn ended failed, cancelled, superseded, or at a
+segment limit (`max_turns`, `budget_exhausted`), or its answer row is itself a
+retained preview: an older answer is never presented as the newest task's
+result. Only standalone maintenance turns are skipped. A turn claimed only to
+continue the child's goal (a goal-routed turn that received no other input,
+typically one that confirms and completes the goal after the answer) does not
+replace the answer: the settlement walks back past such turns, within the
+child's 16 newest turn outcomes, to the newest outcome that had other input,
+reports that answer, and lists each continuation's output after it as
+`finalAnswer.goalContinuations` (`sequence`, `text`, oldest first). The walk
+also stops, as at such a turn, at an earlier outcome that is not a readable
+answer (failed, cancelled, superseded, segment-limited, or a retained preview)
+and at the child's newest `goal.set` or `goal.resumed` event: goal
+continuations never cross an idle boundary that reported the goal inactive, so
+the walk never reaches output an earlier result already reported. If the window
+holds only continuations, the result is the newest answer alone, exactly as if
+no walk were made. The answer and every continuation are copied whole when
+together they fit the 8 KiB bound. Otherwise the copy is the newest part,
+marked `truncated`: `sequence` and `text` are that part behind a leading note
+of how many earlier bytes were omitted (the part itself is cut around a marker
+only if it alone exceeds the bound), `omittedSequences` lists each earlier
+part, `totalBytes` counts every part, and `nextAction` reads them all from the
+first. A child that works across goal continuations therefore still reports its
+final report, and no copy ever presents a cut or partial answer as the whole
+result. The worker's goal
+enrichment upsert keeps the committed `finalAnswer` and `childEventEvidence`
+under the row lock rather than replacing them, so an immediately delivered row
+and a reaper-delivered row carry the same answer. The field is optional, so older
+rows and older workers keep working. An untruncated `finalAnswer` (with each goal
+continuation) is itself the consumption evidence for the parent claim's human
+acknowledgment, so such a row carries no separate `childEventEvidence`; other lifecycle notices and
+answerless terminal results keep the bounded evidence.
+
+A parent's exact live attempt whose model receives a direct child's complete
+final answer from `session_wait` (`contentComplete`) or `session_events` (a
+whole `results`/debug item) has consumed it. Only a direct model call counts:
+the worker's tool gateway marks each first-party call with the attempt surface
+that issued it (`_meta.opengeniCaller`, `FIRST_PARTY_MCP_CALLER_META_KEY`), and
+a Codemode script, which may return only a summary to the model, or an
+unmarked call from an older worker proves nothing. The read records each such
+answer on the reading turn as `metadata.consumedChildAnswers` entries
+(`childSessionId`, `sequence`, `attemptId`; the newest 64 are kept) in a
+separate best-effort transaction that locks only that turn row (a bounded wait;
+a busy row skips it) and re-proves that the attempt is still live and the
+session's current one and that each sequence is the child's result-bearing
+`turn.completed`. A repeated read of an answer the attempt already recorded is
+decided without any lock and writes nothing. Nothing is superseded at read
+time: the tool output is not durable parent history until the attempt
+completes its turn. `session_wait` reports own pending input less each idle
+result whose every part (the answer, each goal continuation, and each omitted
+part) this attempt or a completed turn received, so the parent is neither woken
+by nor told to end its turn for an answer it already has.
+
+The attempt's successful completion settlement
+(`applySessionTurnSettlement` with `completed`) then marks each still-pending
+idle `child_terminal_result` whose every part was received `superseded` and
+appends `system.update.cancelled` with `reason: consumed_by_parent_read`, in
+the same transaction and before any later claim, so it starts no inference
+that repeats the answer. The child usually commits its result a few seconds
+after the answer the parent joined, while the reading turn still runs; such a
+result is inserted pending and that completion supersedes it. A result inserted
+after the reading turn completed arrives already consumed when every part it
+carries is recorded on one of the parent's 16 newest completed turns by the
+attempt that completed it: the row is inserted `superseded`, keeps its
+`system.update.pending` event for replay, and appends `system.update.cancelled`
+with `reason: consumed_by_parent_read`, with no goal auto-resume, wake, or
+queued status. The insert and the completion both hold the parent session lock,
+so they serialize. A read by an attempt that fails, is interrupted, or is
+replaced, even after the read, suppresses nothing: that result is delivered
+normally, as is a result reporting any part the parent did not read, such as an
+older answer skipped by a later cursor. The record only ever suppresses a
+duplicate: an older writer or a lost record delivers the result as before, and
+older workers ignore the metadata key. A parent that reads an answer and then
+waits with `wait_for_input` for that same result is not woken by it; it wakes
+on other input or its own deadline.
 
 When a child's `child_terminal_result` is delivered, that child's still-pending
 `child_progress` and `child_waiting_capacity` notices on the parent are
@@ -289,11 +434,14 @@ the command list mounts and polls only while its panel is open. Closing it abort
 an outstanding read and prevents a late Stop response from starting another read.
 
 Delivery remains the timeline landmark: `system.update.delivered` renders through
-the existing input row for every supported kind, including command results and
-wait timeouts. Those rows stay outside collapsed steps, including an input received
-partway through the same turn. A delivered input does not necessarily start a new
-turn. Command-result summaries include the bounded command preview; an unavailable
-exit result is described as unavailable rather than asserting that execution failed.
+the existing input row for visible update kinds, including wait timeouts. Those
+rows stay outside collapsed steps, including an input received partway through
+the same turn. Background command results are retained in durable agent input
+and event history, but their delivery receipts are omitted from the chat
+timeline, including when they arrive alongside other updates. A delivered input
+does not necessarily start a new turn. Command-result summaries include the
+bounded command preview; an unavailable exit result is described as unavailable
+rather than asserting that execution failed.
 
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation

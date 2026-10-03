@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { directModelConnectionSpec, type CreateConnectionRequest } from "@opengeni/contracts";
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -13,12 +14,58 @@ import { SetupAccountRoute } from "@/routes/setup-account";
 import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 
 // Local-only fixtures. No provider credentials or real payments are used.
+let previewModel: Record<string, unknown> | null = null;
+let previewCouponRedeemedAt: number | null = null;
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
   },
-  async createBillingCheckout({ amountUsd }: { amountUsd: number }) {
-    return { url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}` };
+  async createBillingCheckout({
+    amountUsd,
+    promotionCode,
+  }: {
+    amountUsd?: number;
+    promotionCode?: string;
+  }) {
+    if (promotionCode) {
+      // `LAUNCH100` is a $100 code here; anything else is refused like Stripe would.
+      if (promotionCode.trim().toUpperCase() !== "LAUNCH100") {
+        throw new Error("That code isn't valid or has expired.");
+      }
+      previewCouponRedeemedAt = Date.now();
+      return {
+        checkoutSessionId: "cs_preview_coupon",
+        url: `${window.location.origin}/dev/onboarding?view=checkout&amount=100&coupon=1`,
+        amountUsd: 100,
+      };
+    }
+    return {
+      checkoutSessionId: "cs_preview_purchase",
+      url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}`,
+    };
+  },
+  // The coupon's credits "land" two seconds after redeeming.
+  async getBillingCheckout(checkoutSessionId: string) {
+    const granted =
+      previewCouponRedeemedAt !== null && Date.now() - previewCouponRedeemedAt > 2_000;
+    return {
+      checkoutSessionId,
+      status: granted ? "complete" : "open",
+      credit: {
+        state: granted ? "granted" : "pending",
+        amountMicros: 100_000_000,
+        currency: "usd",
+        free: true,
+      },
+      balance: granted
+        ? {
+            accountId: "preview-organization",
+            balanceMicros: 110_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          }
+        : null,
+    };
   },
   async codexConnectStart() {
     const state = crypto.randomUUID();
@@ -46,11 +93,52 @@ const previewMethods = {
   async supergrokConnectPoll(workspaceId: string, state: string) {
     return previewMethods.codexConnectPoll(workspaceId, state);
   },
-  async createConnection() {
-    return {};
+  // Onboarding connects subscriptions for the organization.
+  async organizationSupergrokConnectStart() {
+    return previewMethods.supergrokConnectStart();
+  },
+  async organizationSupergrokConnectPoll(_organizationId: string, state: string) {
+    return previewMethods.codexConnectPoll("", state);
+  },
+  async requestJson(_method: string, path: string, body?: { state?: string }) {
+    if (path.endsWith("/codex/connect/start")) return previewMethods.codexConnectStart();
+    if (path.endsWith("/codex/connect/poll"))
+      return previewMethods.codexConnectPoll("", body?.state ?? "");
+    throw new Error(`Not in the preview: ${path}`);
+  },
+  async createConnection(_workspaceId: string, request: CreateConnectionRequest) {
+    const connection = {
+      id: crypto.randomUUID(),
+      version: 1,
+      status: "active",
+      subjectId: request.subjectId ?? null,
+      kind: request.kind,
+      providerDomain: request.providerDomain,
+      metadata: request.metadata,
+    };
+    const spec = directModelConnectionSpec(connection);
+    if (spec)
+      previewModel = {
+        id: spec.modelId,
+        label: spec.model,
+        provider: spec.providerId,
+        providerLabel: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+        api: "responses",
+        cost: "workspace",
+        policyAllowed: true,
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+        credentialReadiness: {
+          status: "ready",
+          reason: null,
+          basis: "connection",
+          checkedAt: null,
+        },
+      };
+    return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: [] };
+    return { models: previewModel ? [previewModel] : [] };
   },
   async getNewSessionDraft() {
     return {
@@ -69,6 +157,24 @@ const previewMethods = {
   },
   async saveNewSessionDraft() {
     return previewMethods.getNewSessionDraft();
+  },
+  // Developer setup ("Add AI agents to my product"). Nothing real is created.
+  async createOrganizationApiKey() {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return {
+      apiKey: { id: crypto.randomUUID(), prefix: "ogk_preview12" },
+      token: "ogk_preview12_NOT-A-REAL-KEY-local-preview-only",
+    };
+  },
+  async createWorkspace() {
+    return { id: "preview-setup-workspace" };
+  },
+  async createVariableSet() {
+    return { id: "preview-variable-set" };
+  },
+  async createSession() {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { id: "preview-setup-session" };
   },
 };
 const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
@@ -96,7 +202,7 @@ function PreviewResult({ view }: { view: string }) {
               : "Payment simulated. No money was charged."
             : authorization
               ? "This simulates the external sign-in step. In the real flow, you authorize on the provider’s website using code DEMO-2254."
-              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in OpenGeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
+              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in Opengeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
         </p>
         {!finished ? (
           <Button
@@ -117,8 +223,32 @@ function PreviewResult({ view }: { view: string }) {
   );
 }
 
+/** `?included=free|deployment` previews the step when the deployment default model is included. */
+function previewIncludedModel() {
+  const included = new URLSearchParams(window.location.search).get("included");
+  if (included === "free") return { id: "preview-free", label: "Preview Free Model", free: true };
+  if (included === "deployment")
+    return { id: "preview-included", label: "Preview Included Model", free: false };
+  return null;
+}
+
+/** `?credits=trial` previews the step when the organization already holds OpenGeni credits. */
+function previewStartingCredits() {
+  if (new URLSearchParams(window.location.search).get("credits") !== "trial") return null;
+  return {
+    balance: { balanceMicros: 10_000_000, currency: "usd" },
+    model: {
+      id: "preview-credits",
+      label: "Preview Credits Model",
+      reasoningEffort: "xhigh" as const,
+    },
+  };
+}
+
 function ModelPreview({ organization = false }: { organization?: boolean }) {
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState<false | { sessionId?: string }>(false);
+  const includedModel = previewIncludedModel();
+  const startingCredits = previewStartingCredits();
   if (completed)
     return (
       <section className="flex flex-1 items-center justify-center px-4">
@@ -126,8 +256,9 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
           <p className="text-xs text-fg-subtle">LOCAL PREVIEW</p>
           <h1 className="text-xl font-semibold">Onboarding complete</h1>
           <p className="text-sm text-fg-muted">
-            In the app, you now arrive in your Personal workspace. The connected model is selected
-            for your next chat.
+            {completed.sessionId
+              ? "In the app, you now arrive in the setup chat, in the Opengeni setup workspace."
+              : "In the app, you now arrive in your Personal workspace. The connected model is selected for your next chat."}
           </p>
           <Button onClick={() => setCompleted(false)}>Try another option</Button>
           <Button asChild variant="ghost">
@@ -142,18 +273,25 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
+      includedModel={includedModel}
+      startingCredits={startingCredits}
       previewState="required"
-      onComplete={() => setCompleted(true)}
+      activeEmail="preview@example.test"
+      onSignOut={() => window.location.assign("/dev/onboarding")}
+      onComplete={(destination) => setCompleted(destination ?? {})}
     />
   ) : (
     <ModelAccessOnboardingPanel
       client={previewClient}
       organizationId="preview-organization"
+      organizationName="Acme Robotics"
       workspaceId="preview-workspace"
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
-      onComplete={() => setCompleted(true)}
+      includedModel={includedModel}
+      startingCredits={startingCredits}
+      onComplete={() => setCompleted({})}
     />
   );
 }
@@ -182,18 +320,18 @@ function AdditionalOrganizationPreview() {
 
   return (
     <main className="min-h-screen bg-bg p-5 text-fg">
-      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface-1 shadow-2xl">
+      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
         <aside className="w-64 shrink-0 border-r border-border bg-surface-2/35 p-3">
           <div className="mb-6 flex items-center gap-2 px-1 py-2 text-sm font-semibold">
-            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-white">
+            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-brand-fg">
               O
             </span>
-            OpenGeni
+            Opengeni
           </div>
           <div className="grid gap-1.5">
             <OrganizationSwitcherLine
-              orgs={[{ accountId: "preview-account", label: "OpenGeni", canManage: true }]}
-              currentLabel="OpenGeni"
+              orgs={[{ accountId: "preview-account", label: "Opengeni", canManage: true }]}
+              currentLabel="Opengeni"
               activeAccountId="preview-account"
               onSelect={() => undefined}
               onCreate={() => setOpen(true)}
@@ -252,5 +390,8 @@ export function OnboardingPreviewRoute() {
   if (view === "credits") return <CreditPromptPreview />;
   if (view === "organization") return <ModelPreview organization />;
   if (view === "models") return <ModelPreview />;
+  if (view === "signin") return <ManagedAuthPanel onSubmit={async () => undefined} />;
+  if (view === "verification-expired")
+    return <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />;
   return <ManagedAuthPanel initialMode="signup" onSubmit={async () => undefined} />;
 }

@@ -54,32 +54,35 @@ function titleEvent(sequence: number, title: string): SessionEvent {
 }
 
 const realDb = await import("@opengeni/db");
-const realListSessionEvents = realDb.listSessionEvents;
+const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  listSessionEvents: async (
+  listSessionEventPage: async (
     db: unknown,
     workspaceId: string,
     sessionId: string,
-    afterOrOptions: number | { after?: number; limit?: number },
-    legacyLimit?: number,
+    options: { after?: number; limit?: number; maxBytes?: number },
   ) => {
     if (db !== fakeDb) {
-      return await realListSessionEvents(
-        db as never,
-        workspaceId,
-        sessionId,
-        afterOrOptions as never,
-        legacyLimit,
-      );
+      return await realListSessionEventPage(db as never, workspaceId, sessionId, options);
     }
-    const after = typeof afterOrOptions === "number" ? afterOrOptions : (afterOrOptions.after ?? 0);
-    const limit =
-      typeof afterOrOptions === "number" ? (legacyLimit ?? 500) : (afterOrOptions.limit ?? 500);
+    const after = options.after ?? 0;
+    const limit = options.limit ?? 500;
     durableReads.push({ after, limit });
-    return durableEvents.filter((candidate) => candidate.sequence > after).slice(0, limit);
+    const remaining = durableEvents.filter((candidate) => candidate.sequence > after);
+    const candidates = remaining.slice(0, limit);
+    const events: SessionEvent[] = [];
+    const maxBytes = options.maxBytes ?? realDb.SESSION_EVENT_DB_PAGE_MAX_BYTES;
+    let bytes = 2;
+    for (const candidate of candidates) {
+      const eventBytes = Buffer.byteLength(JSON.stringify(candidate));
+      if (events.length > 0 && bytes + eventBytes + 1 > maxBytes) break;
+      events.push(candidate);
+      bytes += eventBytes + (events.length > 1 ? 1 : 0);
+    }
+    return { events, bytes, hasMore: events.length < remaining.length };
   },
   listWorkspaceControlEvents: async (
     db: unknown,
@@ -662,10 +665,9 @@ test("an open session stream catches up after an accepted embedding publish whil
   // heartbeat both remain read-free.
   reconnect?.(1);
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
-  // The short page requires one EOF probe: byte-selected pages can be short
-  // even when more exact events remain. Neither heartbeat nor duplicate
-  // recovery notification starts another read after that probe.
-  expect(durableReads).toHaveLength(3);
+  // Explicit continuation proves the durable snapshot is exhausted. A short
+  // page alone would not; no extra EOF probe or heartbeat read is needed.
+  expect(durableReads).toHaveLength(2);
 
   await reader.cancel();
   expect(reconnectReleased).toBe(1);
@@ -1003,6 +1005,91 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
   ]);
   await reader.cancel();
 });
+
+test("a live subscription that ends under an open stream fails it retryably for durable replay", async () => {
+  durableEvents = [event(1)];
+  durableReads.length = 0;
+  durableControlEvents = [controlEvent(1)];
+  durableControlReads.length = 0;
+  const sessionTerminations: Array<(error: unknown) => void> = [];
+  let sessionReleased = 0;
+  const sessionResponse = await sseSessionStream(
+    fakeDb as never,
+    sessionEventBus({
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _onEvents: unknown,
+        options?: { onTerminated?: (error: unknown) => void },
+      ) => {
+        if (options?.onTerminated) sessionTerminations.push(options.onTerminated);
+        return () => {
+          sessionReleased += 1;
+        };
+      },
+    }),
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+  );
+  const sessionReader = sessionResponse.body!.getReader();
+  expect(
+    (await readSessionEvents(sessionReader, 1)).map((candidate) => candidate.sequence),
+  ).toEqual([1]);
+  expect(sessionTerminations).toHaveLength(1);
+  sessionTerminations[0]!(Object.assign(new Error("permissions violation"), { code: "PERM" }));
+  // The heartbeat-only stream would otherwise stay open while receiving
+  // nothing; the retryable failure makes the client reconnect and replay.
+  const sessionFailure = await readUntilFailure(sessionReader);
+  expect(sessionFailure).toBeInstanceOf(TypeError);
+  expect((sessionFailure as Error).message).toBe("session live fanout subscription ended");
+  expect(sessionReleased).toBe(1);
+
+  const controlTerminations: Array<(error: unknown) => void> = [];
+  let controlReleased = 0;
+  const controlResponse = await sseWorkspaceControlStream(
+    fakeDb as never,
+    {
+      subscribeWorkspaceControl: async (
+        _workspaceId: string,
+        _onEvent: unknown,
+        options?: { onTerminated?: (error: unknown) => void },
+      ) => {
+        if (options?.onTerminated) controlTerminations.push(options.onTerminated);
+        return () => {
+          controlReleased += 1;
+        };
+      },
+    } as unknown as EventBus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+  );
+  const controlReader = controlResponse.body!.getReader();
+  expect(
+    (await readControlEvents(controlReader, 1)).map((candidate) => candidate.sequence),
+  ).toEqual([1]);
+  expect(controlTerminations).toHaveLength(1);
+  controlTerminations[0]!(new Error("subscription closed"));
+  const controlFailure = await readUntilFailure(controlReader);
+  expect(controlFailure).toBeInstanceOf(TypeError);
+  expect((controlFailure as Error).message).toBe("workspace control live subscription ended");
+  expect(controlReleased).toBe(1);
+});
+
+async function readUntilFailure(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<unknown> {
+  for (;;) {
+    try {
+      const { done } = await reader.read();
+      if (done) return null;
+    } catch (error) {
+      return error;
+    }
+  }
+}
 
 async function readSequences(
   reader: ReadableStreamDefaultReader<Uint8Array>,

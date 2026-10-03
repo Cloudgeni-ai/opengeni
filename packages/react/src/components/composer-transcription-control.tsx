@@ -248,6 +248,7 @@ export function ComposerTranscriptionControl({
                   >
                     <button
                       type="button"
+                      disabled={composer.disabled && !retrying}
                       onClick={() =>
                         savedTranscript
                           ? void transcription.insertSavedTranscript()
@@ -264,8 +265,8 @@ export function ComposerTranscriptionControl({
                       }
                       className={cn(
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                        "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                        "hover:bg-og-fg-muted pointer-coarse:size-11",
+                        "border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover transition-colors duration-150 motion-reduce:transition-none",
+                        "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
                       )}
                     >
                       {savedTranscript ? (
@@ -280,12 +281,13 @@ export function ComposerTranscriptionControl({
                   <Tip tip={messages.discardRecovered}>
                     <button
                       type="button"
+                      disabled={composer.disabled}
                       onClick={() => void transcription.discard()}
                       aria-label={messages.discardRecovered}
                       className={cn(
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
                         "text-og-fg-muted transition-colors duration-150 motion-reduce:transition-none",
-                        "hover:bg-og-surface-3 hover:text-og-status-failed pointer-coarse:size-11",
+                        "hover:bg-og-surface-3 hover:text-og-status-failed disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
                       )}
                     >
                       <Trash2Icon className="size-3.5" />
@@ -347,8 +349,8 @@ export function ComposerTranscriptionControl({
                           aria-label={messages.stop}
                           className={cn(
                             "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                            "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                            "hover:bg-og-fg-muted pointer-coarse:size-11",
+                            "border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover",
+                            "transition-colors duration-150 motion-reduce:transition-none pointer-coarse:size-11",
                           )}
                         >
                           <SquareIcon className="size-2.5 fill-current" />

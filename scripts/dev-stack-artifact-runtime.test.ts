@@ -269,7 +269,8 @@ describe("local artifact runtime stack contract", () => {
     expect(source.indexOf(hostInternalEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source.indexOf(sandboxEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source).toContain('GARAGE_FIXTURE_ACCESS_KEY_ID="GK0123456789abcdef0123456789abcdef"');
-    expect(source).toContain("docker compose up -d postgres nats temporal garage garage-init");
+    expect(source).toContain("docker compose up -d postgres nats temporal garage");
+    expect(source).toContain("bun scripts/dev-native-storage.ts provision .");
   });
 
   test("keeps worker MCP on worktree loopback while Modal may use a public edge", async () => {

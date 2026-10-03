@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTraceProcessors, type Span, type Trace, type TracingProcessor } from "@openai/agents";
+import { beforeModelRequest } from "./model-request-capture";
 
 export type ModelPreparationPhase =
   | "sandbox_agent_preparation"
@@ -64,6 +65,10 @@ type ModelPreparationObservation = {
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
 const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
+type ModelTransportAdmission = { refusal?: { error: unknown } };
+type ModelTransportFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
+const modelTransportAdmission = new AsyncLocalStorage<ModelTransportAdmission>();
+const modelTransportRefusals = new WeakMap<Headers, { error: unknown }>();
 
 class ModelPreparationTraceProcessor implements TracingProcessor {
   async onTraceStart(_trace: Trace): Promise<void> {}
@@ -127,7 +132,49 @@ export function withModelTransportStartedObserver<T>(
 }
 
 export async function recordModelTransportStarted(): Promise<void> {
-  await modelTransportStartedObserver.getStore()?.();
+  try {
+    await beforeModelRequest();
+    await modelTransportStartedObserver.getStore()?.();
+  } catch (error) {
+    const admission = modelTransportAdmission.getStore();
+    if (admission) admission.refusal = { error };
+    throw error;
+  }
+}
+
+/** The OpenAI SDK retries thrown fetch errors and replaces their identity with
+ * APIConnectionError. Carry only our pre-wire refusal through its HTTP-error
+ * path, which honors the retry veto. Native transports keep the original throw.
+ * Each fetch owns its context even when concurrent turns share a cached client.
+ */
+export function sdkModelTransportAdmissionFetch(inner: ModelTransportFetch): ModelTransportFetch {
+  return async (input, init) => {
+    const admission: ModelTransportAdmission = {};
+    return modelTransportAdmission.run(admission, async () => {
+      try {
+        return await inner(input, init);
+      } catch (error) {
+        if (!admission.refusal || admission.refusal.error !== error) throw error;
+        // This is a local SDK handoff, not a provider or public API response.
+        // Identity, not response bytes/headers supplied by a provider, grants
+        // access to the original error at the SDK's status-error boundary.
+        const response = new Response(null, {
+          status: 400,
+          headers: { "x-should-retry": "false" },
+        });
+        modelTransportRefusals.set(response.headers, admission.refusal);
+        return response;
+      }
+    });
+  };
+}
+
+/** Restore the exact host-owned error after the SDK has suppressed retries. */
+export function rethrowModelTransportAdmissionRefusal(headers: Headers): void {
+  const refusal = modelTransportRefusals.get(headers);
+  if (!refusal) return;
+  modelTransportRefusals.delete(headers);
+  throw refusal.error;
 }
 
 /** Record the first routed sandbox operation boundary without publishing an

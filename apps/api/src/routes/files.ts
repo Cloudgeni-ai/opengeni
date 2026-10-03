@@ -58,15 +58,14 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { buildFilesMcpServer } from "../mcp/files";
+import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
   buildWorkspaceToolGatewayMcpServer,
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
-
-const RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY =
-  "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -78,6 +77,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/files",
     "/v1/workspaces/:workspaceId/files/*",
     "/v1/workspaces/:workspaceId/artifacts/*",
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/*",
   ]) {
     app.use(path, async (c, next) => {
       const permission = c.req.path.includes("/files/uploads") ? "files:upload" : "files:read";
@@ -158,7 +158,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
-    const payload = CreateFileUploadRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateFileUploadRequest);
     const privateOwner = fileRequestAuthority.get(c.req.raw)?.owner ?? null;
     const personal =
       payload.scope === "personal" ||
@@ -498,7 +498,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!videoPresent) {
       throw new HTTPException(410, { message: "generated video bytes are unavailable" });
     }
-    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    const signed = await objectStorage.createGetUrl({
+      key: file.objectKey,
+      ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+    });
     await recordAuditEvent(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -620,7 +623,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!present) {
       throw new HTTPException(410, { message: "file bytes are unavailable" });
     }
-    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    const signed = await objectStorage.createGetUrl({
+      key: file.objectKey,
+      ...userContentSignedGetUrlOptions(file.contentType, file.filename),
+    });
     await recordAuditEvent(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -688,14 +694,15 @@ async function serveRetainedArtifactContent(
     );
   }
 
+  // Stored bytes and their content type are user- or agent-chosen; this origin
+  // also serves the console, so the response is a sandboxed, non-embeddable
+  // document and active markup downloads instead of rendering.
   const headers = {
     "Accept-Ranges": range.acceptRanges,
     "Cache-Control": "private, no-store",
     "Content-Length": String(range.length),
     "Content-Type": metadata.contentType,
-    "Content-Disposition": "attachment",
-    "Content-Security-Policy": RETAINED_ARTIFACT_CONTENT_SECURITY_POLICY,
-    "X-Content-Type-Options": "nosniff",
+    ...userContentResponseHeaders(metadata.contentType, file.filename),
     ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
   };
   if (range.kind === "empty") {

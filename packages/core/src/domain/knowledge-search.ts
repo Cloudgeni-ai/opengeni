@@ -2,6 +2,8 @@ import { KnowledgeEntryListRequest, type KnowledgeEntryListResponse } from "@ope
 import type { Settings } from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
+  checkWorkspaceAllowance,
+  creditDebitAttributionForTurn,
   getBillingBalance,
   listKnowledgeEntries,
   recordUsageEvent,
@@ -9,6 +11,7 @@ import {
   withKnowledgeQueryAccountLock,
   type Database,
   type KnowledgeContext,
+  type CreditDebitAttribution,
 } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
@@ -50,6 +53,15 @@ export async function searchKnowledgeEntries(
   settings?: Settings,
 ): Promise<KnowledgeEntryListResponse> {
   const request = KnowledgeEntryListRequest.parse(input);
+  // Copy trusted actor fields before any provider/lock await. Request lifetime
+  // mutation cannot replace the initiating identity between admission/debit.
+  const billingActor = { ...context.actor };
+  let paidAttribution: CreditDebitAttribution =
+    billingActor.kind === "human"
+      ? { kind: "human", initiatingHumanSubjectId: billingActor.subjectId }
+      : billingActor.kind === "service"
+        ? { kind: "service" }
+        : { kind: "unknown" };
   if (!request.query || request.mode === "keyword") {
     return {
       ...(await listKnowledgeEntries(db, context, request)),
@@ -140,6 +152,10 @@ export async function searchKnowledgeEntries(
           sourceResourceType: "knowledge_query",
           sourceResourceId: usageId,
           idempotencyKey: `knowledge.query_cost:${usageId}`,
+          // Durable receipt inserted before the debit in this same transaction.
+          // The service is the writer, not an inferred causal human.
+          initiator: { kind: "service", subjectId: "worker:knowledge-query" },
+          initiatorContext: { creditDebitAttribution: paidAttribution },
         });
       if (paidSettings && cost > 0)
         await applyCreditDebitAfterUse(queryDb, {
@@ -150,7 +166,18 @@ export async function searchKnowledgeEntries(
           sourceType: "knowledge_query",
           sourceId: usageId,
           idempotencyKey: `knowledge.query_embedding:${usageId}`,
-          metadata: { model: embedding.model, bytes },
+          metadata: {
+            model: embedding.model,
+            bytes,
+            // This context is constructed by the trusted HTTP/MCP host, never
+            // from request input. The ledger resolves the immutable exact turn;
+            // an API key's subject (or a session creator) is not a human.
+            ...(billingActor.kind === "agent"
+              ? { turnId: billingActor.turnId }
+              : billingActor.kind === "human"
+                ? { initiatingHumanSubjectId: billingActor.subjectId }
+                : {}),
+          },
         });
     }
     return { ...found, searchMode: request.mode };
@@ -166,6 +193,31 @@ export async function searchKnowledgeEntries(
       const balance = await getBillingBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
+      const attribution =
+        billingActor.kind === "agent"
+          ? await creditDebitAttributionForTurn(lockedDb, {
+              accountId: context.accountId,
+              workspaceId: context.workspaceId,
+              turnId: billingActor.turnId,
+            })
+          : null;
+      if (attribution) paidAttribution = attribution;
+      const refusal = await checkWorkspaceAllowance(lockedDb, {
+        accountId: context.accountId,
+        workspaceId: context.workspaceId,
+        subjectId:
+          billingActor.kind === "human"
+            ? billingActor.subjectId
+            : attribution?.kind === "turn"
+              ? attribution.initiatingHumanSubjectId
+              : null,
+      });
+      if (refusal)
+        return keywordFallback(
+          lockedDb,
+          Object.assign(new Error(refusal.message), refusal),
+          "quota",
+        );
       const now = new Date();
       const minuteBytes = await sumUsageQuantity(lockedDb, {
         accountId: context.accountId,

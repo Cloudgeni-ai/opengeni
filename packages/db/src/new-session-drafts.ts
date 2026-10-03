@@ -62,6 +62,12 @@ export class NewSessionDraftAccessError extends Error {
 type StoredNewSessionDraftOptions = NewSessionDraftOptionsValue & {
   /** JSONB-only compatibility marker; deliberately not part of public options. */
   toolsProvided?: boolean;
+  /**
+   * JSONB-only model-policy marker. True means the person chose the model,
+   * reasoning, and latency; false means they follow the resolved new-chat
+   * default. Absent on rows written before the marker existed.
+   */
+  modelProvided?: boolean;
   /** Successful-create preference state, separate from transient draft edits. */
   selectionHistory?: NewSessionSelectionHistory;
   /** Legacy rolling-upgrade input; migration 0404 strips this on every write. */
@@ -76,10 +82,12 @@ function storedOptions(
   options: NewSessionDraftOptionsValue,
   toolsProvided: boolean,
   selectionHistory: NewSessionSelectionHistory = { projects: [] },
+  modelProvided?: boolean,
 ): StoredNewSessionDraftOptions {
-  const stored = {
+  const stored: StoredNewSessionDraftOptions = {
     ...options,
     toolsProvided,
+    ...(modelProvided === undefined ? {} : { modelProvided }),
     selectionHistory,
   };
   // A caller may have read a row written by the short-lived JSONB provenance
@@ -134,6 +142,16 @@ export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
   return options.toolsProvided === true || !Object.hasOwn(options, "toolsProvided");
 }
 
+/**
+ * The stored model-policy marker, or undefined for a row written before the
+ * marker existed (or by an older client that did not send it). Callers that
+ * know the deployment default decide what an unmarked row means.
+ */
+export function newSessionDraftModelProvided(row: NewSessionDraftRow): boolean | undefined {
+  const marker = (row.sessionOptions as StoredNewSessionDraftOptions).modelProvided;
+  return typeof marker === "boolean" ? marker : undefined;
+}
+
 export function newSessionDraftSelectedProjectChannelId(
   row: NewSessionDraftRow,
 ): string | null | undefined {
@@ -153,6 +171,7 @@ export function newSessionDraftSelectedProjectChannelId(
 export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptionsValue {
   const options = { ...(row.sessionOptions as StoredNewSessionDraftOptions) };
   delete options.toolsProvided;
+  delete options.modelProvided;
   delete options.selectionHistory;
   delete options.selectedProjectChannelId;
   return options;
@@ -246,6 +265,8 @@ export async function saveNewSessionDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
+    /** Omitted by older clients; the row then carries no marker. */
+    modelProvided?: boolean;
     selectedProjectChannelId?: string | null;
     options: NewSessionDraftOptionsValue;
     /** API-key and delegated service subjects have no workspace-membership row. */
@@ -333,6 +354,7 @@ export async function saveNewSessionDraftInTransaction(
       input.options,
       input.toolsProvided,
       current ? newSessionSelectionHistory(current) : { projects: [] },
+      input.modelProvided,
     ),
     ...projectProvenance,
     updatedAt: new Date(),
@@ -448,6 +470,7 @@ export async function rememberNewSessionSelectionInTransaction(
         publicNewSessionDraftOptions(current),
         newSessionDraftToolsProvided(current),
         rememberNewSessionSelection(newSessionSelectionHistory(current), input.acceptedSelection),
+        newSessionDraftModelProvided(current),
       ),
     })
     .where(eq(schema.newSessionDrafts.id, current.id))
@@ -522,6 +545,15 @@ export async function assertExactNewSessionDraftInTransaction(
   await lockExactNewSessionDraft(db, input);
 }
 
+async function workspaceHasDefaultRig(db: Database, workspaceId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ defaultRigId: schema.workspaces.defaultRigId })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return Boolean(row?.defaultRigId);
+}
+
 /**
  * Replace one exact accepted draft with the next-create safe seed. The row is
  * identity-serialized before the revision check so even the absent-row
@@ -558,7 +590,17 @@ export async function seedNewSessionDraftInTransaction(
   const selectedProjectChannelId = input.acceptedSelection
     ? input.acceptedSelection.channelId
     : newSessionDraftSelectedProjectChannelId(current);
+  // A Sandbox Environment choice replaces the workspace default and the
+  // default Variable Sets it carries. When the workspace has a default, that
+  // choice covers only the session it was made for: the next form starts on
+  // the workspace default again. Without a default nothing is replaced, so the
+  // choice is remembered like any other selection.
+  const rememberRig =
+    typeof options.rigId === "string" &&
+    options.rigId.length > 0 &&
+    !(await workspaceHasDefaultRig(db, input.workspaceId));
   const safeOptions: NewSessionDraftOptionsValue = {
+    ...(options.visibility ? { visibility: options.visibility } : {}),
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
     ...(targetSandboxId && typeof options.workingDir === "string"
@@ -570,7 +612,7 @@ export async function seedNewSessionDraftInTransaction(
           variableSetId: options.variableSetIds[options.variableSetIds.length - 1],
         }
       : {}),
-    ...(options.rigId ? { rigId: options.rigId } : {}),
+    ...(rememberRig ? { rigId: options.rigId } : {}),
   };
   const resources = (Array.isArray(current.resources) ? current.resources : []).flatMap((raw) => {
     if (!raw || typeof raw !== "object" || (raw as { kind?: unknown }).kind !== "repository") {
@@ -599,6 +641,7 @@ export async function seedNewSessionDraftInTransaction(
               input.acceptedSelection,
             )
           : newSessionSelectionHistory(current),
+        newSessionDraftModelProvided(current),
       ),
       selectedProjectChannelId: selectedProjectChannelId ?? null,
       selectedProjectComputeSnapshot:

@@ -178,6 +178,70 @@ async function runStreamed(
   return result;
 }
 
+test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+  "configured %s router requires deferred tools and survives prior exposure",
+  async (transport) => {
+    const agent = agentWith(firstPartyTool("request_human_input", "Human input"));
+    const runtime = installLazyToolRuntime(
+      agent,
+      transport,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(),
+      undefined,
+      true,
+    );
+    const names = async () =>
+      (await agent.getAllTools({} as never)).map((entry) =>
+        entry.type === "function" ? entry.name : entry.providerData?.type,
+      );
+    expect(await names()).toEqual(["request_human_input"]);
+    agent.tools.push(firstPartyTool("generate_video", "Deferred video"));
+    expect(await names()).toContain("tool_list");
+    agent.tools.pop();
+    expect(await names()).toContain("tool_list");
+    expect(runtime.inspectSearchableTools()).toEqual([]);
+
+    const restored = agentWith(firstPartyTool("request_human_input", "Human input"));
+    installLazyToolRuntime(
+      restored,
+      transport,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(),
+      undefined,
+      true,
+      true,
+    );
+    expect(
+      (await restored.getAllTools({} as never)).some(
+        (entry) => entry.type === "function" && entry.name === "tool_list",
+      ),
+    ).toBe(true);
+  },
+);
+
+test("configured router does not expose an empty deferred server", async () => {
+  const agent = agentWith(firstPartyTool("request_human_input", "Human input"));
+  installLazyToolRuntime(
+    agent,
+    "generic_dispatch",
+    new Set(["empty"]),
+    Promise.resolve(),
+    new Set(["empty"]),
+    new Set(),
+    undefined,
+    true,
+  );
+  expect(
+    (await agent.getAllTools({} as never)).map((entry) =>
+      entry.type === "function" ? entry.name : entry.providerData?.type,
+    ),
+  ).toEqual(["request_human_input"]);
+});
+
 describe("query-independent tool discovery", () => {
   test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
     const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);
@@ -374,6 +438,146 @@ describe("query-independent tool discovery", () => {
     await runStreamed(agent, model, runtime);
     expect(JSON.stringify(model.requests[1]!.input)).toContain("without namePrefix");
     expect(JSON.stringify(model.requests[2]!.input)).toContain(WEATHER_TOOL);
+  });
+
+  test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+    "%s: an image keyword prefix recovers deferred runtime generation without widening authority",
+    async (transport) => {
+      let executions = 0;
+      let approvals = 0;
+      const image = tool({
+        name: "generate_image",
+        description: "Generate or edit exactly one image",
+        parameters: {
+          type: "object",
+          properties: { prompt: { type: "string" } },
+          required: ["prompt"],
+          additionalProperties: false,
+        },
+        strict: false,
+        needsApproval: () => {
+          approvals++;
+          return false;
+        },
+        execute: () => {
+          executions++;
+          return "synthetic-image-result";
+        },
+      }) as unknown as Tool;
+      const agent = agentWith(image);
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const exact = { query: "", names: ["generate_image", "unauthorized__image"] };
+      const search =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "image-search",
+              name: "tool_search",
+              arguments: JSON.stringify(exact),
+            }
+          : {
+              type: "tool_search_call",
+              call_id: "image-search",
+              execution: "client",
+              status: "completed",
+              arguments: exact,
+            };
+      const generate =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "generate",
+              name: "tool_invoke",
+              arguments: JSON.stringify({
+                name: "generate_image",
+                arguments: { prompt: "A blue circle on a white background" },
+              }),
+            }
+          : {
+              type: "function_call",
+              callId: "generate",
+              name: "generate_image",
+              arguments: '{"prompt":"A blue circle on a white background"}',
+            };
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "image-prefix",
+            name: "tool_list",
+            arguments: '{"namePrefix":"image"}',
+          },
+        ],
+        [search as never],
+        [generate as never],
+        [finalMessage("done")],
+      ]);
+      const result = await runStreamed(agent, model, runtime);
+      expect(result.finalOutput).toBe("done");
+      expect(model.requests[0]!.tools.some((entry) => entry.name === "generate_image")).toBe(false);
+      const input = model.requests[1]!.input;
+      if (typeof input === "string") throw new Error("Expected structured model input");
+      const listResult = input.find(
+        (entry) => entry.type === "function_call_result" && entry.callId === "image-prefix",
+      );
+      if (listResult?.type !== "function_call_result") throw new Error("Missing list result");
+      const listing = JSON.parse((listResult.output as { text: string }).text);
+      expect(listing).toMatchObject({ tools: [], total: 0, nextCursor: null });
+      expect(listing.suggestions).toEqual([
+        { name: "generate_image", description: "Generate or edit exactly one image" },
+      ]);
+      expect(JSON.stringify(listing)).not.toContain("parameters");
+      expect(JSON.stringify(listing)).not.toContain("unauthorized__image");
+      expect(runtime.search(exact)).toEqual([image]);
+      expect(executions).toBe(1);
+      expect(approvals).toBe(1);
+    },
+  );
+
+  test("unmatched-prefix recovery hints stay bounded and disappear with removed tools", async () => {
+    const images = Array.from({ length: 12 }, (_, i) =>
+      firstPartyTool(`provider${i}__generate_image`, "文".repeat(1000)),
+    );
+    const agent = new Agent({ name: "browse", tools: images, model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "image-prefix",
+          name: "tool_list",
+          arguments: '{"namePrefix":"image","limit":40}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    const input = model.requests[1]!.input;
+    if (typeof input === "string") throw new Error("Expected structured model input");
+    const result = input.find(
+      (entry) => entry.type === "function_call_result" && entry.callId === "image-prefix",
+    );
+    if (result?.type !== "function_call_result") throw new Error("Missing list result");
+    const listing = JSON.parse((result.output as { text: string }).text);
+    expect(listing.suggestions).toHaveLength(8);
+    expect(Buffer.byteLength(JSON.stringify(listing))).toBeLessThanOrEqual(16 * 1024);
+    expect(Array.from(listing.suggestions[0].description)).toHaveLength(160);
+
+    agent.tools.length = 0;
+    const removed = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "removed-prefix",
+          name: "tool_list",
+          arguments: '{"namePrefix":"image"}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, removed, runtime);
+    expect(runtime.inspectSearchableTools()).toEqual([]);
+    expect(JSON.stringify(removed.requests[1]!.input)).not.toContain("generate_image");
   });
 });
 
@@ -995,6 +1199,7 @@ describe("generic lazy tool dispatch", () => {
       "Pause this turn and request structured human input",
     );
     const models = firstPartyTool("list_models", "List selectable workspace models");
+    const codeSearch = firstPartyTool("code_search", "Find where code is implemented");
     const browser = firstPartyTool(
       "interaction__browser_act",
       "Click, type, and interact with the current browser page",
@@ -1013,6 +1218,7 @@ describe("generic lazy tool dispatch", () => {
         skillSave,
         human,
         models,
+        codeSearch,
         browser,
       ],
     });
@@ -1032,6 +1238,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "code_search",
       "tool_search",
       "tool_invoke",
       "tool_list",
@@ -1045,6 +1252,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "code_search",
     ]) {
       expect(
         runtime.search({ query: name.replaceAll("_", " ") }).map((candidate) => candidate.name),
@@ -1486,7 +1694,7 @@ describe("generic lazy tool dispatch", () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
-        description: `weather capability ${index} ${"x".repeat(50_000)}`,
+        description: `weather capability ${index} ${"x".repeat(100_000)}`,
         parameters: {
           type: "object",
           properties: { city: { type: "string" } },

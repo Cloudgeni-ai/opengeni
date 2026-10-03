@@ -153,7 +153,7 @@ export function CustomApiSetupDialog({
                         protocol: event.target.value as CustomApiFlowState["draft"]["protocol"],
                       })
                     }
-                    className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
+                    className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
                   >
                     <option value="auto">Detect automatically</option>
                     <option value="openapi">OpenAPI</option>
@@ -280,7 +280,7 @@ function AuthenticationStep({
 
       <div className="grid gap-4 rounded-xl border border-border p-4">
         <fieldset className="grid gap-2">
-          <legend className="text-xs font-medium text-fg-muted">Connection ownership</legend>
+          <legend className="text-xs font-medium text-fg">Connection ownership</legend>
           <div className="grid gap-2 sm:grid-cols-2">
             <Choice
               selected={state.draft.ownership === "personal"}
@@ -298,7 +298,7 @@ function AuthenticationStep({
         </fieldset>
 
         <fieldset className="grid gap-2">
-          <legend className="text-xs font-medium text-fg-muted">Credential source</legend>
+          <legend className="text-xs font-medium text-fg">Credential source</legend>
           <Choice
             selected={state.draft.connectionMode === "new"}
             title="Create a new Connection"
@@ -322,7 +322,7 @@ function AuthenticationStep({
               id="custom-existing-connection"
               value={state.draft.existingConnectionId}
               onChange={(event) => onDraftChange({ existingConnectionId: event.target.value })}
-              className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
+              className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
             >
               <option value="">Choose an exact account…</option>
               {compatible.map((connection) => (
@@ -393,7 +393,7 @@ function NewCredentialFields({
                 authMethod: event.target.value as CustomApiFlowState["draft"]["authMethod"],
               })
             }
-            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
+            className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
           >
             <option value="bearer">Bearer token</option>
             <option value="basic">HTTP Basic</option>
@@ -435,7 +435,7 @@ function NewCredentialFields({
                         .value as CustomApiFlowState["draft"]["credentialCarrier"],
                     })
                   }
-                  className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
+                  className="h-9 rounded-md border border-border bg-transparent px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-input/30"
                 >
                   <option value="header">Header</option>
                   <option value="query">Query parameter</option>

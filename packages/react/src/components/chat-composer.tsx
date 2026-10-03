@@ -190,6 +190,7 @@ export function ChatComposer({
                   onFocusConsumed={composer.clearAnnotationReviewTarget}
                   onUpdate={composer.updateAnnotation}
                   onRemove={composer.removeAnnotation}
+                  onCommit={controller.focusInput}
                 />
               </div>
             ) : null}

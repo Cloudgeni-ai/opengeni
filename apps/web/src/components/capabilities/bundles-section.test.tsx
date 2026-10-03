@@ -75,7 +75,7 @@ describe("BundlesSection", () => {
       ).toContain("Research suite");
       expect(rowNames(rendered.container)).toEqual([
         "release-operator. Skill, imported from source. Installed",
-        "Terraform. Skill, curated by OpenGeni. Installed",
+        "Terraform. Skill, curated by Opengeni. Installed",
       ]);
       // A Bundle is never "Connected" - that word belongs to a connection.
       expect(rendered.container.textContent).not.toContain("Connected");

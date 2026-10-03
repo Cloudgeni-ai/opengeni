@@ -62,6 +62,7 @@ export type EditableSpreadsheetArtifactSurfaceProps = Omit<
   "metadataRevision" | "sheet"
 > & {
   title?: string | undefined;
+  showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
   initialSheetId?: string | undefined;
@@ -311,6 +312,7 @@ export function EditableSpreadsheetGrid({
 export function EditableSpreadsheetArtifactSurface({
   session,
   title = "Workbook",
+  showHeader,
   subtitle,
   actions,
   initialSheetId,
@@ -392,6 +394,7 @@ export function EditableSpreadsheetArtifactSurface({
     <ArtifactSurface
       modality="spreadsheet"
       title={title}
+      showHeader={showHeader}
       subtitle={
         subtitle ??
         (accessRevoked
@@ -429,7 +432,7 @@ export function EditableSpreadsheetArtifactSurface({
                 type="button"
                 onClick={() => void addSheet()}
                 disabled={creatingSheet}
-                className="mt-3 rounded-og-sm bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+                className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
               >
                 {creatingSheet ? "Adding…" : "Add worksheet"}
               </button>

@@ -1,7 +1,7 @@
 import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { requestPasswordReset, sendVerificationEmail } from "@/api";
+import { AuthApiError, requestPasswordReset, sendVerificationEmail } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,11 +18,32 @@ import {
   type ManagedAuthFormErrors,
   type ManagedAuthMode,
 } from "@/lib/managed-auth-form";
+import {
+  clearVerificationLinkErrorFromLocation,
+  managedAuthModeFromSearch,
+  verificationLinkErrorFromSearch,
+  type VerificationLinkError,
+} from "@/lib/managed-auth-url";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
 export function ManagedAuthPanel(props: {
   initialMode?: ManagedAuthMode;
   allowedModes?: readonly ManagedAuthMode[];
   emailVerificationRequired?: boolean;
+  /**
+   * False while the deployment has paused new account creation. The Sign up
+   * view then explains it instead of offering a form or social buttons;
+   * Sign in stays available.
+   */
+  newSignupsEnabled?: boolean;
+  /** An expired or invalid email-verification link returned the person here. */
+  verificationLinkError?: VerificationLinkError | null;
+  /**
+   * The page query string. `?mode=signup` opens Sign up and a Better Auth
+   * verification-link error opens the resend form, unless the explicit
+   * `initialMode` / `verificationLinkError` props say otherwise.
+   */
+  search?: string;
   presentation?: "card" | "embedded";
   invitation?: { organizationName: string; targetEmail: string } | null;
   onDismissInvitation?: () => void;
@@ -34,13 +55,27 @@ export function ManagedAuthPanel(props: {
   ) => Promise<void>;
 }) {
   const allowedModes = props.allowedModes ?? (["signin", "signup"] as const);
-  const requestedInitialMode = props.initialMode ?? "signin";
+  const [verificationLinkError] = useState(
+    () =>
+      props.verificationLinkError ??
+      (props.search === undefined ? null : verificationLinkErrorFromSearch(props.search)),
+  );
+  // A returning verification-link failure always starts from the Sign in side.
+  const requestedInitialMode = verificationLinkError
+    ? "signin"
+    : (props.initialMode ??
+      (props.search === undefined ? undefined : managedAuthModeFromSearch(props.search)) ??
+      "signin");
   const [mode, setMode] = useState<ManagedAuthMode>(
     allowedModes.includes(requestedInitialMode)
       ? requestedInitialMode
       : (allowedModes[0] ?? "signin"),
   );
   const emailVerificationRequired = props.emailVerificationRequired ?? true;
+  // An operator can pause sign-ups after this page loaded; the server's typed
+  // refusal then switches this tab to the same paused view.
+  const [signupsPausedByServer, setSignupsPausedByServer] = useState(false);
+  const newSignupsEnabled = (props.newSignupsEnabled ?? true) && !signupsPausedByServer;
   const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const invitation = invitationDismissed ? null : (props.invitation ?? null);
@@ -48,6 +83,19 @@ export function ManagedAuthPanel(props: {
   const [email, setEmail] = useState(props.invitation?.targetEmail ?? "");
   const [password, setPassword] = useState("");
   const [resetMode, setResetMode] = useState(false);
+  // Offer a fresh link right away when an old verification link brought the person back.
+  const [linkResendMode, setLinkResendMode] = useState(
+    () => emailVerificationRequired && Boolean(verificationLinkError),
+  );
+  const emailOnlyMode = resetMode || linkResendMode;
+  const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
+  // When the page query brought the link error, this panel owns it from here.
+  const [ownsLocationLinkError] = useState(
+    () => linkResendMode && !props.verificationLinkError && props.search !== undefined,
+  );
+  useEffect(() => {
+    if (ownsLocationLinkError) clearVerificationLinkErrorFromLocation(window);
+  }, [ownsLocationLinkError]);
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
@@ -60,6 +108,7 @@ export function ManagedAuthPanel(props: {
   function selectMode(nextMode: ManagedAuthMode) {
     setMode(nextMode);
     setResetMode(false);
+    setLinkResendMode(false);
     setFieldErrors({});
     setFormError(null);
     setFormActionMode(null);
@@ -92,8 +141,8 @@ export function ManagedAuthPanel(props: {
   async function submit() {
     const input = { name: name.trim(), email: email.trim(), password };
     const validationErrors = validateManagedAuthInput(
-      resetMode ? "signin" : mode,
-      resetMode ? { ...input, password: "reset-request" } : input,
+      emailOnlyMode ? "signin" : mode,
+      emailOnlyMode ? { ...input, password: "email-only-request" } : input,
     );
     setFieldErrors(validationErrors);
     setFormError(null);
@@ -103,6 +152,13 @@ export function ManagedAuthPanel(props: {
     if (Object.keys(validationErrors).length > 0) return;
     setBusy(true);
     try {
+      if (linkResendMode) {
+        await sendVerificationEmail({ email: input.email });
+        setSuccessMessage(
+          "If this email still needs verification, we sent a new link. Check your inbox and spam folder.",
+        );
+        return;
+      }
       if (resetMode) {
         await requestPasswordReset(input.email);
         setSuccessMessage(
@@ -120,8 +176,20 @@ export function ManagedAuthPanel(props: {
         );
       }
     } catch (error) {
+      if (linkResendMode) {
+        setFormError("We couldn't send a verification email. Please try again.");
+        return;
+      }
       if (resetMode) {
         setFormError("We couldn't request a password reset. Please try again.");
+        return;
+      }
+      if (
+        mode === "signup" &&
+        error instanceof AuthApiError &&
+        error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE
+      ) {
+        setSignupsPausedByServer(true);
         return;
       }
       const failure = managedAuthFailure(mode, error);
@@ -185,7 +253,7 @@ export function ManagedAuthPanel(props: {
   const resendVerificationControl = verificationEmail ? (
     <div className="mt-2">
       <p className="text-xs text-fg-subtle">
-        Look for “Verify your OpenGeni email” in your inbox or spam folder. After verifying, return
+        Look for “Verify your Opengeni email” in your inbox or spam folder. After verifying, return
         here to sign in.
       </p>
       <Button
@@ -210,7 +278,7 @@ export function ManagedAuthPanel(props: {
       className={
         props.presentation === "embedded"
           ? "w-full"
-          : "flex flex-1 items-center justify-center px-4"
+          : "og-page-glow flex flex-1 items-center justify-center px-4"
       }
     >
       <form
@@ -218,7 +286,7 @@ export function ManagedAuthPanel(props: {
         className={
           props.presentation === "embedded"
             ? "w-full"
-            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+            : "w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         }
         onSubmit={(event) => {
           event.preventDefault();
@@ -231,16 +299,28 @@ export function ManagedAuthPanel(props: {
           </span>
           <div>
             <Heading className="text-base font-semibold">
-              {resetMode ? "Reset password" : mode === "signup" ? "Create account" : "Sign in"}
+              {linkResendMode
+                ? "Get a new verification link"
+                : resetMode
+                  ? "Reset password"
+                  : mode === "signup"
+                    ? "Create account"
+                    : "Sign in"}
             </Heading>
             <p className="text-sm text-fg-subtle">
-              {resetMode
-                ? "Enter your email to receive a password-reset link."
-                : invitation
-                  ? mode === "signup"
-                    ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                    : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                  : "Use your preferred account to access the managed console."}
+              {linkResendMode
+                ? verificationLinkError === "expired"
+                  ? "That verification link has expired. Enter your email and we'll send a new one."
+                  : "That verification link is no longer valid. Enter your email and we'll send a new one."
+                : resetMode
+                  ? "Enter your email to receive a password-reset link."
+                  : signupsPausedView
+                    ? "Existing accounts can still sign in."
+                    : invitation
+                      ? mode === "signup"
+                        ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                        : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                      : "Use your preferred account to access the managed console."}
             </p>
           </div>
         </div>
@@ -256,12 +336,13 @@ export function ManagedAuthPanel(props: {
             Use another account without this invitation
           </Button>
         ) : null}
-        {allowedModes.length > 1 ? (
+        {allowedModes.length > 1 && !linkResendMode ? (
           <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
             <Button
               type="button"
               size="sm"
               variant={mode === "signin" ? "secondary" : "ghost"}
+              className={mode === "signin" ? "text-fg" : "text-fg-muted"}
               disabled={formInteractionBusy}
               onClick={() => selectMode("signin")}
             >
@@ -271,6 +352,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signup" ? "secondary" : "ghost"}
+              className={mode === "signup" ? "text-fg" : "text-fg-muted"}
               disabled={formInteractionBusy}
               onClick={() => selectMode("signup")}
             >
@@ -278,7 +360,17 @@ export function ManagedAuthPanel(props: {
             </Button>
           </div>
         ) : null}
-        {!resetMode && !invitation && props.socialProviders?.length && props.onSocialSubmit ? (
+        {signupsPausedView ? (
+          <SignupsPausedNotice
+            invitation={invitation}
+            onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
+          />
+        ) : null}
+        {!signupsPausedView &&
+        !emailOnlyMode &&
+        !invitation &&
+        props.socialProviders?.length &&
+        props.onSocialSubmit ? (
           <>
             <ManagedSocialAuthButtons
               providers={props.socialProviders}
@@ -289,7 +381,7 @@ export function ManagedAuthPanel(props: {
             <ManagedAuthDivider />
           </>
         ) : null}
-        {mode === "signup" ? (
+        {mode === "signup" && !signupsPausedView ? (
           <div className="mb-3">
             <Label htmlFor="managed-auth-name">Name</Label>
             <Input
@@ -313,32 +405,34 @@ export function ManagedAuthPanel(props: {
             ) : null}
           </div>
         ) : null}
-        <div className="mb-3">
-          <Label htmlFor="managed-auth-email">Email</Label>
-          <Input
-            id="managed-auth-email"
-            type="email"
-            value={email}
-            disabled={formInteractionBusy}
-            readOnly={invitation !== null}
-            onChange={(event) => updateField("email", event.target.value)}
-            autoComplete="email"
-            className="mt-2"
-            autoFocus
-            aria-invalid={Boolean(fieldErrors.email)}
-            aria-describedby={fieldErrors.email ? "managed-auth-email-error" : undefined}
-          />
-          {fieldErrors.email ? (
-            <p
-              id="managed-auth-email-error"
-              role="alert"
-              className="mt-1.5 text-xs text-status-failed"
-            >
-              {fieldErrors.email}
-            </p>
-          ) : null}
-        </div>
-        {!resetMode ? (
+        {signupsPausedView ? null : (
+          <div className="mb-3">
+            <Label htmlFor="managed-auth-email">Email</Label>
+            <Input
+              id="managed-auth-email"
+              type="email"
+              value={email}
+              disabled={formInteractionBusy}
+              readOnly={invitation !== null}
+              onChange={(event) => updateField("email", event.target.value)}
+              autoComplete="email"
+              className="mt-2"
+              autoFocus
+              aria-invalid={Boolean(fieldErrors.email)}
+              aria-describedby={fieldErrors.email ? "managed-auth-email-error" : undefined}
+            />
+            {fieldErrors.email ? (
+              <p
+                id="managed-auth-email-error"
+                role="alert"
+                className="mt-1.5 text-xs text-status-failed"
+              >
+                {fieldErrors.email}
+              </p>
+            ) : null}
+          </div>
+        )}
+        {!emailOnlyMode && !signupsPausedView ? (
           <div>
             <Label htmlFor="managed-auth-password">Password</Label>
             <Input
@@ -373,23 +467,26 @@ export function ManagedAuthPanel(props: {
             className="mt-2 px-0"
             disabled={formInteractionBusy}
             onClick={() => {
+              const enterReset = !emailOnlyMode;
               selectMode("signin");
-              setResetMode(!resetMode);
+              setResetMode(enterReset);
               setPassword("");
             }}
           >
-            {resetMode ? "Back to sign in" : "Forgot password?"}
+            {emailOnlyMode ? "Back to sign in" : "Forgot password?"}
           </Button>
         ) : null}
         {formError ? (
           <Notice
             tone="failed"
             title={
-              resetMode
-                ? "Couldn't request password reset"
-                : mode === "signup"
-                  ? "Couldn't create account"
-                  : "Couldn't sign in"
+              linkResendMode
+                ? "Couldn't send a new link"
+                : resetMode
+                  ? "Couldn't request password reset"
+                  : mode === "signup"
+                    ? "Couldn't create account"
+                    : "Couldn't sign in"
             }
             className="mt-4"
             action={
@@ -413,22 +510,47 @@ export function ManagedAuthPanel(props: {
         {successMessage ? (
           <Notice
             tone="success"
-            title={resetMode || emailVerificationRequired ? "Check your email" : "Account created"}
+            title={
+              emailOnlyMode || emailVerificationRequired ? "Check your email" : "Account created"
+            }
             className="mt-4"
           >
             {successMessage}
             {resendVerificationControl}
           </Notice>
         ) : null}
-        <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
-          {busy ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : (
-            <CheckIcon className="size-4" />
-          )}
-          {resetMode ? "Send reset link" : mode === "signup" ? "Create account" : "Sign in"}
-        </Button>
-        {mode === "signup" ? (
+        {signupsPausedView ? null : (
+          <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
+            {busy ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <CheckIcon className="size-4" />
+            )}
+            {linkResendMode
+              ? "Send new link"
+              : resetMode
+                ? "Send reset link"
+                : mode === "signup"
+                  ? "Create account"
+                  : "Sign in"}
+          </Button>
+        )}
+        {mode === "signin" && !emailOnlyMode && allowedModes.includes("signup") ? (
+          <p className="mt-3 text-center text-sm text-fg-subtle">
+            New here?{" "}
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto px-0 font-medium text-fg underline underline-offset-4"
+              disabled={formInteractionBusy}
+              onClick={() => selectMode("signup")}
+            >
+              Create an account
+            </Button>
+          </p>
+        ) : null}
+        {mode === "signup" && !signupsPausedView ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
             {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
@@ -437,5 +559,26 @@ export function ManagedAuthPanel(props: {
         ) : null}
       </form>
     </section>
+  );
+}
+
+function SignupsPausedNotice(props: {
+  invitation: { organizationName: string; targetEmail: string } | null;
+  onSignIn: (() => void) | undefined;
+}) {
+  return (
+    <div data-testid="managed-auth-signups-paused">
+      <Notice tone="info" title="New accounts are paused" live="polite">
+        {SIGNUPS_PAUSED_MESSAGE}
+        {props.invitation
+          ? ` To join ${props.invitation.organizationName}, open the invitation link from your email to set up your account.`
+          : null}
+      </Notice>
+      {props.onSignIn ? (
+        <Button type="button" className="mt-4 w-full" onClick={props.onSignIn}>
+          Sign in to an existing account
+        </Button>
+      ) : null}
+    </div>
   );
 }

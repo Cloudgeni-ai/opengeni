@@ -2167,16 +2167,18 @@ describe("parseCodexUsageHeaders", () => {
     const snap = parseCodexUsageHeaders(
       new Headers({
         "x-codex-primary-used-percent": "42",
+        "x-codex-primary-limit-window-seconds": "18000",
         "x-codex-primary-reset-at": String(resetPrimary),
         "x-codex-secondary-used-percent": "7",
+        "x-codex-secondary-limit-window-seconds": "604800",
         "x-codex-secondary-reset-at": String(resetSecondary),
       }),
     );
     expect(snap).not.toBeNull();
     expect(snap!.primaryUsedPercent).toBe(42);
     expect(snap!.secondaryUsedPercent).toBe(7);
-    expect(snap!.primaryResetAt.getTime()).toBe(resetPrimary * 1000);
-    expect(snap!.secondaryResetAt.getTime()).toBe(resetSecondary * 1000);
+    expect(snap!.primaryResetAt?.getTime()).toBe(resetPrimary * 1000);
+    expect(snap!.secondaryResetAt?.getTime()).toBe(resetSecondary * 1000);
     expect(snap!.checkedAt).toBeInstanceOf(Date);
   });
 
@@ -2185,10 +2187,62 @@ describe("parseCodexUsageHeaders", () => {
       parseCodexUsageHeaders(
         new Headers({
           "x-codex-primary-used-percent": "42",
+          "x-codex-primary-limit-window-seconds": "18000",
           "x-codex-primary-reset-at": "1782700000",
         }),
       ),
     ).toBeNull();
+  });
+
+  test("untyped headers cannot overwrite a weekly-only account with fabricated windows", () => {
+    expect(
+      parseCodexUsageHeaders(
+        new Headers({
+          "x-codex-primary-used-percent": "66",
+          "x-codex-secondary-used-percent": "0",
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseCodexUsageHeaders(
+        new Headers({
+          "x-codex-primary-used-percent": "66",
+          "x-codex-primary-limit-window-seconds": "604800",
+          "x-codex-secondary-used-percent": "0",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("explicit durations without reset headers leave exhausted windows unknown", () => {
+    const snap = parseCodexUsageHeaders(
+      new Headers({
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-limit-window-seconds": "18000",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-limit-window-seconds": "604800",
+      }),
+    );
+    expect(snap).not.toBeNull();
+    expect(snap?.primaryResetAt).toBeNull();
+    expect(snap?.secondaryResetAt).toBeNull();
+  });
+
+  test("explicit reversed durations are placed into the canonical cache columns", () => {
+    const snap = parseCodexUsageHeaders(
+      new Headers({
+        "x-codex-primary-used-percent": "66",
+        "x-codex-primary-limit-window-seconds": "604800",
+        "x-codex-primary-reset-at": "1783200000",
+        "x-codex-secondary-used-percent": "10",
+        "x-codex-secondary-limit-window-seconds": "18000",
+        "x-codex-secondary-reset-at": "1782700000",
+      }),
+    );
+    expect(snap?.primaryUsedPercent).toBe(10);
+    expect(snap?.primaryResetAt?.getTime()).toBe(1782700000 * 1000);
+    expect(snap?.secondaryUsedPercent).toBe(66);
+    expect(snap?.secondaryResetAt?.getTime()).toBe(1783200000 * 1000);
   });
 
   test("absent / non-integer used-percent → null (safe no-op)", () => {
@@ -2208,14 +2262,16 @@ describe("parseCodexUsageHeaders", () => {
     const snap = parseCodexUsageHeaders(
       new Headers({
         "x-codex-primary-used-percent": "10",
+        "x-codex-primary-limit-window-seconds": "18000",
         "x-codex-primary-reset-after-seconds": "3600",
         "x-codex-secondary-used-percent": "20",
+        "x-codex-secondary-limit-window-seconds": "604800",
         "x-codex-secondary-reset-after-seconds": "7200",
       }),
     );
     expect(snap).not.toBeNull();
-    expect(snap!.primaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
-    expect(snap!.secondaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
+    expect(snap!.primaryResetAt?.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
+    expect(snap!.secondaryResetAt?.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
   });
 });
 
@@ -2233,8 +2289,10 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
     const fetchImpl = codexSubscriptionFetch(
       usageBase(200, {
         "x-codex-primary-used-percent": "55",
+        "x-codex-primary-limit-window-seconds": "18000",
         "x-codex-primary-reset-at": "1782700000",
         "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-limit-window-seconds": "604800",
         "x-codex-secondary-reset-at": "1783200000",
       }),
     );
@@ -2254,7 +2312,9 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
     const fetchImpl = codexSubscriptionFetch(
       usageBase(429, {
         "x-codex-primary-used-percent": "100",
+        "x-codex-primary-limit-window-seconds": "18000",
         "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-limit-window-seconds": "604800",
       }),
     );
     await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>

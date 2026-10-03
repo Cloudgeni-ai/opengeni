@@ -970,6 +970,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1986,7 +1996,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1994,6 +2004,7 @@ dependencies = [
  "blake3",
  "clap",
  "ed25519-dalek",
+ "fs2",
  "futures",
  "hostname",
  "nix 0.29.0",
@@ -2026,6 +2037,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-files-ffi"
+version = "0.1.46"
+
+[[package]]
 name = "opengeni-agent-harness"
 version = "0.0.0"
 dependencies = [
@@ -2048,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "libc",
  "tokio",
@@ -2056,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2075,13 +2090,14 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "async-trait",
  "blake3",
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-files-ffi",
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",
@@ -2099,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "prost",
  "prost-build",
@@ -2108,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2125,13 +2141,14 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "blake3",
  "hex",
  "minisign-verify",
  "opengeni-agent-proto",
  "reqwest",
+ "rustix 1.1.4",
  "self-replace",
  "semver",
  "serde",
@@ -2144,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2175,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.19"
+version = "0.1.46"
 dependencies = [
  "async-trait",
  "axum",

@@ -13,6 +13,8 @@ import {
   GoogleDriveConnectionMetadata,
 } from "@opengeni/contracts/google-drive";
 import {
+  ApiIntegrationPreview,
+  InstalledApiIntegration,
   IntegrationPresentation,
   OrganizationIntegrationDeniedError,
   ListIntegrationDefinitionsResponse,
@@ -165,6 +167,7 @@ beforeAll(async () => {
       settings: testSettings({
         productAccessMode: "managed",
         delegationSecret,
+        environmentsEncryptionKey: Buffer.from(environmentsEncryptionKey).toString("base64"),
       }),
     } as ApiRouteDeps,
     {
@@ -180,6 +183,7 @@ beforeAll(async () => {
           ![
             "https://127.0.0.1/openapi.json",
             "https://127.0.0.1/reconciliation-openapi.json",
+            "https://127.0.0.1/approval-openapi.json",
           ].includes(String(sourceRequest))
         ) {
           return new Response(null, { status: 404 });
@@ -586,6 +590,27 @@ describe("API Integration routes", () => {
     expect(drifted.status).toBe(409);
 
     sourceVersion = "1.0.0";
+    // allowedTools names preview tool ids. A preview operationKey is a client
+    // error that names the matching id, never an unhandled 500.
+    const freshPreview = (await (
+      await request("/integrations/preview", { method: "POST", body: JSON.stringify({ source }) })
+    ).json()) as { tools: Array<{ id: string; operationKey: string }> };
+    const listTool = freshPreview.tools.find((tool) => tool.id === "inventory_listitems")!;
+    expect(listTool.operationKey).not.toBe(listTool.id);
+    const byOperationKey = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+        allowedTools: [listTool.operationKey, "no_such_tool"],
+      }),
+    });
+    expect(byOperationKey.status).toBe(422);
+    const byOperationKeyMessage = await byOperationKey.text();
+    expect(byOperationKeyMessage).toContain("no_such_tool");
+    expect(byOperationKeyMessage).toContain(`${listTool.operationKey} -> inventory_listitems`);
+
     const optionalConnection = await createConnection(client!.db, {
       accountId,
       workspaceId,
@@ -685,6 +710,502 @@ describe("API Integration routes", () => {
       remainingOwners: [],
       definitionStatus: "disabled",
     });
+  }, 60_000);
+
+  test("previews and installs an inline OpenAPI document by stable source key", async () => {
+    if (!available || !client) return;
+    const fetchesBefore = sourceFetches;
+    const document = JSON.stringify(openApiDocument());
+    const source = { kind: "openapi_document", sourceKey: "inventory-inline", document };
+    const previewResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({ source }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json();
+    expect(sourceFetches).toBe(fetchesBefore);
+    expect(preview.source).toEqual({
+      kind: "openapi_document",
+      sourceKey: "inventory-inline",
+      documentSha256: new Bun.CryptoHasher("sha256").update(document).digest("hex"),
+    });
+    expect(JSON.stringify(preview)).not.toContain('"paths"');
+    expect(preview).toMatchObject({ sourceUrl: null, providerDomain: "127.0.0.1" });
+
+    const installed = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      }),
+    });
+    expect(installed.status).toBe(201);
+    const install = await installed.json();
+    expect(install.capabilityId).toBe(preview.capabilityId);
+
+    // A revised document under the same key keeps the same Integration identity.
+    const revised = openApiDocument();
+    (revised.info as Record<string, unknown>).version = "2.0.0";
+    const revisedPreview = await (
+      await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: { ...source, document: JSON.stringify(revised) } }),
+      })
+    ).json();
+    expect(revisedPreview.capabilityId).toBe(preview.capabilityId);
+    expect(revisedPreview.revisionId).not.toBe(preview.revisionId);
+
+    const relative = openApiDocument();
+    relative.servers = [{ url: "/v1/" }];
+    const relativeResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        source: {
+          kind: "openapi_document",
+          sourceKey: "relative",
+          document: JSON.stringify(relative),
+        },
+      }),
+    });
+    expect(relativeResponse.status).toBe(422);
+    expect(await relativeResponse.text()).toContain("absolute servers[].url");
+
+    const removed = await request(
+      `/integrations/${encodeURIComponent(install.capabilityId)}/instances/${encodeURIComponent(install.instanceKey)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: install.installationVersion,
+          expectedInstanceVersion: install.instanceVersion,
+        }),
+      },
+    );
+    expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("inline URL rotation keeps immutable versions and shared instance settings while fencing stale installs", async () => {
+    if (!client || !shared) throw new Error("URL rotation regression requires PostgreSQL");
+    const fetchesBefore = sourceFetches;
+    const source = {
+      kind: "openapi_document",
+      sourceKey: `url-rotation-${crypto.randomUUID()}`,
+      document: JSON.stringify(openApiDocument()),
+      baseUrl: "https://127.0.0.1/v1/",
+    };
+    let capabilityId: string | null = null;
+    try {
+      const previewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source }),
+      });
+      expect(previewResponse.status).toBe(200);
+      const preview = await previewResponse.json();
+      capabilityId = preview.capabilityId;
+      const installPayload = {
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      };
+      const installResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify(installPayload),
+      });
+      expect(installResponse.status).toBe(201);
+      const installed = await installResponse.json();
+      const same = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...installPayload,
+          source: { ...source, baseUrl: "https://127.0.0.1:443/a/../v1/" },
+        }),
+      });
+      expect(same.status).toBe(201);
+      expect(await same.json()).toEqual(installed);
+      const peerResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, instanceKey: "peer" }),
+      });
+      expect(peerResponse.status).toBe(201);
+      const peer = await peerResponse.json();
+      const oldVersions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(oldVersions).toHaveLength(1);
+
+      const rotatedSource = { ...source, baseUrl: "https://127.0.0.1/rotated/" };
+      const rotatedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: rotatedSource }),
+      });
+      expect(rotatedPreviewResponse.status).toBe(200);
+      const rotatedPreview = await rotatedPreviewResponse.json();
+      expect(rotatedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(rotatedPreview.revisionId).not.toBe(preview.revisionId);
+      expect(rotatedPreview.contentSha256).not.toBe(preview.contentSha256);
+      expect(rotatedPreview.tools).toEqual(preview.tools);
+      const stalePreview = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...installPayload, source: rotatedSource }),
+      });
+      expect(stalePreview.status).toBe(409);
+      const rotatedPayload = {
+        source: rotatedSource,
+        expectedRevisionId: rotatedPreview.revisionId,
+        expectedContentSha256: rotatedPreview.contentSha256,
+      };
+      const staleVersion = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({ ...rotatedPayload, expectedInstanceVersion: 9999 }),
+      });
+      expect(staleVersion.status).toBe(409);
+      const rotatedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          ...rotatedPayload,
+          expectedInstanceVersion: installed.instanceVersion,
+        }),
+      });
+      expect(rotatedResponse.status).toBe(200);
+      const rotated = await rotatedResponse.json();
+      expect(rotated.instanceId).toBe(installed.instanceId);
+      expect(rotated.instanceVersion).toBeGreaterThan(installed.instanceVersion);
+      const versions = await shared.admin`
+      select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+      from capability_plugin_versions v
+      join capability_plugins p on p.id = v.plugin_id
+      join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+      join integration_spec_revisions s on s.api_facet_id = f.id
+      where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+      order by v.id`;
+      expect(versions).toHaveLength(2);
+      expect(versions.find((version) => version.id === oldVersions[0]!.id)).toEqual(oldVersions[0]);
+      const listing = await (await request("/integrations")).json();
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: peer.instanceId,
+          instanceVersion: peer.instanceVersion + 1,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+          allowedTools: preview.tools.map((tool: { id: string }) => tool.id).sort(),
+          ownership: "none",
+        }),
+      );
+      expect(listing.integrations).toContainEqual(
+        expect.objectContaining({
+          instanceId: rotated.instanceId,
+          baseUrl: rotatedPreview.baseUrl,
+          revisionId: rotatedPreview.revisionId,
+        }),
+      );
+      // A new instance must also be able to introduce a new executable URL
+      // under the same source key, without colliding with either stored revision.
+      const namedSource = { ...source, baseUrl: "https://127.0.0.1/new-instance-rotation/" };
+      const namedPreviewResponse = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: namedSource }),
+      });
+      expect(namedPreviewResponse.status).toBe(200);
+      const namedPreview = await namedPreviewResponse.json();
+      expect(namedPreview.capabilityId).toBe(preview.capabilityId);
+      expect(namedPreview.revisionId).not.toBe(rotatedPreview.revisionId);
+      const namedResponse = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          source: namedSource,
+          instanceKey: "new-route",
+          expectedRevisionId: namedPreview.revisionId,
+          expectedContentSha256: namedPreview.contentSha256,
+        }),
+      });
+      expect(namedResponse.status).toBe(201);
+      expect(await namedResponse.json()).toMatchObject({
+        capabilityId: preview.capabilityId,
+        instanceKey: "new-route",
+        revisionId: namedPreview.revisionId,
+      });
+      const retained = await shared.admin`
+        select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+        from capability_plugin_versions v
+        join capability_plugins p on p.id = v.plugin_id
+        join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+        join integration_spec_revisions s on s.api_facet_id = f.id
+        where p.workspace_id = ${workspaceId} and p.plugin_key = ${preview.pluginKey}
+        order by v.id`;
+      expect(retained).toHaveLength(3);
+      for (const version of versions) {
+        expect(retained.find((candidate) => candidate.id === version.id)).toEqual(version);
+      }
+      expect(sourceFetches).toBe(fetchesBefore);
+    } finally {
+      if (capabilityId) {
+        const listing = (await (await request("/integrations")).json()) as {
+          integrations: { capabilityId: string; instanceKey: string }[];
+        };
+        for (const instance of listing.integrations.filter(
+          (integration) => integration.capabilityId === capabilityId,
+        )) {
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instance.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId,
+            instanceKey: instance.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }
+  }, 60_000);
+
+  for (const sharedOwner of [false, true]) {
+    test(`numeric operation-ID reorder deduplicates storage${sharedOwner ? " with another owner" : ""} with unchanged selected tools`, async () => {
+      if (!client || !shared) throw new Error("Numeric reorder regression requires PostgreSQL");
+      const fetchesBefore = sourceFetches;
+      const role = await shared.admin`
+        select rolsuper, rolbypassrls from pg_roles where rolname = ${new URL(shared.appUrl).username}`;
+      expect(role[0]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+      const path = (operationId: string, serverUrl: string) => ({
+        get: {
+          operationId,
+          servers: [{ url: serverUrl }],
+          responses: { "200": { description: "OK" } },
+        },
+      });
+      const one = path("1", "https://127.0.0.1/numeric/one/");
+      const two = path("2", "https://127.0.0.1/numeric/two/");
+      const document = {
+        openapi: "3.1.0",
+        info: { title: "Numeric operation-ID reorder", version: "1.0.0" },
+        paths: { "/two": two, "/one": one },
+      };
+      const source = {
+        kind: "openapi_document" as const,
+        sourceKey: `numeric-reorder-${crypto.randomUUID()}`,
+        document: JSON.stringify(document),
+      };
+      const reorderedSource = {
+        ...source,
+        document: JSON.stringify({ ...document, paths: { "/one": one, "/two": two } }),
+      };
+      const preview = async (selectedSource: typeof source) => {
+        const response = await request("/integrations/preview", {
+          method: "POST",
+          body: JSON.stringify({ source: selectedSource }),
+        });
+        expect(response.status).toBe(200);
+        return ApiIntegrationPreview.parse(await response.json());
+      };
+      let installed: InstalledApiIntegration | null = null;
+      const ownerId = `numeric-reorder-owner-${crypto.randomUUID()}`;
+      try {
+        const first = await preview(source);
+        // Keep the selected request authority unchanged: the omitted-tools
+        // default preserves traversal order and is independent of revision hashing.
+        const allowedTools = first.tools.map((tool) => tool.id).sort();
+        const created = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source,
+            expectedRevisionId: first.revisionId,
+            expectedContentSha256: first.contentSha256,
+            allowedTools,
+          }),
+        });
+        expect(created.status).toBe(201);
+        installed = InstalledApiIntegration.parse(await created.json());
+        if (sharedOwner) {
+          await shared.admin`
+            insert into capability_component_owners
+              (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
+            values
+              (${accountId}, ${workspaceId}, ${installed.integrationFacetInstallationId}, 'migration', ${ownerId}, false),
+              (${accountId}, ${workspaceId}, ${installed.apiFacetInstallationId}, 'migration', ${ownerId}, false)`;
+          await shared.admin`
+            insert into integration_facet_binding_owners
+              (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
+            values (${accountId}, ${workspaceId}, ${installed.instanceId}, 'migration', ${ownerId}, false)`;
+        }
+        const snapshot = async () => {
+          const [versions, installation, facets, bindings, componentOwners, bindingOwners] =
+            await Promise.all([
+              shared!.admin`
+              select v.id, v.version, v.manifest_digest, v.manifest, s.spec_digest, s.spec
+              from capability_plugin_versions v
+              join capability_facets f on f.plugin_version_id = v.id and f.facet_key = 'api'
+              join integration_spec_revisions s on s.api_facet_id = f.id
+              where v.plugin_id = ${installed!.pluginId} order by v.id`,
+              shared!.admin`
+              select * from capability_plugin_installations where id = ${installed!.pluginInstallationId}`,
+              shared!.admin`
+              select * from capability_facet_installations
+              where plugin_installation_id = ${installed!.pluginInstallationId} order by id`,
+              shared!.admin`
+              select * from integration_facet_bindings where id = ${installed!.instanceId}`,
+              shared!.admin`
+              select * from capability_component_owners where workspace_id = ${workspaceId}
+              and facet_installation_id in (${installed!.integrationFacetInstallationId}, ${installed!.apiFacetInstallationId})
+              order by id`,
+              shared!.admin`
+              select * from integration_facet_binding_owners where binding_id = ${installed!.instanceId} order by id`,
+            ]);
+          return { versions, installation, facets, bindings, componentOwners, bindingOwners };
+        };
+        const before = await snapshot();
+        expect(before.versions).toHaveLength(1);
+        expect(before.bindings[0]!.config.allowedTools).toEqual(allowedTools);
+        expect(first.baseUrl).toBe("https://127.0.0.1/numeric/one/");
+        expect(before.versions[0]!.manifest.baseUrl).toBe(first.baseUrl);
+        expect(Object.values(before.versions[0]!.spec.bindings)[0]).toMatchObject({
+          serverUrl: first.baseUrl,
+        });
+        if (sharedOwner) {
+          expect(before.componentOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            2,
+          );
+          expect(before.bindingOwners.filter((owner) => owner.owner_id === ownerId)).toHaveLength(
+            1,
+          );
+        }
+        const reordered = await preview(reorderedSource);
+        expect(reordered.baseUrl).toBe(first.baseUrl);
+        expect(reordered.capabilityId).toBe(first.capabilityId);
+        const byId = (value: ApiIntegrationPreview) =>
+          [...value.tools].sort((left, right) => left.id.localeCompare(right.id));
+        expect(byId(reordered)).toEqual(byId(first));
+        let failure: unknown;
+        const repeated = await request("/integrations/install", {
+          method: "POST",
+          body: JSON.stringify({
+            source: reorderedSource,
+            expectedRevisionId: reordered.revisionId,
+            expectedContentSha256: reordered.contentSha256,
+            expectedInstanceVersion: installed.instanceVersion,
+            allowedTools,
+          }),
+        }).catch((error: unknown) => {
+          failure = error;
+          return null;
+        });
+        const after = await snapshot();
+        if (failure || after.versions.length !== 1) {
+          console.info(
+            `[numeric-reorder:${sharedOwner ? "shared" : "direct"}] published=${before.versions.length}->${after.versions.length}; instance=${before.bindings[0]!.version}->${after.bindings[0]!.version}; failure=${failure instanceof Error ? failure.name : "none"}`,
+          );
+        }
+        expect(failure).toBeUndefined();
+        expect(repeated!.status).toBe(200);
+        expect(await repeated!.json()).toEqual(installed);
+        expect(after).toEqual(before);
+        expect(reordered.revisionId).toBe(first.revisionId);
+        expect(reordered.contentSha256).toBe(first.contentSha256);
+        expect(sourceFetches).toBe(fetchesBefore);
+      } finally {
+        if (installed) {
+          if (sharedOwner) {
+            await shared.admin`delete from integration_facet_binding_owners
+              where binding_id = ${installed.instanceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+            await shared.admin`delete from capability_component_owners
+              where workspace_id = ${workspaceId} and owner_kind = 'migration' and owner_id = ${ownerId}`;
+          }
+          const removal = await getApiIntegrationUninstallPreview(
+            client.db,
+            workspaceId,
+            subjectId,
+            installed.capabilityId,
+            installed.instanceKey,
+          );
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId: installed.capabilityId,
+            instanceKey: installed.instanceKey,
+            expectedInstallationVersion: removal.installationVersion!,
+            expectedInstanceVersion: removal.instanceVersion!,
+          });
+        }
+      }
+    }, 60_000);
+  }
+
+  test("installers can auto-approve selected write tools for unattended runs", async () => {
+    if (!available || !client) return;
+    const source = { kind: "openapi", url: "https://127.0.0.1/approval-openapi.json" };
+    const preview = await (
+      await request("/integrations/preview", { method: "POST", body: JSON.stringify({ source }) })
+    ).json();
+    const install = (body: Record<string, unknown>) =>
+      request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          source,
+          expectedRevisionId: preview.revisionId,
+          expectedContentSha256: preview.contentSha256,
+          ...body,
+        }),
+      });
+    const listed = async () =>
+      (
+        (await (await request("/integrations")).json()) as {
+          integrations: Array<{ capabilityId: string; approvalRequiredToolCount: number }>;
+        }
+      ).integrations.find((item) => item.capabilityId === preview.capabilityId);
+
+    const unselected = await install({
+      allowedTools: ["inventory_listitems"],
+      autoApprovedTools: ["inventory_createitem"],
+    });
+    expect(unselected.status).toBe(422);
+    expect(await unselected.text()).toContain("autoApprovedTools must name selected");
+
+    const created = await install({});
+    expect(created.status).toBe(201);
+    const installed = await created.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(1);
+
+    const exempted = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: installed.instanceVersion,
+      autoApprovedTools: ["inventory_createitem"],
+    });
+    expect(exempted.status).toBe(200);
+    const updated = await exempted.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(0);
+
+    // Declarative: omitting the field restores approval for every write tool.
+    const restored = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: updated.instanceVersion,
+    });
+    expect(restored.status).toBe(200);
+    const final = await restored.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(1);
+
+    const removed = await request(
+      `/integrations/${encodeURIComponent(preview.capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: final.installationVersion,
+          expectedInstanceVersion: final.instanceVersion,
+        }),
+      },
+    );
+    expect(removed.status).toBe(200);
   }, 60_000);
 
   test("preserves discovered auth placement and derives Personal ownership from the Connection", async () => {
@@ -817,6 +1338,37 @@ describe("API Integration routes", () => {
       }),
     });
     expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("warns when the selected Connection does not place the credential the description declares", async () => {
+    if (!available || !client) return;
+    const source = { kind: "openapi", url: "https://127.0.0.1/secured-openapi.json" };
+    const preview = async (credential: Record<string, unknown>) => {
+      const connection = await createConnection(client!.db, {
+        accountId,
+        workspaceId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKey,
+          JSON.stringify(credential),
+        ),
+        createdBySubjectId: subjectId,
+      });
+      const response = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source, connectionId: connection.id }),
+      });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { warnings: string[] }).warnings;
+    };
+
+    const header = await preview({ headers: { Authorization: "Token synthetic" } });
+    expect(header.join("\n")).toContain('expects the credential in query "api_key"');
+    expect(header.join("\n")).not.toContain("synthetic");
+    expect(
+      await preview({ placements: [{ carrier: "query", name: "api_key", value: "synthetic" }] }),
+    ).toEqual([]);
   }, 60_000);
 
   test("controls generic Integration facets through the public lifecycle", async () => {

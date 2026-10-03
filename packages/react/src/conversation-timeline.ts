@@ -8,7 +8,10 @@ export function conversationTimeline(
   queue: Pick<UseTurnQueueResult, "queue" | "snapshot" | "acceptedSteers">,
   composer: Pick<
     ComposerState,
-    "optimisticMessages" | "retryOptimisticMessage" | "removeOptimisticMessage"
+    | "optimisticMessages"
+    | "retryOptimisticMessage"
+    | "restoreOptimisticMessage"
+    | "removeOptimisticMessage"
   >,
 ): TimelineItem[] {
   const queued = new Set(
@@ -61,7 +64,12 @@ export function conversationTimeline(
         ...(message.error ? { error: message.error } : {}),
         ...(message.state === "failed"
           ? {
-              onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId),
+              ...(message.retryable !== false && composer.retryOptimisticMessage
+                ? { onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId) }
+                : {}),
+              ...(message.retryable === false && composer.restoreOptimisticMessage
+                ? { onEdit: () => composer.restoreOptimisticMessage?.(message.clientEventId) }
+                : {}),
               onRemove: () => composer.removeOptimisticMessage?.(message.clientEventId),
             }
           : {}),
