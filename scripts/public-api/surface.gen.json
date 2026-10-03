@@ -236,6 +236,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/mcp-connections/requests/:request",
+      "sdk": [
+        "OpenGeniClient.getMcpConnectionRequest"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/mcp-connections/requests/:request",
+      "sdk": [
+        "OpenGeniClient.answerMcpConnectionRequest"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/organization-invitations",
       "sdk": [
         "OpenGeniClient.listOrganizationInvitations"
@@ -599,6 +617,33 @@
       "response": [
         "OrganizationInvitation"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/mcp-connections",
+      "sdk": [
+        "OpenGeniClient.listOrganizationMcpConnections"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+      "sdk": [
+        "OpenGeniClient.deleteOrganizationMcpConnection"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationMcpConnection"
+      ],
+      "request": [],
+      "response": []
     },
     {
       "method": "GET",
@@ -26034,6 +26079,8 @@
       "MachineView": "type",
       "ManagedOrganizationMembership": "type",
       "McpConnectionAccountSelection": "type",
+      "McpConnectionDecision": "type",
+      "McpConnectionRequest": "type",
       "McpPersonalConnectionDelegation": "type",
       "McpPersonalConnectionSummary": "type",
       "McpServerConnectionRef": "type",
@@ -26166,6 +26213,8 @@
       "OrganizationCodexAccountsResponse": "type",
       "OrganizationCredentialProvider": "type",
       "OrganizationInvitation": "type",
+      "OrganizationMcpConnection": "type",
+      "OrganizationMcpConnectionList": "type",
       "OrganizationMember": "type",
       "OrganizationMembershipRole": "type",
       "OrganizationModelProviderConnection": "type",
@@ -26651,6 +26700,7 @@
       "UpdateMemorySlackPublicationConfigurationRequest": "type",
       "UpdateNetworkRouteRequest": "type",
       "UpdateOrganizationApiKeyRequest": "type",
+      "UpdateOrganizationMcpConnectionRequest": "type",
       "UpdateOrganizationNameRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationWebhookRequest": "type",
@@ -29620,6 +29670,7 @@
       "addDocument",
       "addWorkspaceMember",
       "advanceExternalBrowserAuthRun",
+      "answerMcpConnectionRequest",
       "apiUrl",
       "applyGoalRevision",
       "approveDeviceEnrollment",
@@ -29717,6 +29768,7 @@
       "deleteEnvironmentVariable",
       "deleteGoal",
       "deleteOrganizationApiKey",
+      "deleteOrganizationMcpConnection",
       "deleteOrganizationProviderCustomModel",
       "deleteOrganizationWorkspace",
       "deleteQueueItem",
@@ -29809,6 +29861,7 @@
       "getKnowledgeEntry",
       "getLatestEventResult",
       "getLatestStartedTurn",
+      "getMcpConnectionRequest",
       "getModelConnectionAccess",
       "getNetworkRoute",
       "getNewSessionDraft",
@@ -29930,6 +29983,7 @@
       "listOrganizationClaudeSubscriptionAccounts",
       "listOrganizationInvitations",
       "listOrganizationInvitationsForOrganization",
+      "listOrganizationMcpConnections",
       "listOrganizationMembers",
       "listOrganizationMemberships",
       "listOrganizationProviderCustomModels",
@@ -30155,6 +30209,7 @@
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
       "updateOrganizationApiKey",
+      "updateOrganizationMcpConnection",
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",

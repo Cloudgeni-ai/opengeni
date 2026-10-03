@@ -5,7 +5,6 @@ import {
   type ExternalActorContinuation,
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
-import { OrganizationWorkspaceScope } from "@opengeni/contracts/organization-access";
 import {
   verifyDelegatedAccessToken,
   DEVELOPER_SETUP_API_KEY_PRESET,
@@ -14,7 +13,7 @@ import {
   type AccessContext,
   type AccessGrant,
   type OrganizationApiKeyAccess,
-  type OrganizationWorkspaceScope,
+  OrganizationWorkspaceScope,
   OPENGENI_USER_ACTIVITY_ACTIVE,
   OPENGENI_USER_ACTIVITY_HEADER,
   Permission,
