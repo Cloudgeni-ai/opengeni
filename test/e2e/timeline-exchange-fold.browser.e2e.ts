@@ -419,17 +419,35 @@ describe("readable timeline browser regression", () => {
           window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total, true);
           return { before, after: selection.toString(), connected: paragraph.isConnected };
         });
+        expect(result.before.length).toBeGreaterThan(0);
         expect(result.connected).toBe(true);
         expect(result.after).toBe(result.before);
+        await nextPaint(page);
+        expect((await sample(page)).following).toBe(false);
+        // Selection owns the reader without moving them away from the tip.
+        // The jump stays quiet until there is actually content below them.
+        expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(0);
+        const gap = await page
+          .locator("[data-og-timeline-scroller]")
+          .evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+        expect(gap).toBeLessThan(48);
         const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
         if (output) {
           mkdirSync(output, { recursive: true });
           writeFileSync(`${output}/selection-${width}.json`, JSON.stringify(result, null, 2));
           await page.screenshot({ path: `${output}/selection-${width}.png` });
         }
+        await page.locator("[data-og-timeline-scroller]").hover();
+        await page.mouse.wheel(0, -250);
+        await page.locator("[data-og-jump-to-latest]").waitFor();
+        expect(await page.evaluate(() => window.getSelection()!.toString())).toBe(result.before);
+        if (output) await page.screenshot({ path: `${output}/selection-away-${width}.png` });
         await page.locator("[data-og-jump-to-latest]").click();
         await nextPaint(page);
+        expect(await page.evaluate(() => window.getSelection()!.toString())).toBe("");
+        expect((await sample(page)).following).toBe(true);
         expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
+        if (output) await page.screenshot({ path: `${output}/selection-returned-${width}.png` });
       } finally {
         await page.context().close();
       }
@@ -868,7 +886,7 @@ describe("readable timeline browser regression", () => {
           expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
           expect(await page.locator('[data-og-exchange-status="waiting"]').count()).toBe(0);
           await page
-            .getByText("Approval was needed.", { exact: true })
+            .getByText("You responded to this approval.", { exact: true })
             .waitFor({ state: "visible" });
           expect(await page.getByText("waiting on you", { exact: false }).count()).toBe(0);
           await page
