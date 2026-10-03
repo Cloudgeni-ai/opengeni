@@ -82,6 +82,10 @@
       "types": "./src/queue-presentation-model.ts",
       "default": "./src/queue-presentation-model.ts"
     },
+    "./composer-messages": {
+      "types": "./src/composer-messages.ts",
+      "default": "./src/composer-messages.ts"
+    },
     "./model-picker-model": {
       "types": "./src/model-picker-model.ts",
       "default": "./src/model-picker-model.ts"
