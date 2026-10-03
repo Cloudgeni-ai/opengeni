@@ -26,6 +26,9 @@ export type Sample = {
   httpStatus: number | null;
   errorCode: string | null;
   signupMs: number | null;
+  enrollmentStartedAt: string | null;
+  enrollmentSettledAt: string | null;
+  enrollmentPacingWaitMs: number | null;
   promptSentAt: string | null;
   sentMonoMs: number | null;
   acceptedMs: number | null;

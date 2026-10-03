@@ -4,6 +4,7 @@ import { z } from "zod";
 export const STAGING_ORIGIN = "https://staging.app.opengeni.ai";
 // packages/config/src/index.ts: creditsDefaultModel / creditsDefaultReasoningEffort.
 export const LUNA_MODEL = "gpt-6-luna";
+export const FRESH_ENROLLMENT_MIN_GAP_MS = 3_100;
 export const Mode = z.enum(["plain", "sandbox", "fresh"]);
 export type Mode = z.infer<typeof Mode>;
 const Label = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/u);
@@ -19,6 +20,12 @@ export const Intent = z
     requestTimeoutMs: z.number().int().min(1_000).max(60_000),
     turnTimeoutMs: z.number().int().min(10_000).max(600_000),
     signupTimeoutMs: z.number().int().min(10_000).max(600_000),
+    freshEnrollmentGapMs: z
+      .number()
+      .int()
+      .min(FRESH_ENROLLMENT_MIN_GAP_MS)
+      .max(60_000)
+      .default(FRESH_ENROLLMENT_MIN_GAP_MS),
     // Admission reservation, NOT a provider hard cap (see README).
     costCapUsd: z.number().positive().max(100),
     reservedUsdPerSession: z.number().positive().max(10),
@@ -170,6 +177,18 @@ export function publicPlan(intent: Intent) {
     intentDigest: intentDigest(intent),
     dryRun: true,
     remoteRequests: 0,
+    enrollment:
+      intent.mode === "fresh"
+        ? {
+            concurrency: 1,
+            gapAfterSettlementMs: intent.freshEnrollmentGapMs,
+            minimumPacingSpanMs: (intent.count - 1) * intent.freshEnrollmentGapMs,
+            sessionsCreated: 0,
+            credentials: "in-memory only; no persisted enrollment/resume",
+            nextPhase:
+              "concurrent first turns after enrollment settles and exact gate revalidation",
+          }
+        : null,
     model: intent.mode === "fresh" ? "server default; assert credits gpt-6-luna xhigh" : LUNA_MODEL,
     reasoningEffort: intent.mode === "fresh" ? "omitted; assert xhigh" : "low",
     prompt: promptFor(intent.mode),
@@ -177,7 +196,7 @@ export function publicPlan(intent: Intent) {
     gates: [
       "reliability four fixes confirmed on staging",
       "Launch dashboard LIVE on staging",
-      "new exact-wave capacity-parent authorization and token",
+      "new exact-wave capacity-parent authorization and token covering enrollment and dispatch",
     ],
   };
 }

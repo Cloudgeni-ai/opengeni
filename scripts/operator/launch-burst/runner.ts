@@ -31,6 +31,8 @@ export type RunInput = {
   env?: Record<string, string | undefined>;
   fetchImpl?: FetchLike;
   clock?: Clock;
+  // Offline fixtures advance a virtual clock; the CLI uses real bounded waits.
+  wait?: (milliseconds: number) => Promise<void>;
   verificationReader?: VerificationReader;
   checkpoint?: (result: object) => Promise<void>;
   stopRequested?: () => Promise<boolean>;
@@ -74,6 +76,9 @@ export async function runBurst(input: RunInput): Promise<object> {
     httpStatus: null,
     errorCode: null,
     signupMs: null,
+    enrollmentStartedAt: null,
+    enrollmentSettledAt: null,
+    enrollmentPacingWaitMs: null,
     promptSentAt: null,
     sentMonoMs: null,
     acceptedMs: null,
@@ -89,6 +94,15 @@ export async function runBurst(input: RunInput): Promise<object> {
     cleanup: "not_requested",
     terminalObservedAt: null,
   }));
+  const enrollment = {
+    concurrency: intent.mode === "fresh" ? 1 : intent.count,
+    gapAfterSettlementMs: intent.mode === "fresh" ? intent.freshEnrollmentGapMs : null,
+    startedAt: null as string | null,
+    settledAt: null as string | null,
+    durationMs: null as number | null,
+    pacingWaitMs: 0,
+    dispatchReleasedAt: null as string | null,
+  };
   const result = (phase: string) => ({
     schemaVersion: 1,
     dryRun: false,
@@ -105,6 +119,7 @@ export async function runBurst(input: RunInput): Promise<object> {
     effortOverride: intent.mode === "fresh" ? null : "low",
     costCapUsd: intent.costCapUsd,
     hardProviderCostCap: false,
+    enrollment,
     telemetry: {
       status: "not_collected",
       temporalScheduleToStart: null,
@@ -154,72 +169,191 @@ export async function runBurst(input: RunInput): Promise<object> {
   }
   // Prepare auth/default evidence first, then release all ready prompt creates together.
   const ready: Array<{ http: HumanHttp; workspaceId: string } | null> = samples.map(() => null);
-  await executeBounded(intent.count, intent.count, async (index) => {
-    const identity = cohort.identities[index]!;
-    const sample = samples[index]!;
-    const signal = AbortSignal.timeout(intent.signupTimeoutMs);
-    const http = new HumanHttp(
-      fetchImpl,
-      intent.requestTimeoutMs,
-      sample.correlationId,
-      Date.parse(gate.expiresAt),
-      identity.kind === "existing" ? env[identity.cookieEnv]! : "",
-      clock.now,
-    );
-    http.actorEpoch = identity.kind === "existing" ? identity.actorEpoch : undefined;
-    http.contract = config.apiContractRevision;
-    const authStarted = clock.mono();
+  const enrollmentControl = new AbortController();
+  const expiresAt = Date.parse(gate.expiresAt);
+  const assertAdmission = async () => {
+    enrollmentControl.signal.throwIfAborted();
     try {
       if (await input.stopRequested?.()) throw new ProbeError("operator_cutoff");
-      const { workspaceId } =
-        identity.kind === "fresh"
-          ? await freshSignup({
-              identity,
-              http,
-              config,
-              password: env[identity.passwordEnv]!,
-              verificationReader: input.verificationReader!,
-              signal,
-              stage: (stage) => {
-                sample.stage = stage;
-              },
-              now: clock.now,
-            })
-          : { workspaceId: identity.workspaceId };
-      sample.workspaceId = workspaceId;
-      if (identity.kind === "fresh") sample.signupMs = clock.mono() - authStarted;
-      sample.stage = "model_catalog";
-      const catalog = z
-        .object({
-          defaultSelection: z
-            .object({ model: z.string(), reasoningEffort: z.string(), source: z.string() })
-            .optional(),
-          models: z.array(
-            z.object({
-              id: z.string(),
-              cost: z.string(),
-              availability: z.object({ selectable: z.boolean() }),
-            }),
-          ),
-        })
-        .parse(await http.json(`/v1/workspaces/${workspaceId}/model-catalog`, "GET", signal));
-      const luna = catalog.models.find((model) => model.id === LUNA_MODEL);
-      if (!luna?.availability.selectable || luna.cost !== "credits")
-        throw new ProbeError("credits_luna_unavailable");
-      if (
-        identity.kind === "fresh" &&
-        (catalog.defaultSelection?.model !== LUNA_MODEL ||
-          catalog.defaultSelection.reasoningEffort !== "xhigh" ||
-          catalog.defaultSelection.source !== "credits")
-      )
-        throw new ProbeError("actual_fresh_default_is_not_credits_luna_xhigh");
-      ready[index] = { http, workspaceId };
-      sample.stage = "ready_at_prompt_barrier";
+      if (clock.now() >= expiresAt) throw new ProbeError("authorization_expired");
     } catch (error) {
-      recordFailure(sample, error, signal);
+      const failure =
+        error instanceof ProbeError ? error : new ProbeError("operator_cutoff_read_failed");
+      enrollmentControl.abort(failure);
+      throw failure;
     }
-  });
+  };
+  const wait =
+    input.wait ??
+    ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  let priorEnrollmentSettledMs: number | null = null;
+  enrollment.startedAt = clock.wall();
+  const enrollmentStartedMs = clock.mono();
+  // Also interrupt a real mailbox wait on STOP/expiry, without overlapping reads.
+  let admissionCheck: Promise<void> | null = null;
+  const enrollmentWatch =
+    intent.mode === "fresh"
+      ? setInterval(() => {
+          if (admissionCheck) return;
+          admissionCheck = assertAdmission()
+            .catch(() => {})
+            .finally(() => {
+              admissionCheck = null;
+            });
+        }, 250)
+      : null;
+  try {
+    await executeBounded(intent.count, enrollment.concurrency, async (index) => {
+      const identity = cohort.identities[index]!;
+      const sample = samples[index]!;
+      let signal = enrollmentControl.signal;
+      let signupTimer: ReturnType<typeof setTimeout> | undefined;
+      let authActive = false;
+      try {
+        await assertAdmission();
+        if (identity.kind === "fresh") {
+          sample.stage = "enrollment_pacing";
+          const pacingStarted = clock.mono();
+          try {
+            const eligibleAt =
+              priorEnrollmentSettledMs === null
+                ? pacingStarted
+                : priorEnrollmentSettledMs + intent.freshEnrollmentGapMs;
+            for (;;) {
+              await assertAdmission();
+              const remaining = eligibleAt - clock.mono();
+              if (remaining <= 0) break;
+              await wait(Math.min(250, remaining));
+            }
+          } finally {
+            sample.enrollmentPacingWaitMs = clock.mono() - pacingStarted;
+            enrollment.pacingWaitMs += sample.enrollmentPacingWaitMs;
+          }
+        }
+        await assertAdmission();
+        // The per-human deadline begins only AFTER pacing, never in the cohort queue.
+        const authStarted = clock.mono();
+        const signupDeadline = authStarted + intent.signupTimeoutMs;
+        const signupControl = new AbortController();
+        signupTimer = setTimeout(
+          () => signupControl.abort(new ProbeError("signup_timeout")),
+          intent.signupTimeoutMs,
+        );
+        signal = AbortSignal.any([enrollmentControl.signal, signupControl.signal]);
+        authActive = true;
+        if (identity.kind === "fresh") sample.enrollmentStartedAt = clock.wall();
+        const enrollmentNow = () => {
+          if (authActive) {
+            if (clock.mono() >= signupDeadline)
+              signupControl.abort(new ProbeError("signup_timeout"));
+            signal.throwIfAborted();
+          }
+          return clock.now();
+        };
+        const http = new HumanHttp(
+          fetchImpl,
+          intent.requestTimeoutMs,
+          sample.correlationId,
+          expiresAt,
+          identity.kind === "existing" ? env[identity.cookieEnv]! : "",
+          enrollmentNow,
+        );
+        http.actorEpoch = identity.kind === "existing" ? identity.actorEpoch : undefined;
+        http.contract = config.apiContractRevision;
+        const { workspaceId } =
+          identity.kind === "fresh"
+            ? await freshSignup({
+                identity,
+                http,
+                config,
+                password: env[identity.passwordEnv]!,
+                verificationReader: async (freshIdentity, verificationSignal) => {
+                  await assertAdmission();
+                  const link = await input.verificationReader!(freshIdentity, verificationSignal);
+                  await assertAdmission();
+                  return link;
+                },
+                signal,
+                stage: (stage) => {
+                  sample.stage = stage;
+                },
+                now: clock.now,
+              })
+            : { workspaceId: identity.workspaceId };
+        sample.workspaceId = workspaceId;
+        if (identity.kind === "fresh") sample.signupMs = clock.mono() - authStarted;
+        sample.stage = "model_catalog";
+        const catalog = z
+          .object({
+            defaultSelection: z
+              .object({ model: z.string(), reasoningEffort: z.string(), source: z.string() })
+              .optional(),
+            models: z.array(
+              z.object({
+                id: z.string(),
+                cost: z.string(),
+                availability: z.object({ selectable: z.boolean() }),
+              }),
+            ),
+          })
+          .parse(await http.json(`/v1/workspaces/${workspaceId}/model-catalog`, "GET", signal));
+        const luna = catalog.models.find((model) => model.id === LUNA_MODEL);
+        if (!luna?.availability.selectable || luna.cost !== "credits")
+          throw new ProbeError("credits_luna_unavailable");
+        if (
+          identity.kind === "fresh" &&
+          (catalog.defaultSelection?.model !== LUNA_MODEL ||
+            catalog.defaultSelection.reasoningEffort !== "xhigh" ||
+            catalog.defaultSelection.source !== "credits")
+        )
+          throw new ProbeError("actual_fresh_default_is_not_credits_luna_xhigh");
+        await assertAdmission();
+        enrollmentNow();
+        ready[index] = { http, workspaceId };
+        sample.stage = "ready_at_prompt_barrier";
+      } catch (error) {
+        recordFailure(sample, error, signal);
+      } finally {
+        authActive = false;
+        clearTimeout(signupTimer);
+        if (sample.enrollmentStartedAt !== null) {
+          sample.enrollmentSettledAt = clock.wall();
+          priorEnrollmentSettledMs = clock.mono();
+        }
+      }
+    });
+  } finally {
+    if (enrollmentWatch !== null) clearInterval(enrollmentWatch);
+    await admissionCheck;
+    enrollment.settledAt = clock.wall();
+    enrollment.durationMs = clock.mono() - enrollmentStartedMs;
+  }
   await checkpoint("auth_and_defaults_prepared");
+  try {
+    await assertAdmission();
+    // No checkpoint or other wait between this exact dual-gate check and release.
+    validateAuthorization({
+      intent,
+      cohort,
+      cohortText,
+      authorization: gate,
+      confirm: input.confirm ?? false,
+      sourceSha: input.sourceSha,
+      env,
+      nowMs: clock.now(),
+    });
+  } catch (error) {
+    const failure =
+      error instanceof ProbeError ? error : new ProbeError("authorization_revalidation_failed");
+    for (const sample of samples) {
+      if (sample.status !== "not_started") continue;
+      sample.stage = "dispatch_gate";
+      recordFailure(sample, failure, enrollmentControl.signal);
+    }
+    await checkpoint("dispatch_blocked");
+    return result("dispatch_blocked");
+  }
+  enrollment.dispatchReleasedAt = clock.wall();
   await executeBounded(intent.count, intent.count, async (index) => {
     const prepared = ready[index];
     if (!prepared) return;
@@ -349,9 +483,11 @@ export async function runBurst(input: RunInput): Promise<object> {
   return result("complete");
 }
 function recordFailure(sample: Sample, error: unknown, signal: AbortSignal) {
-  const operatorCutoff =
-    signal.reason instanceof ProbeError && signal.reason.code.startsWith("operator_cutoff");
-  sample.status = signal.aborted && !operatorCutoff ? "timeout" : "failed";
+  const admissionBlocked =
+    signal.reason instanceof ProbeError &&
+    (signal.reason.code.startsWith("operator_cutoff") ||
+      signal.reason.code === "authorization_expired");
+  sample.status = signal.aborted && !admissionBlocked ? "timeout" : "failed";
   sample.httpStatus = error instanceof ProbeError ? error.status : null;
   sample.errorCode =
     error instanceof ProbeError

@@ -7,6 +7,7 @@
   "requestTimeoutMs": 30000,
   "turnTimeoutMs": 180000,
   "signupTimeoutMs": 300000,
+  "freshEnrollmentGapMs": 3100,
   "costCapUsd": 10,
   "reservedUsdPerSession": 0.2,
   "cleanup": "request-after-terminal"
