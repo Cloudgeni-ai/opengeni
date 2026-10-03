@@ -24,7 +24,9 @@ const initialDensity = params.get("density") === "compact" ? "compact" : "defaul
 const initialTheme = params.get("theme") === "light" ? "light" : "dark";
 const initialVoiceActive = params.get("voice") === "active";
 const hostBranding = params.get("branding") === "host";
-const widths = [280, 320, 360, 420, 640, 768] as const;
+const openGeniBranding = params.get("branding") === "opengeni";
+const deploymentModelsRequested = params.get("models") === "deployment";
+const widths = [280, 320, 360, 390, 420, 640, 768] as const;
 const client = new MockOpenGeniClient();
 
 const commands: readonly SlashCommand[] = [
@@ -76,6 +78,30 @@ const models: ClientModel[] = [
         { id: "fast", upstream: "supported", runnable: true },
       ],
     },
+  },
+];
+
+// Synthetic catalog facts exercise the real shared picker; no model is invoked.
+const deploymentModels: ClientModel[] = [
+  {
+    ...models[0]!,
+    id: "deployment/credits",
+    label: "Credit-backed model",
+    shortLabel: "Credit model",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    source: "opengeni",
+    cost: "credits",
+  },
+  {
+    ...models[0]!,
+    id: "deployment/free",
+    label: "Free deployment model",
+    shortLabel: "Free model",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    source: "opengeni",
+    cost: "free",
   },
 ];
 
@@ -150,7 +176,13 @@ function ResponsiveComposerHarness() {
   const [paused, setPaused] = useState(params.get("paused") === "1");
   const [voiceActive, setVoiceActive] = useState(initialVoiceActive);
   const [value, setValue] = useState("A long prompt remains editable while the panel resizes.");
-  const [model, setModel] = useState(models[0]!.id);
+  const [model, setModel] = useState(
+    deploymentModelsRequested
+      ? params.get("selected") === "free"
+        ? "deployment/free"
+        : "deployment/credits"
+      : models[0]!.id,
+  );
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("fast");
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -290,39 +322,61 @@ function ResponsiveComposerHarness() {
               controlsStart={
                 <ModelPolicyPicker
                   models={
-                    hostBranding
-                      ? [
-                          ...models,
-                          {
-                            ...models[0]!,
-                            id: "host/example",
-                            provider: "openai",
-                            source: "opengeni",
-                            label: "Host model",
-                            cost: "credits",
-                          },
-                        ]
-                      : models
+                    deploymentModelsRequested
+                      ? [...deploymentModels, ...models]
+                      : hostBranding
+                        ? [
+                            ...models,
+                            {
+                              ...models[0]!,
+                              id: "host/example",
+                              provider: "openai",
+                              source: "opengeni",
+                              label: "Host model",
+                              cost: "credits",
+                            },
+                          ]
+                        : models
                   }
                   groupPresentation={
-                    hostBranding
+                    openGeniBranding
                       ? {
                           opengeni_credits: {
-                            label: "Acme Assist",
-                            description: "Provided by your workspace",
+                            label: "Opengeni",
+                            // Explicit host-owned branding in the existing 14px slot.
                             icon: (
-                              <svg viewBox="0 0 16 16" aria-hidden="true">
-                                <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                              <svg
+                                viewBox="0 0 176 138.73"
+                                fill="currentColor"
+                                aria-hidden="true"
+                                data-testid="opted-in-opengeni-mark"
+                              >
+                                <path
+                                  transform="translate(-75 -39.5966)"
+                                  d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"
+                                />
                               </svg>
                             ),
                           },
-                          codex_subscription: {
-                            label: "Your connected plan",
-                            description: null,
-                            icon: null,
-                          },
                         }
-                      : undefined
+                      : hostBranding
+                        ? {
+                            opengeni_credits: {
+                              label: "Acme Assist",
+                              description: "Provided by your workspace",
+                              icon: (
+                                <svg viewBox="0 0 16 16" aria-hidden="true">
+                                  <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                                </svg>
+                              ),
+                            },
+                            codex_subscription: {
+                              label: "Your connected plan",
+                              description: null,
+                              icon: null,
+                            },
+                          }
+                        : undefined
                   }
                   model={model}
                   effort={effort}
