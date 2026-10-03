@@ -738,6 +738,81 @@ emergency threshold, cadence, and sustained window with
 with a turn-duration limit or a blind hard kill. Managed profiles may combine a
 hard per-process maximum with resource-based admission and HPA.
 
+### Demand-driven turn-worker cutover
+
+The chart's opt-in `worker.turns.autoscaling.keda` path assigns the existing
+turn-worker HPA name to one KEDA ScaledObject. Install the protected, pinned KEDA
+addon first, and enable the ServiceMonitor and freshness-gated PrometheusRule.
+`keda.enabled=true` with `keda.demandEnabled=false` retains CPU/memory scaling
+under the single owner during compatibility rollout; it emits no purportedly
+pure demand record or Prometheus trigger. The protected final activation sets
+`keda.demandEnabled=true` only after the coordinated creator-rollout and legacy
+drain gates pass; a successful bounded visibility scan alone is insufficient.
+Ordinary KEDA-mode Helm releases omit Deployment `spec.replicas`; they must not
+repin a previously scaled worker fleet. HPA takeover/removal during the first
+Helm migration requires protected release coordination, preserving the current
+count and verifying the resulting HPA owner UID rather than assuming a live
+annotation prevents Helm from deleting its old managed resource.
+
+Demand is **approximate dispatchable activity plus physical agent-turn slot
+pressure**, not the number of unique logical turns. `opengeni_turns_queued`
+includes parked/paused obligations and is never an autoscaling source. Replicated
+`DescribeTaskQueue` backlog samples use **MAX**, while deduplicated per-pod
+`opengeni_turns_inflight` uses **SUM**. Every observed and desired worker pod must
+have a successful scrape and same-instance queue/occupancy/freshness evidence
+with a successful read less than 45 seconds old. Missing, failed or incomplete
+evidence produces no series, never zero. The scaler additionally checks the
+record timestamp, uses `ignoreNullValues: "false"`, and falls back to
+`currentReplicasIfHigher`; HPA metric errors block downscale. A nonzero dispatched
+backlog also prevents demand-driven downscale. Separate CPU utilization (70%)
+and absolute average memory (2560Mi, not a percentage of requests) can scale up.
+
+Historical video reconciliation shares `${OPENGENI_TEMPORAL_TASK_QUEUE}-turns`
+and can retry; it must not be presented as exclusively agent-turn demand. Roll
+out compatibility registration on every workflow/control pod first with
+`OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED=false`. Only after all those
+pollers run the routing-aware source may the protected release set it to true
+for new video workflows. Every video creator, including turn pods, must also
+have the routing-aware source and enabled configuration before activation.
+Witness actual current ReplicaSet membership, Ready/nonterminating pods, source
+revision and configuration; a control-only source annotation is not sufficient.
+The input remains frozen across continue-as-new and
+the patch is evaluated at each dispatch boundary. Legacy absent/false-input
+video runs stay on their historical queue, including scheduled/retrying work
+and timer-held future dispatches. Keep the old turn video handler until a
+bounded read-only Temporal metadata/history inspection finds no such runs.
+Temporal visibility is eventually consistent: two stable inventories are not
+a linearizable absence proof. The protected activation must additionally fence
+all legacy creators and establish the existing admission/visibility cutover
+boundary; without that operational evidence, leave demand scaling disabled.
+Unknown, incomplete or stale cutover evidence also keeps the new demand scaler
+disabled; retain the safe warm floor/resource scaling during transition.
+Do not rename the agent-turn queue, drop old handlers early, or infer purity
+from an instant zero backlog. No customer payload belongs in cutover output.
+
+Managed planning guarantees require `fixed` memory-aware admission, not the
+native resource-based tuner. Each permit retains its complete 100MiB charge
+until physical release, plus 512MiB native/GC margin. The optional
+`OPENGENI_TURN_WORKER_MIN_MEMORY_SAFE_TURNS` and
+`OPENGENI_TURN_WORKER_BASELINE_MEMORY_BUDGET_MIB` fail startup after native
+`Worker.create` if the configured resident planning density cannot be supported.
+The conservative check accounts for both observed resident allocation and the
+retained permit charge. For example, a 6Gi limit and at most 1536MiB finalized
+baseline support a planning density of 20 at the 100MiB resident contract; a
+hard ceiling of 32 does **not** guarantee 32 usable slots. Reconcile requests,
+actual resident memory, every sibling workload, node failure/rollout reserves,
+database pools and shared regional/family quota before selecting a pod maximum.
+Six Ready pods at a **validated** density of 20 cover 100 admitted turns after
+one pod fails; neither cold-node capacity nor an unmeasured ceiling proves a
+first-turn latency target. Launch load/density acceptance remains a separate gate.
+
+Turn workers drain serially with 120-second pod grace and an effective PDB.
+Database/checkpoint pools must stay open throughout drain. Post-drain pool-close
+containment is a separate lifecycle change coordinated with the reliability owner.
+Configured zero surge alone does not bound connections held by terminating
+pods. Coordinate component rollouts and wait for old pools/pods to leave before
+the next overlapping generation.
+
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 

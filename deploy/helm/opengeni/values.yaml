@@ -390,6 +390,19 @@ worker:
         enabled: false
         name: opengeni_turn_slot_saturation_ratio
         targetAverageValue: "750m"
+      # Install KEDA before enabling this path. KEDA is the sole owner of the
+      # worker-turns HPA; Helm no longer emits that HPA or Deployment replicas.
+      keda:
+        enabled: false
+        # First take ownership with CPU/memory only. Enable demand only after
+        # protected control-poller and exhaustive legacy-video drain evidence.
+        demandEnabled: false
+        serverAddress: ""
+        targetTurnsPerPod: 20
+        memoryAverageValue: 2560Mi
+        pollingInterval: 15
+        freshnessSeconds: 60
+        failureThreshold: 3
       customMetrics: []
       behavior: {}
   podSecurityContext:

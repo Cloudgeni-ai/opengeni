@@ -700,11 +700,12 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 }
 
 /**
- * Record the authoritative turn activity queue rather than aggregate Postgres
+ * Record dispatched activity pressure rather than aggregate Postgres
  * prompts. A paused human prompt is durable queue truth but is not runnable and
  * never reaches this Temporal task queue. DescribeTaskQueue's approximate
- * backlog count and age are explicitly documented by Temporal as autoscaling
- * signals.
+ * backlog count and age are autoscaling signals, not unique logical-turn
+ * counts. Historical video activities share this queue until the protected
+ * routing cutover and legacy-workflow drain prove it contains only agent turns.
  */
 export function recordTurnTaskQueueStats(
   observability: Observability,
@@ -712,22 +713,22 @@ export function recordTurnTaskQueueStats(
 ): void {
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog",
-    help: "Temporal runAgentTurn activity tasks eligible for immediate worker admission.",
+    help: "Approximate dispatchable activities on the turn queue; agent-turn-only after the protected video cutover.",
     value: nonnegativeFinite(stats.eligibleBacklog),
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog_oldest_age_seconds",
-    help: "Approximate age of the oldest eligible runAgentTurn activity task.",
+    help: "Approximate age of the oldest dispatchable activity on the turn queue.",
     value: nonnegativeFinite(stats.oldestBacklogAgeSeconds),
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_add_rate",
-    help: "Temporal runAgentTurn tasks added per second over its rolling window.",
+    help: "Turn-queue activity tasks added per second over Temporal's rolling window.",
     value: nonnegativeFinite(stats.tasksAddRate),
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_dispatch_rate",
-    help: "Temporal runAgentTurn tasks dispatched per second over its rolling window.",
+    help: "Turn-queue activity tasks dispatched per second over Temporal's rolling window.",
     value: nonnegativeFinite(stats.tasksDispatchRate),
   });
 }
@@ -2068,10 +2069,12 @@ function contentDeltaClass(type: SessionEventType): StreamDeltaClass | null {
   return null;
 }
 
-// TTFT and inter-delta live on a human-perceptible scale (tens of ms to a few
-// seconds), so they get their own SHORT buckets — the default duration buckets
-// (which run to 3600s) would collapse every real streaming value into one bucket.
-const STREAM_TTFT_BUCKETS = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10];
+// Preserve perceptible short-latency boundaries, but expose model-start tails
+// beyond 10s rather than censoring every slow first token in the +Inf bucket.
+// Inter-delta spacing retains its independent short-scale distribution.
+const STREAM_TTFT_BUCKETS = [
+  0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 30, 60, 120, 300,
+];
 const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
 
 /**

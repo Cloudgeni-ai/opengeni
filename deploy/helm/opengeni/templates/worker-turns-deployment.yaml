@@ -9,7 +9,9 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker-turns
 spec:
+  {{- if not (((.Values.worker.turns.autoscaling).keda).enabled | default false) }}
   replicas: {{ .Values.worker.turns.replicaCount }}
+  {{- end }}
   {{- with .Values.worker.turns.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}

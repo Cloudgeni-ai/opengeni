@@ -292,6 +292,14 @@ const SettingsSchema = z.object({
   startupDependencyRetryMaxDelayMs: z.coerce.number().int().positive().default(5000),
   turnWorkerConcurrencyMode: z.enum(["fixed", "resource-based"]).default("fixed"),
   turnWorkerMaxConcurrentTurns: z.coerce.number().int().positive().max(2_000).default(16),
+  // Optional managed-fleet planning contract. Zero leaves generic/self-hosted
+  // profiles unchanged; enabled profiles prove worst-case resident capacity
+  // after Temporal/native initialization, not just the hard concurrency cap.
+  turnWorkerMinMemorySafeTurns: z.coerce.number().int().min(0).max(2_000).default(0),
+  turnWorkerBaselineMemoryBudgetMiB: z.coerce.number().int().min(0).default(0),
+  // Activate only after every control worker registers the video activity.
+  // New video workflows freeze this value; legacy runs drain their old queue.
+  videoReconciliationControlQueueEnabled: EnvBoolean.default(false),
   turnWorkerTargetCpuUsage: z.coerce.number().positive().max(1).default(0.8),
   turnWorkerTargetMemoryUsage: z.coerce.number().positive().max(0.8).default(0.75),
   // Admission and emergency recovery are deliberately separate control loops.
@@ -3457,6 +3465,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     startupDependencyRetryMaxDelayMs: optional("OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS"),
     turnWorkerConcurrencyMode: optional("OPENGENI_TURN_WORKER_CONCURRENCY_MODE"),
     turnWorkerMaxConcurrentTurns: optional("OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS"),
+    turnWorkerMinMemorySafeTurns: optional("OPENGENI_TURN_WORKER_MIN_MEMORY_SAFE_TURNS"),
+    turnWorkerBaselineMemoryBudgetMiB: optional("OPENGENI_TURN_WORKER_BASELINE_MEMORY_BUDGET_MIB"),
+    videoReconciliationControlQueueEnabled: optional(
+      "OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED",
+    ),
     turnWorkerTargetCpuUsage: optional("OPENGENI_TURN_WORKER_TARGET_CPU_USAGE"),
     turnWorkerTargetMemoryUsage: optional("OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE"),
     turnWorkerEmergencyMemoryUsage: optional("OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE"),

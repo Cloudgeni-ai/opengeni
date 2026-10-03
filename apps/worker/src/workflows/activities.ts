@@ -130,9 +130,14 @@ export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCanc
   });
 }
 
-export function videoGenerationActivityForTaskQueue(baseTaskQueue: string) {
+export function videoGenerationActivityForTaskQueue(
+  baseTaskQueue: string,
+  useControlQueue = false,
+) {
   return proxyActivities<Pick<typeof activities, "reconcileVideoGenerationOperation">>({
-    taskQueue: turnTaskQueue(baseTaskQueue),
+    // The caller versions this decision at each dispatch boundary. Historical
+    // commands retain their original turn queue; new commands use control.
+    taskQueue: useControlQueue ? baseTaskQueue : turnTaskQueue(baseTaskQueue),
     startToCloseTimeout: "20 minutes",
     retry: {
       initialInterval: "1 second",

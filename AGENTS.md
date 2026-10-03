@@ -280,6 +280,8 @@ disabled tools or grant execution outside the current catalog.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+- **Demand-driven worker scaling needs a guarded activity-queue cutover.** Never use `opengeni_turns_queued` as runnable demand or sum replicated Temporal backlog. KEDA scaling is fresh complete activity/physical-slot pressure, not unique logical turns. Register video reconciliation on every control poller before activating new-workflow control routing; retain the historical turn handler and block demand-scaler activation until open legacy/timer-held/scheduled/retrying video work is proven drained. Keep full 100MiB permit charges through physical release, finalize the baseline after native worker creation, and derive pod bounds from the reconciled resource/placement/DB/quota contract. See `docs/deployment.md#demand-driven-turn-worker-cutover`.
+
 Claude Messages requests group retained system inputs after the user inputs in
 the same assistant-delimited phase: the system beta forbids `user → system → user`.
 This is a request-local projection; keep canonical roles/content and compaction
