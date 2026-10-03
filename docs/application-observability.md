@@ -5,6 +5,15 @@ traces keep their existing attribute projection; adding a diagnostic field does
 not make it public. Raw exceptions, prompts, tool content, SQL and parameters
 must not be serialized into telemetry.
 
+Reviewed operational failures retain their closed `errorClass`, `errorCode`,
+HTTP status and origin. Their `errorMessage` is a fixed description of the
+reviewed code, not the original exception message. Parallel session-title
+generation and persistence have distinct reviewed classes/codes, so these
+nonfatal sidecar failures no longer collapse to `OperationError`. Unknown
+classes still collapse and unknown codes/messages are omitted. Caller-supplied
+`errorMessage`, provider bodies, SQL and customer content remain excluded;
+protected diagnostics below are the separate cause-investigation boundary.
+
 ## Context and timing
 
 `withTraceContext` scopes identity through asynchronous calls. `startSpan`
