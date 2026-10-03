@@ -2,12 +2,27 @@
 // sessions) and native renderers: relative-time labels, recency bucketing
 // (Today / Yesterday / Previous 7 days / Older), the running-first ordering
 // rule, status tones and the compact row metadata. No DOM, no React.
-import type { ClientModel, Session, SessionListEntry, SessionStatus } from "@opengeni/sdk";
+import {
+  deriveSessionDisplayTitle,
+  type ClientModel,
+  type Session,
+  type SessionListEntry,
+  type SessionStatus,
+} from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
 
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
+
+/**
+ * The title shown for a session: durable agent/user metadata once available,
+ * otherwise a bounded opening-prompt preview while automatic naming is still
+ * pending. Every list, header and row reads identically.
+ */
+export function sessionDisplayTitle(session: SessionListRow): string {
+  return "displayTitle" in session ? session.displayTitle : deriveSessionDisplayTitle(session);
+}
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
 

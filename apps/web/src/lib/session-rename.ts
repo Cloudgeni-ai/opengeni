@@ -5,14 +5,11 @@
 // the Enter-save / Esc-cancel / blur-save / empty-or-unchanged-no-op behaviour
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  deriveAutomaticSessionTitlePreview,
-  deriveSessionDisplayTitle,
-  sessionTitleIsPending,
-} from "@opengeni/sdk";
+import { deriveAutomaticSessionTitlePreview, sessionTitleIsPending } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
 import type { RailSession } from "./session-list-entry";
+import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 
 /** The maximum length a session title may be renamed to. */
 export const SESSION_TITLE_MAX_LENGTH = 200;
@@ -23,9 +20,7 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * pending. Mirrors the rail list and the header so every surface reads
  * identically.
  */
-export function sessionDisplayTitle(session: RailSession): string {
-  return "displayTitle" in session ? session.displayTitle : deriveSessionDisplayTitle(session);
-}
+export { sessionDisplayTitle };
 
 /**
  * The value the editor seeds from when entering edit mode. A safe provisional

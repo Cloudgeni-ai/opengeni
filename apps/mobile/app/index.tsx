@@ -1,25 +1,37 @@
-import type { Session } from "@opengeni/sdk";
-import { router, useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { compactModelPill } from "@opengeni/react/model-policy";
+import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
+import type { ReasoningEffort, Session } from "@opengeni/sdk";
 import {
-  ActivityIndicator,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  RefreshControl,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+  ComposerPill,
+  fontStyle,
+  Icon,
+  SectionLabel,
+  SessionComposer,
+  SessionRowList,
+  useNativeTimelineTheme,
+} from "@opengeni/react-native/timeline";
+import { Stack, router, useFocusEffect } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
+import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
+import { AppThemeProvider } from "@/theme";
 
-export default function SessionsScreen() {
-  const { client, workspaceId, workspaces, error, reload } = useAccount();
+export default function HomeScreen() {
+  return (
+    <AppThemeProvider>
+      <Home />
+    </AppThemeProvider>
+  );
+}
+
+/* The web home canvas at phone width: the question, the new-session composer
+   and the quiet Recent sessions list under it. The rail lives behind the menu. */
+function Home() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const headerHeight = insets.top + 44;
+  const { client, config, models, workspaceId, error, reload } = useAccount();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
@@ -45,6 +57,16 @@ export default function SessionsScreen() {
     }, [load]),
   );
 
+  const model = process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL ?? config?.defaultModel ?? null;
+  const effort = (process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING ??
+    config?.defaultReasoningEffort ??
+    null) as ReasoningEffort | null;
+  const pill = model ? compactModelPill(models, model, effort) : null;
+  const recent = useMemo(() => {
+    const { pinned } = partitionPinnedSessions(sessions);
+    return recentSessionsForHome(sessions, pinned, 6);
+  }, [sessions]);
+
   const create = async () => {
     const text = draft.trim();
     if (!workspaceId || !text || creating) return;
@@ -52,12 +74,8 @@ export default function SessionsScreen() {
     try {
       const created = await client.createSession(workspaceId, {
         initialMessage: text,
-        ...(process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL
-          ? { model: process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL }
-          : {}),
-        ...(process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING
-          ? { reasoningEffort: process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING as "low" }
-          : {}),
+        ...(model ? { model } : {}),
+        ...(effort ? { reasoningEffort: effort } : {}),
       });
       setDraft("");
       router.push(`/session/${created.id}`);
@@ -68,109 +86,129 @@ export default function SessionsScreen() {
     }
   };
 
-  const workspaceName = workspaces.find((workspace) => workspace.id === workspaceId)?.name;
-
+  const problem = error?.message ?? listError;
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={headerHeight}
-      style={styles.root}
-    >
-      {error || listError ? <Text style={styles.error}>{error?.message ?? listError}</Text> : null}
-      <FlatList
-        data={sessions}
-        keyboardDismissMode="interactive"
+    <>
+      <Stack.Screen
+        options={{
+          headerStyle: { backgroundColor: c.bg },
+          headerShadowVisible: true,
+          headerTitle: HeaderWordmark,
+          headerTitleAlign: "left",
+          headerLeft: HeaderMenuButton,
+        }}
+      />
+      <ScrollView
+        style={{ flex: 1, backgroundColor: c.bg }}
         keyboardShouldPersistTaps="handled"
-        keyExtractor={(session) => session.id}
+        keyboardDismissMode="interactive"
         refreshControl={
           <RefreshControl refreshing={loading} onRefresh={() => void reload().then(load)} />
         }
-        ListHeaderComponent={
-          workspaceName ? <Text style={styles.workspace}>{workspaceName}</Text> : null
-        }
-        renderItem={({ item }) => (
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => router.push(`/session/${item.id}`)}
-            style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-          >
-            <Text numberOfLines={1} style={styles.rowTitle}>
-              {item.title ?? "Untitled session"}
-            </Text>
-            <Text style={styles.rowMeta}>{item.status}</Text>
-          </Pressable>
-        )}
-      />
-      <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-        <TextInput
-          accessibilityLabel="New session message"
-          multiline
-          onChangeText={setDraft}
-          placeholder="Ask anything"
-          style={styles.input}
-          value={draft}
-        />
-        <Pressable
-          accessibilityLabel="Start session"
-          accessibilityRole="button"
-          disabled={!draft.trim() || creating}
-          onPress={() => void create()}
-          style={[styles.send, (!draft.trim() || creating) && styles.sendDisabled]}
+        contentContainerStyle={{
+          paddingHorizontal: 16,
+          paddingTop: 40,
+          paddingBottom: Math.max(insets.bottom, 16) + 48,
+        }}
+      >
+        <Text
+          accessibilityRole="header"
+          style={{
+            ...fontStyle(theme, 600),
+            fontSize: 24,
+            lineHeight: 32,
+            letterSpacing: -0.6,
+            color: c.fg,
+            textAlign: "center",
+          }}
         >
-          {creating ? <ActivityIndicator color="#fff" /> : <Text style={styles.sendText}>↑</Text>}
-        </Pressable>
-      </View>
-    </KeyboardAvoidingView>
+          What should the agent do?
+        </Text>
+        <View style={{ marginTop: 28 }}>
+          <SessionComposer
+            value={draft}
+            onChangeText={setDraft}
+            onSend={() => void create()}
+            canSend={Boolean(draft.trim()) && !creating && Boolean(workspaceId)}
+            sending={creating}
+            placeholder="Describe a task for the agent..."
+            inset={0}
+            liftWithKeyboard={false}
+            bottomInset={0}
+            options={
+              pill ? (
+                <ComposerPill label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name} />
+              ) : null
+            }
+          />
+        </View>
+        {problem ? (
+          <Text
+            style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"], marginTop: 12 }}
+          >
+            {problem}
+          </Text>
+        ) : null}
+        {recent.length > 0 ? (
+          <View style={{ marginTop: 48 }}>
+            <SectionLabel>Recent sessions</SectionLabel>
+            <SessionRowList
+              sessions={recent}
+              models={models}
+              onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+            />
+          </View>
+        ) : null}
+      </ScrollView>
+    </>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#fff" },
-  error: { color: "#b42318", padding: 16 },
-  workspace: {
-    fontSize: 13,
-    color: "#667085",
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 4,
-  },
-  row: {
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: "#e4e7ec",
-  },
-  rowPressed: { backgroundColor: "#f2f4f7" },
-  rowTitle: { fontSize: 16, color: "#101828" },
-  rowMeta: { fontSize: 13, color: "#667085", marginTop: 2 },
-  composer: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: "#e4e7ec",
-  },
-  input: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 140,
-    borderRadius: 22,
-    backgroundColor: "#f2f4f7",
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 12,
-    fontSize: 16,
-  },
-  send: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "#101828",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sendDisabled: { opacity: 0.35 },
-  sendText: { color: "#fff", fontSize: 20, fontWeight: "600" },
-});
+// Navigator chrome renders outside the screen tree, so it takes its own theme.
+function HeaderWordmark() {
+  return (
+    <AppThemeProvider>
+      <Wordmark />
+    </AppThemeProvider>
+  );
+}
+
+function HeaderMenuButton() {
+  return (
+    <AppThemeProvider>
+      <MenuButton />
+    </AppThemeProvider>
+  );
+}
+
+function MenuButton() {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Open sessions"
+      hitSlop={8}
+      onPress={() => router.push("/sessions")}
+      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+    >
+      <Icon name="menu" size={20} color={theme.colors.fg} />
+    </Pressable>
+  );
+}
+
+function Wordmark() {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Text
+      accessibilityRole="header"
+      style={{
+        ...fontStyle(theme, 600),
+        fontSize: 18,
+        letterSpacing: -0.3,
+        color: theme.colors.fg,
+      }}
+    >
+      Opengeni
+    </Text>
+  );
+}

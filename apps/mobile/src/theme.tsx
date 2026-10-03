@@ -11,14 +11,19 @@ import {
 } from "@expo-google-fonts/jetbrains-mono";
 import {
   NativeTimelineThemeProvider,
+  webColorsDark,
+  webColorsLight,
   type NativeTimelineThemeOverrides,
 } from "@opengeni/react-native/timeline";
 import { useFonts } from "expo-font";
 import type { ReactNode } from "react";
 import { useColorScheme } from "react-native";
 
-/** The web app's faces (Inter, JetBrains Mono) mapped to the native theme. */
+/** The web app's faces (Inter, JetBrains Mono) mapped to the native theme. The app's
+ * pages sit on the canvas color (white / near-black), not the component bg. */
 const OVERRIDES: NativeTimelineThemeOverrides = {
+  light: { bg: webColorsLight.canvas },
+  dark: { bg: webColorsDark.canvas },
   fonts: {
     sans: {
       "400": "Inter_400Regular",
@@ -32,6 +37,8 @@ const OVERRIDES: NativeTimelineThemeOverrides = {
     sansTracking: 0.12,
   },
 };
+
+const COLORS_ONLY: NativeTimelineThemeOverrides = { light: OVERRIDES.light, dark: OVERRIDES.dark };
 
 export function AppThemeProvider({
   scheme,
@@ -53,7 +60,7 @@ export function AppThemeProvider({
   return (
     <NativeTimelineThemeProvider
       scheme={scheme ?? (system === "dark" ? "dark" : "light")}
-      overrides={loaded ? OVERRIDES : undefined}
+      overrides={loaded ? OVERRIDES : COLORS_ONLY}
     >
       {children}
     </NativeTimelineThemeProvider>

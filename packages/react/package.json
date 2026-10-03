@@ -142,6 +142,10 @@
     "./session-list-model": {
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
+    },
+    "./model-mark-paths": {
+      "types": "./src/model-mark-paths.ts",
+      "default": "./src/model-mark-paths.ts"
     }
   },
   "publishConfig": {

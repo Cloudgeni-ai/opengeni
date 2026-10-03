@@ -37,6 +37,10 @@ export interface SessionComposerProps {
   /** Distance from the composer's container bottom to the window bottom (tab bars). */
   keyboardBottomOffset?: number | undefined;
   autoFocus?: boolean | undefined;
+  /** Horizontal page inset around the card (default 16). */
+  inset?: number | undefined;
+  /** Lift above the keyboard (bottom-docked composer). Off for an inline card. */
+  liftWithKeyboard?: boolean | undefined;
 }
 
 export function SessionComposer(props: SessionComposerProps) {
@@ -48,14 +52,18 @@ export function SessionComposer(props: SessionComposerProps) {
   const keyboard = useAnimatedKeyboard();
   const restingBottom = Math.max(16, (props.bottomInset ?? 0) + 4);
   const offset = props.keyboardBottomOffset ?? 0;
+  const liftWithKeyboard = props.liftWithKeyboard ?? true;
   const lift = useAnimatedStyle(() => {
+    if (!liftWithKeyboard) return { paddingBottom: restingBottom };
     const lifted = keyboard.height.value - offset;
     return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
   });
   // Web shows the workstream control whenever the host can pause or resume.
   const showPause = Boolean(props.paused ? props.onResume : props.onPause);
   return (
-    <Animated.View style={[{ paddingHorizontal: 16, paddingTop: 4, backgroundColor: c.bg }, lift]}>
+    <Animated.View
+      style={[{ paddingHorizontal: props.inset ?? 16, paddingTop: 4, backgroundColor: c.bg }, lift]}
+    >
       {props.above}
       <View
         style={{
@@ -63,7 +71,12 @@ export function SessionComposer(props: SessionComposerProps) {
           borderWidth: 1,
           borderColor: c.border,
           backgroundColor: c["surface-1"],
-          overflow: "hidden",
+          // Web shadow-og-sm: 0 1px 2px rgb(0 0 0 / 0.07).
+          shadowColor: "#000",
+          shadowOpacity: 0.07,
+          shadowRadius: 2,
+          shadowOffset: { width: 0, height: 1 },
+          elevation: 1,
         }}
       >
         {props.header}

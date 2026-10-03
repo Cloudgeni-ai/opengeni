@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { OpenGeniClient, type ClientModel, type Workspace } from "@opengeni/sdk";
+import { OpenGeniClient, type ClientConfig, type ClientModel, type Workspace } from "@opengeni/sdk";
 import {
   createHydratedPersistenceAdapter,
   type OpenGeniReactNativeAdapters,
@@ -28,6 +28,8 @@ interface AccountState {
   client: OpenGeniClient;
   adapters: OpenGeniReactNativeAdapters;
   workspaces: Workspace[];
+  /** The deployment's client configuration (defaults, model catalog). */
+  config: ClientConfig | null;
   /** The deployment's client model catalog (labels for the composer pill). */
   models: ClientModel[];
   workspaceId: string | null;
@@ -70,18 +72,19 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [account.id],
   );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [models, setModels] = useState<ClientModel[]>([]);
+  const [config, setConfig] = useState<ClientConfig | null>(null);
+  const models = useMemo(() => config?.models ?? [], [config]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const [next, config] = await Promise.all([
+      const [next, nextConfig] = await Promise.all([
         client.listWorkspaces(),
         client.getClientConfig().catch(() => null),
       ]);
       setWorkspaces(next);
-      if (config) setModels(config.models);
+      if (nextConfig) setConfig(nextConfig);
       setWorkspaceId((current) => current ?? next[0]?.id ?? null);
       setError(null);
     } catch (caught) {
@@ -99,13 +102,14 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       client,
       adapters,
       workspaces,
+      config,
       models,
       workspaceId,
       setWorkspaceId,
       error,
       reload,
     }),
-    [account, client, adapters, workspaces, models, workspaceId, error, reload],
+    [account, client, adapters, workspaces, config, models, workspaceId, error, reload],
   );
   return <AccountContext.Provider value={value}>{children}</AccountContext.Provider>;
 }

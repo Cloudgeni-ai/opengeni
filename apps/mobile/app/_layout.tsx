@@ -31,7 +31,8 @@ export default function RootLayout() {
             {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
             <StatusBar style="auto" />
             <Stack screenOptions={{ headerShown: true }}>
-              <Stack.Screen name="index" options={{ title: "OpenGeni" }} />
+              <Stack.Screen name="index" options={{ title: "Opengeni" }} />
+              <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
               <Stack.Screen name="session/[id]" options={{ title: "" }} />
             </Stack>
           </NativeEnvironment>
