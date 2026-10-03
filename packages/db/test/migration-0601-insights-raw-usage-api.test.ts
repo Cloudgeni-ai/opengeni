@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
@@ -41,7 +44,7 @@ let accountId: string,
   privateId: string,
   deletedId: string,
   subjectId: string;
-const migrationName = "0599_insights_raw_usage_api.sql";
+const migrationName = "0601_insights_raw_usage_api.sql";
 const now = new Date("2026-09-14T12:00:00Z");
 const actor = <T>(fn: () => Promise<T>, id = subjectId) =>
   withSessionRlsActorContext({ subjectId: id }, fn);
@@ -169,6 +172,7 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
     cacheWriteKnownCalls: 5,
     listClassKnownCalls: 0,
     listByClassMicros: null,
+    tokens: { uncachedInput: 32, cacheRead: 10, cacheWrite: 0, output: 30, reasoning: 0 },
   });
   expect(response.groups.find((g) => g.kind === "service")?.measures).toMatchObject({
     calls: 0,
@@ -177,6 +181,52 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   const org = await usage({ range: "month", groupBy: "workspace" }, true, true);
   expect(org.totals.chargedMicros).toBe(31);
 });
+
+test("frozen pre-0601 runtime and provisioner accept the complete migrated inventory", async () => {
+  const revision = "00000d75ec520007a318637c22d74f23fdc4deb1";
+  const repoRoot = new URL("../../..", import.meta.url).pathname;
+  const root = await mkdtemp(`${repoRoot}/.insights-0601-old-runtime-`);
+  const directory = `${root}/${revision}`;
+  const options = {
+    expectedRole: "opengeni_app",
+    rlsStrategy: "force" as const,
+    targetSchema: "public",
+    organizationTenancyCanonicalActivationEnabled: true,
+  };
+  const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
+  try {
+    await mkdir(directory);
+    for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"])
+      await writeFile(
+        `${directory}/${name}`,
+        execFileSync("git", ["show", `${revision}:packages/db/src/${name}`], { cwd: repoRoot }),
+      );
+    const old = await import(pathToFileURL(`${directory}/runtime-posture.ts`).href);
+    const oldProvision = await import(pathToFileURL(`${directory}/provision-roles.ts`).href);
+    const verify = async () => {
+      expect(
+        old.evaluateRuntimeDatabasePosture(
+          await old.inspectRuntimeDatabasePosture(client.db, options),
+          options,
+        ),
+      ).toEqual([]);
+      expect(
+        evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(client.db, options),
+          options,
+        ),
+      ).toEqual([]);
+    };
+    await verify();
+    await oldProvision.provisionRoles(fixture.adminUrl, roles);
+    await verify();
+    await provisionRoles(fixture.adminUrl, roles);
+    await verify();
+  } finally {
+    await provisionRoles(fixture.adminUrl, roles);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 180_000);
 
 test("six ranges/every grouping conserve calls and money in groups/series and expose honest NULL knownness", async () => {
   for (const range of ["today", "week", "month", "30d", "90d", "ytd"] as const)
@@ -192,13 +242,7 @@ test("six ranges/every grouping conserve calls and money in groups/series and ex
     ] as const) {
       const org = groupBy === "workspace";
       const response = await usage({ range, groupBy, seriesGroups: true, limit: 2 }, true, org);
-      // Frozen 3276 incorrectly rejects a non-empty money-only prior. Preserve money,
-      // and explicitly test that known contract incompatibility below instead.
-      const compatible = {
-        ...response,
-        prior: response.prior?.calls === 0 ? null : response.prior,
-      };
-      expect(InsightsUsageResponse.safeParse(compatible).success).toBe(true);
+      expect(InsightsUsageResponse.safeParse(response).success).toBe(true);
       const bounds = insightsUsageWindow(range, now);
       const [raw] =
         await fixture.admin`select count(*)::int as calls from model_call_facts where account_id=${accountId}
@@ -215,18 +259,10 @@ test("six ranges/every grouping conserve calls and money in groups/series and ex
     }
 });
 
-test("money-only prior is retained; frozen contract contradiction is documented rather than dropped", async () => {
+test("money-only prior is retained and validates without fabricated calls", async () => {
   const response = await usage({ range: "month" });
   expect(response.prior).toMatchObject({ calls: 0, chargedMicros: 17 });
-  const parsed = InsightsUsageResponse.safeParse(response);
-  // Contract follow-up 3296 accepts this without changing the wire shape.
-  // Before it lands, the released guard is the only permitted incompatibility.
-  if (!parsed.success)
-    expect(
-      parsed.error.issues.some(
-        (i) => i.path[0] === "prior" && i.message === "Zero-call prior must be null",
-      ),
-    ).toBe(true);
+  expect(InsightsUsageResponse.safeParse(response).success).toBe(true);
 });
 
 test("forward classes conserve frozen total and visible cursor pagination preserves PostgreSQL microseconds", async () => {
@@ -324,7 +360,7 @@ test("private and deleted are distinct, hidden identities/filter facets/call det
     expectedVersion: settings.version,
     operationId: crypto.randomUUID(),
   });
-  const hidden = await actor(() =>
+  const privateSession = await actor(() =>
     createSession(client.db, {
       accountId,
       workspaceId,
@@ -339,7 +375,7 @@ test("private and deleted are distinct, hidden identities/filter facets/call det
       createdByContext: {},
     }),
   );
-  privateId = hidden.id;
+  privateId = privateSession.id;
   deletedId = crypto.randomUUID();
   await transitionSessionVisibility(client.db, {
     workspaceId,
@@ -449,10 +485,24 @@ test("organization Shared-all never admits Personal IDs/names/details, and Perso
     await fixture.admin`insert into workspaces(id,account_id,name) values(${workspace},${accountId},${"SECRET PERSONAL " + n})`;
     await fixture.admin`insert into workspace_inference_controls(workspace_id,account_id) values(${workspace},${accountId})`;
     await fixture.admin`insert into organization_memberships(id,account_id,subject_id,status,personal_workspace_id) values(${membership},${accountId},${subject},'active',${workspace})`;
-    const created = await actor(()=>createSession(client.db,{accountId,workspaceId:workspace,initialMessage:"SECRET PERSONAL TITLE "+n,
-      resources:[],metadata:{},model:"fixture",reasoningEffort:"medium",latencyMode:"standard",sandboxBackend:"none",
-      createdBy:{kind:"subject",subjectId:subject},createdByContext:{}}),subject);
-    const session=created.id;
+    const created = await actor(
+      () =>
+        createSession(client.db, {
+          accountId,
+          workspaceId: workspace,
+          initialMessage: "SECRET PERSONAL TITLE " + n,
+          resources: [],
+          metadata: {},
+          model: "fixture",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: subject },
+          createdByContext: {},
+        }),
+      subject,
+    );
+    const session = created.id;
     hiddenSessions.push(session);
     await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,
       estimated_provider_cost_micros,pricing_source,occurred_at) values(${accountId},${workspace},${session},gen_random_uuid(),'personal',
@@ -530,4 +580,52 @@ test("UTC exact midnight has no fabricated future usage point", async () => {
   expect(response.series).toEqual([]);
   expect(response.prior).toBeNull();
   expect(InsightsUsageResponse.safeParse(response).success).toBe(true);
+});
+
+test("uncached input subtracts both cache classes per complete fact, never unequal-coverage aggregate sums", async () => {
+  const cases = [
+    { name: "complete", input: 100, cached: 20, writes: 10, reasoning: 5, uncached: 70 },
+    { name: "unknown-read", input: 100, cached: null, writes: 10, reasoning: 5, uncached: null },
+    { name: "unknown-write", input: 100, cached: 20, writes: null, reasoning: 5, uncached: null },
+    { name: "unknown-input", input: null, cached: 20, writes: 10, reasoning: 5, uncached: null },
+    { name: "overlap", input: 25, cached: 20, writes: 10, reasoning: 5, uncached: null },
+    { name: "known-zero-cache", input: 10, cached: 0, writes: 0, reasoning: 0, uncached: 10 },
+  ];
+  for (const value of cases) {
+    await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,
+      provider,provider_api,model,billing_path,input_tokens,output_tokens,cached_tokens,cache_write_tokens,
+      reasoning_tokens,total_tokens,occurred_at) values(${accountId},${workspaceId},${sessionId},${crypto.randomUUID()},
+      ${`token-edge:${value.name}`},'token-edges','responses',${value.name},'external',${value.input},50,
+      ${value.cached},${value.writes},${value.reasoning},${value.input === null ? null : value.input + 50},'2026-09-07T00:00:00Z')`;
+  }
+  const response = await usage({ range: "month", provider: "token-edges" });
+  expect(response.totals.tokens).toEqual({
+    uncachedInput: 80,
+    cacheRead: 80,
+    cacheWrite: 40,
+    output: 300,
+    reasoning: 25,
+  });
+  const page = await actor(() =>
+    readInsightsCalls(client.db, {
+      accountId,
+      workspaceId,
+      now,
+      detailsWorkspaceIds: [workspaceId],
+      query: InsightsCallsQuery.parse({ range: "month", provider: "token-edges" }),
+    }),
+  );
+  expect(page.calls).toHaveLength(cases.length);
+  for (const value of cases) {
+    const call = page.calls.find((item) => item.model === value.name)!;
+    if (value.uncached === null) expect(call.tokens).toBeNull();
+    else
+      expect(call.tokens).toEqual({
+        uncachedInput: value.uncached,
+        cacheRead: value.cached,
+        cacheWrite: value.writes,
+        output: 50,
+        reasoning: value.reasoning,
+      });
+  }
 });

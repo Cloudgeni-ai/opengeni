@@ -1,6 +1,6 @@
 # Insights unified DB API checkpoint
 
-Migration `0599_insights_raw_usage_api.sql` is rolling and independent of the
+Migration `0601_insights_raw_usage_api.sql` is rolling and independent of the
 unfinished daily-rollup migration. It adds nullable captured class annotations
 and two scoped read capabilities. Released readers, authorization policies,
 permission checks, billing writes, pricing/catalog definitions and ledger rows
@@ -38,10 +38,10 @@ does not perform historical allocation: eligible fixed-total allocation using
 the separately approved current-catalog snapshot remains the rollup follow-up.
 
 This is an intentionally raw-backed endpoint-first checkpoint: full-day/YTD
-scans are not yet accelerated and no staging p95 claim is made. The frozen
-3276 contract's zero-call-prior guard rejects a money-only prior; the DB retains
-that money rather than inventing calls or dropping it. Contract follow-up 3296
-must permit such a nonempty prior before route-level response validation.
+scans are not yet accelerated and no staging p95 claim is made. Contract
+follow-up 3296 permits a money-only prior with zero recorded calls; the DB and
+routes retain that money rather than inventing calls or dropping it. A truly
+empty prior is null.
 
 Focused real PostgreSQL coverage uses a NOSUPERUSER/NOBYPASSRLS migration owner
 and restricted application role, with historical facts before the migration,

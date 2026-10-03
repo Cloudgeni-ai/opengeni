@@ -54,7 +54,10 @@ BEGIN
         'cacheKnownCalls',CASE WHEN f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL THEN 1 ELSE 0 END,
         'cacheWriteKnownCalls',CASE WHEN f.cache_write_tokens IS NOT NULL THEN 1 ELSE 0 END,
         'listClassKnownCalls',CASE WHEN f.list_uncached_input_cost_micros IS NOT NULL THEN 1 ELSE 0 END,
-        'uncachedInput',greatest(coalesce(f.input_tokens,0)-coalesce(f.cached_tokens,0),0),
+        'uncachedInput',CASE WHEN f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL AND f.cache_write_tokens IS NOT NULL
+          AND f.input_tokens>=0 AND f.cached_tokens>=0 AND f.cache_write_tokens>=0
+          AND f.cached_tokens::numeric+f.cache_write_tokens::numeric<=f.input_tokens::numeric
+          THEN f.input_tokens-f.cached_tokens-f.cache_write_tokens ELSE 0 END,
         'cacheRead',coalesce(f.cached_tokens,0),'cacheWrite',coalesce(f.cache_write_tokens,0),'output',coalesce(f.output_tokens,0),
         'reasoning',coalesce(f.reasoning_tokens,0),'chargedMicros',0,'listMicros',coalesce(f.estimated_provider_cost_micros,0),
         'pricedCalls',CASE WHEN f.estimated_provider_cost_micros IS NOT NULL THEN 1 ELSE 0 END,
@@ -234,9 +237,14 @@ BEGIN
           VALUES(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',a,w.id,subject_value,human_value);
           RETURN QUERY SELECT jsonb_build_object('id',f.id,'occurredAt',f.occurred_at,'workspaceId',w.id,
             'sessionId',leaf.id,'sessionTitle',leaf.title,'sessionKind','visible','personKey',meta->>'person',
-            'provider',f.provider,'model',f.model,'payer',meta->>'payer','tokens',CASE WHEN f.total_tokens IS NOT NULL THEN jsonb_build_object(
-              'uncachedInput',greatest(coalesce(f.input_tokens,0)-coalesce(f.cached_tokens,0),0),'cacheRead',coalesce(f.cached_tokens,0),
-              'cacheWrite',coalesce(f.cache_write_tokens,0),'output',coalesce(f.output_tokens,0),'reasoning',coalesce(f.reasoning_tokens,0)) END,
+            'provider',f.provider,'model',f.model,'payer',meta->>'payer','tokens',CASE WHEN
+              f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL AND f.cache_write_tokens IS NOT NULL
+              AND f.output_tokens IS NOT NULL AND f.reasoning_tokens IS NOT NULL
+              AND f.input_tokens>=0 AND f.cached_tokens>=0 AND f.cache_write_tokens>=0 AND f.output_tokens>=0
+              AND f.reasoning_tokens>=0 AND f.reasoning_tokens<=f.output_tokens
+              AND f.cached_tokens::numeric+f.cache_write_tokens::numeric<=f.input_tokens::numeric THEN jsonb_build_object(
+              'uncachedInput',f.input_tokens-f.cached_tokens-f.cache_write_tokens,'cacheRead',f.cached_tokens,
+              'cacheWrite',f.cache_write_tokens,'output',f.output_tokens,'reasoning',f.reasoning_tokens) END,
             'chargedMicros',(SELECT coalesce(-sum(c.amount_micros),0) FROM %1$I.credit_ledger_entries c
               WHERE c.account_id=a AND c.workspace_id=w.id AND c.type='model_usage_debit' AND c.source_type='model_response'
                 AND c.amount_micros<0 AND c.source_id=f.turn_id::text||':'||f.source_key),

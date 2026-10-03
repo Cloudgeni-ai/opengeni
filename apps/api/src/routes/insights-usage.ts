@@ -17,7 +17,7 @@ import {
   type ApiRouteDeps,
   type InsightsQueryScope,
 } from "@opengeni/core";
-import { currentSessionRlsActorIdentityKey } from "@opengeni/db";
+import { currentSessionRlsActorIdentityKey, InvalidInsightsCallsCursorError } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireSelectedAccount, withBillingUsageActor } from "./billing";
@@ -74,6 +74,18 @@ export function organizationInsightsScope(
   };
 }
 
+async function callsWithValidation(
+  read: () => Promise<Awaited<ReturnType<typeof listInsightsCalls>>>,
+) {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof InvalidInsightsCallsCursorError)
+      throw new HTTPException(400, { message: "invalid Insights calls cursor" });
+    throw error;
+  }
+}
+
 export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void {
   const usage = createInFlightCoalescer<Awaited<ReturnType<typeof getInsightsUsage>>>();
   const calls = createInFlightCoalescer<Awaited<ReturnType<typeof listInsightsCalls>>>();
@@ -101,7 +113,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const scope = { accountId: grant.accountId, workspaceId, detailsWorkspaceIds: [workspaceId] };
     const response = await calls.run(
       insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
-      () => listInsightsCalls(deps.db, { ...scope, query: parsed.data }),
+      () => callsWithValidation(() => listInsightsCalls(deps.db, { ...scope, query: parsed.data })),
     );
     c.header("cache-control", "private, no-store");
     return c.json(InsightsCallsResponse.parse(response));
@@ -137,7 +149,8 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const response = await withBillingUsageActor(deps, context, accountId, () =>
       calls.run(
         insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
-        () => listInsightsCalls(deps.db, { ...scope, query: parsed.data }),
+        () =>
+          callsWithValidation(() => listInsightsCalls(deps.db, { ...scope, query: parsed.data })),
       ),
     );
     c.header("cache-control", "private, no-store");

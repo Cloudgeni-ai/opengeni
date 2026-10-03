@@ -4040,6 +4040,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/insights/calls",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/insights/usage",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/instruction-policies",
       "sdk": [
         "OpenGeniClient.listWorkspaceInstructionPolicies"

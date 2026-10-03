@@ -8,6 +8,7 @@ import {
   createSession,
   ensureManagedAccessForUser,
   recordModelCallFact,
+  updateSessionTitle,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -46,6 +47,8 @@ async function fixture() {
   const workspaceId = crypto.randomUUID();
   await shared.admin`insert into workspaces(id,account_id,name)
     values (${workspaceId},${grant.accountId},'Shared Insights HTTP fixture')`;
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id)
+    values (${workspaceId},${grant.accountId})`;
   await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
     values (${grant.accountId},${workspaceId},${subjectId},'owner','[]'::jsonb)`;
   return { accountId: grant.accountId, workspaceId, subjectId };
@@ -127,7 +130,16 @@ test("HTTP readers preserve actual debit totals while enforcing the delegated de
     }),
   );
   const title = `HTTP DETAIL SENTINEL ${crypto.randomUUID()}`;
-  await shared.admin`update sessions set title=${title} where id=${session.id}`;
+  expect(
+    await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      updateSessionTitle(client.db, {
+        workspaceId: scope.workspaceId,
+        sessionId: session.id,
+        title,
+        source: "user",
+      }),
+    ),
+  ).toMatchObject({ updated: true, title });
   const turnId = crypto.randomUUID();
   const sourceKey = `response:${crypto.randomUUID()}`;
   await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
@@ -175,6 +187,7 @@ test("HTTP readers preserve actual debit totals while enforcing the delegated de
       chargedMicros: 7,
       listMicros: 500,
       cacheWriteKnownCalls: 1,
+      tokens: { uncachedInput: 70, cacheRead: 20, cacheWrite: 10, output: 50, reasoning: 5 },
       byPayer: { opengeni_credits: { calls: 1, chargedMicros: 7, listMicros: 500 } },
     });
     const calls = await app.request(path(scope, organization, "calls"), {
@@ -182,7 +195,12 @@ test("HTTP readers preserve actual debit totals while enforcing the delegated de
     });
     expect(calls.status, await calls.clone().text()).toBe(200);
     expect(InsightsCallsResponse.parse(await calls.json()).calls).toEqual([
-      expect.objectContaining({ sessionId: session.id, sessionTitle: title, chargedMicros: 7 }),
+      expect.objectContaining({
+        sessionId: session.id,
+        sessionTitle: title,
+        chargedMicros: 7,
+        tokens: { uncachedInput: 70, cacheRead: 20, cacheWrite: 10, output: 50, reasoning: 5 },
+      }),
     ]);
   }
   const amounts = await app.request(path(scope, true, "usage", "range=ytd&groupBy=rootSession"), {

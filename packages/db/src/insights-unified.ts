@@ -264,6 +264,13 @@ function cursorScope(input: Scope & { query: InsightsCallsQuery }): string {
     .digest("hex");
 }
 
+export class InvalidInsightsCallsCursorError extends Error {
+  constructor() {
+    super("Invalid Insights calls cursor for this scope and filters");
+    this.name = "InvalidInsightsCallsCursorError";
+  }
+}
+
 /** Visible details only; cursor and all filters are inside the bounded raw read. */
 export async function readInsightsCalls(
   db: Database,
@@ -298,7 +305,7 @@ export async function readInsightsCalls(
       cursorAt = value.at;
       cursorId = value.id;
     } catch {
-      throw new Error("Invalid Insights calls cursor for this scope and filters");
+      throw new InvalidInsightsCallsCursorError();
     }
   }
   const calls = await withRlsContext(

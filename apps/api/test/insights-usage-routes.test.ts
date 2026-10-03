@@ -220,6 +220,21 @@ describe("unified Insights route discipline", () => {
     expect((await result.json()).prior).toBeNull();
   });
 
+  test("malformed calls cursors return 400 in both scopes before database access", async () => {
+    const app = appFor();
+    const authorization = await token(["workspace:admin", "billing:read"]);
+    for (const scope of [`workspaces/${workspaceId}`, `organizations/${accountId}`]) {
+      const result = await app.request(
+        `http://x/v1/${scope}/insights/calls?range=week&cursor=not_base64`,
+        {
+          headers: { authorization },
+        },
+      );
+      expect(result.status).toBe(400);
+      expect(await result.text()).not.toContain(workspaceId);
+    }
+  });
+
   test("organization reads bind the verified subject without manufacturing a human initiator", async () => {
     const actors: Array<string | null> = [];
     const usage = spyOn(core, "getInsightsUsage").mockImplementation(async (_db, input) => {
