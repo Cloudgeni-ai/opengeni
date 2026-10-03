@@ -492,7 +492,7 @@ and then consults this port with their durable caller authority.
 A delegated grant never selects a subject's **personal** connections - not in a
 personal workspace, and not in an ordinary shared workspace either. A session
 created or steered through a host-minted delegated token gets workspace-owned
-connections only; personal X/Reddit/Atlassian/Google Drive delegation is
+connections only; personal X/Reddit/Google Drive delegation is
 omitted, exactly as it is for a member who never connected that provider.
 
 This is deliberate and is a change in behaviour: before, a delegated grant did

@@ -161,9 +161,11 @@ confirmation recovery remain; conversation history and task notes are separate.
 This is a maintenance cutover: stop old API and workers, migrate and provision
 roles, and start only the matching runtime. Do not restart an old binary.
 
-Built-in Drive/Atlassian sources use ordinary scheduled agent turns. Their fetch
+Built-in Drive sources use ordinary scheduled agent turns. Their fetch
 adapter retains originals/source text under the frozen policy; the agent selects
 useful findings. Task lifecycle owns completion; source adapters own checkpoints.
+Native Jira/Confluence source sync is retired; its imported Documents and
+historical configuration remain, but native schedules cannot fetch new content.
 Legacy source schedules keep their IDs and configuration. Those with no active
 owning-human authority are preserved paused, and require a current authorized
 edit. The change does not extend the managed scheduled-authority lifecycle to

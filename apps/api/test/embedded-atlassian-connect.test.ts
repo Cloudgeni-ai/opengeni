@@ -2,6 +2,9 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   bootstrapWorkspace,
+  beginConnectAttempt,
+  getConnectAttempt,
+  listConnectionsMetadata,
   createDb,
   createOrganizationApiKey,
   deleteWorkspace,
@@ -13,7 +16,8 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { ATLASSIAN_REQUIRED_SCOPES } from "@opengeni/contracts/atlassian";
+import { createSignedState } from "@opengeni/github";
+import { ATLASSIAN_NATIVE_RETIRED_REASON } from "@opengeni/contracts/atlassian-native-retirement";
 import { createApp } from "../src/app";
 
 let fixture: SharedTestDatabase;
@@ -31,7 +35,7 @@ afterAll(async () => {
   await fixture?.release();
 });
 
-test("embedded Atlassian preserves personal ownership, exact returns, replay and denial", async () => {
+test("native Atlassian is retired, including pending callbacks, without provider calls or grant writes", async () => {
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
     accountExternalId: randomUUID(),
@@ -72,29 +76,9 @@ test("embedded Atlassian preserves personal ownership, exact returns, replay and
       atlassianClientId: "fixture-client",
       atlassianClientSecret: "fixture-secret",
     }),
-    atlassianFetch: async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/oauth/token")) {
-        exchanges++;
-        return Response.json({
-          access_token: "fixture-token",
-          refresh_token: "fixture-refresh",
-          expires_in: 3600,
-          scope: ATLASSIAN_REQUIRED_SCOPES.join(" "),
-        });
-      }
-      if (url.endsWith("/me"))
-        return Response.json({ account_id: "provider-user", name: "Product User" });
-      if (url.endsWith("/accessible-resources"))
-        return Response.json([
-          {
-            id: "cloud-1",
-            name: "Product",
-            url: "https://fixture.atlassian.net",
-            scopes: ["read:jira-work"],
-          },
-        ]);
-      throw new Error("Unexpected provider request");
+    atlassianFetch: async () => {
+      exchanges++;
+      throw new Error("Retired native provider must never be called");
     },
   } as never);
   const headers = {
@@ -117,31 +101,62 @@ test("embedded Atlassian preserves personal ownership, exact returns, replay and
         idempotencyKey: randomUUID(),
       }),
     });
-  expect((await begin("workspace")).status).toBe(422);
-  const started = await begin();
-  expect(started.status).toBe(200);
-  const attempt = await started.json();
-  const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
-  const callback = (callbackState: string, denied = false) =>
+  expect((await begin()).status).toBe(410);
+  expect((await begin("workspace")).status).toBe(410);
+  const catalog = await (
+    await app.request(base.replace("/attempts", "/catalog"), { headers })
+  ).json();
+  expect(catalog.some((provider: { id: string }) => provider.id === "atlassian")).toBe(false);
+  expect(catalog.some((provider: { id: string }) => provider.id === "mcp-oauth")).toBe(true);
+
+  // Simulate an OAuth attempt accepted by the preceding release. Callback
+  // authority still follows the original native human, rather than the reader.
+  const scope = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
+  const attemptId = randomUUID();
+  await beginConnectAttempt(client.db, scope, {
+    idempotencyKey: randomUUID(),
+    requestDigest: "a".repeat(64),
+    returnUrl,
+    attempt: {
+      id: attemptId,
+      workspaceId: scope.workspaceId,
+      providerId: "atlassian",
+      ownership: "personal",
+      revision: 1,
+      state: "requires_user_action",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "connection",
+      nextAction: { type: "authorize", url: "https://auth.atlassian.com/authorize" },
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    },
+  });
+  const state = createSignedState("embedded-atlassian-fixture-state", {
+    kind: "atlassian_oauth",
+    ...scope,
+    personalOwnerVerified: true,
+    returnPath: `/workspaces/${scope.workspaceId}/capabilities`,
+    connectAttemptId: attemptId,
+  });
+  const callback = () =>
     app.request(
-      `/v1/integrations/atlassian/callback?${new URLSearchParams({ state: callbackState, ...(denied ? { error: "access_denied" } : { code: "fixture-code" }) })}`,
+      `/v1/integrations/atlassian/callback?${new URLSearchParams({ state, code: "fixture-code" })}`,
     );
-  expect((await callback(state)).headers.get("location")).toBe(returnUrl);
-  const result = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+  expect((await callback()).headers.get("location")).toBe(returnUrl);
+  const result = (await getConnectAttempt(client.db, scope, attemptId)).attempt;
   expect(result).toMatchObject({
-    state: "complete",
-    completionRequirement: "connection",
-    credentialsCommitted: true,
-    account: { providerId: "atlassian", ownership: "personal" },
-  });
-  expect((await callback(state)).headers.get("location")).toBe(returnUrl);
-  expect(exchanges).toBe(1);
-  const denied = await (await begin()).json();
-  const deniedState = new URL(denied.nextAction.url).searchParams.get("state")!;
-  expect((await callback(deniedState, true)).headers.get("location")).toBe(returnUrl);
-  expect(await (await app.request(`${base}/${denied.id}`, { headers })).json()).toMatchObject({
-    state: "cancelled",
+    state: "failed",
     credentialsCommitted: false,
+    integrationInstalled: false,
+    nextAction: { type: "none" },
+    error: { code: ATLASSIAN_NATIVE_RETIRED_REASON, retryable: false },
   });
-  expect(exchanges).toBe(1);
+  expect((await callback()).headers.get("location")).toBe(returnUrl);
+  expect((await getConnectAttempt(client.db, scope, attemptId)).attempt).toEqual(result);
+  expect(await listConnectionsMetadata(client.db, grant.workspaceId, grant.subjectId)).toEqual([]);
+  expect(exchanges).toBe(0);
 });

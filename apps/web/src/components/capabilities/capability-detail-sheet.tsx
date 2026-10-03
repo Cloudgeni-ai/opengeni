@@ -916,12 +916,16 @@ export function FikenConnectorControls({
   busy,
   onAction,
   setupOnly = false,
+  oauthAvailable = true,
+  tokenAvailable = true,
 }: {
   item: CapabilityCatalogItem;
   health: ConnectionHealth;
   keyPageUrl: string | null;
   busy: boolean;
   setupOnly?: boolean;
+  oauthAvailable?: boolean;
+  tokenAvailable?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const [replacing, setReplacing] = useState(false);
@@ -1041,11 +1045,11 @@ export function FikenConnectorControls({
 
   return (
     <div className="space-y-3">
-      {oauthButton("Connect Fiken", <PlugIcon />)}
+      {oauthAvailable ? oauthButton("Connect Fiken", <PlugIcon />) : null}
       <p className="text-center text-xs text-fg-subtle">
         Uses your Fiken account. Agents and automations in this workspace can use it.
       </p>
-      {usingToken ? (
+      {tokenAvailable && (usingToken || !oauthAvailable) ? (
         <div className="space-y-3">
           {tokenForm("Connect for workspace", <PlugIcon />)}
           <p className="text-center text-xs text-fg-subtle">
@@ -1053,9 +1057,9 @@ export function FikenConnectorControls({
             personal tokens only for integrating your own company.
           </p>
         </div>
-      ) : (
+      ) : tokenAvailable ? (
         tokenFallbackToggle
-      )}
+      ) : null}
     </div>
   );
 }

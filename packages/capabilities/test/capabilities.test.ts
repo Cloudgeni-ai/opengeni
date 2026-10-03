@@ -3,6 +3,7 @@ import { buildSchema, introspectionFromSchema } from "graphql";
 
 import {
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
   MAX_INTEGRATION_SPEC_BYTES,
   MAX_CURATED_INTEGRATION_SPEC_BYTES,
@@ -74,6 +75,23 @@ describe("OpenAPI compiler and local MCP invocation", () => {
       `${file}/children`,
       `${file}/workbookOther`,
       "/shares/{sharedDriveItem-id}/driveItem",
+    ]);
+  });
+
+  test("Outlook Calendar keeps availability and omits meeting suggestions needing shared-calendar grants", () => {
+    const paths = Object.fromEntries(
+      ["/me/calendar/getSchedule", "/me/events", "/me/findMeetingTimes", "/me/reminderView"].map(
+        (path) => [path, { post: { responses: { "200": { description: "OK" } } } }],
+      ),
+    );
+    const filtered = filterOpenApiDocumentForDefinition(
+      { openapi: "3.1.0", info: { title: "Graph", version: "1" }, paths },
+      MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+    );
+    expect(Object.keys(filtered.paths as object)).toEqual([
+      "/me/calendar/getSchedule",
+      "/me/events",
+      "/me/reminderView",
     ]);
   });
 

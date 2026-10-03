@@ -7,9 +7,9 @@ import {
 } from "./atlassian-connection";
 
 describe("Atlassian capabilities state", () => {
-  test("states both live reading and optional synchronization", () => {
-    expect(ATLASSIAN_APP_DESCRIPTION).toContain("Search Jira and Confluence live");
-    expect(ATLASSIAN_APP_DESCRIPTION).toContain("optional knowledge synchronization");
+  test("states retirement and points to hosted agent tools", () => {
+    expect(ATLASSIAN_APP_DESCRIPTION).toContain("knowledge sync is retired");
+    expect(ATLASSIAN_APP_DESCRIPTION).toContain("Atlassian agent tools");
   });
 
   test("projects the local connected QA fixture", () => {
