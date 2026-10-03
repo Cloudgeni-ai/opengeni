@@ -9,20 +9,21 @@ import { chatTokens, type ChatStyle } from "./style-knobs";
 export const CONNECT_MS = 900;
 
 /**
- * Keeps the agent's reply in view after a click inside the chat paused the
- * timeline's auto-follow: presses the timeline's own "Jump to latest" while
- * the reply streams in.
+ * After the Connect click, hand focus back out of the conversation and return
+ * it to the latest message: a control focused inside the timeline means "the
+ * reader is here" to `@opengeni/react`, which then stops following the reply.
  */
-function followLatest(section: HTMLElement) {
-  let ticks = 0;
+function returnToLatest(link: HTMLElement, section: HTMLElement) {
+  link.blur();
+  // The timeline offers its "Jump to latest" once the reply lands below;
+  // take it once, and with focus outside the timeline it keeps following.
+  let tries = 0;
   const timer = setInterval(() => {
-    ticks += 1;
-    const jump = Array.from(section.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim() === "Jump to latest",
-    );
-    jump?.click();
-    if (ticks >= 16) clearInterval(timer);
-  }, 400);
+    tries += 1;
+    const jump = section.querySelector<HTMLButtonElement>("[data-og-jump-to-latest]");
+    if (jump) jump.click();
+    if (jump || tries >= 20) clearInterval(timer);
+  }, 250);
 }
 
 /**
@@ -70,8 +71,8 @@ export function AcmeProduct({
     setTimeout(() => {
       link.dataset.demoConnect = "connected";
       link.setAttribute("aria-label", "Connected");
+      returnToLatest(link, section);
       onConnected();
-      followLatest(section);
     }, CONNECT_MS);
   };
   return (
