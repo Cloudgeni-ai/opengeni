@@ -2881,6 +2881,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
+      // These scenarios share a configured workspace, so earlier fixtures can
+      // legitimately contribute attention outside the painted project window.
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
       const parent = await createSessionThroughApi(
         page,
         apiBaseUrl,
@@ -2973,7 +2976,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
-      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
@@ -3008,6 +3018,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
+      const attentionBefore = await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId);
       const root = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Deep pinned root");
       await withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
         await scoped.execute(sql`update workspaces
@@ -3047,7 +3058,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, root, true);
       await navigateWithProjectPages(page, workspaceId, () => page.reload());
-      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      // The depth-33 descendant contributes exactly one more root workstream,
+      // independent of earlier fixtures and the treeStats painted-depth cap.
+      const needsYouCount = attentionBefore + 1;
+      expect(await needsYouCountFromBrowser(page, apiBaseUrl, workspaceId)).toBe(needsYouCount);
+      await page
+        .getByRole("button", {
+          name: `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`,
+          exact: true,
+        })
+        .click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
       const filteredPage = page.waitForResponse((response) => {
@@ -4030,6 +4050,7 @@ type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
   nextCursor: string | null;
+  totals?: { needsYouCount: number };
 };
 
 function sessionPageResponse(
@@ -4408,7 +4429,13 @@ async function listPageFromBrowser(
   page: Page,
   apiBaseUrl: string,
   workspaceId: string,
-  options: { limit: number; cursor?: string; search?: string },
+  options: {
+    limit: number;
+    cursor?: string;
+    search?: string;
+    parentSessionId?: null;
+    includeTotals?: boolean;
+  },
 ): Promise<BrowserSessionPage> {
   return await page.evaluate(
     async ({
@@ -4422,6 +4449,8 @@ async function listPageFromBrowser(
       });
       if (pageOptions.cursor) query.set("cursor", pageOptions.cursor);
       if (pageOptions.search) query.set("search", pageOptions.search);
+      if (pageOptions.parentSessionId === null) query.set("parentSessionId", "null");
+      if (pageOptions.includeTotals) query.set("includeTotals", "true");
       const response = await fetch(
         `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions?${query.toString()}`,
       );
@@ -4432,6 +4461,21 @@ async function listPageFromBrowser(
     },
     { apiBaseUrl, workspaceId, options },
   );
+}
+
+async function needsYouCountFromBrowser(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+): Promise<number> {
+  // A one-row root page must still report the complete, member-scoped total.
+  const response = await listPageFromBrowser(page, apiBaseUrl, workspaceId, {
+    limit: 1,
+    parentSessionId: null,
+    includeTotals: true,
+  });
+  expect(response.totals).toBeDefined();
+  return response.totals!.needsYouCount;
 }
 
 async function expectNoPageOverflow(page: Page): Promise<void> {
