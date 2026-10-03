@@ -237,7 +237,9 @@ function SessionCapabilitySetup({
     id: string;
     url: string;
     kind: "oauth2" | "none" | "unknown";
+    message?: string | undefined;
   } | null>(null);
+  const [authInspectionRevision, setAuthInspectionRevision] = useState(0);
   const inFlight = useRef(false);
   const scope = useRef({
     client: context.client,
@@ -283,7 +285,7 @@ function SessionCapabilitySetup({
     setAuthInspection(null);
     void context.client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
       (result) => {
-        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: result.kind });
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, ...result });
       },
       () => {
         if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: "unknown" });
@@ -292,7 +294,14 @@ function SessionCapabilitySetup({
     return () => {
       active = false;
     };
-  }, [context.client, workspaceId, rawItemId, inspectUrl, needsAuthInspection]);
+  }, [
+    context.client,
+    workspaceId,
+    rawItemId,
+    inspectUrl,
+    needsAuthInspection,
+    authInspectionRevision,
+  ]);
   const item = useMemo(() => {
     if (!rawItem || !needsAuthInspection) return rawItem;
     const inspection =
@@ -307,7 +316,11 @@ function SessionCapabilitySetup({
           : inspection === "none"
             ? ("none" as const)
             : null,
-      metadata: { ...rawItem.metadata, authDiscovery: inspection },
+      metadata: {
+        ...rawItem.metadata,
+        authDiscovery: inspection,
+        authDiscoveryMessage: inspection === "unknown" ? authInspection?.message : undefined,
+      },
     };
   }, [rawItem, needsAuthInspection, inspectUrl, authInspection]);
   useEffect(() => {
@@ -440,6 +453,14 @@ function SessionCapabilitySetup({
             "capabilities:manage",
           )}
           onAction={(action) => void act(action)}
+          onRetryAuthInspection={
+            needsAuthInspection
+              ? () => {
+                  setAuthInspection(null);
+                  setAuthInspectionRevision((revision) => revision + 1);
+                }
+              : undefined
+          }
         />
       )}
       <div className="mt-2 flex justify-end gap-2">

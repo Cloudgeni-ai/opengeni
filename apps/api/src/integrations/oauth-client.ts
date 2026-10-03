@@ -1301,10 +1301,13 @@ export async function inspectMcpAuthentication(
       await resolveMcpOAuthDiscovery({
         resourceUrl: resource,
         challenge,
-        fetchMetadata: async ({ url }) => {
+        fetchMetadata: async ({ kind, url }) => {
           try {
-            const result = await deadline.run("protected_resource_metadata", (signal) =>
-              fetchOAuthMetadata(url, settings, signal),
+            const result = await deadline.run(
+              kind === "protected_resource"
+                ? "protected_resource_metadata"
+                : "authorization_server_metadata",
+              (signal) => fetchOAuthMetadata(url, settings, signal),
             );
             metadataRead = true;
             if (result.status !== "absent") metadataAbsent = false;
@@ -1318,7 +1321,7 @@ export async function inspectMcpAuthentication(
         canonicalizeResource: canonicalOAuthResource,
       });
       return { kind: "oauth2" };
-    } catch {
+    } catch (failure) {
       // Public initialization does not exclude optional or tool-level OAuth.
       // Only explicit absence of metadata permits the unauthenticated path.
       if (
@@ -1331,18 +1334,29 @@ export async function inspectMcpAuthentication(
         return { kind: "none" };
       return {
         kind: "unknown",
-        message:
-          "This server's sign-in requirements could not be determined. Check its setup instructions.",
+        message: mcpAuthInspectionFailureMessage(failure),
       };
     }
-  } catch {
+  } catch (failure) {
     return {
       kind: "unknown",
-      message: "Could not check this server. Retry or consult its setup instructions.",
+      message: mcpAuthInspectionFailureMessage(failure),
     };
   } finally {
     deadline.dispose();
   }
+}
+
+function mcpAuthInspectionFailureMessage(failure: unknown): string {
+  if (failure instanceof OAuthStartStageError) {
+    if (failure.reason === "timeout") {
+      return "Checking how to sign in timed out. Try again.";
+    }
+    if (failure.cause instanceof OAuthMetadataUpstreamError) {
+      return `The provider returned HTTP ${failure.cause.upstreamStatus} while checking how to sign in. Retry or check the provider's setup instructions.`;
+    }
+  }
+  return "Could not determine how to sign in. Retry or check the provider's setup instructions.";
 }
 
 async function discoverMcpOAuth(
