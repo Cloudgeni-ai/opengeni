@@ -219,6 +219,18 @@ Read response visibility from `session.tenancy?.visibility`, not
 requests; the response's tenancy projection may be absent when private-session
 support is unavailable. Absence means unknown, not `"workspace"`.
 
+For a product-only background job, use both `firstPartyMcpTools: []` and
+`firstPartyMcpPermissions: []` (see [Agent recipes](agent-recipes.md)). An
+explicit empty permission ceiling is zero delegated OpenGeni authority, not a
+default grant or a request to mint an empty token. Remote first-party MCP tools
+are not prepared; requesting them or dedicated first-party `files`/`docs`
+produces an `insufficient_scope` advisory and no executable catalog entry.
+External-host MCP servers, host-owned local adapters, independent connections
+and already-authorized native runtime mechanics retain their own authority.
+Automation templates default omitted first-party arrays to `[]`; ordinary
+sessions with undefined permissions retain their existing defaults. Never pad
+the permissions merely to make startup succeed.
+
 `effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
 locally if your UI needs capability sections:
 

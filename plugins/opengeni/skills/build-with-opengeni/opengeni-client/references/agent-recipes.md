@@ -50,6 +50,7 @@ await job.createSession(workspaceId, {
   skills: productSkills,
   tools: selectedProductTools,
   firstPartyMcpTools: [],
+  firstPartyMcpPermissions: [],
   bundledSkillIds: [],
 });
 ```
@@ -60,6 +61,16 @@ permissions or borrowing personal resources. Use a workspace-owned Connection
 for background API/MCP access, or the product's signed workspace credential
 provider for short-lived managed-sandbox Git/cloud material. See
 [Data tools and credentials](data-tools-and-credentials.md).
+
+The two empty first-party arrays deliberately give this job no delegated
+OpenGeni tool authority. Remote first-party MCP preparation is skipped without
+a token or endpoint request; do not add a permission just to start the job.
+Product MCP servers, independently authorized connections, host-owned local
+adapters and already-authorized native runtime mechanics keep their own
+authorization paths. Requesting first-party tools or dedicated `files`/`docs`
+with this ceiling leaves them unavailable with an `insufficient_scope`
+advisory. In inbound automation templates both arrays also default to `[]`;
+ordinary `createSession` omission still inherits its existing defaults.
 
 ## Per-user tool tokens
 

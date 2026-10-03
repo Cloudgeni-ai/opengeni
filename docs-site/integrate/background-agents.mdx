@@ -42,6 +42,13 @@ x-opengeni-delivery-id: <optional, for deduplication>
 
 Redelivered events are deduplicated. Event data reaches the agent as untrusted input, never as instructions or permissions. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
 
+Automation templates default `firstPartyMcpTools` and `firstPartyMcpPermissions`
+to `[]`: no delegated OpenGeni tool authority. Keep them empty for product-only
+jobs; startup skips remote first-party MCP preparation without padding a grant.
+Product servers and independently authorized connections keep their own
+authority. Explicitly requested first-party tools remain unavailable with an
+`insufficient_scope` advisory.
+
 ## Work until done
 
 Give a background session a **goal** with success criteria, and it keeps working across turns until it completes the goal with evidence or pauses with a reason:

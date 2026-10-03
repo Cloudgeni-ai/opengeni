@@ -4487,17 +4487,49 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  // An explicit empty permission ceiling is valid zero authority, not a
+  // request for the default grant. There is no delegated bearer to mint and
+  // no OpenGeni MCP capability to prepare. Host/local adapters and independent
+  // connection credentials do not use that bearer and keep their own authority.
+  const unavailableFirstPartyServers = new Map<string, Settings["mcpServers"][number]>();
+  const refs = tools.filter((tool) => {
+    const config = registry.get(tool.id);
+    if (
+      options.firstPartyPermissions?.length !== 0 ||
+      !config ||
+      config.connectionRef ||
+      localRegistry.has(config.id) ||
+      !isFirstPartyMcpServer(settings, config)
+    ) {
+      return true;
+    }
+    unavailableFirstPartyServers.set(config.id, config);
+    return false;
+  });
+  for (const config of unavailableFirstPartyServers.values()) {
+    if (
+      config.id === "opengeni" &&
+      (options.firstPartyTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS).length === 0
+    ) {
+      continue;
+    }
+    await publishAuthNeeded(options, {
+      serverId: config.id,
+      providerDomain: "opengeni",
+      reason: "insufficient_scope",
+    });
+  }
   const identityTargets = selectedSessionRemoteMcpTargets(
     settings,
     options.sessionAttachedRemoteMcpTargets ?? [],
-    tools,
+    refs,
     options.localMcpServers,
   );
   options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
   options.runMcpCredentials?.assertRemoteTargets(
     settings.mcpServers.filter(
       (config) =>
-        tools.some((tool) => tool.id === config.id) &&
+        refs.some((tool) => tool.id === config.id) &&
         !config.connectionRef &&
         !localRegistry.has(config.id) &&
         !isFirstPartyMcpServer(settings, config) &&
@@ -4515,7 +4547,7 @@ export async function prepareAgentTools(
     options,
     "server_construction",
     async () =>
-      await boundedParallelMap(tools, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
+      await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
         const config = registry.get(tool.id);
         if (!config) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);

@@ -96,6 +96,11 @@ Empty realtime session creation captures no authority; first text Send selects
 normally. Superseded host references are rejected, not converted to native IDs.
 See `docs/architecture.md` and `docs/remote-mcp-credentials.md`.
 
+Explicit effective first-party permissions `[]` remain zero authority: skip
+only remote OpenGeni-delegated MCP preparation, never pad the grant or sign an
+empty token. Preserve independent external-host/local/connection/native paths.
+See `docs/automations.md` for empty template defaults and scope advisories.
+
 Explicit Slack task-file delivery uses the exact session's mapped thread and the
 installation's own bot credential, never a model-supplied destination or personal
 token. The source-workspace upload ledger checkpoints provider identity before
