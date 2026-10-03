@@ -19,6 +19,16 @@ function apiOrigin(): string {
   return new URL(apiBaseUrl || window.location.origin, window.location.href).origin;
 }
 
+/**
+ * Where to continue an agent's authorization after the person signed in:
+ * only the API's own authorize endpoint, never an arbitrary address.
+ */
+export function continueAuthorizeUrl(authorize: string, origin: string): string | null {
+  if (!authorize.startsWith("/oauth/authorize?")) return null;
+  const url = new URL(authorize, origin);
+  return url.origin === origin && url.pathname === "/oauth/authorize" ? url.toString() : null;
+}
+
 export function ConnectAgentRoute({
   request: requestToken,
   authorize,
@@ -38,8 +48,9 @@ export function ConnectAgentRoute({
     // Signed in now: continue the agent's authorization on the server. Only
     // this exact endpoint is followed, never an arbitrary address.
     if (authorize) {
-      if (authorize.startsWith("/oauth/authorize?")) {
-        window.location.replace(new URL(authorize, apiOrigin()).toString());
+      const next = continueAuthorizeUrl(authorize, apiOrigin());
+      if (next) {
+        window.location.replace(next);
         setState({ kind: "leaving" });
       } else {
         setState({ kind: "error", ...UNKNOWN });
