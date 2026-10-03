@@ -74,6 +74,8 @@ export type ExposeStreamPortInput = {
   resolution?: [number, number];
   /** Override the issue clock (tests). Seconds since the epoch. */
   nowSeconds?: number;
+  /** Input authority already granted by the API route. */
+  mode?: "view" | "control";
   /** The authenticated viewer subject the token is minted for (0281). */
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
@@ -306,6 +308,7 @@ export async function exposeStreamPort(
   }
 
   const url = buildStreamUrl(endpoint);
+  const channelBinding = relayChannelBinding(endpoint, input.workspaceId, port);
   const ttlSeconds = input.ttlSeconds ?? STREAM_TOKEN_DEFAULT_TTL_SECONDS;
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const token = await mintStreamToken(input.streamTokenSecret, {
@@ -313,12 +316,13 @@ export async function exposeStreamPort(
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
-    mode: "view",
+    mode: input.mode ?? "view",
     port,
     ttlSeconds,
     nowSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
+    ...channelBinding,
   });
 
   return {
@@ -330,4 +334,47 @@ export async function exposeStreamPort(
     resolution: input.resolution ?? DEFAULT_RESOLUTION,
     leaseEpoch: input.leaseEpoch,
   };
+}
+
+function relayChannelBinding(
+  endpoint: ExposedPortEndpoint,
+  workspaceId: string,
+  port: number,
+): { agentId?: string; channelId?: string } {
+  const query = new URLSearchParams((endpoint.query ?? "").replace(/^\?/u, ""));
+  const keys = ["ws", "agent", "port", "channel"] as const;
+  const present = keys.map((key) => query.has(key));
+  const usesRelayPath = endpoint.path?.replace(/\/+$/u, "").endsWith("/stream") ?? false;
+
+  if (!present.some(Boolean)) {
+    if (usesRelayPath) {
+      throw new StreamPortUnavailableError("relay endpoint is missing its channel key");
+    }
+    return {};
+  }
+
+  if (!present.every(Boolean) || keys.some((key) => query.getAll(key).length !== 1)) {
+    throw new StreamPortUnavailableError(
+      "relay endpoint has an incomplete or ambiguous channel key",
+    );
+  }
+
+  const endpointWorkspaceId = query.get("ws");
+  const agentId = query.get("agent");
+  const endpointPort = Number(query.get("port"));
+  const channelId = query.get("channel");
+  if (
+    endpointWorkspaceId !== workspaceId ||
+    endpointPort !== port ||
+    !agentId ||
+    agentId.length > 512 ||
+    !channelId ||
+    channelId.length > 128
+  ) {
+    throw new StreamPortUnavailableError(
+      "relay endpoint channel key does not match the stream token",
+    );
+  }
+
+  return { agentId, channelId };
 }

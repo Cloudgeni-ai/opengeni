@@ -64,6 +64,14 @@ spec:
             # The wss listener bind. The container port is the single source of truth.
             - name: OPENGENI_RELAY_BIND
               value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}
+            # The API and relay read the same operator flag. The relay checks it
+            # independently so a control-claim token cannot enable input by itself.
+            - name: OPENGENI_STREAM_CONTROL_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "opengeni.fullname" . }}-config
+                  key: OPENGENI_STREAM_CONTROL_ENABLED
+                  optional: true
             {{- with .Values.relay.metricsPort }}
             # GET /metrics moves to this internal listener and is never served on
             # the public wss port.

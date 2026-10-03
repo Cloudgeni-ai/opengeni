@@ -37,7 +37,8 @@
 //!   against the same field set + `exp >= now` the TS `verify*` does.
 //!
 //! The JSON field NAMES must match the TS schema exactly (camelCase: `workspaceId`,
-//! `sessionId`, `viewerId`, `leaseEpoch`, `mode`, `port`, `exp`; `agentId`); the
+//! `sessionId`, `viewerId`, `leaseEpoch`, `mode`, `port`, `exp`, `agentId`,
+//! `channelId`); the
 //! cross-stack fixture (`tests/cross_stack_token.rs`) reads tokens the TS mint
 //! produced and asserts this Rust verify accepts them, locking the agreement.
 
@@ -71,7 +72,7 @@ pub struct StreamTokenClaims {
     /// fence.
     #[serde(rename = "leaseEpoch")]
     pub lease_epoch: u64,
-    /// `"view"` (always, v1) or `"control"` (the never-granted raw-input plane).
+    /// Whether the API granted this viewer raw input authority.
     pub mode: String,
     /// The exposed stream port the token pins to.
     pub port: u32,
@@ -86,6 +87,13 @@ pub struct StreamTokenClaims {
     /// floor, mirroring the lease-epoch stale-viewer fence.
     #[serde(rename = "authorityEpoch", default)]
     pub authority_epoch: Option<u64>,
+    /// The exact self-hosted agent/channel this viewer token may attach to.
+    /// Optional for decoding; relay authorization rejects tokens missing either value.
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
+    /// The channel instance bound to this viewer token.
+    #[serde(rename = "channelId", default)]
+    pub channel_id: Option<String>,
 }
 
 /// The verified claims of an agent `ogr_` relay producer token. Field names mirror
@@ -137,8 +145,8 @@ impl std::error::Error for TokenError {}
 ///
 /// `now_seconds` is the current unix time (injected so tests are deterministic).
 /// Mirrors the TypeScript `verifyStreamToken` exactly (authenticity + freshness);
-/// the lease-epoch fence + workspace/session scope are enforced by the caller
-/// against the channel key (see [`registry`](crate::registry)).
+/// the lease-epoch fence and workspace/port/agent/channel scope are enforced by
+/// the caller against the channel key (see [`registry`](crate::registry)).
 ///
 /// # Errors
 ///
@@ -241,7 +249,7 @@ mod tests {
 
     fn stream_payload(epoch: u64, exp: i64) -> String {
         format!(
-            r#"{{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":{epoch},"mode":"view","port":7681,"exp":{exp}}}"#
+            r#"{{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":{epoch},"mode":"view","port":7681,"exp":{exp},"agentId":"agent-1","channelId":"channel-1"}}"#
         )
     }
 
@@ -257,26 +265,31 @@ mod tests {
         assert_eq!(claims.lease_epoch, 3);
         assert_eq!(claims.port, 7681);
         assert_eq!(claims.mode, "view");
+        assert_eq!(claims.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(claims.channel_id.as_deref(), Some("channel-1"));
     }
 
     #[test]
     fn parses_viewer_authority_claims_and_tolerates_their_absence() {
         // A 0281 token carries the viewer subject + authority epoch.
-        let payload = r#"{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":3,"mode":"view","port":7681,"exp":9999999999,"subjectId":"user:abc","authorityEpoch":7}"#;
+        let payload = r#"{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":3,"mode":"view","port":7681,"exp":9999999999,"subjectId":"user:abc","authorityEpoch":7,"agentId":"agent-1","channelId":"channel-1"}"#;
         let token = mint(STREAM_TOKEN_PREFIX, "sekret", payload);
         let claims = verify_stream_token("sekret", &token, 1_000).expect("verify");
         assert_eq!(claims.subject_id.as_deref(), Some("user:abc"));
         assert_eq!(claims.authority_epoch, Some(7));
+        assert_eq!(claims.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(claims.channel_id.as_deref(), Some("channel-1"));
 
-        // A pre-0281 token (no claims) still verifies with None fields.
-        let legacy = mint(
-            STREAM_TOKEN_PREFIX,
-            "sekret",
-            &stream_payload(3, 9_999_999_999),
-        );
+        // Legacy tokens without optional viewer authority or channel-binding
+        // claims still verify here; relay authorization separately requires the
+        // exact agent/channel binding before accepting a viewer connection.
+        let legacy_payload = r#"{"workspaceId":"ws-1","sessionId":"sess-1","viewerId":"v-1","leaseEpoch":3,"mode":"view","port":7681,"exp":9999999999}"#;
+        let legacy = mint(STREAM_TOKEN_PREFIX, "sekret", legacy_payload);
         let legacy_claims = verify_stream_token("sekret", &legacy, 1_000).expect("verify");
         assert_eq!(legacy_claims.subject_id, None);
         assert_eq!(legacy_claims.authority_epoch, None);
+        assert_eq!(legacy_claims.agent_id, None);
+        assert_eq!(legacy_claims.channel_id, None);
     }
 
     #[test]

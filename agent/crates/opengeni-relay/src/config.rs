@@ -42,6 +42,17 @@ pub struct RelayConfig {
     #[arg(long, env = "OPENGENI_RELAY_TOKEN_SECRET", default_value = "")]
     pub relay_token_secret: String,
 
+    /// Whether control-mode viewer tokens may send typed desktop input on port 6080.
+    /// PTY typing on port 7681 is independent of desktop control.
+    /// This must be enabled independently at the API and relay edges.
+    #[arg(
+        long,
+        env = "OPENGENI_STREAM_CONTROL_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub stream_control_enabled: bool,
+
     /// The per-channel-direction replay ring capacity (frames retained for resume).
     #[arg(long, env = "OPENGENI_RELAY_RING_FRAMES", default_value_t = 1024)]
     pub ring_frames: usize,
@@ -104,6 +115,7 @@ impl RelayConfig {
             metrics_bind: None,
             stream_token_secret: secret.to_string(),
             relay_token_secret: secret.to_string(),
+            stream_control_enabled: false,
             ring_frames: 64,
             splice_buffer: 16,
             rate_burst_bytes: 1024 * 1024,
@@ -124,6 +136,23 @@ mod tests {
         assert_eq!(cfg.effective_relay_token_secret(), "shared");
         cfg.relay_token_secret = "explicit".to_string();
         assert_eq!(cfg.effective_relay_token_secret(), "explicit");
+    }
+
+    #[test]
+    fn stream_control_defaults_off_and_can_be_enabled_explicitly() {
+        let disabled =
+            RelayConfig::try_parse_from(["opengeni-relay"]).expect("default relay config parses");
+        assert!(!disabled.stream_control_enabled);
+
+        let enabled =
+            RelayConfig::try_parse_from(["opengeni-relay", "--stream-control-enabled", "true"])
+                .expect("explicit stream control setting parses");
+        assert!(enabled.stream_control_enabled);
+
+        let explicitly_disabled =
+            RelayConfig::try_parse_from(["opengeni-relay", "--stream-control-enabled", "false"])
+                .expect("explicit false stream control setting parses");
+        assert!(!explicitly_disabled.stream_control_enabled);
     }
 
     #[test]

@@ -18,12 +18,13 @@
 //! # The two tokens (a documented seam for M8b)
 //!
 //! The relay pairs a *producer* (agent) registration with a *consumer* (viewer)
-//! attach by the channel key `{workspaceId, agentId, port}`. The viewer presents
-//! the control-plane-minted scoped `ogs_` token (`mintStreamToken`); the AGENT
-//! presents its enrollment-scoped relay token here. The proto `StreamOpen.token`
-//! carries whichever side is registering. M8b's relay MUST validate BOTH sides'
-//! tokens and only splice a producer↔consumer pair when the keys match and both
-//! tokens pass (see the crate-level relay-dial protocol doc).
+//! attach by the channel key `{workspaceId, agentId, port, channelId}`. The viewer
+//! presents a control-plane-minted `ogs_` token (`mintStreamToken`) bound to that
+//! exact agent/channel; its mode decides whether viewer input may be forwarded.
+//! The AGENT presents its enrollment-scoped relay token here. The proto
+//! `StreamOpen.token` carries whichever side is registering. The relay MUST
+//! validate BOTH sides' tokens and only splice a producer↔consumer pair when the
+//! keys match and both tokens pass (see the crate-level relay-dial protocol doc).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -549,20 +550,22 @@ async fn await_pump_ready(ready_rx: oneshot::Receiver<()>, kind: &str) -> Platfo
     }
 }
 
-/// A fresh channel id (a random hex token). Avoids pulling a uuid crate for what is
-/// only a relay routing handle.
+/// A fresh channel id: 128 bits of CSPRNG entropy rendered as hex under the
+/// `ch-` prefix. The id is an unguessable relay routing handle — never a
+/// timestamp/counter sequence a peer could enumerate or predict.
 fn new_channel_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    // Mix in a per-process counter so two channels opened in the same nanosecond
-    // tick still differ.
-    let counter = CHANNEL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("ch-{nanos:x}-{counter:x}")
+    use rand::{rngs::OsRng, RngCore as _};
+    use std::fmt::Write as _;
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let mut id = String::with_capacity(3 + bytes.len() * 2);
+    id.push_str("ch-");
+    for byte in bytes {
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
 }
 
-static CHANNEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BROWSER_PORT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn allocate_browser_port(ports: &Arc<Mutex<HashSet<u32>>>) -> PlatformResult<u32> {
@@ -607,11 +610,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn channel_ids_are_unique() {
-        let a = new_channel_id();
-        let b = new_channel_id();
-        assert_ne!(a, b);
-        assert!(a.starts_with("ch-"));
+    fn channel_ids_are_unique_and_unpredictable() {
+        // The id must not be enumerable: a timestamp/counter sequence lets a
+        // peer predict a victim channel id, so draws must be CSPRNG outputs —
+        // unique, fixed-width hex, and never monotone.
+        let ids: Vec<String> = (0..64).map(|_| new_channel_id()).collect();
+        let unique: HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+        for id in &ids {
+            assert_eq!(id.len(), "ch-".len() + 32);
+            assert!(
+                id.strip_prefix("ch-")
+                    .expect("ch- prefix")
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "unexpected channel id shape: {id}"
+            );
+        }
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_ne!(ids, sorted, "channel ids must not arrive in sequence");
     }
 
     #[test]

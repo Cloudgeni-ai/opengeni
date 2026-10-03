@@ -2,7 +2,11 @@ import { afterAll, describe, expect, mock, test } from "bun:test";
 import { resolveStreamTokenSecret } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { verifyStreamToken } from "@opengeni/runtime/sandbox";
-import { mintSelfhostedStream, resolveActiveDesktopTransport } from "../src/sandbox/viewer";
+import {
+  mintSelfhostedStream,
+  resolveActiveDesktopTransport,
+  shouldGrantStreamControl,
+} from "../src/sandbox/viewer";
 
 // M8b — the SELFHOSTED relay stream-mint seam (viewer.ts mintSelfhostedStream).
 //
@@ -113,6 +117,9 @@ describe("mintSelfhostedStream — relay stream cell fenced by active_epoch (M8b
     expect(claims).not.toBeNull();
     expect(claims?.leaseEpoch).toBe(activeEpoch);
     expect(claims?.workspaceId).toBe(WS);
+    expect(claims?.agentId).toBe(AGENT);
+    expect(claims?.channelId).toBe("ch-abc");
+    expect(claims?.mode).toBe("view");
     expect(cell?.leaseEpoch).toBe(activeEpoch);
     // The token is NEVER appended to the URL (recorded against the holder instead).
     expect(cell?.url).not.toContain(cell!.token);
@@ -151,6 +158,90 @@ describe("mintSelfhostedStream — relay stream cell fenced by active_epoch (M8b
       },
     );
     expect(cell).toBeNull();
+  });
+
+  test("the API feature flag downgrades a control request to view mode", async () => {
+    const cell = await mintSelfhostedStream(
+      { db: {} as never, settings },
+      {
+        workspaceId: WS,
+        sessionId: SESSION,
+        viewerId: VIEWER,
+        activeEpoch: 1,
+        port: 6080,
+        mode: "control",
+        session: fakeSelfhostedSession(6080),
+      },
+    );
+    expect(cell).not.toBeNull();
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(settings)!, cell!.token);
+    expect(claims?.mode).toBe("view");
+  });
+
+  test("the terminal port keeps its control claim with the desktop flag off", async () => {
+    // `settings` leaves streamControlEnabled at its false default: PTY typing
+    // is authorized by terminal:attach alone, so a flag-off deploy must still
+    // mint a control token or authorized keystrokes die at the relay.
+    const cell = await mintSelfhostedStream(
+      { db: {} as never, settings },
+      {
+        workspaceId: WS,
+        sessionId: SESSION,
+        viewerId: VIEWER,
+        activeEpoch: 1,
+        port: 7681,
+        mode: "control",
+        session: fakeSelfhostedSession(7681),
+      },
+    );
+    expect(cell).not.toBeNull();
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(settings)!, cell!.token);
+    expect(claims?.mode).toBe("control");
+  });
+});
+
+describe("stream control authorization", () => {
+  test("control requires the API flag, stream:control permission, and machine owner consent", () => {
+    const allGranted = {
+      settingEnabled: true,
+      accessIncludesControl: true,
+      machineConsentRequired: true,
+      machineOwnerAllowsScreenControl: true,
+    };
+    expect(shouldGrantStreamControl({ ...allGranted, settingEnabled: false })).toBe(false);
+    expect(shouldGrantStreamControl({ ...allGranted, accessIncludesControl: false })).toBe(false);
+    expect(
+      shouldGrantStreamControl({ ...allGranted, machineOwnerAllowsScreenControl: false }),
+    ).toBe(false);
+    expect(shouldGrantStreamControl(allGranted)).toBe(true);
+  });
+
+  test("a desktop token carries control only after every API gate passes", async () => {
+    const controlSettings = testSettings({
+      streamTokenSecret: "selfhosted-stream-secret",
+      streamControlEnabled: true,
+      sandboxDesktopEnabled: true,
+    });
+    const canControl = shouldGrantStreamControl({
+      settingEnabled: controlSettings.streamControlEnabled,
+      accessIncludesControl: true,
+      machineConsentRequired: true,
+      machineOwnerAllowsScreenControl: true,
+    });
+    const cell = await mintDesktopStream(
+      { db: {} as never, settings: controlSettings },
+      {
+        accountId: "acc",
+        workspaceId: WS,
+        session: baseSession as never,
+        viewerId: VIEWER,
+        canControl,
+        resolveSelfhostedSession: fakeResolveSession(6080),
+      },
+    );
+    expect(cell).not.toBeNull();
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(controlSettings)!, cell!.token);
+    expect(claims?.mode).toBe("control");
   });
 });
 
@@ -193,6 +284,7 @@ function fakeResolveSession(port: number) {
 describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch (M8b wiring)", () => {
   const settings = testSettings({
     streamTokenSecret: "selfhosted-stream-secret",
+    streamControlEnabled: true,
     sandboxTerminalEnabled: true,
     sandboxDesktopEnabled: true,
   });
@@ -204,6 +296,7 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
       workspaceId: WS,
       session: baseSession as never,
       viewerId: VIEWER,
+      canControl: true,
       resolveSelfhostedSession: fakeResolveSession(7681),
     });
     expect(cell).not.toBeNull();
@@ -217,6 +310,9 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     expect(claims?.leaseEpoch).toBe(7);
     // 0281: the selfhosted lane threads the authority claims end-to-end.
     expect(claims?.authorityEpoch).toBe(1);
+    expect(claims?.mode).toBe("control");
+    expect(claims?.agentId).toBe(AGENT);
+    expect(claims?.channelId).toBe("ch-abc");
     expect(cell?.leaseEpoch).toBe(7);
     expect(cell?.url).not.toContain(cell!.token);
   });
@@ -237,6 +333,9 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
     const claims = await verifyStreamToken(secret, cell!.token);
     expect(claims?.leaseEpoch).toBe(7);
     expect(claims?.authorityEpoch).toBe(1);
+    expect(claims?.mode).toBe("view");
+    expect(claims?.agentId).toBe(AGENT);
+    expect(claims?.channelId).toBe("ch-abc");
     expect(cell?.leaseEpoch).toBe(7);
     // Desktop cell must carry resolution.
     expect(cell?.resolution).toBeDefined();

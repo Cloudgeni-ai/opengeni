@@ -421,9 +421,9 @@ const SettingsSchema = z.object({
   // BOTH while sandboxDesktopEnabled=true is a GRACEFUL DEGRADE (DesktopStream
   // transport:null + a loud boot warning), NOT a hard boot-fail (stream-token availability contract).
   streamTokenSecret: z.string().optional(),
-  // The desktop input plane (raw stream:control writes) is OFF in v1: even a
-  // holder of stream:control gets 403 until this flips. Keeps stream:control a
-  // declared-but-inert permission so later hardening is a flag flip.
+  // Desktop control is disabled by default and requires API/relay rollout,
+  // caller authority, and machine-owner consent. Authorized PTY typing remains
+  // independent of this desktop flag.
   streamControlEnabled: EnvBoolean.default(false),
   // Provider-neutral advisory work discovery rollout. Disabling this keeps
   // ordinary session listings available while rejecting relevance discovery

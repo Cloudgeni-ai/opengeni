@@ -402,6 +402,63 @@ describe("migration 0362 managed browser session sets", () => {
     expect(await getManagedAuthSessionSetAuthorityState(client.db, reauthAuthority)).toBe("absent");
   });
 
+  test("uses the database lease ceiling when the issuing API clock is ahead", async () => {
+    if (!owned || !client || !app) return;
+    const authority = `clock-skew-authority-${crypto.randomUUID()}`;
+    const transactionId = crypto.randomUUID();
+    const input = {
+      authorityHash: hex(authority),
+      csrfHash: hex(`csrf:${authority}`),
+      operationId: crypto.randomUUID(),
+      requestDigest: hex("clock-skew-broker-add"),
+      expectedGeneration: "1",
+      expectedActorEpoch: "1",
+      transactionId,
+      transactionSecretHash: hex(`secret:${transactionId}`),
+      kind: "add" as const,
+      targetSlotId: null,
+      returnIntentId: null,
+      returnPath: null,
+      // A ten-minute lease issued by an API clock one minute ahead.
+      expiresAt: new Date(Date.now() + 660_000),
+    };
+    const [before] = await owned.admin<Array<{ now: Date }>>`
+      select pg_catalog.clock_timestamp() as now
+    `;
+    const begun = await beginManagedAuthLoginTransaction(client.db, input);
+    const [stored] = await owned.admin<Array<{ expires_at: Date; now: Date }>>`
+      select expires_at, pg_catalog.clock_timestamp() as now
+      from managed_auth_login_transactions where id = ${transactionId}::uuid
+    `;
+    expect(stored).toBeDefined();
+    expect(begun.expiresAt).toBe(stored!.expires_at.toISOString());
+    expect(stored!.expires_at.getTime()).toBeGreaterThanOrEqual(before!.now.getTime() + 600_000);
+    expect(stored!.expires_at.getTime()).toBeLessThanOrEqual(stored!.now.getTime() + 600_000);
+    expect(stored!.expires_at.getTime()).toBeLessThan(input.expiresAt.getTime());
+
+    // The durable function still refuses a caller's overlong absolute deadline.
+    await expectSqlState(
+      () => app!`
+        select managed_auth_session_set_begin_transaction(
+          ${input.authorityHash}, ${input.csrfHash}, ${input.authorityHash},
+          ${crypto.randomUUID()}::uuid, ${input.requestDigest}, 1::bigint,
+          ${crypto.randomUUID()}::uuid, 1::bigint, ${input.transactionSecretHash},
+          'add', null::uuid, null::uuid, null,
+          pg_catalog.clock_timestamp() + interval '11 minutes'
+        )
+      `,
+      "22023",
+    );
+    await expect(
+      beginManagedAuthLoginTransaction(client.db, {
+        ...input,
+        operationId: crypto.randomUUID(),
+        transactionId: crypto.randomUUID(),
+        expiresAt: new Date(0),
+      }),
+    ).rejects.toBeTruthy();
+  });
+
   test(
     "bounds pre-auth transactions across repeated and fresh authorities and purges expiry",
     withRateLimitClock(async (setClock) => {

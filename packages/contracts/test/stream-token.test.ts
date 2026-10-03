@@ -62,6 +62,15 @@ describe("StreamTokenPayload sign/verify", () => {
     expect(() => payload({ subjectId: "" })).toThrow();
   });
 
+  test("self-hosted relay channel claims must be complete", async () => {
+    const claims = payload({ agentId: "agent-7", channelId: "channel-4" });
+    const verified = await verifyStreamToken(SECRET, await signStreamToken(SECRET, claims));
+    expect(verified?.agentId).toBe("agent-7");
+    expect(verified?.channelId).toBe("channel-4");
+    expect(() => payload({ agentId: "agent-7" })).toThrow();
+    expect(() => payload({ channelId: "channel-4" })).toThrow();
+  });
+
   test("verify rejects a tampered payload (signature no longer matches)", async () => {
     const token = await signStreamToken(SECRET, payload());
     const [encoded, signature] = token.slice("ogs_".length).split(".");

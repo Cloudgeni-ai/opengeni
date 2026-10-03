@@ -1470,7 +1470,6 @@ export function createAppComposition(deps: AppDependencies): {
       workspaceId,
       "workspace:read",
     );
-    const grant = authorization.grant;
     const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new HTTPException(400, { message: "Invalid tool gateway call" });
@@ -1480,7 +1479,7 @@ export function createAppComposition(deps: AppDependencies): {
       return c.json(
         await callWorkspaceToolGateway(
           prepared,
-          grant,
+          authorization,
           parsed.data,
           routeDeps.db,
           undefined,
@@ -1509,7 +1508,7 @@ export function createAppComposition(deps: AppDependencies): {
       return c.json(
         await approveWorkspaceToolGatewayCall(
           prepared,
-          authorization.grant,
+          authorization,
           routeDeps.db,
           parsed.data,
           undefined,

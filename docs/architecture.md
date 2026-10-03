@@ -1150,7 +1150,10 @@ Rust and `@opengeni/agent-proto` TypeScript types.
 
 One agent connects independently to multiple deployments and workspaces within
 shared host containment. The relay carries terminal/desktop bytes, not durable
-session or lease state. Install `latest` may serve baked binaries; version pins
+session or lease state. Viewer tokens bind the workspace, agent, channel, and port.
+Desktop input requires API/relay flags, `stream:control`, owner consent, and port
+6080; PTY typing uses `terminal:attach` independently. Install `latest` may serve
+baked binaries; version pins
 resolve binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and

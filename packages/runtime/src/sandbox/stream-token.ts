@@ -37,7 +37,7 @@ export type MintStreamTokenInput = {
    *  swapped off of. One field, two fences — the relay/in-box edge reads it as the
    *  stale-viewer floor either way. */
   leaseEpoch: number;
-  /** v1 is always "view"; "control" is the never-granted raw-input plane. */
+  /** Whether this holder may send input over the stream. */
   mode?: "view" | "control";
   /** The exposed stream port (noVNC); defaults to 6080. */
   port?: number;
@@ -49,6 +49,9 @@ export type MintStreamTokenInput = {
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
   authorityEpoch?: number;
+  /** Self-hosted relay channel identity. Omitted for non-relay provider tunnels. */
+  agentId?: string;
+  channelId?: string;
 };
 
 /**
@@ -74,6 +77,8 @@ export async function mintStreamToken(
     exp: nowSeconds + ttlSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
+    ...(input.agentId ? { agentId: input.agentId } : {}),
+    ...(input.channelId ? { channelId: input.channelId } : {}),
   });
   return signStreamToken(secret, payload);
 }
@@ -84,9 +89,8 @@ export async function mintStreamToken(
  * / expiry. Re-exports the contracts verify; the leaf is the agent-loop-free
  * import surface the API uses.
  *
- * The epoch fence (claim.leaseEpoch vs the LIVE lease epoch) and the
- * workspace+session scope are enforced at USE by the caller against the live
- * lease + route params — verify proves authenticity + freshness only.
+ * The epoch fence and any self-hosted agent/channel binding are enforced at USE
+ * by the caller against the live route — verify proves authenticity + freshness.
  */
 export async function verifyStreamToken(
   secret: string,

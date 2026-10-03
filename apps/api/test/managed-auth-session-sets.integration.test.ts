@@ -20,6 +20,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import { createManagedAuth } from "../src/auth/managed-auth";
 
 let shared: SharedTestDatabase;
@@ -49,6 +50,16 @@ function oneCookie(response: Response, name: string): string {
 
 function authorityValue(cookie: string): string {
   return cookie.slice(cookie.indexOf("=") + 1);
+}
+
+let nextClientIpOctet = 10;
+// app.request carries no socket binding, so every request would share the
+// "unknown" transport peer and collapse into one login-transaction rate scope
+// (and one better-auth bucket). Give each test client a distinct peer address.
+function clientRequest(app: ReturnType<typeof createApp>) {
+  const clientIp = `198.51.100.${nextClientIpOctet++}`;
+  return (path: string | URL | Request, init?: RequestInit) =>
+    app.request(path, init, apiRequestBindingsForTransportPeer(clientIp));
 }
 
 function mutationHeaders(
@@ -84,10 +95,11 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
-    const initialResponse = await app.request("/v1/auth/session-set");
+    const request = clientRequest(app);
+    const initialResponse = await request("/v1/auth/session-set");
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
     const authorityCookie = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
-    const begin = await app.request("/v1/auth/session-set/transactions", {
+    const begin = await request("/v1/auth/session-set/transactions", {
       method: "POST",
       headers: mutationHeaders(initial, authorityCookie),
       body: JSON.stringify({
@@ -106,7 +118,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       transactionId: transaction.id,
       provider: "google",
     });
-    const start = await app.request("/v1/auth/session-set/transactions/social", {
+    const start = await request("/v1/auth/session-set/transactions/social", {
       method: "POST",
       headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
       body: socialBody,
@@ -127,7 +139,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       .find((cookie) => cookie.startsWith("better-auth.state="));
     expect(stateCookie).toBeString();
 
-    const replay = await app.request("/v1/auth/session-set/transactions/social", {
+    const replay = await request("/v1/auth/session-set/transactions/social", {
       method: "POST",
       headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
       body: socialBody,
@@ -138,7 +150,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       replay.headers.getSetCookie().find((cookie) => cookie.startsWith("better-auth.state=")),
     ).toBe(stateCookie);
 
-    const reused = await app.request("/v1/auth/session-set/transactions/social", {
+    const reused = await request("/v1/auth/session-set/transactions/social", {
       method: "POST",
       headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
       body: JSON.stringify({
@@ -248,9 +260,10 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    const request = clientRequest(app);
     const email = `managed-session-set-broker-${crypto.randomUUID()}@example.test`;
     const password = "password1234";
-    const initialResponse = await app.request("/v1/auth/session-set");
+    const initialResponse = await request("/v1/auth/session-set");
     expect(initialResponse.status).toBe(200);
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
     const authorityCookie = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
@@ -264,7 +277,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
 
-    const signUp = await app.request("/v1/auth/sign-up/email", {
+    const signUp = await request("/v1/auth/sign-up/email", {
       method: "POST",
       headers: { "content-type": "application/json", cookie: authorityCookie },
       body: JSON.stringify({ name: "Broker Session Set User", email, password }),
@@ -284,7 +297,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(sessionsAfterSignup).toEqual({ count: 0 });
     await shared.admin`update auth_users set email_verified = true where email = ${email}`;
 
-    const unselectedSignIn = await app.request("/v1/auth/sign-in/email", {
+    const unselectedSignIn = await request("/v1/auth/sign-in/email", {
       method: "POST",
       headers: { "content-type": "application/json", cookie: authorityCookie },
       body: JSON.stringify({ email, password, rememberMe: true }),
@@ -304,7 +317,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       expectedGeneration: initial.generation,
       kind: "add",
     });
-    const begin = await app.request("/v1/auth/session-set/transactions", {
+    const begin = await request("/v1/auth/session-set/transactions", {
       method: "POST",
       headers: mutationHeaders(initial, authorityCookie),
       body,
@@ -317,7 +330,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(transactionCookie).toContain(String(transaction.id));
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("active");
 
-    const replay = await app.request("/v1/auth/session-set/transactions", {
+    const replay = await request("/v1/auth/session-set/transactions", {
       method: "POST",
       headers: mutationHeaders(initial, authorityCookie),
       body,
@@ -332,7 +345,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       email,
       password,
     });
-    const completion = await app.request("/v1/auth/session-set/transactions/email-password", {
+    const completion = await request("/v1/auth/session-set/transactions/email-password", {
       method: "POST",
       headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
       body: completionBody,
@@ -360,7 +373,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     `;
     expect(sessionsAfterCompletion).toEqual({ count: 1 });
 
-    const completionReplay = await app.request("/v1/auth/session-set/transactions/email-password", {
+    const completionReplay = await request("/v1/auth/session-set/transactions/email-password", {
       method: "POST",
       headers: mutationHeaders(initial, authorityCookie),
       body: completionBody,
@@ -377,7 +390,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       operationId: crypto.randomUUID(),
       expectedGeneration: completed.projection.generation,
     });
-    const logout = await app.request("/v1/auth/session-set/logout-all", {
+    const logout = await request("/v1/auth/session-set/logout-all", {
       method: "POST",
       headers: mutationHeaders(completed.projection, authorityCookie),
       body: logoutBody,
@@ -401,7 +414,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     // Model a lost response body after the browser retained the response
     // headers. The retired cookie is deliberately still present, so the exact
     // command can recover its append-only receipt without reviving authority.
-    const logoutReplay = await app.request("/v1/auth/session-set/logout-all", {
+    const logoutReplay = await request("/v1/auth/session-set/logout-all", {
       method: "POST",
       headers: mutationHeaders(completed.projection, authorityCookie),
       body: logoutBody,
@@ -410,7 +423,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(await logoutReplay.json()).toEqual(logoutReceipt);
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("retired");
 
-    const distinctLogout = await app.request("/v1/auth/session-set/logout-all", {
+    const distinctLogout = await request("/v1/auth/session-set/logout-all", {
       method: "POST",
       headers: mutationHeaders(completed.projection, authorityCookie),
       body: JSON.stringify({
@@ -423,7 +436,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       error: { details: { managedAuthCode: "browser_session_set_required" } },
     });
 
-    const fresh = await app.request("/v1/auth/session-set", {
+    const fresh = await request("/v1/auth/session-set", {
       headers: { cookie: authorityCookie },
     });
     expect(fresh.status).toBe(200);
@@ -450,12 +463,13 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    const request = clientRequest(app);
     for (const [label, presentedAuthority, clientAddress] of [
       ["empty", "", "198.51.100.21"],
       ["malformed", "not-a-session-set-authority", "198.51.100.22"],
     ] as const) {
       const unselectedEmail = `managed-session-set-dual-${label}-${crypto.randomUUID()}@example.test`;
-      const unselectedSignup = await app.request("/v1/auth/sign-up/email", {
+      const unselectedSignup = await request("/v1/auth/sign-up/email", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -478,13 +492,13 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       `;
       expect(unselectedSessions).toEqual({ count: 0 });
     }
-    const initialResponse = await app.request("/v1/auth/session-set");
+    const initialResponse = await request("/v1/auth/session-set");
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
     const authority = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
     const email = `managed-session-set-dual-empty-${crypto.randomUUID()}@example.test`;
     const password = "password1234";
 
-    const signUp = await app.request("/v1/auth/sign-up/email", {
+    const signUp = await request("/v1/auth/sign-up/email", {
       method: "POST",
       headers: { "content-type": "application/json", cookie: authority },
       body: JSON.stringify({ name: "Dual Empty User", email, password }),
@@ -504,7 +518,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(sessionsAfterSignup).toEqual({ count: 0 });
     await shared.admin`update auth_users set email_verified = true where email = ${email}`;
 
-    const begin = await app.request("/v1/auth/session-set/transactions", {
+    const begin = await request("/v1/auth/session-set/transactions", {
       method: "POST",
       headers: mutationHeaders(initial, authority),
       body: JSON.stringify({
@@ -516,7 +530,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(begin.status).toBe(200);
     const transaction = (await begin.json()) as { id: string };
     const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
-    const completion = await app.request("/v1/auth/session-set/transactions/email-password", {
+    const completion = await request("/v1/auth/session-set/transactions/email-password", {
       method: "POST",
       headers: mutationHeaders(initial, `${authority}; ${transactionCookie}`),
       body: JSON.stringify({
@@ -539,7 +553,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       "better-auth.session_token=ey",
     );
 
-    const select = await app.request("/v1/auth/session-set/select", {
+    const select = await request("/v1/auth/session-set/select", {
       method: "POST",
       headers: mutationHeaders(completed.projection, authority),
       body: JSON.stringify({
@@ -553,7 +567,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(projection.selectedSlotId).not.toBeNull();
     const selectedCookie = oneCookie(select, "better-auth.session_token");
     expect(selectedCookie).not.toBe("better-auth.session_token=");
-    const selectedRead = await app.request("/v1/auth/get-session", {
+    const selectedRead = await request("/v1/auth/get-session", {
       headers: {
         cookie: `${authority}; ${selectedCookie}`,
         [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projection.actorEpoch,
@@ -574,8 +588,9 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    const brokerRequest = clientRequest(brokerApp);
     const cutoverCookies = `${authority}; ${selectedCookie}`;
-    const brokerRead = await brokerApp.request("/v1/auth/session-set", {
+    const brokerRead = await brokerRequest("/v1/auth/session-set", {
       headers: { cookie: cutoverCookies },
     });
     expect(brokerRead.status).toBe(200);
@@ -586,7 +601,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     expect(oneCookie(brokerRead, "better-auth.session_token")).toBe("better-auth.session_token=");
 
-    const brokerBegin = await brokerApp.request("/v1/auth/session-set/transactions", {
+    const brokerBegin = await brokerRequest("/v1/auth/session-set/transactions", {
       method: "POST",
       headers: mutationHeaders(brokerProjection, cutoverCookies),
       body: JSON.stringify({
@@ -599,7 +614,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(oneCookie(brokerBegin, "better-auth.session_token")).toBe("better-auth.session_token=");
     const brokerTransaction = (await brokerBegin.json()) as { id: string };
     const brokerTransactionCookie = oneCookie(brokerBegin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
-    const brokerCancel = await brokerApp.request(
+    const brokerCancel = await brokerRequest(
       `/v1/auth/session-set/transactions/${brokerTransaction.id}`,
       {
         method: "DELETE",
@@ -628,11 +643,12 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    const request = clientRequest(app);
     const email = `managed-session-set-${crypto.randomUUID()}@example.test`;
     const password = "password1234";
     expect(
       (
-        await app.request("/v1/auth/sign-up/email", {
+        await request("/v1/auth/sign-up/email", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ name: "Session Set User", email, password }),
@@ -640,7 +656,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       ).status,
     ).toBeLessThan(300);
     await shared.admin`update auth_users set email_verified = true where email = ${email}`;
-    const signIn = await app.request("/v1/auth/sign-in/email", {
+    const signIn = await request("/v1/auth/sign-in/email", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email, password, rememberMe: true }),
@@ -651,8 +667,8 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(signInBody).not.toHaveProperty("session");
     const ambient = oneCookie(signIn, "better-auth.session_token");
 
-    const tabAGet = await app.request("/v1/auth/session-set", { headers: { cookie: ambient } });
-    const tabBGet = await app.request("/v1/auth/session-set", { headers: { cookie: ambient } });
+    const tabAGet = await request("/v1/auth/session-set", { headers: { cookie: ambient } });
+    const tabBGet = await request("/v1/auth/session-set", { headers: { cookie: ambient } });
     const tabA = (await tabAGet.json()) as ManagedAuthSessionSetProjection;
     const tabB = (await tabBGet.json()) as ManagedAuthSessionSetProjection;
     const authorityA = oneCookie(tabAGet, MANAGED_AUTH_SESSION_SET_COOKIE);
@@ -661,7 +677,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
 
     const operationA = crypto.randomUUID();
     const bodyA = JSON.stringify({ operationId: operationA, expectedGeneration: tabA.generation });
-    const bootstrapA = await app.request("/v1/auth/session-set/bootstrap", {
+    const bootstrapA = await request("/v1/auth/session-set/bootstrap", {
       method: "POST",
       headers: mutationHeaders(tabA, `${ambient}; ${authorityA}`),
       body: bodyA,
@@ -672,7 +688,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
 
     const operationB = crypto.randomUUID();
     const bodyB = JSON.stringify({ operationId: operationB, expectedGeneration: tabB.generation });
-    const bootstrapB = await app.request("/v1/auth/session-set/bootstrap", {
+    const bootstrapB = await request("/v1/auth/session-set/bootstrap", {
       method: "POST",
       headers: mutationHeaders(tabB, `${ambient}; ${authorityB}`),
       body: bodyB,
@@ -694,7 +710,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       ),
     ).toBe("absent");
 
-    const replay = await app.request("/v1/auth/session-set/bootstrap", {
+    const replay = await request("/v1/auth/session-set/bootstrap", {
       method: "POST",
       headers: mutationHeaders(tabA, `${ambient}; ${authorityA}`),
       body: bodyA,
@@ -702,7 +718,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual(projectionA);
 
-    const legacyEpochOneRead = await app.request("/v1/auth/get-session", {
+    const legacyEpochOneRead = await request("/v1/auth/get-session", {
       headers: { cookie: `${ambient}; ${authorityA}` },
     });
     expect(legacyEpochOneRead.status).toBe(200);
@@ -713,7 +729,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       from auth_sessions where user_id = (select id from auth_users where email = ${email})
       order by created_at desc limit 1
     `;
-    const selectedRead = await app.request("/v1/auth/get-session", {
+    const selectedRead = await request("/v1/auth/get-session", {
       headers: {
         cookie: `${ambient}; ${authorityA}`,
         [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionA.actorEpoch,
@@ -734,7 +750,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       update auth_sessions set expires_at = now() - interval '1 second'
       where id = ${before!.id}
     `;
-    const expiredProjectionResponse = await app.request("/v1/auth/session-set", {
+    const expiredProjectionResponse = await request("/v1/auth/session-set", {
       headers: { cookie: authorityA },
     });
     expect(expiredProjectionResponse.status).toBe(200);
@@ -745,7 +761,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       state: "actor_change_required",
       slots: [{ id: projectionA.selectedSlotId, state: "reauth_required" }],
     });
-    const expiredSelectedRead = await app.request("/v1/auth/get-session", {
+    const expiredSelectedRead = await request("/v1/auth/get-session", {
       headers: {
         cookie: `${ambient}; ${authorityA}`,
         [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionA.actorEpoch,
@@ -781,7 +797,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       update managed_auth_session_sets set actor_epoch = actor_epoch + 1
       where authority_hash = ${managedAuthSha256(authorityValue(authorityA))}
     `;
-    const staleHeaderless = await app.request("/v1/auth/get-session", {
+    const staleHeaderless = await request("/v1/auth/get-session", {
       headers: { cookie: `${ambient}; ${authorityA}` },
     });
     expect(staleHeaderless.status).toBe(409);

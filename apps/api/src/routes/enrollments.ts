@@ -489,38 +489,55 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
+const MAX_TRACKED_RATE_LIMIT_BUCKETS = 10_000;
+
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained
-// rate. Buckets are created lazily and reset their tokens by elapsed time on each
-// take, so an idle key fully refills without a background timer.
-class TokenBucket {
+// rate. Source buckets are created lazily and refill on access without a timer.
+// At the storage cap, reclaim only a source idle for a complete burst-refill
+// period. Its quota would already be full, so eviction cannot reset a depleted
+// bucket. Until a slot becomes idle, refuse new sources without sharing quota.
+export class TokenBucket {
   private readonly capacity: number;
   private readonly refillPerSecond: number;
+  private readonly maxBuckets = MAX_TRACKED_RATE_LIMIT_BUCKETS;
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  private latestObservedTime = Number.NEGATIVE_INFINITY;
 
   constructor(options: { capacity: number; refillPerSecond: number }) {
     this.capacity = options.capacity;
     this.refillPerSecond = options.refillPerSecond;
   }
 
+  get bucketCount(): number {
+    return this.buckets.size;
+  }
+
   take(key: string, now = Date.now()): boolean {
-    const bucket = this.buckets.get(key) ?? {
-      tokens: this.capacity,
-      updatedAt: now,
-    };
+    now = Math.max(now, this.latestObservedTime);
+    this.latestObservedTime = now;
+    const existingBucket = this.buckets.get(key);
+    let bucket = existingBucket;
+    if (!bucket) {
+      if (this.buckets.size >= this.maxBuckets) {
+        const oldest = this.buckets.entries().next().value;
+        const refillPeriodMs = (this.capacity / this.refillPerSecond) * 1000;
+        if (!oldest || now - oldest[1].updatedAt < refillPeriodMs) return false;
+        this.buckets.delete(oldest[0]);
+      }
+      bucket = { tokens: this.capacity, updatedAt: now };
+    }
+
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
-    bucket.updatedAt = now;
-    // Prune the map opportunistically so it never grows unbounded: a fully-refilled
-    // bucket carries no state worth keeping.
-    if (bucket.tokens >= this.capacity && this.buckets.size > 10_000) {
-      this.buckets.delete(key);
-    }
+    bucket.updatedAt = Math.max(now, bucket.updatedAt);
+    // Keep the oldest idle source first, including denied attempts. With the
+    // monotonic observation clock this allows safe reclamation in constant time.
+    this.buckets.delete(key);
+    this.buckets.set(key, bucket);
     if (bucket.tokens < 1) {
-      this.buckets.set(key, bucket);
       return false;
     }
     bucket.tokens -= 1;
-    this.buckets.set(key, bucket);
     return true;
   }
 }
