@@ -1,17 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
-import {
-  buildInsightsDiagnostics,
-  buildInsightsView,
-  formatDeltaUsd,
-  formatPctDelta,
-  formatUsd,
-  formatUsdTick,
-  formatUtcTimestamp,
-  formatWarmHours,
-  pctDelta,
-} from "./mock-data";
+import { buildInsightsDiagnostics, formatWarmHours, pctDelta } from "./activity-data";
 
 function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): WorkspaceInsightsSnapshot {
   return {
@@ -135,140 +125,7 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
   };
 }
 
-describe("buildInsightsView", () => {
-  test("does not rescale warm series when deriving totals", () => {
-    const view = buildInsightsView(snapshot(), { provider: "all", model: "all" });
-    expect(view.totals.creditUsd).toBe(3);
-    expect(view.totals.cacheHitPct).toBe(40);
-    expect(view.series[0]?.warmSeconds).toBe(3600);
-    expect(view.deltas.warmPct).toBe(100);
-  });
-
-  test("keeps unfiltered facet options for dropdowns", () => {
-    const view = buildInsightsView(
-      snapshot({
-        modelFilterActive: true,
-        models: [
-          {
-            id: "openai:gpt-5.4:opengeni_credits",
-            model: "gpt-5.4",
-            provider: "openai",
-            billing: "opengeni_credits",
-            calls: 1,
-            inputTokens: 10,
-            outputTokens: 1,
-            cachedTokens: 0,
-            cacheInputTokens: 10,
-            cacheWriteTokens: 0,
-            reasoningTokens: 0,
-            totalTokens: 11,
-            tokenKnownCalls: 1,
-            cacheKnownCalls: 1,
-            creditUsd: 0.1,
-            estimatedProviderUsd: 0.08,
-            estimatedProviderCostKnownCalls: 1,
-            equivalentCreditUsd: 0.084,
-            equivalentCreditCostKnownCalls: 1,
-          },
-        ],
-      }),
-      { provider: "openai", model: "all" },
-    );
-    expect(view.availableProviders).toEqual(["anthropic", "openai"]);
-    expect(view.availableModels).toEqual(["gpt-5.4"]);
-    expect(view.totals.creditUsd).toBe(2.5);
-    expect(view.totals.estimatedProviderUsd).toBe(2);
-  });
-
-  test("counts a provider model once across billing paths", () => {
-    const base = snapshot().models[0]!;
-    const view = buildInsightsView(
-      snapshot({
-        models: [
-          base,
-          {
-            ...base,
-            id: "openai:gpt-5.4:external",
-            billing: "external",
-            calls: 2,
-            creditUsd: 0,
-          },
-        ],
-      }),
-      { provider: "all", model: "all" },
-    );
-
-    expect(view.providers[0]?.models).toBe(1);
-    expect(view.providers[0]?.calls).toBe(12);
-  });
-
-  test("splits credit-paid spend from the external estimate and uncached input", () => {
-    const base = snapshot().models[0]!;
-    const view = buildInsightsView(
-      snapshot({
-        models: [
-          base,
-          {
-            ...base,
-            id: "openai:gpt-5.4:external",
-            billing: "external",
-            creditUsd: 0,
-            estimatedProviderUsd: 1.25,
-          },
-        ],
-      }),
-      { provider: "all", model: "all" },
-    );
-    expect(view.totals.creditPaidUsd).toBe(2.5);
-    expect(view.totals.externalEstimatedUsd).toBe(1.25);
-    expect(view.totals.uncachedInputTokens).toBe(1_200);
-  });
-
-  test("keeps cache hit Unknown instead of zero when no input was reported", () => {
-    const base = snapshot().models[0]!;
-    const view = buildInsightsView(
-      snapshot({
-        models: [{ ...base, cachedTokens: 0, cacheInputTokens: 0, cacheKnownCalls: 0 }],
-      }),
-      { provider: "all", model: "all" },
-    );
-    expect(view.totals.cacheHitPct).toBeNull();
-    expect(view.deltas.cachePts).toBeNull();
-  });
-
-  test("reports how much of the charged ledger the per-call breakdown covers", () => {
-    const unscoped = buildInsightsView(snapshot(), { provider: "all", model: "all" });
-    expect(unscoped.totals.ledgerGapUsd).toBe(0.5);
-    const scoped = buildInsightsView(snapshot({ modelFilterActive: true }), {
-      provider: "openai",
-      model: "all",
-    });
-    expect(scoped.totals.ledgerGapUsd).toBeNull();
-  });
-
-  test("uses the scoped fact total instead of the workspace ledger for a session scope", () => {
-    const view = buildInsightsView(
-      snapshot({
-        scope: { rootSessionId: "00000000-0000-4000-8000-000000000001", sessionId: null },
-      }),
-      { provider: "all", model: "all" },
-    );
-    expect(view.totals.creditUsd).toBe(2.5);
-  });
-
-  test("formats signed USD deltas with the sign before the currency", () => {
-    expect(formatDeltaUsd(-0.1754)).toBe("\u2212$0.1754");
-    expect(formatDeltaUsd(1.17)).toBe("+$1.17");
-    expect(formatDeltaUsd(0)).toBe("$0.00");
-  });
-
-  test("rounds axis ticks to cents once they reach ten cents", () => {
-    expect(formatUsdTick(0.7326)).toBe("$0.73");
-    expect(formatUsdTick(1.4652)).toBe("$1.47");
-    expect(formatUsdTick(0)).toBe("$0.00");
-    expect(formatUsdTick(0.0425)).toBe("$0.0425");
-  });
-
+describe("activity formats", () => {
   test("formatWarmHours stays in hours", () => {
     expect(formatWarmHours(3600)).toBe("1.00h");
     expect(formatWarmHours(36_000)).toBe("10.0h");
@@ -276,12 +133,6 @@ describe("buildInsightsView", () => {
 
   test("pctDelta is null for a new non-zero window", () => {
     expect(pctDelta(10, 0)).toBeNull();
-    expect(formatPctDelta(null, "Prior 7 days")).toBe("new vs prior 7 days");
-  });
-
-  test("keeps sub-cent USD precision and formats timestamps explicitly in UTC", () => {
-    expect(formatUsd(0.000002)).toBe("$0.000002");
-    expect(formatUtcTimestamp("2026-08-07T12:34:56.000Z")).toContain("UTC");
   });
 });
 

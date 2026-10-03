@@ -976,8 +976,9 @@ remain visible but disabled with the instruction to assign another active owner
 first. The setup screen renders the frozen invitation preview and states that
 no Personal workspace is shared.
 
-Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
-Billing & usage) exposes Personal workspaces only as amounts. Organization and
+Organization usage (`GET /v1/billing/usage-summary` and the Insights usage
+query, Organization settings > Insights) exposes Personal workspaces only as
+amounts. Organization and
 workspace totals count every usage ledger row in the period, including another
 member's Only me/private chats and retained usage whose session is missing or
 deleted; billing debits are not rewritten and missing owners are not invented.

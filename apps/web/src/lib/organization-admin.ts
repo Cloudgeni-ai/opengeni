@@ -13,6 +13,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "identity",
   "models",
   "integrations",
+  "insights",
   "billing",
   "developer",
   "security",

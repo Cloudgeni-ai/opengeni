@@ -86,7 +86,7 @@ function MonthCell({ usage, limit }: { usage: WorkspaceUsageResponse | null; lim
 }
 
 /**
- * Organization settings > Billing & usage: one row per shared workspace with
+ * Organization settings > Billing: one row per shared workspace with
  * its monthly budget and this month's usage. A row opens the workspace's
  * budget page (budget, member limits).
  */

@@ -381,21 +381,30 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// Mirrors USAGE_SEARCH_KEYS in components/insights/usage-search.ts (kept here
+// so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
   "view",
   "range",
-  "chart",
-  "provider",
+  "group",
+  "metric",
+  "split",
+  "tab",
+  "ws",
+  "prov",
   "model",
+  "payer",
+  "proj",
+  "who",
   "root",
-  "session",
+  "sched",
 ] as const;
 type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
   // Insights filters pass as strings (the lazy chunk validates their values);
-  // `from` is set when opened from Organization settings > Billing & usage.
+  // `from` is set when opened from Organization settings > Billing.
   validateSearch: (search: Record<string, unknown>): InsightsRawSearch & ReturnToSearch => ({
     ...Object.fromEntries(
       INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -595,7 +604,8 @@ const workspaceOrganizationRoute = createRoute({
     invitation?: string;
     workspace?: string;
     webhook?: string;
-  } & ReturnToSearch => {
+  } & InsightsRawSearch &
+    ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
     const checkoutSession =
       checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
@@ -630,6 +640,13 @@ const workspaceOrganizationRoute = createRoute({
       ...(invitation ? { invitation } : {}),
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
+      ...(section === "insights"
+        ? Object.fromEntries(
+            INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+              key !== "view" && typeof search[key] === "string" ? [[key, search[key]]] : [],
+            ),
+          )
+        : {}),
       ...parseReturnTo(search),
     };
   },
@@ -1011,6 +1028,8 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
+  const search = workspaceOrganizationRoute.useSearch();
+  const navigate = workspaceOrganizationRoute.useNavigate();
   const {
     checkout,
     checkoutSession,
@@ -1046,6 +1065,19 @@ function Organization() {
       person={person}
       invitation={invitation}
       workspace={workspace}
+      insights={
+        page === "insights"
+          ? {
+              search: Object.fromEntries(
+                INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+                  typeof search[key] === "string" ? [[key, search[key]]] : [],
+                ),
+              ),
+              onSearchChange: (next: Record<string, string | undefined>) =>
+                void navigate({ search: { section: "insights", ...next } }),
+            }
+          : undefined
+      }
     />
   );
 }

@@ -1044,6 +1044,11 @@ Insights counts every ledger row, including private/missing/deleted sessions;
 debits remain unchanged.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`.
+Workspace Insights and Organization settings > Insights render one dashboard
+(`apps/web/src/components/insights/usage-dashboard.tsx`) over the usage query
+(`.../insights/usage`, group-by plus token-class and cost breakdown); the
+adapter in `usage-adapter.ts` serves the older endpoints until every
+deployment answers it.
 
 Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
 same-organization pools as separate allocator boundaries, not access grants.
