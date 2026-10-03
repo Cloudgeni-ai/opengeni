@@ -78,6 +78,10 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./queue-presentation-model": {
+      "types": "./src/queue-presentation-model.ts",
+      "default": "./src/queue-presentation-model.ts"
+    },
     "./model-picker-model": {
       "types": "./src/model-picker-model.ts",
       "default": "./src/model-picker-model.ts"
