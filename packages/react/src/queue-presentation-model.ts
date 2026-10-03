@@ -406,3 +406,57 @@ export const QUEUE_REPLACE_DRAFT_COPY = {
   keep: "Keep current draft",
   replace: "Replace and edit",
 } as const;
+
+export type QueuedTurnPresentation = {
+  kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
+  text: string;
+};
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** What a queued row shows: the prompt, or the transcript of a voice request. */
+export function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
+  const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
+  const inputTranscript = realtimeDelegation?.inputTranscript;
+  if (typeof inputTranscript === "string" && inputTranscript.trim()) {
+    return { kind: "realtime_voice", text: inputTranscript.trim() };
+  }
+  if (objectValue(turn.metadata.realtimeTailFlush)) {
+    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
+  }
+  return { kind: "prompt", text: turn.prompt };
+}
+
+export function isSteeringTurn(turn: SessionTurn): boolean {
+  return turn.metadata.delivery === "steer";
+}
+
+/** A queued turn that is really waiting: not already a steer in flight. */
+export function isAuthoritativeQueuedTurn(
+  turn: SessionTurn,
+  mutationFor: (turnId: string) => string | null,
+): boolean {
+  return !isSteeringTurn(turn) && mutationFor(turn.id) !== "steer";
+}
+
+export function countAuthoritativeQueuedTurns(
+  turns: readonly SessionTurn[],
+  mutationFor: (turnId: string) => string | null,
+): number {
+  return turns.filter((turn) => isAuthoritativeQueuedTurn(turn, mutationFor)).length;
+}
+
+/** The move anchors for one row's Move up / Move down. */
+export function queueNeighborAnchors(
+  turns: readonly SessionTurn[],
+  index: number,
+): { beforeUp: string | null; beforeDown: string | null } {
+  return {
+    beforeUp: index > 0 ? (turns[index - 1]?.id ?? null) : null,
+    beforeDown: index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null,
+  };
+}

@@ -75,6 +75,13 @@ import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
+import {
+  countAuthoritativeQueuedTurns,
+  isAuthoritativeQueuedTurn,
+  QUEUE_REPLACE_DRAFT_COPY,
+  queuedTurnPresentation,
+  queueNeighborAnchors,
+} from "../queue-presentation-model";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
@@ -142,11 +149,6 @@ type GoalPillState =
   | "paused"
   | "invariant_broken"
   | "completed";
-
-type QueuedTurnPresentation = {
-  kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
-  text: string;
-};
 
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
@@ -231,35 +233,7 @@ export function sessionChromeGoalPillExplanation(
   return null;
 }
 
-function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
-  const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
-  const inputTranscript = realtimeDelegation?.inputTranscript;
-  if (typeof inputTranscript === "string" && inputTranscript.trim()) {
-    return { kind: "realtime_voice", text: inputTranscript.trim() };
-  }
-  if (objectValue(turn.metadata.realtimeTailFlush)) {
-    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
-  }
-  return { kind: "prompt", text: turn.prompt };
-}
-
-function isSteeringTurn(turn: SessionTurn): boolean {
-  return turn.metadata.delivery === "steer";
-}
-
-function isAuthoritativeQueuedTurn(
-  turn: SessionTurn,
-  mutationFor: UseTurnQueueResult["mutationFor"],
-): boolean {
-  return !isSteeringTurn(turn) && mutationFor(turn.id) !== "steer";
-}
-
-export function countAuthoritativeQueuedTurns(
-  turns: readonly SessionTurn[],
-  mutationFor: UseTurnQueueResult["mutationFor"],
-): number {
-  return turns.filter((turn) => isAuthoritativeQueuedTurn(turn, mutationFor)).length;
-}
+export { countAuthoritativeQueuedTurns };
 
 function isOptimisticQueuedMessage(
   message: ComposerOptimisticMessage,
@@ -321,12 +295,6 @@ export function sessionChromeShouldOfferQueue(input: {
     input.authoritativeQueuedCount >= 1 &&
     !input.suppressed
   );
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 /** Select pill state from the goal's authoritative continuation projection. */
@@ -1400,8 +1368,7 @@ function QueuePanel({
         const voice = presentation.kind !== "prompt";
         const pending = mutationFor(turn.id);
         const settling = !interactiveTurnIds.has(turn.id);
-        const beforeUp = index > 0 ? (turns[index - 1]?.id ?? null) : null;
-        const beforeDown = index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null;
+        const { beforeUp, beforeDown } = queueNeighborAnchors(turns, index);
         const showActions = !readOnly && (onEdit || onSteer || onRemove || onMove);
         const confirmingReplace = replaceDraftFor === turn.id;
         return (
@@ -1498,25 +1465,22 @@ function QueuePanel({
             </div>
             {confirmingReplace ? (
               <div className="rounded-og-sm border border-og-status-waiting/30 bg-og-status-waiting/10 p-2 text-og-xs text-og-fg">
-                <p>Your composer already has a draft. Replace it with this queued prompt?</p>
-                <p className="mt-0.5 text-og-fg-muted">
-                  The current draft will be permanently discarded; this queued prompt is preserved
-                  until you confirm.
-                </p>
+                <p>{QUEUE_REPLACE_DRAFT_COPY.title}</p>
+                <p className="mt-0.5 text-og-fg-muted">{QUEUE_REPLACE_DRAFT_COPY.detail}</p>
                 <div className="mt-2 flex justify-end gap-1.5">
                   <button
                     type="button"
                     className="rounded-og-sm px-2 py-1 font-medium hover:bg-og-surface-3/70 focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onCancelReplace}
                   >
-                    Keep current draft
+                    {QUEUE_REPLACE_DRAFT_COPY.keep}
                   </button>
                   <button
                     type="button"
                     className="rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onConfirmReplace}
                   >
-                    Replace and edit
+                    {QUEUE_REPLACE_DRAFT_COPY.replace}
                   </button>
                 </div>
               </div>
