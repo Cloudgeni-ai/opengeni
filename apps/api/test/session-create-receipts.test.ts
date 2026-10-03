@@ -8,6 +8,7 @@ import {
   createChannel,
   getSession,
   createSession,
+  requireWorkspace,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
@@ -18,7 +19,11 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { resolveTurnSurface, withSiteSessionOrigin } from "@opengeni/core";
+import {
+  resolveSessionAgentConfigForCreate,
+  resolveTurnSurface,
+  withSiteSessionOrigin,
+} from "@opengeni/core";
 import {
   resolveSiteSessionOrigin,
   withOptionalSiteCommandOrigin,
@@ -293,6 +298,19 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     const grant = await freshGrant();
     const idempotencyKey = `repair-${crypto.randomUUID()}`;
     const initialMessage = `repair fixture ${crypto.randomUUID()}`;
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    // This shell represents a create already admitted by the public boundary,
+    // including its immutable agent configuration, but not yet initialized.
+    const acceptedAgent = resolveSessionAgentConfigForCreate({
+      settings,
+      creator: "api",
+      request: undefined,
+      instructions: undefined,
+      workspaceSettings: (await requireWorkspace(client.db, grant.workspaceId)).settings,
+      parent: null,
+      goal: false,
+    }).config;
+    expect(acceptedAgent).not.toBeNull();
     const seeded = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -304,6 +322,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      agentConfig: acceptedAgent,
       createIdempotencyKey: idempotencyKey,
     });
     expect(await durableCounts(grant.workspaceId, seeded.id)).toMatchObject({
@@ -315,13 +334,22 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     });
 
     const workflow = new FakeWorkflowClient();
-    const server = buildServer(grant, workflow);
+    const server = buildServer(grant, workflow, settings);
     const args = {
       initialMessage,
       model: "scripted-model",
       sandboxBackend: "none",
       idempotencyKey,
     };
+    const beforeConflict = await durableCounts(grant.workspaceId, seeded.id);
+    const conflict = await callMcpTool<{ error: { code: string } }>(server, "session_create", {
+      ...args,
+      agent: { capabilities: "none" },
+    });
+    expect(conflict).toMatchObject({ error: { code: "session_create_conflict" } });
+    expect(await durableCounts(grant.workspaceId, seeded.id)).toEqual(beforeConflict);
+    expect(workflow.wakeups).toHaveLength(0);
+
     const repaired = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
     expect(repaired).toMatchObject({
       operation: "session_create",
@@ -341,6 +369,9 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       usageEvents: 1,
     });
     expect(workflow.wakeups).toHaveLength(1);
+    expect((await getSession(client.db, grant.workspaceId, seeded.id))!.agent).toEqual(
+      acceptedAgent,
+    );
 
     const wakeRepair = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
     expect(wakeRepair).toMatchObject({
