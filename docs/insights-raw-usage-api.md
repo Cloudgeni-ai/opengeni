@@ -1,0 +1,101 @@
+# Insights unified DB API checkpoint
+
+Migration `0604_insights_raw_usage_api.sql` is rolling and independent of the
+unfinished daily-rollup migration. It adds nullable captured class annotations
+and two scoped read capabilities. Released readers, authorization policies,
+permission checks, billing writes, pricing/catalog definitions and ledger rows
+are unchanged. No historical total is repriced.
+
+`readInsightsUsage` and `readInsightsCalls` accept `(db, { accountId,
+workspaceId: string | null, query, now, detailsWorkspaceIds?: readonly string[],
+detailsSharedWorkspaces?: boolean })`. A null workspace selects organization
+scope. The result is the existing `@opengeni/contracts/insights-usage` response.
+All six preset UTC ranges and the original grouping/filter/cursor fields are
+supported. Source/plan/session dimensions and custom dates remain preserved
+follow-up work: these queries return HTTP 400 rather than silently using a
+different window or dimension. The interim response omits `facets.sources`.
+
+Core must supply authenticated detail authority, not wire fields: workspace
+routes pass their sessions:read-authorized workspace; organization routes pass
+their actual same-account/same-subject workspace grants. Shared-all must come
+only from the existing stamped account-scoped API-key authority proof with
+sessions:read and an all-workspaces scope. Selected keys pass exactly their
+canonical selected IDs instead; explicit workspace:admin never substitutes for
+literal sessions:read. Workspace endpoint permission gates are unchanged,
+but detail authority is independently intersected. Billing/account administration
+alone grants no detail access.
+Shared-all never admits Personal workspaces. The cursor binds these flags.
+
+Live session/root/project/person/schedule metadata is projected only after
+actor and detail-authority masking. Hidden Only-me and other Personal amounts
+are aggregated inside the owner capability by kind/opaque person/payer/bucket,
+not returned per hidden call. Private/Personal rows are not identity-filterable;
+facets contain only visible metadata. Deleted and restricted usage are distinct.
+Call details are visible-only, with filtering before cursor and limit.
+
+Charged amounts come only from negative `model_usage_debit` / `model_response`
+credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are
+not actual debits. Unmatched workspace/account charges retain their money in
+restricted buckets with zero calls/tokens and no fabricated model attribution.
+Successful JSON responses have a bounded, process-local 60-second cache, so
+amounts can be up to 60 seconds stale. Cache hits preserve `generatedAt` and
+`dataThrough`. Every request reauthenticates and reauthorizes; keys partition by
+account/workspace, normalized query, authenticated credential/principal and
+current selected-workspace/session-read ceilings. The existing committed
+session-activity revision plus current shared inventory/project/schedule metadata
+fences private/deleted/moved identities before a hit. Unavailable fence metadata
+disables caching. Credentials are HMAC-digested, not retained as cache keys.
+The cache holds at most 128 entries/8 MiB, with a 1 MiB per-response limit; hits
+do not extend TTL, failures are never cached, and browser cache control is
+`private, no-store`. `x-opengeni-insights-max-staleness-seconds: 60` discloses the
+upper bound. Existing transaction-local 10-second statement cancellation maps
+to HTTP 408 in the normal error envelope: `Range too large, try 7 days.`
+Usage totals follow each debit's ledger `occurredAt` in the selected period;
+call details follow the fact's `occurredAt` and show lifetime debits linked to
+that call, including a later clipped debit. These are different clocks: summing
+call rows is not period-ledger reconciliation. No requested price is substituted
+and a delayed debit is retained in its actual period even without period facts.
+Cursor timestamps are always UTC with all six PostgreSQL fractional digits,
+independent of the database connection timezone.
+
+Captured class annotations must conserve the recorded provider estimate. NULL
+telemetry is not zero, including cache-write telemetry. This interim checkpoint
+does not perform historical allocation: eligible fixed-total allocation using
+the separately approved current-catalog snapshot remains the rollup follow-up.
+
+This is an intentionally raw-backed endpoint-first checkpoint: full-day/YTD
+scans are not yet accelerated and no staging p95 claim is made. Contract
+follow-up 3296 permits a money-only prior with zero recorded calls; the DB and
+routes retain that money rather than inventing calls or dropping it. A truly
+empty prior is null.
+
+Focused real PostgreSQL coverage uses a NOSUPERUSER/NOBYPASSRLS migration owner
+and restricted application role, with historical facts before the migration,
+both scopes, all ranges/groupings, clipped/orphan debit conservation, strict
+privacy/authority ceilings, class snapshots, microsecond cursors, exact UTC
+midnight, grants, capability cleanup and runtime posture. Daily-rollup
+bootstrap/maintenance tests are retained in the separate rollup branch.
+
+Historical staging API `2a5ab6f512a05bf28afce38ac4259dea861d3669` is also
+tested before/after this migration against the **complete** current catalog,
+with both old and current provisioners. Its pre-existing readiness blockers
+from main's Claude pool tables (0598), selected-key table (0600) and Slack
+rate-limit DML (0597) remain identical; 0604 adds no violations. The old
+provisioner removes newer required grants, so current-role provisioning must
+be restored at cutover. This is not a claim that the serving old binary is
+ready on the combined main schema. The f893cb5 modules (independently verified
+equivalent to serving e61's runtime-posture/role-relationships/provisioner blobs)
+are also compared before/after with both provisioners, preserving any main-0603
+service-account inventory blockers. Frozen pre-0604 (a15e7a5) and current
+runtime/provisioner readiness pass without exclusions or widened grants.
+
+After the synthetic full-HTTP baseline exceeded two seconds, 0605 adds only a
+concurrent partial debit-period index on account/occurredAt/workspace; no source
+rows, prices, allowances, permissions or policies are changed. The pre-index
+workspace seven-day p95 was 3.59s, workspace 30-day 9.80s, organization seven-day
+6.62s, and organization 30-day hit the existing 10s statement timeout. These are
+synthetic volume-sized local PostgreSQL 17.11 results, not PostgreSQL 16.15 staging
+clearance. The indexed 5239f006 run measured workspace seven-day warm p95 4.09s,
+organization seven-day 8.41s, and both 30-day cases encountered the 10s timeout
+(workspace's first request succeeded). Cache-hit smoke is separate from this
+uncached performance evidence; this is not a sub-two-second uncached claim.

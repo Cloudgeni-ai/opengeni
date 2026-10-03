@@ -109,6 +109,7 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";
 export * from "./domain/insights";
+export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
 export * from "./domain/memory-slack-delivery";
 export * from "./domain/governed-learning-slack-publication";

@@ -2380,6 +2380,8 @@ describe("release schema contract", () => {
       "0601_organization_mcp_connections.sql",
       "0602_claude_account_lifecycle_facts.sql",
       "0603_organization_service_accounts.sql",
+      "0604_insights_raw_usage_api.sql",
+      "0605_insights_model_debit_period_index.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
