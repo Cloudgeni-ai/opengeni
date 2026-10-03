@@ -297,11 +297,11 @@ describe("migration 0241 atomic personal-resource delegation", () => {
 
   for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
     test(`converges helper ACLs after ${order} without breaking ordinary app-role RLS`, async () => {
-      const appPassword = "apppw";
       let admin: postgres.Sql | undefined;
       let app: postgres.Sql | undefined;
       const blank = await acquireMigrationTestDatabase(`migration-0241-capability-${order}`);
       if (!blank) return;
+      const appPassword = blank.appPassword ?? "apppw";
 
       try {
         if (order === "migrate-then-provision") {
@@ -376,6 +376,16 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           publicExecute: false,
           appTableAccess: false,
         });
+
+        if (order === "provision-then-migrate") {
+          // Keep the migration's ACL proof above independent of provisioning.
+          // The full ledger includes maintenance cutovers, so the current
+          // runtime must be provisioned before exercising ordinary app writes.
+          await provisionRoles(blank.databaseUrl, {
+            appPassword,
+            rlsStrategy: "force",
+          });
+        }
 
         const ids = await createFixture(admin, blank.databaseUrl, "once", {
           directOnly: true,
