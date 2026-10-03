@@ -27,6 +27,7 @@ export function OrganizationServiceAccounts({
     () => ({
       list: async () =>
         (await client.listOrganizationServiceAccounts(organizationId)).serviceAccounts,
+      get: async (id) => await client.getOrganizationServiceAccount(organizationId, id),
       create: async (request) =>
         await client.createOrganizationServiceAccount(organizationId, request),
       update: async (id, request) =>
