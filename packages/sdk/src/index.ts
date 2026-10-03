@@ -228,8 +228,15 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
-// Model display helpers live on the `@opengeni/sdk/model-display` subpath so the
-// root entry stays free of the contracts runtime (publish closure guard).
+// Preserve the published root aliases through the dependency-free leaf, never
+// the contracts root (which would load its schema runtime in native bundles).
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "./model-display";
 export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
