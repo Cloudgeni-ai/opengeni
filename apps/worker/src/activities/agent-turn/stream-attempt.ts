@@ -7,7 +7,6 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
-  recordUsageEvent,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   attachOpenSuffixToPendingToolCalls,
@@ -15,6 +14,7 @@ import {
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
+  recordUsageEventsAndApplyCreditDebit,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -30,6 +30,7 @@ import {
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
   compactionProviderRejection,
+  modelTerminalResponseFromSdkEvent,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
   type SandboxFileDownload,
@@ -101,6 +102,8 @@ import {
   stableHumanInputRequestId,
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
+  reserveModelCallBudget,
+  usageReservationReleaseEvents,
   ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
@@ -383,40 +386,49 @@ export async function runTurnStreamAttempt(
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let parallelSessionTitleFinished = false;
+  let sessionTitleGrant: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
+  const settleSessionTitleUsage = async (
+    usage: Parameters<typeof processSessionTitleModelUsageEvent>[0]["usage"],
+  ): Promise<void> => {
+    const result = await processSessionTitleModelUsageEvent({
+      usage,
+      state: sessionTitleUsageState,
+      dispatchId: modelUsageDispatchId,
+      settings: eventing.modelRunSettings,
+      db,
+      observability,
+      publish: eventing.publish,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      turnAttemptId: input.attemptId,
+      provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+      providerApi: resolvedModel?.provider.api ?? "responses",
+      model: resolvedModel?.configured.id ?? turn.model,
+      externallyBilled: billingState.isExternallyBilledTurn,
+      chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+      countsTowardTokenCap: billingState.countsTowardTokenCap,
+      servingCredentialId: providerTurn.effectiveCodexCredentialId,
+      priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+      emittedSourceKeys: emittedModelUsageSourceKeys,
+      renewLease: () => leases.renewServing("model_usage"),
+      leaseLost: leases.servingLost,
+      reservationReleases: sessionTitleGrant?.reservationReleases ?? [],
+      leaseLostMessage: "Provider credential lease expired during session title generation",
+    });
+    if (result.usageReported && sessionTitleGrant) {
+      billingState.pendingUsageReservations.delete(sessionTitleGrant.callId);
+      sessionTitleGrant = null;
+    }
+  };
   const finishParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
     const generated = await parallelSessionTitle?.finish();
     if (!generated) return;
 
-    if (generated.usage) {
-      await processSessionTitleModelUsageEvent({
-        usage: generated.usage,
-        state: sessionTitleUsageState,
-        dispatchId: modelUsageDispatchId,
-        settings,
-        db,
-        observability,
-        publish: eventing.publish,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        turnAttemptId: input.attemptId,
-        provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-        providerApi: resolvedModel?.provider.api ?? "responses",
-        model: resolvedModel?.configured.id ?? turn.model,
-        externallyBilled: billingState.isExternallyBilledTurn,
-        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-        countsTowardTokenCap: billingState.countsTowardTokenCap,
-        servingCredentialId: providerTurn.effectiveCodexCredentialId,
-        priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-        emittedSourceKeys: emittedModelUsageSourceKeys,
-        renewLease: () => leases.renewServing("model_usage"),
-        leaseLost: leases.servingLost,
-        leaseLostMessage: "Provider credential lease expired during session title generation",
-      });
-    }
+    if (generated.usage) await settleSessionTitleUsage(generated.usage);
     if (!generated.title) return;
 
     try {
@@ -586,6 +598,9 @@ export async function runTurnStreamAttempt(
   // calling runStreamAttempt again; resetting this state there would reuse
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
+  // Fresh UUIDs survive retries without colliding with already-released grants.
+  // Terminal responses consume their own call identity in dispatch order.
+  const admittedCallOrdinals: string[] = [];
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
@@ -604,6 +619,7 @@ export async function runTurnStreamAttempt(
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
       initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+      monthlyBudgetReserved: billingState.pendingUsageReservations.size > 0,
     });
   };
   const runStreamAttempt = async (options: {
@@ -624,6 +640,8 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
     });
+    const streamUsageIdentity = crypto.randomUUID();
+    const streamCallIds = new Set<string>();
     const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -844,6 +862,38 @@ export async function runTurnStreamAttempt(
           onModelResponse: modelCallAdmission.onModelResponse,
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
+          // Producer-side budget admission: this hook is the LAST per-call
+          // filter inside the SDK model loop, so it adjudicates the exact
+          // payload about to reach the provider BEFORE the call can start —
+          // the SDK producer can run ahead of this consumer's per-response
+          // accounting, which is why a consumer-side check cannot bound the
+          // next call. The hold is sized from the real prompt plus the
+          // reserved output headroom and must fit the remaining cap in full;
+          // a veto throws BudgetExhaustedError out of the stream like any
+          // other filter failure.
+          onModelCallAdmission: async () => {
+            await modelCallAdmission.beforeModelRequest();
+            const grant = await reserveModelCallBudget({
+              settings: eventing.modelRunSettings,
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              turnAttemptId: input.attemptId,
+              model: turn.model,
+              isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+              entitlements,
+              chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+              countsTowardTokenCap: billingState.countsTowardTokenCap,
+              initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+              latencyMode: turnExecutionPolicy.latencyMode,
+            });
+            admittedCallOrdinals.push(grant.callId);
+            streamCallIds.add(grant.callId);
+            if (grant.held) billingState.pendingUsageReservations.set(grant.callId, grant.held);
+            return grant.held ? { maxOutputTokens: grant.maxOutputTokens } : undefined;
+          },
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
@@ -1058,6 +1108,18 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        // The hold admitted for THIS response's call: its release rides the
+        // same transaction as the usage facts and debit, so a call can never
+        // keep a stale hold once its actuals are recorded. The call is the
+        // head of the admission FIFO — NOT responseCount+1: a provider call
+        // rejected before producing a response still consumed an admission
+        // ordinal, so response and admission ordinals diverge after a
+        // rejection.
+        const isTerminalResponse = modelTerminalResponseFromSdkEvent(next.value) !== null;
+        const queuedCallOrdinal = isTerminalResponse ? admittedCallOrdinals.shift() : undefined;
+        const responseCallOrdinal =
+          queuedCallOrdinal ?? String(modelResponseState.responseCount + 1);
+        const responseCallHold = billingState.pendingUsageReservations.get(responseCallOrdinal);
         const responseResult = await processModelResponseTerminalEvent({
           event: next.value,
           state: modelResponseState,
@@ -1085,8 +1147,20 @@ export async function runTurnStreamAttempt(
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
-          setLastInputTokens: setLastInputTokensFenced,
+          setLastInputTokens: async (tokens) => {
+            await setLastInputTokensFenced(tokens);
+          },
           contextContributions: eventing.companyBrainContextContributions,
+          ...(responseCallHold !== undefined
+            ? {
+                reservationReleases: usageReservationReleaseEvents({
+                  reservations: [[responseCallOrdinal, responseCallHold]],
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnAttemptId: input.attemptId,
+                }),
+              }
+            : {}),
         });
         assertModelResponseLatencyMode({
           event: next.value,
@@ -1095,6 +1169,10 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          // Missing usage does not prove that the call was free. Retain its
+          // hold until authoritative response/aggregate settlement.
+          if (responseResult.usageReported)
+            billingState.pendingUsageReservations.delete(responseCallOrdinal);
           if (
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
@@ -1530,10 +1608,9 @@ export async function runTurnStreamAttempt(
       const aggregateSourceKey = modelUsageSourceKey({
         responseId: null,
         dispatchId: modelUsageDispatchId,
-        positionalKey: "aggregate",
+        positionalKey: `aggregate:${streamUsageIdentity}`,
       });
       if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
-        claimedModelUsageSourceKeys.add(aggregateSourceKey);
         // The aggregate frame is only a billing fallback when no terminal
         // response exposed usage. It is not final-request context authority.
         const aggregateAccountCtx = modelCallAccountContext({
@@ -1559,10 +1636,33 @@ export async function runTurnStreamAttempt(
               countsTowardTokenCap: billingState.countsTowardTokenCap,
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
+              reservationReleases:
+                normalizedAggregateUsage.telemetry.inputTokens !== null &&
+                normalizedAggregateUsage.telemetry.outputTokens !== null &&
+                normalizedAggregateUsage.rejectedFields.length === 0
+                  ? usageReservationReleaseEvents({
+                      reservations: [...billingState.pendingUsageReservations].filter(([callId]) =>
+                        streamCallIds.has(callId),
+                      ),
+                      sessionId: input.sessionId,
+                      turnId: activeTurnId,
+                      turnAttemptId: input.attemptId,
+                    })
+                  : [],
               sourceKey: aggregateSourceKey,
               latencyMode: turnExecutionPolicy.latencyMode,
               observability,
             });
+            if (!billing) return;
+            claimedModelUsageSourceKeys.add(aggregateSourceKey);
+            if (
+              normalizedAggregateUsage.telemetry.inputTokens !== null &&
+              normalizedAggregateUsage.telemetry.outputTokens !== null &&
+              normalizedAggregateUsage.rejectedFields.length === 0
+            ) {
+              for (const callId of streamCallIds)
+                billingState.pendingUsageReservations.delete(callId);
+            }
             const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
             const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
             aggregateAuthoritative = await emitModelCallUsage({
@@ -1873,24 +1973,24 @@ export async function runTurnStreamAttempt(
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        // The completion usage fact commits inside the terminal settlement
+        // transaction — a worker crash between the two can never leave a
+        // completed turn with its billing fact lost.
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: activeTurnId,
+            idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+          },
+        ],
       }))
     ) {
       return claimedResult({ status: "cancelled" });
     }
     control.turnMetricOutcome = "completed";
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.completed",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: activeTurnId,
-      sessionId: input.sessionId,
-      turnId: activeTurnId,
-      turnAttemptId: input.attemptId,
-      idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
-    });
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
@@ -1944,16 +2044,43 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
         await withSessionTitleProviderRequestContext(() =>
-          runtime.generateSessionTitle!(
-            runSettings,
-            sessionTitlePrompt,
-            sessionTitleGenerationOptions({
+          runtime.generateSessionTitle!(runSettings, sessionTitlePrompt, {
+            ...sessionTitleGenerationOptions({
               resolvedModel,
               modelName: turnExecutionPolicy.upstreamModelId,
               serviceTier,
               signal,
             }),
-          ),
+            onModelCallAdmission: async () => {
+              sessionTitleGrant = await reserveModelCallBudget({
+                settings: eventing.modelRunSettings,
+                db,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                turnAttemptId: input.attemptId,
+                model: resolvedModel?.configured.id ?? turn.model,
+                isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+                entitlements,
+                chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+                countsTowardTokenCap: billingState.countsTowardTokenCap,
+                initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+                latencyMode: turnExecutionPolicy.latencyMode,
+                maxOutputTokens: 512,
+              });
+              if (sessionTitleGrant.held)
+                billingState.pendingUsageReservations.set(
+                  sessionTitleGrant.callId,
+                  sessionTitleGrant.held,
+                );
+              return {
+                maxOutputTokens: sessionTitleGrant.maxOutputTokens,
+                budgetReserved: Boolean(sessionTitleGrant.held),
+              };
+            },
+            onUsage: settleSessionTitleUsage,
+          }),
         ),
       onError: (error) => {
         observability.warn("parallel session title generation failed", {
@@ -1999,6 +2126,32 @@ export async function runTurnStreamAttempt(
             : null;
         if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
           throw attemptError;
+        }
+        // The call that just died is the admission FIFO's tail — the model
+        // loop is sequential, so everything ahead of it already emitted its
+        // response and was consumed before this error surfaced. Retire its
+        // admission ordinal and release its hold NOW, before the re-admitted
+        // retry call queues behind it: otherwise the retry's response would
+        // release the dead call's hold and leave the live one pinned.
+        const rejectedCallOrdinal = admittedCallOrdinals.pop();
+        const rejectedCallHold =
+          rejectedCallOrdinal !== undefined
+            ? billingState.pendingUsageReservations.get(rejectedCallOrdinal)
+            : undefined;
+        if (rejectedCallOrdinal !== undefined) {
+          billingState.pendingUsageReservations.delete(rejectedCallOrdinal);
+        }
+        if (rejectedCallOrdinal !== undefined && rejectedCallHold) {
+          await recordUsageEventsAndApplyCreditDebit(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            usageEvents: usageReservationReleaseEvents({
+              reservations: [[rejectedCallOrdinal, rejectedCallHold]],
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              turnAttemptId: input.attemptId,
+            }),
+          });
         }
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
@@ -2124,6 +2277,16 @@ export async function runTurnStreamAttempt(
             turnStatus: "completed",
             sessionStatus: "idle",
             activeTurnId: null,
+            usageEvents: [
+              {
+                eventType: "agent_run.completed",
+                quantity: 1,
+                unit: "run",
+                sourceResourceType: "session_turn",
+                sourceResourceId: activeTurnId,
+                idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
+              },
+            ],
           });
           if (!settled) return claimedResult({ status: "cancelled" });
           control.turnMetricOutcome = "completed";

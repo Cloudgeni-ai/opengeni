@@ -1016,19 +1016,36 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Configured monthly token and account-cost caps reserve a complete provider-call
+bound under an account advisory lock before ordinary inference, summaries, and
+remote compaction dispatch. The worker waits for the previous response's usage
+settlement, gives each call a fresh UUID, and preserves the accepted human,
+allowance, entitlement, and billing authority. Input reservations cover the
+selected model's complete context window; output is separately limited on the
+wire. Cost bounds include pricing tiers, cache writes, margin, and latency.
+Missing cost pricing refuses cost-capped dispatch. Reservation-backed requests
+cannot use hidden SDK retries.
+
+Usage facts, credit debits, allowance counters, and the matching reservation
+release commit atomically. Unresolved calls remain reserved across cancellation,
+worker retries, logical attempt closure, and month changes: none proves the
+provider charged zero. Missing usage retains the conservative hold until
+reconciliation. Reserved rows stay internal and are excluded from user-facing
+usage lists, exports, and Insights. These monthly deployment caps are separate
+from the administrator allowance counters described in section3.12.
+
+
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
 Usage is normalized at the provider boundary and recorded per authoritative
-model call. Admission limits and entitlements are domain policy; provider
-telemetry, comparison pricing, and dashboards do not independently debit or
-grant capacity. The durable `agent.model.usage` event carries the accepted
-billing path and any validated Gateway endpoint provider so the additive
-Insights fact can be repaired exactly after a soft writer failure; repair
-prefers those authorities over the logical Gateway provider and legacy
-inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
-Each new fact also freezes provider cost and equivalent OpenGeni credit price as
-separate nullable comparisons, while `priced_cost_micros` remains the actual
-credits-path price and is zero for externally billed calls.
+model call; admission limits and entitlements are domain policy — provider
+telemetry, comparison pricing, and dashboards never debit or grant capacity.
+The durable `agent.model.usage` event carries the accepted billing path and
+validated Gateway endpoint provider so the additive Insights fact repairs
+exactly after a soft writer failure, preferring those authorities over legacy
+`usage_events` inference. Each fact also freezes provider cost and equivalent
+credit price as nullable comparisons; `priced_cost_micros` is the credits-path
+price (zero externally billed).
 
 Insights counts every ledger row, including private/missing/deleted sessions;
 `privateChats` exposes person-only amounts. Details/samples remain actor-visible;
@@ -1059,7 +1076,6 @@ policy; recovery preserves that policy while current health governs capacity.
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
-[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).

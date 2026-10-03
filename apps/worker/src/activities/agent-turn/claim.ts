@@ -413,6 +413,15 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // bypass OpenGeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
+  // The monthly caps are enforced with a bounded hold at the producer-side
+  // provider-call boundary (runStream's onModelCallAdmission hook), which is
+  // the only point that sees the exact request payload before the call can
+  // start. This claim-time check is deliberately read-only: it fails fast on
+  // an already-exhausted budget but writes no hold — a consumer-side or
+  // claim-side hold can never bound a call the SDK producer starts on its
+  // own.
+  // Unreconciled calls may have reached the provider before a crash. Retain
+  // their durable holds; retries receive fresh call identities.
   let allowanceRefusal: AllowanceRefusal | null = null;
   try {
     await waitForTurnOperation(
@@ -555,6 +564,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           ),
         }
       : undefined;
+    // Closing a logical attempt does not establish whether a dispatched call
+    // incurred usage. Only authoritative response settlement releases its hold.
+    const usageEvents = inputSettlement.usageEvents ?? [];
     const result = await applySessionTurnSettlement(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId!,
@@ -572,7 +584,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+      ...(usageEvents.length > 0 ? { usageEvents } : {}),
     });
+    if (inputSettlement.turnStatus !== "running") {
+      billingState.pendingUsageReservations.clear();
+    }
     if (result.action === "stale") {
       // The terminal write can lose to a control transaction before the
       // workflow delivers Temporal cancellation. That control may settle

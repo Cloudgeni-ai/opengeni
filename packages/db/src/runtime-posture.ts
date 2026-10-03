@@ -4198,6 +4198,29 @@ export function evaluateRuntimeDatabasePosture(
       violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
+  for (const name of [
+    "account_usage_quantity(uuid, text, timestamp with time zone)",
+    "account_open_usage_reservations(uuid, text, timestamp with time zone, timestamp with time zone)",
+  ]) {
+    const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+    // Additive rolling capability: an older schema may not contain it yet.
+    if (matches.length === 0) continue;
+    const routine = matches[0];
+    if (
+      matches.length !== 1 ||
+      !routine?.securityDefiner ||
+      !routine.execute ||
+      routine.publicExecute ||
+      routine.owner !== tableByName.get("usage_events")?.owner ||
+      !routine.configuration?.some(
+        (value) =>
+          value.startsWith("search_path=pg_catalog,") &&
+          value.endsWith("opengeni_private, pg_temp"),
+      )
+    ) {
+      violations.push(`account usage capability ${name} is missing or unsafe`);
+    }
+  }
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
   const modelFactCapabilityRoutines = new Set(
     options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),

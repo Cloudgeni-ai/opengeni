@@ -1,3 +1,4 @@
+import { hasModelCallOutputBound } from "./model-request-capture";
 import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
 import { types as utilTypes } from "node:util";
@@ -139,6 +140,9 @@ export class ReplayableJsonOpenAI extends OpenAI {
           };
         }
       }
+      // A financial admission covers one request. SDK retries of network or
+      // server failures may replay paid work without a fresh durable grant.
+      if (hasModelCallOutputBound()) prepared = { ...prepared, maxRetries: 0 };
       return wrapJsonRequestOptions(prepared);
     });
     return super.post<Rsp>(path, wrapped);

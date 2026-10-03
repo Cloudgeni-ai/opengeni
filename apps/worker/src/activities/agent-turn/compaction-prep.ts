@@ -46,6 +46,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { reserveModelCallBudget } from "./admission";
 
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -66,6 +67,7 @@ export type CompactionPrepDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  entitlements?: ActivityServices["entitlements"];
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -236,8 +238,11 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
-  const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-    await processCompactionModelUsageEvent({
+  const recordCompactionUsage = async (
+    usage: ModelResponseUsage,
+    reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null,
+  ) => {
+    const result = await processCompactionModelUsageEvent({
       usage,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
@@ -263,7 +268,42 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       leaseLost: leases.servingLost,
       leaseLostMessage: "Provider credential lease expired during context compaction",
       contextContributions: eventing.companyBrainContextContributions,
+      ...(reservation ? { reservationReleases: reservation.reservationReleases } : {}),
     });
+    if (reservation && result.usageReported)
+      billingState.pendingUsageReservations.delete(reservation.callId);
+  };
+  const compactionCallAccounting = (maxOutputTokens: number) => {
+    let reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
+    return {
+      onModelCallAdmission: async () => {
+        reservation = await reserveModelCallBudget({
+          settings: eventing.modelRunSettings,
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          turnAttemptId: input.attemptId,
+          model: resolvedModel?.configured.id ?? turn.model,
+          isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+          ...(deps.entitlements ? { entitlements: deps.entitlements } : {}),
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+          countsTowardTokenCap: billingState.countsTowardTokenCap,
+          initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+          latencyMode: turnExecutionPolicy.latencyMode,
+          maxOutputTokens,
+        });
+        if (reservation.held) {
+          billingState.pendingUsageReservations.set(reservation.callId, reservation.held);
+        }
+        return {
+          maxOutputTokens: reservation.maxOutputTokens,
+          budgetReserved: Boolean(reservation.held),
+        };
+      },
+      onUsage: (usage: ModelResponseUsage) => recordCompactionUsage(usage, reservation),
+    };
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
     const summarize: CompactionSummarizer = resolvedModel
@@ -276,7 +316,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-              onUsage: recordCompactionUsage,
+              ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
               ...(portableResponsesNeedsAgentPrefix
@@ -289,7 +329,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             model: turnExecutionPolicy.upstreamModelId,
             maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
             ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-            onUsage: recordCompactionUsage,
+            ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
@@ -322,7 +362,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              onUsage: recordCompactionUsage,
+              ...compactionCallAccounting(s.contextWindowTokens),
             });
           })
       : undefined;
@@ -504,6 +544,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };
@@ -685,6 +735,16 @@ export async function runPostAgentCompaction(
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };

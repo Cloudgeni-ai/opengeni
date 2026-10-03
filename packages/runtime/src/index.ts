@@ -248,6 +248,7 @@ import {
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
+  type ModelInputData,
   type ModelRequest,
   type ModelResponse,
   type SerializedTool,
@@ -420,6 +421,7 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
+  withModelCallOutputBound,
   withModelRequestCapture,
   withModelCallLifecycle,
   type ModelCallLifecycle,
@@ -593,6 +595,7 @@ export {
   boundModelToolOutputsFilterForSettings,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  estimateAgentToolSchemaTokens,
   incrementalModelInputProjectionFilter,
   normalizeComputerCallsFilter,
   projectModelInputForCapabilities,
@@ -989,6 +992,8 @@ export type GenerateSessionTitleOptions = {
    */
   reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
+  onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
+  onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
 };
 
 export const SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS = 4_000;
@@ -1091,26 +1096,38 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  const response =
-    binding?.provider.api === "anthropic-messages"
-      ? await new AnthropicMessagesModel(
-          binding.provider,
-          binding.modelId,
-          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
-        ).getResponse(request)
-      : binding
-        ? await new CompactionResponsesModel(
-            binding.client,
-            binding.modelId,
+  const grant = await options.onModelCallAdmission?.();
+  if (grant) {
+    request.modelSettings.maxTokens = Math.min(
+      SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+      grant.maxOutputTokens,
+    );
+  }
+  const response = await withModelCallOutputBound(
+    { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+    () =>
+      binding?.provider.api === "anthropic-messages"
+        ? new AnthropicMessagesModel(
             binding.provider,
-          ).fetchResponse(request)
-        : await options.model!.getResponse(request);
+            binding.modelId,
+            instrumentedModelFetch(binding.provider.id, globalThis.fetch),
+          ).getResponse(request)
+        : binding
+          ? new CompactionResponsesModel(
+              binding.client,
+              binding.modelId,
+              binding.provider,
+            ).fetchResponse(request)
+          : options.model!.getResponse(request),
+  );
+  const usage = modelResponseUsageFromResponse(response);
+  if (usage) await options.onUsage?.(usage);
   return {
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
       responseStoppedAtOutputLimit(response),
     ),
-    usage: modelResponseUsageFromResponse(response),
+    usage,
   };
 }
 
@@ -1126,10 +1143,14 @@ async function generateChatSessionTitle(
   prompt: string,
   options: GenerateSessionTitleOptions,
 ): Promise<GeneratedSessionTitle> {
+  const grant = await options.onModelCallAdmission?.();
   const completion = await client.chat.completions.create(
     {
       model: modelName,
-      max_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+      max_tokens: Math.min(
+        SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+        grant?.maxOutputTokens ?? SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+      ),
       messages: [
         { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
         { role: "user", content: prompt },
@@ -1137,8 +1158,13 @@ async function generateChatSessionTitle(
       ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
       ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
     } as any,
-    options.signal ? { signal: options.signal } : undefined,
+    {
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+    },
   );
+  const usage = modelResponseUsageFromResponse(completion);
+  if (usage) await options.onUsage?.(usage);
   const choice = (
     completion as {
       choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
@@ -1150,7 +1176,7 @@ async function generateChatSessionTitle(
       typeof content === "string" ? content : "",
       choice?.finish_reason === "length",
     ),
-    usage: modelResponseUsageFromResponse(completion),
+    usage,
   };
 }
 
@@ -1229,6 +1255,7 @@ export async function summarizeForCompaction(
     systemInstructions?: string;
     preparedRequest?: Omit<ModelRequest, "input">;
     signal?: AbortSignal;
+    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -1242,12 +1269,13 @@ export async function summarizeForCompaction(
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
+    const grant = await options.onModelCallAdmission?.();
     let completion: unknown;
     try {
       completion = await client.chat.completions.create(
         {
           model,
-          max_tokens: maxTokens,
+          max_tokens: Math.min(maxTokens, grant?.maxOutputTokens ?? maxTokens),
           messages: [
             ...(options.systemInstructions
               ? [{ role: "system" as const, content: options.systemInstructions }]
@@ -1256,7 +1284,10 @@ export async function summarizeForCompaction(
           ],
           ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
         } as any,
-        options.signal ? { signal: options.signal } : undefined,
+        {
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+        },
       );
     } catch (error) {
       throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
@@ -1339,16 +1370,23 @@ export async function summarizeForCompaction(
         tracing: false,
         ...(options.signal ? { signal: options.signal } : {}),
       };
+  const grant = await options.onModelCallAdmission?.();
+  if (grant) {
+    request.modelSettings.maxTokens = Math.min(maxTokens, grant.maxOutputTokens);
+  }
   let response: unknown;
   try {
-    response =
-      provider.api === "anthropic-messages"
-        ? await new AnthropicMessagesModel(
-            provider,
-            model,
-            instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(request)
-        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    response = await withModelCallOutputBound(
+      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      () =>
+        provider.api === "anthropic-messages"
+          ? new AnthropicMessagesModel(
+              provider,
+              model,
+              instrumentedModelFetch(provider.id, globalThis.fetch),
+            ).getResponse(request)
+          : new CompactionResponsesModel(client, model, provider).fetchResponse(request),
+    );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1556,6 +1594,7 @@ export async function requestRemoteCompactionV2(
     preparedRequest: Omit<ModelRequest, "input">;
     captureAgent?: object;
     signal?: AbortSignal | undefined;
+    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
@@ -1578,18 +1617,27 @@ export async function requestRemoteCompactionV2(
     // Compaction uses the still-active turn cancellation signal instead.
     ...(options.signal ? { signal: options.signal } : {}),
   };
+  // Remote compaction has opaque output and no supported output-limit field.
+  // Its caller reserves the complete context bound before allowing dispatch.
+  const grant = await options.onModelCallAdmission?.();
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await withModelRequestCapture(
-      options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
-      async () => {
-        void notifyModelRequestCapture(request);
-        return new CompactionResponsesModel(options.client, options.model, provider).fetchResponse(
-          request,
-        );
-      },
+    response = await withModelCallOutputBound(
+      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      () =>
+        withModelRequestCapture(
+          options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
+          async () => {
+            void notifyModelRequestCapture(request);
+            return new CompactionResponsesModel(
+              options.client,
+              options.model,
+              provider,
+            ).fetchResponse(request);
+          },
+        ),
     );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
@@ -8288,6 +8336,28 @@ export type RunAgentStreamOptions = {
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
   /**
+   * Producer-side admission gate invoked at the exact per-call boundary: it
+   * runs as the LAST callModelInputFilter, after every input projection and
+   * the dispatch seal, immediately before the provider request is prepared.
+   * The SDK's model loop can run ahead of the consumer's per-response
+   * accounting, so admission that must veto a provider call has to live here —
+   * a consumer-side check can only observe a call that already started. Throw
+   * to veto the call; the error surfaces through the stream like any other
+   * filter failure. Receives the exact payload about to reach the provider so
+   * the gate can size itself on the real request, not a heuristic.
+   *
+   * The gate may return `maxOutputTokens`: the output headroom it granted
+   * this call. The runtime clamps the dispatched ModelRequest's
+   * `modelSettings.maxTokens` to it at the model seam (the SDK merges
+   * modelSettings before filters run, so this is the only seam that still
+   * mutates the request), making the granted hold an actual provider bound —
+   * a permitted call cannot emit beyond its reservation.
+   */
+  onModelCallAdmission?: (call: {
+    modelData: ModelInputData;
+    agent: Agent<any, any>;
+  }) => void | { maxOutputTokens?: number } | Promise<void | { maxOutputTokens?: number }>;
+  /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
    */
@@ -8368,6 +8438,30 @@ function modelModalityProjectionFilterForAgent(
     },
     initialInputAlreadyProjected,
   );
+}
+
+/**
+ * Producer-side billing/budget admission gate. Installed as the LAST
+ * callModelInputFilter — after every input projection and the dispatch seal —
+ * so it sees the exact payload that will reach the provider and its veto
+ * (throw) runs before any provider request preparation or transport await.
+ * The filter itself never mutates the payload; it only adjudicates. A granted
+ * output bound is written into the per-run cell that the model wrappers read
+ * when the actual ModelRequest is dispatched — each call's admission replaces
+ * the previous grant, so an unbounded call never inherits an earlier bound.
+ */
+function modelCallAdmissionFilter(
+  onAdmission: RunAgentStreamOptions["onModelCallAdmission"],
+  outputBoundCell?: { maxTokens: number | undefined },
+): CallModelInputFilter | undefined {
+  if (!onAdmission) return undefined;
+  return async ({ modelData, agent }) => {
+    const grant = await onAdmission({ modelData, agent });
+    if (outputBoundCell) {
+      outputBoundCell.maxTokens = grant?.maxOutputTokens;
+    }
+    return modelData;
+  };
 }
 
 function measuredModelInputFilter(
@@ -8511,6 +8605,13 @@ async function runAgentStreamInternal(
     agent,
     overrides.onModelVisibleContext,
   );
+  // Per-run output-bound cell: the producer-side admission gate writes the
+  // headroom it granted for each call; the model wrappers clamp the
+  // dispatched request's maxTokens to it so a permitted call cannot emit
+  // beyond its reservation.
+  const modelCallOutputBoundCell: { maxTokens: number | undefined } = {
+    maxTokens: undefined,
+  };
   installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -8693,6 +8794,12 @@ async function runAgentStreamInternal(
         ),
         // Seal admission before any provider preparation/transport awaits.
         inputWaitYield?.modelDispatchFilter,
+        // Billing admission is the literal last gate: it sizes the hold from
+        // the exact provider-bound payload and can veto the call by throwing.
+        measuredModelInputFilter(
+          "input_filter_admission",
+          modelCallAdmissionFilter(overrides.onModelCallAdmission, modelCallOutputBoundCell),
+        ),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -8711,23 +8818,25 @@ async function runAgentStreamInternal(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelRequestCapture(modelRequestCapture, () =>
-      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          recordModelPreparationManifestInventory(
-            "sandbox_session_manifest_inventory",
-            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            ownedRunOptions,
-          );
-        }),
+    return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
+      withModelRequestCapture(modelRequestCapture, () =>
+        withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+          withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+            recordModelPreparationManifestInventory(
+              "sandbox_agent_manifest_inventory",
+              (agent as { defaultManifest?: Manifest }).defaultManifest,
+            );
+            recordModelPreparationManifestInventory(
+              "sandbox_session_manifest_inventory",
+              (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+            );
+            return runScopedRunner(settings, agent, inputWaitYield).run(
+              agent,
+              prepared.input,
+              ownedRunOptions,
+            );
+          }),
+        ),
       ),
     );
   }
@@ -8850,6 +8959,12 @@ async function runAgentStreamInternal(
         ),
       ),
       inputWaitYield?.modelDispatchFilter,
+      // Billing admission is the literal last gate: it sizes the hold from
+      // the exact provider-bound payload and can veto the call by throwing.
+      measuredModelInputFilter(
+        "input_filter_admission",
+        modelCallAdmissionFilter(overrides.onModelCallAdmission, modelCallOutputBoundCell),
+      ),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -8873,19 +8988,21 @@ async function runAgentStreamInternal(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelRequestCapture(modelRequestCapture, () =>
-    withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-        recordModelPreparationManifestInventory(
-          "sandbox_agent_manifest_inventory",
-          (agent as { defaultManifest?: Manifest }).defaultManifest,
-        );
-        return runScopedRunner(settings, agent, inputWaitYield).run(
-          agent,
-          prepared.input,
-          runOptions,
-        );
-      }),
+  return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
+    withModelRequestCapture(modelRequestCapture, () =>
+      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          return runScopedRunner(settings, agent, inputWaitYield).run(
+            agent,
+            prepared.input,
+            runOptions,
+          );
+        }),
+      ),
     ),
   );
 }

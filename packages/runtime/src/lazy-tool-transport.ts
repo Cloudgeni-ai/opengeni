@@ -13,6 +13,7 @@ import {
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
 import {
+  applyModelCallOutputBound,
   beforeModelRequest,
   modelResponseSettlement,
   notifyModelRequestCapture,
@@ -872,7 +873,7 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     await beforeModelRequest();
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(applyModelCallOutputBound(request), this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
@@ -886,7 +887,7 @@ class LazyToolModel implements Model {
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     await beforeModelRequest();
-    const prepared = prepareLazyToolRequest(request, this.runtime);
+    const prepared = prepareLazyToolRequest(applyModelCallOutputBound(request), this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     for await (const event of this.inner.getStreamedResponse(prepared)) {

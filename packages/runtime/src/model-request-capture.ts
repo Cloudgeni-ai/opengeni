@@ -14,6 +14,48 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
 const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
 const captureIndices = new WeakMap<object, number>();
 
+/**
+ * Per-run mutable output bound set by the producer-side admission gate
+ * (RunAgentStreamOptions.onModelCallAdmission). The SDK merges
+ * modelSettings BEFORE the per-call input filter runs, so the granted
+ * headroom cannot ride the filter's ModelInputData — the only mutable seam
+ * left is the ModelRequest seen by the model wrappers below. The cell is
+ * scoped to one run's async context so concurrent turns never share a bound.
+ */
+const modelCallOutputBound = new AsyncLocalStorage<{
+  maxTokens: number | undefined;
+}>();
+
+export function withModelCallOutputBound<T>(
+  cell: { maxTokens: number | undefined },
+  fn: () => T,
+): T {
+  return modelCallOutputBound.run(cell, fn);
+}
+
+/** Reservation-backed requests cannot blindly replay potentially paid work. */
+export function hasModelCallOutputBound(): boolean {
+  return modelCallOutputBound.getStore()?.maxTokens !== undefined;
+}
+
+/**
+ * Clamp the provider request's output budget to the admission-granted
+ * headroom. A smaller explicit maxTokens always wins; when no admission ran
+ * (or it granted no bound) the request passes through untouched. Applied at
+ * the model-request seam so the bound reaches the actual provider dispatch,
+ * not just the accounting side.
+ */
+export function applyModelCallOutputBound(request: ModelRequest): ModelRequest {
+  const bound = modelCallOutputBound.getStore()?.maxTokens;
+  if (bound === undefined) return request;
+  const existing = request.modelSettings.maxTokens;
+  if (typeof existing === "number" && existing <= bound) return request;
+  return {
+    ...request,
+    modelSettings: { ...request.modelSettings, maxTokens: bound },
+  };
+}
+
 /** Awaited producer-side authority, separate from observational request capture. */
 export type ModelCallLifecycle = {
   beforeModelRequest?: () => Promise<void>;
@@ -155,16 +197,18 @@ export class ModelRequestCaptureModel implements Model {
 
   async getResponse(request: ModelRequest) {
     await beforeModelRequest();
-    rememberPreparedModelRequest(request);
-    void notifyModelRequestCapture(request);
-    return this.inner.getResponse(request);
+    const bounded = applyModelCallOutputBound(request);
+    rememberPreparedModelRequest(bounded);
+    void notifyModelRequestCapture(bounded);
+    return this.inner.getResponse(bounded);
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     await beforeModelRequest();
-    rememberPreparedModelRequest(request);
-    void notifyModelRequestCapture(request);
-    for await (const event of this.inner.getStreamedResponse(request)) {
+    const bounded = applyModelCallOutputBound(request);
+    rememberPreparedModelRequest(bounded);
+    void notifyModelRequestCapture(bounded);
+    for await (const event of this.inner.getStreamedResponse(bounded)) {
       const settlement = modelResponseSettlement(event);
       void settlement?.catch(() => undefined);
       yield event;

@@ -862,6 +862,39 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("account usage capabilities require the ledger owner, bounded search path and private execution", () => {
+    const posture = safePosture();
+    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "usage_events" });
+    const routines = [
+      "account_usage_quantity(uuid, text, timestamp with time zone)",
+      "account_open_usage_reservations(uuid, text, timestamp with time zone, timestamp with time zone)",
+    ].map((name) => ({
+      name,
+      owner: "opengeni_migrator",
+      securityDefiner: true,
+      execute: true,
+      publicExecute: false,
+      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+    }));
+    posture.privateRoutines.push(...routines);
+    const issues = () =>
+      evaluateRuntimeDatabasePosture(posture, options).filter((value) =>
+        value.startsWith("account usage capability"),
+      );
+    expect(issues()).toEqual([]);
+    for (const routine of routines) {
+      routine.publicExecute = true;
+      expect(issues()).toHaveLength(1);
+      routine.publicExecute = false;
+      routine.owner = "foreign_owner";
+      expect(issues()).toHaveLength(1);
+      routine.owner = "opengeni_migrator";
+      routine.configuration = ["search_path=public"];
+      expect(issues()).toHaveLength(1);
+      routine.configuration = ["search_path=pg_catalog, public, opengeni_private, pg_temp"];
+    }
+  });
+
   test("private publication capabilities preserve the rolling table inventory and forbid direct DML", () => {
     const posture = safePosture();
     const table = {

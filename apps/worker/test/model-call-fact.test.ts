@@ -3,11 +3,16 @@ import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { createObservability } from "@opengeni/observability";
 
 import {
   emitModelCallUsage,
   recordAuthoritativeModelCallFact,
   recordModelUsageAndDebitCredits,
+  createCompactionModelUsageEventState,
+  processCompactionModelUsageEvent,
+  createModelResponseEventState,
+  processModelResponseTerminalEvent,
 } from "../src/activities/agent-turn";
 
 const ACCOUNT = "acct-1";
@@ -36,6 +41,236 @@ describe("recordAuthoritativeModelCallFact", () => {
   afterEach(() => {
     while (restores.length > 0) restores.pop()?.();
   });
+
+  /**
+   * The atomic usage+debit writer (BILL-03) carries the whole batch in one
+   * call; capture its usageEvents and creditDebit the way the old per-write
+   * spies did.
+   */
+  function mockAtomicWrites(input?: { failOnDebit?: boolean }) {
+    const usageEvents: Array<Record<string, any>> = [];
+    const creditDebits: Array<Record<string, any>> = [];
+    const spy = spyOn(opengeniDb, "recordUsageEventsAndApplyCreditDebit").mockImplementation(
+      async (_db, batch) => {
+        if (input?.failOnDebit && batch.creditDebit) {
+          throw new Error("credits must NOT be debited for an externally billed turn");
+        }
+        usageEvents.push(...batch.usageEvents);
+        if (batch.creditDebit) creditDebits.push(batch.creditDebit);
+        return {
+          events: [],
+          debit: batch.creditDebit
+            ? {
+                balance: {
+                  accountId: ACCOUNT,
+                  balanceMicros: 1_000_000,
+                  currency: "usd",
+                  updatedAt: new Date().toISOString(),
+                },
+                debitedMicros: batch.creditDebit.requestedAmountMicros,
+              }
+            : null,
+        };
+      },
+    );
+    restores.push(() => spy.mockRestore());
+    return { usageEvents, creditDebits, spy };
+  }
+
+  test.each([false, true])(
+    "compaction settles its reservation atomically, including duplicate usage (duplicate=%s)",
+    async (duplicate) => {
+      const { usageEvents, creditDebits, spy } = mockAtomicWrites();
+      const settings = billedSettings();
+      const release = {
+        eventType: "model.tokens.reserved",
+        quantity: -2_000,
+        unit: "tokens",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: "reservation-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        idempotencyKey: "reservation-1:release",
+      };
+      const input: Parameters<typeof processCompactionModelUsageEvent>[0] = {
+        usage: {
+          responseId: "compaction-response",
+          usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+        },
+        state: createCompactionModelUsageEventState(
+          new Set(duplicate ? ["compaction-response"] : []),
+        ),
+        dispatchId: "dispatch-1",
+        settings,
+        db,
+        observability: createObservability(settings, { component: "compaction-test" }),
+        publish: null,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "openai",
+        providerApi: "responses",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        reservationReleases: [release],
+      };
+      if (!duplicate) {
+        const failedCommit = new Error("Synthetic billing transaction failure");
+        spy.mockRejectedValueOnce(failedCommit);
+        await expect(processCompactionModelUsageEvent(input)).rejects.toBe(failedCommit);
+        expect(input.state.claimedSourceKeys.has("compaction-response")).toBe(false);
+        expect(input.state.usageCount).toBe(0);
+      }
+      const callsBeforeMalformed = spy.mock.calls.length;
+      const malformed = await processCompactionModelUsageEvent({
+        ...input,
+        usage: {
+          responseId: "compaction-response",
+          usage: { inputTokens: 100, outputTokens: -1, totalTokens: 150 },
+        },
+      });
+      expect(malformed.usageReported).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(callsBeforeMalformed);
+      expect(input.state.claimedSourceKeys.has("compaction-response")).toBe(duplicate);
+      const result = await processCompactionModelUsageEvent(input);
+      expect(result.usageReported).toBe(true);
+      expect(result.status).toBe(duplicate ? "duplicate" : "processed");
+      expect(spy).toHaveBeenCalledTimes(duplicate ? 1 : 2);
+      expect(usageEvents).toContainEqual(release);
+      expect(usageEvents.filter((event) => event.eventType === "model.tokens")).toHaveLength(1);
+      expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+      expect(creditDebits).toHaveLength(1);
+    },
+  );
+
+  test.each([
+    { inputTokens: 100 },
+    { outputTokens: 50 },
+    { inputTokens: 100, outputTokens: 50, inputTokensDetails: { cached_tokens: -1 } },
+  ])(
+    "incomplete or rejected telemetry keeps a hold until complete usage arrives: %j",
+    async (usage) => {
+      const { usageEvents, creditDebits, spy } = mockAtomicWrites();
+      const release = {
+        eventType: "model.tokens.reserved",
+        quantity: -2_000,
+        unit: "tokens",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: "reservation-malformed",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        idempotencyKey: "reservation-malformed:release",
+      };
+      const input: Parameters<typeof recordModelUsageAndDebitCredits>[2] = {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        sourceKey: "malformed-response",
+        usage,
+        reservationReleases: [release],
+      };
+      expect(await recordModelUsageAndDebitCredits(billedSettings(), db, input)).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        ...input,
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(usageEvents).toContainEqual(release);
+      expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+      expect(creditDebits).toHaveLength(1);
+    },
+  );
+
+  test.each([false, true])(
+    "a terminal response with unknown spend keeps its reservation (malformed=%s)",
+    async (malformed) => {
+      const { usageEvents, spy } = mockAtomicWrites();
+      const settings = billedSettings();
+      const input: Parameters<typeof processModelResponseTerminalEvent>[0] = {
+        event: {
+          type: "raw_model_stream_event",
+          data: {
+            type: "response_done",
+            response: {
+              id: "usage-less-response",
+              ...(malformed ? { usage: { inputTokens: 100, outputTokens: -1 } } : {}),
+            },
+          },
+        },
+        state: createModelResponseEventState(),
+        dispatchId: "dispatch-1",
+        settings,
+        db,
+        observability: createObservability(settings, { component: "unknown-spend-test" }),
+        publish: null,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "openai",
+        metricProvider: "openai",
+        providerApi: "responses",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async () => undefined,
+        reservationReleases: [
+          {
+            eventType: "model.tokens.reserved",
+            quantity: -2_000,
+            unit: "tokens",
+            idempotencyKey: "unknown-spend:release",
+          },
+        ],
+      };
+      const result = await processModelResponseTerminalEvent(input);
+      expect(result).toMatchObject({ status: "processed", usageReported: false });
+      expect(spy).not.toHaveBeenCalled();
+      if (malformed) {
+        expect(input.state.claimedSourceKeys.has("usage-less-response")).toBe(false);
+        const settled = await processModelResponseTerminalEvent({
+          ...input,
+          event: {
+            type: "raw_model_stream_event",
+            data: {
+              type: "response_done",
+              response: {
+                id: "usage-less-response",
+                usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+              },
+            },
+          },
+        });
+        expect(settled).toMatchObject({ status: "processed", usageReported: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+        expect(
+          usageEvents.find((event) => event.eventType === "model.tokens.reserved")?.quantity,
+        ).toBe(-2_000);
+      }
+    },
+  );
 
   test("soft-fails fact persist without throwing", async () => {
     const sentinel = "SECRET_SENTINEL_123";
@@ -159,14 +394,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("external billing returns pricedCostMicros 0 for facts", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites({ failOnDebit: true });
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
@@ -183,18 +411,11 @@ describe("recordAuthoritativeModelCallFact", () => {
     expect(billing.estimatedProviderCostMicros).toBe(14_000);
     expect(billing.equivalentCreditCostMicros).toBe(14_700);
     expect(billing.pricingSource).toBe("configured_list_price");
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites({ failOnDebit: true });
 
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
@@ -217,12 +438,11 @@ describe("recordAuthoritativeModelCallFact", () => {
       pricingSource: "configured_list_price",
     });
     expect(billing).not.toHaveProperty("upstreamProvider");
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("persists free external billing authority before a soft fact-write failure", async () => {
-    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => usageSpy.mockRestore());
+    const { usageEvents } = mockAtomicWrites();
     const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(async () => {
       throw new Error("fact writer unavailable");
     });
@@ -302,7 +522,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         outputTokens: 500,
       }),
     ]);
-    expect(usageSpy.mock.calls.map(([, input]) => input)).toEqual([
+    expect(usageEvents).toEqual([
       expect.objectContaining({ eventType: "model.tokens", quantity: 1500 }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
@@ -320,8 +540,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("external estimates preserve per-request pricing tiers", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
+    mockAtomicWrites();
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,
@@ -351,14 +570,7 @@ describe("recordAuthoritativeModelCallFact", () => {
   });
 
   test("partial or malformed configured usage stays externally uncharged and unpriced", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async () => {
-        throw new Error("credits must NOT be debited for an externally billed turn");
-      },
-    );
-    restores.push(() => debitSpy.mockRestore());
+    const { usageEvents, creditDebits } = mockAtomicWrites({ failOnDebit: true });
 
     const usageCases = [
       { sourceKey: "response-partial", usage: { inputTokens: 100, totalTokens: 100 } },
@@ -388,27 +600,15 @@ describe("recordAuthoritativeModelCallFact", () => {
       });
     }
 
-    expect(recordSpy).toHaveBeenCalledTimes(2);
-    expect(recordSpy.mock.calls.map(([, input]) => input)).toEqual([
+    expect(usageEvents).toEqual([
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
-    expect(debitSpy).not.toHaveBeenCalled();
+    expect(creditDebits).toHaveLength(0);
   });
 
   test("Gateway exact cost remains known with malformed core token telemetry", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
-      balance: {
-        accountId: ACCOUNT,
-        balanceMicros: 1_000_000,
-        currency: "usd",
-        updatedAt: new Date().toISOString(),
-      },
-      debitedMicros: 5,
-    });
-    restores.push(() => debitSpy.mockRestore());
+    const { creditDebits } = mockAtomicWrites();
 
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
@@ -431,12 +631,11 @@ describe("recordAuthoritativeModelCallFact", () => {
       pricingSource: "gateway_reported",
       upstreamProvider: "baseten",
     });
-    expect(debitSpy).toHaveBeenCalledTimes(1);
+    expect(creditDebits).toHaveLength(1);
   });
 
   test("external usage stays uncharged and explicitly unpriced when no schedule exists", async () => {
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
-    restores.push(() => recordSpy.mockRestore());
+    mockAtomicWrites();
     const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
       accountId: ACCOUNT,
       workspaceId: WORKSPACE,

@@ -38,6 +38,7 @@ export type ModelPreparationPhase =
   | "input_filter_tool_output"
   | "input_filter_modality"
   | "input_filter_context"
+  | "input_filter_admission"
   | "responses_input_conversion"
   | "responses_request_build";
 
