@@ -204,9 +204,19 @@ export async function requireScopeMutation(
   if (scope === "organization")
     throw new HTTPException(409, { message: "Manage this subscription in organization settings" });
   if (scope === "user") {
-    // Server-side external-user assertions do not use browser cookies. Ordinary
-    // bearers remain rejected by requirePrivateHuman; native CSRF is unchanged.
-    await requireNonCookieOrSameOriginMutation(c, deps);
+    // External contexts materialize grants only for the requested workspace.
+    // Resolve that grant before recognizing their verified non-cookie origin;
+    // headers alone never exempt a native-cookie request from CSRF checks.
+    const authorization = c.req.header("authorization")
+      ? await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write")
+      : null;
+    if (
+      !authorization ||
+      !hasVerifiedOwningUserAuthorization(authorization) ||
+      !externalActorContinuationForAuthorization(authorization)
+    ) {
+      await requireNonCookieOrSameOriginMutation(c, deps);
+    }
     return await requirePrivateHuman(c, deps, workspaceId);
   }
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");

@@ -11,6 +11,7 @@ import {
 import {
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
+  hasVerifiedOwningUserAuthorization,
   stampDelegatedHumanAuthorization,
   type ApiRouteDeps,
   type DelegatedHumanAuthorization,
@@ -35,6 +36,8 @@ import {
   nativeProviderCallbackFailureUrl,
 } from "../src/integrations/delegated-native-provider-handoff";
 import { registerConnectionRoutes } from "../src/routes/connections";
+import { requireNonServiceProviderActor } from "../src/routes/codex";
+import { requireScopeMutation } from "../src/routes/supergrok";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -543,6 +546,8 @@ describe("independent native consent for delegated provider setup", () => {
     });
     let origin: ExternalActorContinuation | null = null;
     let context: social.SocialOAuthStartContext | null = null;
+    let startAuthorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>> | null =
+      null;
     const controls = { revoked: false, revokeAtClaim: false, revokeAfterExchange: false };
     apiKeys.mockImplementation(async (_, hash) =>
       hash === createHash("sha256").update(token).digest("hex")
@@ -658,6 +663,7 @@ describe("independent native consent for delegated provider setup", () => {
         workspaceId,
         "workspace:admin",
       );
+      startAuthorization = authorization;
       expect(authorization.canonicalManagedHumanSession).toBe(false);
       expect(authorization.canonicalLocalHumanSession).toBe(false);
       origin = externalActorContinuationForAuthorization(authorization);
@@ -676,6 +682,9 @@ describe("independent native consent for delegated provider setup", () => {
         await social.startSocialOAuth({ db: deps.db, settings: deps.settings }, context),
       );
     });
+    app.post("/fixture/external-private-scope", async (c) =>
+      c.json(await requireScopeMutation(c, deps, workspaceId, "user")),
+    );
     return {
       controls,
       key,
@@ -693,6 +702,28 @@ describe("independent native consent for delegated provider setup", () => {
       },
       get origin() {
         return origin!;
+      },
+      get authorization() {
+        return startAuthorization!;
+      },
+      async privateScope(overrides: Record<string, string | null> = {}) {
+        const headers = new Headers({
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-opengeni-external-actor": encodeURIComponent(
+            JSON.stringify({ mode: "external", identity: reference }),
+          ),
+        });
+        for (const [name, value] of Object.entries(overrides)) {
+          if (value === null) headers.delete(name);
+          else headers.set(name, value);
+        }
+        return app.fetch(
+          new Request(`${baseUrl}/fixture/external-private-scope`, {
+            method: "POST",
+            headers,
+          }),
+        );
       },
       async start() {
         const response = await app.fetch(
@@ -712,6 +743,60 @@ describe("independent native consent for delegated provider setup", () => {
         return { result, state: readSignedState(result.state, stateSecret)! };
       },
     };
+  }
+
+  test("provider actor admission preserves a genuine external owner without promoting host-key attribution to native browser proof", async () => {
+    const fixture = externalSocialFixture();
+    await fixture.start();
+    const authorization = fixture.authorization;
+    expect(hasVerifiedOwningUserAuthorization(authorization)).toBe(true);
+    expect(externalActorContinuationForAuthorization(authorization)).toEqual(fixture.origin);
+    expect(authorization.grant.principalKind).toBe("human_session");
+    expect(authorization.canonicalManagedHumanSession).toBe(false);
+    expect(authorization.canonicalLocalHumanSession).toBe(false);
+    expect(() => requireNonServiceProviderActor(authorization)).not.toThrow();
+  });
+
+  test("private SuperGrok transport admits a verified external owner before any workspace grant has been materialized", async () => {
+    const fixture = externalSocialFixture();
+    const response = await fixture.privateScope();
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toEqual({
+      accountId: organizationId,
+      subjectId: `external_user:${identityId}`,
+    });
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(sessions).not.toHaveBeenCalled();
+  });
+
+  for (const [label, headers, status] of [
+    ["organization key without an external owner", { "x-opengeni-external-actor": null }, 404],
+    [
+      "foreign external identity with unavailable authority",
+      {
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({
+            mode: "external",
+            identity: { externalId: "wrong-person", source: "fixture-host" },
+          }),
+        ),
+      },
+      503,
+    ],
+    [
+      "invalid bearer borrowing a native cookie without same-origin proof",
+      { authorization: "Bearer invalid", cookie, "x-opengeni-external-actor": null },
+      403,
+    ],
+  ] as const) {
+    test(`private SuperGrok transport rejects ${label}`, async () => {
+      const fixture = externalSocialFixture();
+      const response = await fixture.privateScope(headers);
+      expect(response.status).toBe(status);
+      expect(fixture.provider).not.toHaveBeenCalled();
+      expect(fixture.write).not.toHaveBeenCalled();
+    });
   }
 
   test("Social genuine external Connect START permits its anonymous callback and retains the stored-origin fence through credential commit", async () => {
