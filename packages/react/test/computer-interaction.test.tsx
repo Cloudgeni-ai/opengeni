@@ -852,6 +852,126 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("dismisses both desktop menus after target discovery before dock shortcuts", async () => {
+    const screenTarget = target("screen-1", "screen");
+    const windowTarget = target();
+    let discover!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      discover = resolve;
+    });
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => {
+        await discovered;
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [screenTarget, windowTarget],
+        };
+      },
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) =>
+        observation(targetId === screenTarget.id ? screenTarget : windowTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(screenTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    let dockEscapes = 0;
+    const dock = (event: Event) => {
+      if ((event as KeyboardEvent).key === "Escape") dockEscapes += 1;
+    };
+    document.addEventListener("keydown", dock);
+    try {
+      await flush(40);
+      expect(
+        rendered.container.querySelector("summary[aria-label='Advanced desktop views']"),
+      ).toBeNull();
+      await actRun(discover);
+      await flush(20);
+      const menus = [...rendered.container.querySelectorAll<HTMLDetailsElement>("details")];
+      expect(menus).toHaveLength(2);
+      for (const menu of menus) {
+        const trigger = menu.querySelector("summary")!;
+        const inside = menu.querySelector("button")!;
+        menu.open = true;
+        inside.focus();
+        inside.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
+        expect(menu.open).toBe(true);
+        const escape = new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        });
+        inside.dispatchEvent(escape);
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+        expect(escape.defaultPrevented).toBe(true);
+        expect(dockEscapes).toBe(0);
+        menu.open = true;
+        const outside = new Event("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        document.body.dispatchEvent(outside);
+        expect(menu.open).toBe(false);
+        expect(outside.defaultPrevented).toBe(false);
+      }
+      menus[0]!
+        .querySelector("summary")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(dockEscapes).toBe(1);
+      expect(requests).toEqual([]);
+    } finally {
+      discover();
+      document.removeEventListener("keydown", dock);
+      await rendered.unmount();
+    }
+  });
+
+  test("returns desktop menu focus after keyboard actions without stealing pointer focus", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      const trigger = menu.querySelector("summary")!;
+      for (const label of ["Agent computer", "Follow agent"]) {
+        menu.open = true;
+        const action = [...menu.querySelectorAll("button")].find((button) =>
+          button.textContent?.startsWith(label),
+        )!;
+        action.focus();
+        await actRun(() => action.click());
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+      }
+      menu.open = true;
+      const choice = menu.querySelector("button")!;
+      choice.focus();
+      await actRun(() =>
+        choice.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })),
+      );
+      expect(menu.open).toBe(false);
+      expect(document.activeElement === trigger).toBe(false);
+      expect(fixture.actions).toEqual([]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
   test("keeps a single desktop uncluttered and puts app/window views under Advanced", async () => {
     const screenTarget = target("screen-1", "screen");
     const windowTarget = target();
@@ -2254,12 +2374,15 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
-  test("retains keyboard focus after a canvas click and types after that click", async () => {
+  test("dismisses the desktop menu without swallowing a canvas click or subsequent typing", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
       await fixture.frame(1);
       await canvasMock.finishDecode(0);
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      menu.open = true;
+      menu.querySelector("summary")!.focus();
       const pointer = new MouseEvent("pointerdown", {
         bubbles: true,
         cancelable: true,
@@ -2279,6 +2402,7 @@ describe("ComputerViewer input reliability", () => {
         );
       });
       expect(pointer.defaultPrevented).toBe(true);
+      expect(menu.open).toBe(false);
       expect(document.activeElement).toBe(fixture.keyboard);
       await actRun(() => {
         fixture.keyboard.value = "immediate text";
