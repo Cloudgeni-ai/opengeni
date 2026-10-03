@@ -1,0 +1,80 @@
+{{- $autoscaling := .Values.worker.turns.autoscaling }}
+{{- $keda := $autoscaling.keda }}
+{{- if and .Values.worker.enabled $keda.enabled }}
+{{- if not $autoscaling.enabled }}
+{{- fail "worker.turns.autoscaling.keda requires autoscaling.enabled" }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "keda.sh/v1alpha1") }}
+{{- fail "install the pinned KEDA addon before enabling worker.turns.autoscaling.keda" }}
+{{- end }}
+{{- if or (not .Values.observability.prometheusRule.enabled) (not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1")) }}
+{{- fail "worker KEDA requires the freshness-gated PrometheusRule" }}
+{{- end }}
+{{- if or (lt (int $autoscaling.minReplicas) 2) (lt (int $autoscaling.maxReplicas) (int $autoscaling.minReplicas)) (le (int $keda.targetTurnsPerPod) 0) (gt (int $keda.freshnessSeconds) 60) (le (int $keda.freshnessSeconds) 0) }}
+{{- fail "worker KEDA requires an HA floor, a capacity-derived maximum, positive demand target, and freshness at most 60 seconds" }}
+{{- end }}
+{{- if or $autoscaling.slotSaturationMetric.enabled (gt (len $autoscaling.customMetrics) 0) }}
+{{- fail "KEDA is the only turn-worker autoscaler owner; legacy custom metrics must be disabled" }}
+{{- end }}
+{{- if or (ne (default "fixed" (index .Values.config "OPENGENI_TURN_WORKER_CONCURRENCY_MODE")) "fixed") (lt (int (index .Values.config "OPENGENI_TURN_WORKER_MIN_MEMORY_SAFE_TURNS")) (int $keda.targetTurnsPerPod)) (le (int (index .Values.config "OPENGENI_TURN_WORKER_BASELINE_MEMORY_BUDGET_MIB")) 0) }}
+{{- fail "worker KEDA requires fixed admission with a finalized baseline budget and minimum safe density covering its demand target" }}
+{{- end }}
+{{- if and $keda.demandEnabled (ne (index .Values.config "OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED") "true") }}
+{{- fail "worker KEDA demand requires the protected video control-routing cutover and legacy drain proof" }}
+{{- end }}
+{{- $fullName := include "opengeni.fullname" . }}
+{{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $fullName }}-worker-turns
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-turns
+  annotations:
+    scaledobject.keda.sh/transfer-hpa-ownership: "true"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullName }}-worker-turns
+  pollingInterval: {{ $keda.pollingInterval }}
+  minReplicaCount: {{ $autoscaling.minReplicas }}
+  maxReplicaCount: {{ $autoscaling.maxReplicas }}
+  {{- if $keda.demandEnabled }}
+  fallback:
+    failureThreshold: {{ $keda.failureThreshold }}
+    replicas: {{ $autoscaling.minReplicas }}
+    behavior: currentReplicasIfHigher
+  {{- end }}
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      name: {{ $fullName }}-worker-turns
+      behavior:
+        {{- toYaml $autoscaling.behavior | nindent 8 }}
+  triggers:
+    {{- if $keda.demandEnabled }}
+    - type: prometheus
+      name: runnable-turn-demand
+      metricType: AverageValue
+      metadata:
+        serverAddress: {{ required "worker KEDA requires a Prometheus serverAddress" $keda.serverAddress | quote }}
+        threshold: {{ $keda.targetTurnsPerPod | quote }}
+        ignoreNullValues: "false"
+        # No `or vector(0)`: missing/partial/stale demand is an error. Before
+        # fallback, HPA skips downscale; afterwards it holds current or floor.
+        query: >-
+          opengeni:turn_autoscaling_demand:fresh_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+          and
+          (time() - timestamp(opengeni:turn_autoscaling_demand:fresh_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}) < {{ $keda.freshnessSeconds }})
+    {{- end }}
+    - type: memory
+      metricType: AverageValue
+      metadata:
+        value: {{ $keda.memoryAverageValue | quote }}
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ $autoscaling.targetCPUUtilizationPercentage | quote }}
+{{- end }}

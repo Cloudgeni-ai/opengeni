@@ -115,6 +115,21 @@ successors; Temporal metadata never proves writer quiescence.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
+Worker elasticity is activity/slot pressure, not logical queue truth. The
+opt-in KEDA owner sums deduplicated physical agent-turn occupancy and takes the
+maximum of replicated fresh Temporal activity backlog. Complete current pod
+scrapes and same-instance monitor timestamps are required; missing evidence
+blocks downscale, and any remaining dispatched backlog holds the current
+replica floor. Durable paused prompts and timer-held recoveries are not demand.
+See the guarded [deployment cutover](deployment.md#demand-driven-turn-worker-cutover).
+
+Future video reconciliation routes to the existing control queue only after
+all control pollers register it. A default-off workflow input freezes activation,
+and the deterministic patch decision is made at the activity dispatch boundary.
+Legacy video runs and their continue-as-new successors retain the turn queue;
+its video registration remains until a complete read-only drain proof permits
+agent-only demand scaling. This is queue isolation, not a provider behavior change.
+
 ### 3.3 Logical turns and physical attempts are different
 
 A **turn** is accepted work; an **attempt**, replaceable execution. Resumed

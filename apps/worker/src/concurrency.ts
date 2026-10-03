@@ -29,7 +29,8 @@ export type TurnWorkerConcurrencySettings = Pick<
   | "turnWorkerMaxConcurrentTurns"
   | "turnWorkerTargetCpuUsage"
   | "turnWorkerTargetMemoryUsage"
->;
+> &
+  Partial<Pick<Settings, "turnWorkerMinMemorySafeTurns" | "turnWorkerBaselineMemoryBudgetMiB">>;
 
 export type TurnWorkerConcurrencyOptions = Pick<
   WorkerOptions,
@@ -84,6 +85,12 @@ export function createTurnWorkerConcurrencyPlan(
   options: Omit<TurnAdmissionOptions, "maximumTurns"> = {},
 ): TurnWorkerConcurrencyPlan {
   if (settings.turnWorkerConcurrencyMode === "resource-based") {
+    if (
+      (settings.turnWorkerMinMemorySafeTurns ?? 0) > 0 ||
+      (settings.turnWorkerBaselineMemoryBudgetMiB ?? 0) > 0
+    ) {
+      throw new Error("Turn worker memory-safe planning guarantees require fixed admission");
+    }
     return {
       options: turnWorkerConcurrencyOptions(settings),
       admission: null,
@@ -93,6 +100,8 @@ export function createTurnWorkerConcurrencyPlan(
   const fixed = createTurnWorkerTuner({
     ...options,
     maximumTurns: settings.turnWorkerMaxConcurrentTurns,
+    minimumMemorySafeTurns: settings.turnWorkerMinMemorySafeTurns ?? 0,
+    baselineMemoryBudgetBytes: (settings.turnWorkerBaselineMemoryBudgetMiB ?? 0) * MIB,
   });
   return {
     options: { tuner: fixed.tuner },
@@ -154,6 +163,8 @@ export type TurnAdmissionSnapshot = {
 
 export type TurnAdmissionOptions = {
   maximumTurns?: number;
+  minimumMemorySafeTurns?: number;
+  baselineMemoryBudgetBytes?: number;
   hardBytesPerTurn?: number;
   nativeHeadroomBytes?: number;
   memorySnapshot?: () => CgroupMemorySnapshot;
@@ -189,6 +200,8 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
   private readonly permits = new Set<TurnSlotPermit>();
   private baselineBytes: number;
   private readonly maximumTurns: number;
+  private readonly minimumMemorySafeTurns: number;
+  private readonly baselineMemoryBudgetBytes: number;
   private readonly hardBytesPerTurn: number;
   private readonly nativeHeadroomBytes: number;
   private readonly memorySnapshot: () => CgroupMemorySnapshot;
@@ -200,6 +213,17 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
       "maximumTurns",
       options.maximumTurns ?? TURN_WORKER_MAX_CONCURRENT_TURNS,
     );
+    this.minimumMemorySafeTurns = nonnegativeInteger(
+      "minimumMemorySafeTurns",
+      options.minimumMemorySafeTurns ?? 0,
+    );
+    this.baselineMemoryBudgetBytes = nonnegativeInteger(
+      "baselineMemoryBudgetBytes",
+      options.baselineMemoryBudgetBytes ?? 0,
+    );
+    if (this.minimumMemorySafeTurns > this.maximumTurns) {
+      throw new Error("Turn worker memory-safe planning density exceeds its hard concurrency cap");
+    }
     this.hardBytesPerTurn = positiveInteger(
       "hardBytesPerTurn",
       options.hardBytesPerTurn ?? TURN_WORKER_HARD_MEMORY_BYTES_PER_TURN,
@@ -281,6 +305,43 @@ export class MemoryAwareTurnSlotSupplier implements CustomSlotSupplier<ActivityS
       throw new Error("Turn worker startup admission check ran after slot reservation");
     }
     const finalizedBaselineBytes = memory.currentBytes;
+    if (
+      this.baselineMemoryBudgetBytes > 0 &&
+      finalizedBaselineBytes > this.baselineMemoryBudgetBytes
+    ) {
+      throw new Error(
+        "Turn worker initialized above its placement baseline budget: " +
+          `baseline=${finalizedBaselineBytes} budget=${this.baselineMemoryBudgetBytes}. ` +
+          "Lower the planning density or reconcile worker resources and fleet placement.",
+      );
+    }
+    if (this.minimumMemorySafeTurns > 0) {
+      // The observed-memory check deliberately keeps every permit's complete
+      // reservation even after its allocation is resident. Prove the planning
+      // density with both the worst-case resident budget and that retained
+      // charge; a startup-only slot count would overstate sustainable density.
+      const memorySafeResidentTurns =
+        memory.limitBytes === null
+          ? 0
+          : Math.min(
+              this.maximumTurns,
+              Math.max(
+                0,
+                Math.floor(
+                  (memory.limitBytes - finalizedBaselineBytes - this.nativeHeadroomBytes) /
+                    (2 * this.hardBytesPerTurn),
+                ),
+              ),
+            );
+      if (memorySafeResidentTurns < this.minimumMemorySafeTurns) {
+        throw new Error(
+          "Turn worker cannot sustain its memory-safe planning density: " +
+            `minimum=${this.minimumMemorySafeTurns} safe=${memorySafeResidentTurns} ` +
+            `baseline=${finalizedBaselineBytes} limit=${String(memory.limitBytes)}. ` +
+            "Lower the demand target and reconcile the Ready floor, or increase reviewed resources.",
+        );
+      }
+    }
     const finalizedCapacity =
       memory.limitBytes === null
         ? this.maximumTurns

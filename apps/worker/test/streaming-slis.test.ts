@@ -86,6 +86,54 @@ describe("logical sandbox provision metrics", () => {
 });
 
 describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
+  test("exports the unchanged identity and finite first-token tail beyond ten seconds", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    now = 25_000;
+    timing.onEvent("agent.message.delta");
+    const metrics = await observability.prometheusMetrics();
+    const buckets = metrics
+      .split("\n")
+      .filter(
+        (line) =>
+          line.startsWith("opengeni_stream_ttft_seconds_bucket{") &&
+          line.includes('provider="openai"'),
+      );
+    const values = new Map(
+      buckets.map((line) => [line.match(/le="([^"]+)"/)![1], Number(line.split(" ").at(-1))]),
+    );
+    expect([...values.keys()]).toEqual([
+      "0.02",
+      "0.05",
+      "0.1",
+      "0.2",
+      "0.35",
+      "0.5",
+      "0.75",
+      "1",
+      "1.5",
+      "2",
+      "3",
+      "5",
+      "10",
+      "15",
+      "30",
+      "60",
+      "120",
+      "300",
+      "+Inf",
+    ]);
+    expect(values.get("10")).toBe(0);
+    expect(values.get("15")).toBe(0);
+    expect(values.get("30")).toBe(1);
+    expect(values.get("300")).toBe(1);
+    expect(values.get("+Inf")).toBe(1);
+    expect(metrics).toMatch(/opengeni_stream_ttft_seconds_sum\{[^}]*provider="openai"[^}]*\} 25\b/);
+    expect(metrics).toMatch(
+      /opengeni_stream_ttft_seconds_count\{[^}]*provider="openai"[^}]*\} 1\b/,
+    );
+  });
   test("first content delta records TTFT from the response (re)start anchor", async () => {
     const observability = worker();
     let now = 1_000;

@@ -20,6 +20,9 @@
     "verify-portable-compaction.test.ts",
     "compaction-durable.ts",
     "compaction-history.ts",
-    "compaction-verification-errors.ts"
+    "compaction-verification-errors.ts",
+    "turn-queue-purity.ts",
+    "verify-turn-queue-purity.ts",
+    "verify-turn-queue-purity.test.ts"
   ]
 }

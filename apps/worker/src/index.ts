@@ -549,6 +549,7 @@ export async function createWorkerWorkflowSignaler(
               workspaceId,
               operationId,
               baseTaskQueue: settings.temporalTaskQueue,
+              controlQueueRoutingEnabled: settings.videoReconciliationControlQueueEnabled,
             },
           ],
         });

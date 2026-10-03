@@ -1,6 +1,7 @@
 {{- range $role := list "control" "turns" }}
 {{- $config := index $.Values.worker $role }}
-{{- if and $.Values.worker.enabled $config.autoscaling.enabled }}
+{{- $keda := and (eq $role "turns") (((($config).autoscaling).keda).enabled | default false) }}
+{{- if and $.Values.worker.enabled $config.autoscaling.enabled (not $keda) }}
 {{- if ne $role "control" }}
 ---
 {{- end }}
