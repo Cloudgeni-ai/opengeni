@@ -315,15 +315,19 @@ async function start(
   subjectId = "subject-a",
   connectionId?: string,
 ) {
+  const requestBody = JSON.stringify(connectionId ? { connectionId } : {});
   const request = new Request(
     `http://127.0.0.1:8000/v1/workspaces/${authority.workspaceId}/connections/google-drive/install`,
     {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        // The standard Hono body-limit middleware otherwise rebuilds this
+        // in-memory Request, intentionally losing its request-local proof.
+        "content-length": String(Buffer.byteLength(requestBody)),
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
-      body: JSON.stringify(connectionId ? { connectionId } : {}),
+      body: requestBody,
     },
   );
   stampDelegatedHumanAuthorization(request, {

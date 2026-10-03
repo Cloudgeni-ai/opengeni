@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
   GOOGLE_DRIVE_INTEGRATION_DEFINITION,
@@ -14,25 +14,34 @@ import {
   signDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
-  bootstrapWorkspace,
   createDb,
   createOrganizationApiKey,
   deleteWorkspace,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
+  ensureManagedAccessForUser,
   type DbClient,
 } from "@opengeni/db";
+import {
+  getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
+} from "@opengeni/db/canonical-human-identities";
 import { migrate } from "@opengeni/db/migrate";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
 
 import { createApp } from "../src/app";
-import { requireAccessGrantAuthorization } from "@opengeni/core";
+import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
+import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
+import { requireAccessGrantAuthorization, stampDelegatedHumanAuthorization } from "@opengeni/core";
+import { HTTPException } from "hono/http-exception";
+import { bindNativeProviderStart } from "../src/integrations/delegated-native-provider-handoff";
 import { requireWorkspaceToolGatewayAuthorization } from "../src/workspace-tool-gateway";
 
 const DELEGATION_SECRET = "api-integration-provider-oauth-delegation";
@@ -46,7 +55,12 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
+let managedAuth: NonNullable<ReturnType<typeof createManagedAuth>>;
+let managedAuthSessionAdapter: ReturnType<typeof createBetterAuthSessionAdapter>;
+let fixturePasswordHash: string;
 const workspaceIds: string[] = [];
+const authUserIds: string[] = [];
+const nativeFlows = new Map<string, { nativeCookie: string; flowCookie: string }>();
 
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_ADMIN_URL;
@@ -75,7 +89,10 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   settings = testSettings({
+    databaseUrl: shared.appUrl,
     productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+    betterAuthSecret: "provider-oauth-native-browser-secret-at-least-32-bytes",
     delegationSecret: DELEGATION_SECRET,
     authRequired: true,
     accessKey: EDGE_ACCESS_KEY,
@@ -92,31 +109,79 @@ beforeAll(async () => {
         tokenEndpointAuthMethod: "none",
       },
     }),
-  }) as Settings;
+  });
+  managedAuth = createManagedAuth(settings, client.db, {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:provider-oauth", retentionSeconds: 86400 },
+    send: async () => ({ status: "sent", providerMessageId: null }),
+  })!;
+  managedAuthSessionAdapter = createBetterAuthSessionAdapter(managedAuth, client.db);
+  fixturePasswordHash = await hashManagedAuthPassword("provider-oauth-fixture-password");
 }, 180_000);
 
 afterAll(async () => {
   for (const workspaceId of workspaceIds) {
     await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   }
+  for (const userId of authUserIds)
+    await shared!.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
+  nativeFlows.clear();
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 180_000);
 
 async function freshWorkspace() {
-  const subjectId = `user:provider-oauth-${crypto.randomUUID()}`;
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `provider-oauth-account-${crypto.randomUUID()}`,
-    accountName: "Provider OAuth account",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `provider-oauth-workspace-${crypto.randomUUID()}`,
-    workspaceName: "Provider OAuth workspace",
-    subjectId,
+  const userId = `provider-oauth-${randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  const email = `${userId}@example.test`;
+  await shared!.admin`insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'Provider OAuth user', ${email}, true)`;
+  authUserIds.push(userId);
+  await shared!.admin`insert into auth_identities (id, user_id, provider_id, account_id, password)
+    values (${randomUUID()}, ${userId}, 'credential', ${userId}, ${fixturePasswordHash})`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email,
+    name: "Provider OAuth user",
+    emailVerified: true,
   });
-  const grant = access.workspaceGrants[0]!;
-  workspaceIds.push(grant.workspaceId);
-  return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId };
+  const grant = access.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+  )!;
+  workspaceIds.push(...access.workspaceGrants.map((candidate) => candidate.workspaceId));
+  await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+  const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
+  const binding = projection.loginBindings.find(
+    (candidate) => candidate.providerId === "credential" && candidate.status === "active",
+  )!;
+  expect(binding).toBeDefined();
+  const sessionId = randomUUID(),
+    token = randomUUID();
+  await shared!.admin`insert into auth_sessions (
+    id, user_id, token, expires_at, identity_id, identity_revision,
+    auth_revision, login_binding_id, login_binding_revision
+  ) values (
+    ${sessionId}, ${userId}, ${token}, now() + interval '1 hour',
+    ${projection.activeIdentity.id}, ${projection.activeIdentity.identityRevision},
+    ${projection.activeIdentity.authRevision}, ${binding.id}, ${binding.revision}
+  )`;
+  const cookie = (
+    await managedAuthSessionAdapter.createLegacySelectedSessionCookies({ token } as never, null)
+  )
+    .map((value) => value.split(";", 1)[0])
+    .join("; ");
+  return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId, cookie };
+}
+
+function nativeHeaders(workspace: Awaited<ReturnType<typeof freshWorkspace>>) {
+  return {
+    cookie: workspace.cookie,
+    origin: settings.publicBaseUrl!,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/json",
+    "x-opengeni-access-key": EDGE_ACCESS_KEY,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  };
 }
 
 async function bearer(
@@ -150,112 +215,115 @@ function providerFixture() {
   }> = [];
   let googlePrincipalId = "google-principal-1";
   let microsoftPrincipalId = "microsoft-principal-1";
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : input.toString());
-    if (url.href === "https://www.googleapis.com/fixture-openapi.json")
-      return Response.json({
-        openapi: "3.0.3",
-        info: { title: "Public fixture", version: "1" },
-        servers: [{ url: "https://www.googleapis.com" }],
-        paths: {
-          "/items": {
-            get: { operationId: "listItems", responses: { "200": { description: "Items" } } },
+  const fetch: typeof globalThis.fetch = Object.assign(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.href === "https://www.googleapis.com/fixture-openapi.json")
+        return Response.json({
+          openapi: "3.0.3",
+          info: { title: "Public fixture", version: "1" },
+          servers: [{ url: "https://www.googleapis.com" }],
+          paths: {
+            "/items": {
+              get: { operationId: "listItems", responses: { "200": { description: "Items" } } },
+            },
           },
-        },
-      });
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.source.url) {
-      return Response.json({
-        name: "drive",
-        version: "v3",
-        title: sourceTitle,
-        rootUrl: "https://www.googleapis.com/",
-        servicePath: "drive/v3/",
-        resources: {
-          files: {
-            methods: {
-              list: {
-                id: "drive.files.list",
-                path: "files",
-                httpMethod: "GET",
-                description: "List files",
-                response: { $ref: "FileList" },
-              },
-              get: {
-                id: "drive.files.get",
-                path: "files/{fileId}",
-                httpMethod: "GET",
-                description: "Get file",
-                parameters: { fileId: { type: "string", required: true, location: "path" } },
-                response: { $ref: "File" },
+        });
+      if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.source.url) {
+        return Response.json({
+          name: "drive",
+          version: "v3",
+          title: sourceTitle,
+          rootUrl: "https://www.googleapis.com/",
+          servicePath: "drive/v3/",
+          resources: {
+            files: {
+              methods: {
+                list: {
+                  id: "drive.files.list",
+                  path: "files",
+                  httpMethod: "GET",
+                  description: "List files",
+                  response: { $ref: "FileList" },
+                },
+                get: {
+                  id: "drive.files.get",
+                  path: "files/{fileId}",
+                  httpMethod: "GET",
+                  description: "Get file",
+                  parameters: { fileId: { type: "string", required: true, location: "path" } },
+                  response: { $ref: "File" },
+                },
               },
             },
           },
-        },
-        schemas: {
-          File: { type: "object", properties: { id: { type: "string" } } },
-          FileList: {
-            type: "object",
-            properties: { files: { type: "array", items: { $ref: "File" } } },
+          schemas: {
+            File: { type: "object", properties: { id: { type: "string" } } },
+            FileList: {
+              type: "object",
+              properties: { files: { type: "array", items: { $ref: "File" } } },
+            },
           },
-        },
-      });
-    }
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
-      await beforeGoogleTokenReply?.();
-      const body = requestBody(init?.body);
-      tokenRequests.push({
-        family: "google",
-        body,
-        authorization: new Headers(init?.headers).get("authorization"),
-      });
-      const plan = googlePlans.shift() ?? {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-token",
-      };
-      return Response.json({
-        access_token: `google-access-${tokenRequests.length}`,
-        ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
-        token_type: "Bearer",
-        expires_in: 3600,
-        scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
-      const body = requestBody(init?.body);
-      tokenRequests.push({
-        family: "microsoft",
-        body,
-        authorization: new Headers(init?.headers).get("authorization"),
-      });
-      const plan = microsoftPlans.shift() ?? {
-        scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "microsoft-refresh-token",
-      };
-      return Response.json({
-        access_token: `microsoft-access-${tokenRequests.length}`,
-        ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
-        token_type: "Bearer",
-        expires_in: 3600,
-        scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
-      return Response.json({
-        sub: googlePrincipalId,
-        email: "google.user@example.com",
-        name: "Google User",
-      });
-    }
-    if (url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me") {
-      return Response.json({
-        id: microsoftPrincipalId,
-        mail: "microsoft.user@example.com",
-        userPrincipalName: "microsoft.user@example.com",
-        displayName: "Microsoft User",
-      });
-    }
-    return new Response("not found", { status: 404 });
-  };
+        });
+      }
+      if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+        await beforeGoogleTokenReply?.();
+        const body = requestBody(init?.body);
+        tokenRequests.push({
+          family: "google",
+          body,
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        const plan = googlePlans.shift() ?? {
+          scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+          refreshToken: "google-refresh-token",
+        };
+        return Response.json({
+          access_token: `google-access-${tokenRequests.length}`,
+          ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: plan.scopes.join(" "),
+        });
+      }
+      if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+        const body = requestBody(init?.body);
+        tokenRequests.push({
+          family: "microsoft",
+          body,
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        const plan = microsoftPlans.shift() ?? {
+          scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
+          refreshToken: "microsoft-refresh-token",
+        };
+        return Response.json({
+          access_token: `microsoft-access-${tokenRequests.length}`,
+          ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: plan.scopes.join(" "),
+        });
+      }
+      if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
+        return Response.json({
+          sub: googlePrincipalId,
+          email: "google.user@example.com",
+          name: "Google User",
+        });
+      }
+      if (url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me") {
+        return Response.json({
+          id: microsoftPrincipalId,
+          mail: "microsoft.user@example.com",
+          userPrincipalName: "microsoft.user@example.com",
+          displayName: "Microsoft User",
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+    { preconnect: () => undefined },
+  );
   return {
     fetch,
     setSourceTitle(value: string) {
@@ -282,37 +350,100 @@ function requestBody(body: BodyInit | null | undefined): URLSearchParams {
 }
 
 function testApp(fixture: ReturnType<typeof providerFixture>) {
-  return createApp({
+  const deps = {
     settings,
     db: client.db,
-    bus: {} as never,
+    bus: new MemoryEventBus(),
     workflowClient: {} as never,
-    managedAuth: null,
+    managedAuth,
     apiIntegrationOAuthFetch: fixture.fetch,
     apiIntegrationSourceFetch: fixture.fetch,
-  } as never);
+  };
+  const app = createApp(deps as never);
+  // Only parser-negative fixtures use this admission shim. A real canonical
+  // native cookie must authorize the exact signed owner/scope before binding.
+  app.post("/provider-oauth-state-binding-fixture", async (c) => {
+    const body = await c.req.json<{ state: string }>();
+    const signed = readSignedState(body.state, STATE_SECRET);
+    if (!signed || typeof signed.workspaceId !== "string") throw new HTTPException(400);
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      signed.workspaceId,
+      "connections:write",
+    );
+    if (
+      signed.accountId !== authorization.grant.accountId ||
+      signed.subjectId !== authorization.grant.subjectId
+    )
+      throw new HTTPException(403);
+    const url = new URL("https://provider.example.test/authorize");
+    url.searchParams.set("state", body.state);
+    bindNativeProviderStart(c, deps as never, {
+      authorization,
+      provider: "provider-oauth",
+      authorizationUrl: url.toString(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    return c.json({ bound: true });
+  });
+  return app;
+}
+
+function recordNativeFlow(
+  state: string,
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  response: Response,
+) {
+  const flowCookie = response.headers
+    .getSetCookie()
+    .map((value) => value.split(";", 1)[0])
+    .join("; ");
+  expect(flowCookie).toContain("opengeni_oauth_provider_oauth_");
+  expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+  nativeFlows.set(state, { nativeCookie: workspace.cookie, flowCookie });
+}
+
+async function bindParserFixtureState(
+  fixture: ReturnType<typeof providerFixture>,
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  state: string,
+) {
+  const response = await testApp(fixture).request("/provider-oauth-state-binding-fixture", {
+    method: "POST",
+    headers: nativeHeaders(workspace),
+    body: JSON.stringify({ state }),
+  });
+  expect(response.status).toBe(200);
+  recordNativeFlow(state, workspace, response);
 }
 
 async function start(
   fixture: ReturnType<typeof providerFixture>,
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   payload: Record<string, unknown>,
-  principalKind: "human_session" | "service" = "human_session",
+  principalKind?: "human_session" | "service",
+  withNativeCookie = false,
 ) {
+  const headers = principalKind
+    ? { ...nativeHeaders(workspace), authorization: await bearer(workspace, principalKind) }
+    : nativeHeaders(workspace);
+  if (principalKind && !withNativeCookie) delete (headers as { cookie?: string }).cookie;
   const response = await testApp(fixture).request(
     `/v1/workspaces/${workspace.workspaceId}/integrations/oauth/start`,
     {
       method: "POST",
-      headers: {
-        authorization: await bearer(workspace, principalKind),
-        "content-type": "application/json",
-        "x-opengeni-access-key": EDGE_ACCESS_KEY,
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-      },
+      headers,
       body: JSON.stringify(payload),
     },
   );
   const body = (await response.json()) as { authorizationUrl?: string; error?: unknown };
+  if (response.status === 200 && !principalKind && body.authorizationUrl)
+    recordNativeFlow(
+      new URL(body.authorizationUrl).searchParams.get("state")!,
+      workspace,
+      response,
+    );
   return { response, authorizationUrl: body.authorizationUrl ?? "", body };
 }
 
@@ -320,8 +451,10 @@ async function start(
  * The exact state an older deployment would have signed: a real state minted by
  * the (now fenced) start route, re-signed with the `personalOwnerVerified`
  * claim removed. Re-signing the genuine payload keeps every other field —
- * definition fingerprint, PKCE verifier, nonce — valid, so the callback's
- * refusal can only come from the missing claim.
+ * definition fingerprint and PKCE verifier — valid, with a new fixture nonce,
+ * so the callback's
+ * refusal can only come from the missing claim after real native admission.
+ * Positive controls keep the actual native START state unchanged.
  */
 async function legacyProviderOAuthState(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
@@ -332,12 +465,12 @@ async function legacyProviderOAuthState(
     ownership: payload.ownership,
   });
   const raw = new URL(started.authorizationUrl).searchParams.get("state")!;
+  if (payload.personalOwnerVerified === true) return raw;
   const decoded = readSignedState(raw, STATE_SECRET) as Record<string, unknown>;
   const { personalOwnerVerified: _dropped, ...withoutClaim } = decoded;
-  return createSignedState(STATE_SECRET, {
-    ...withoutClaim,
-    ...(payload.personalOwnerVerified === true ? { personalOwnerVerified: true } : {}),
-  });
+  const legacy = createSignedState(STATE_SECRET, withoutClaim);
+  await bindParserFixtureState(providerFixture(), workspace, legacy);
+  return legacy;
 }
 
 async function callback(
@@ -346,8 +479,17 @@ async function callback(
   code = "fixture-code",
   path = "/v1/integrations/provider-oauth/callback",
 ) {
+  const flow = nativeFlows.get(state);
   return await testApp(fixture).request(
     `${path}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    flow
+      ? {
+          headers: {
+            cookie: `${flow.nativeCookie}; ${flow.flowCookie}`,
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+        }
+      : undefined,
   );
 }
 
@@ -727,9 +869,9 @@ describe("API Integration provider OAuth", () => {
     expect(started.response.status).toBe(200);
     const authorizationUrl = new URL(started.authorizationUrl);
     expect(authorizationUrl.origin).toBe("https://accounts.google.com");
-    expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
-      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
-    );
+    expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
+      ...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+    ]);
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
@@ -737,6 +879,38 @@ describe("API Integration provider OAuth", () => {
       "http://127.0.0.1:8000/v1/integrations/oauth/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
+    const flow = nativeFlows.get(state)!;
+    const callbackUrl = `${settings.publicBaseUrl}/v1/integrations/oauth/callback?code=fixture-code&state=${encodeURIComponent(state)}`;
+    for (const headers of [
+      undefined,
+      { cookie: workspace.cookie },
+      { cookie: flow.flowCookie },
+      {
+        cookie: workspace.cookie,
+        "x-opengeni-canonical-human": "true",
+        "x-opengeni-browser-session": "fabricated-session",
+      },
+    ]) {
+      const denied = await testApp(fixture).fetch(
+        new Request(callbackUrl, headers ? { headers } : undefined),
+      );
+      expect(denied.status).toBeOneOf([401, 403]);
+      expect(fixture.tokenRequests).toHaveLength(0);
+    }
+    const typed = new Request(callbackUrl, {
+      headers: {
+        cookie: `${workspace.cookie}; ${flow.flowCookie}`,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+    });
+    stampDelegatedHumanAuthorization(typed, {
+      organizationId: workspace.accountId,
+      subjectId: workspace.subjectId,
+      permissions: ["connections:write"],
+      workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+    });
+    expect((await testApp(fixture).fetch(typed)).status).toBe(403);
+    expect(fixture.tokenRequests).toHaveLength(0);
     const connected = await callback(
       fixture,
       state,
@@ -797,12 +971,7 @@ describe("API Integration provider OAuth", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
       {
         method: "PATCH",
-        headers: {
-          authorization: await bearer(workspace),
-          "content-type": "application/json",
-          "x-opengeni-access-key": EDGE_ACCESS_KEY,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({ credential: { access_token: "bypass-attempt" } }),
       },
     );
@@ -1154,6 +1323,7 @@ describe("API Integration provider OAuth", () => {
       ...verifiedPayload,
       definitionId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
     });
+    await bindParserFixtureState(fixture, workspace, swapped);
     const swappedResult = await callback(
       fixture,
       swapped,
@@ -1189,36 +1359,40 @@ describe("API Integration provider OAuth", () => {
     ).toHaveLength(1);
   }, 60_000);
 
-  test("a non-human principal cannot request personal ownership", async () => {
+  test("legacy human-shaped and service bearers cannot initiate either ownership, even with a native cookie", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    const refused = await start(
-      fixture,
-      workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
-      "service",
-    );
-    expect(refused.response.status).toBe(422);
-    expect(JSON.stringify(refused.body)).toContain("requires an authenticated human");
+    for (const principalKind of ["human_session", "service"] as const)
+      for (const ownership of ["personal", "workspace"])
+        for (const withNativeCookie of [false, true]) {
+          const refused = await start(
+            fixture,
+            workspace,
+            { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership },
+            principalKind,
+            withNativeCookie,
+          );
+          expect(refused.response.status).toBe(403);
+          expect(refused.authorizationUrl).toBe("");
+        }
+    expect(fixture.tokenRequests).toHaveLength(0);
 
     // The refusal is explicit, never a silent downgrade to workspace ownership.
     expect(
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
     ).toEqual([]);
 
-    // The same principal may still create the documented workspace-owned
-    // Connection, so this narrows rather than blocking the flow outright.
+    // Workspace ownership still works through an independent real native
+    // ceremony. A service cannot borrow that connecting person's authority.
     fixture.googlePlans.push({
       scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
       refreshToken: "google-refresh-token",
     });
-    const allowed = await start(
-      fixture,
-      workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
-      "service",
-    );
+    const allowed = await start(fixture, workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "workspace",
+    });
     expect(allowed.response.status).toBe(200);
     const connected = await callback(
       fixture,

@@ -2,6 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
+  stampDelegatedHumanAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
+  type DelegatedHumanAuthorization,
+} from "@opengeni/core";
+import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
@@ -23,6 +28,7 @@ import {
   listScheduledTasks,
   loadConnectionCredentialForBroker,
   migrate,
+  synchronizeCanonicalHumanLoginBindings,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -31,6 +37,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { createApp } from "../src/app";
 import { wakeGoogleDriveSourcesFromWorkspaceEvent } from "../src/integrations/google-drive";
 
@@ -38,6 +46,15 @@ const DELEGATION_SECRET = "google-drive-delegation-secret";
 const STATE_SECRET = "google-drive-state-secret";
 const CLIENT_ID = "google-drive-client.apps.googleusercontent.com";
 const CLIENT_SECRET = "google-drive-client-secret";
+const SUBJECT_A = `user:${randomUUID()}`;
+const SUBJECT_B = `user:${randomUUID()}`;
+type NativeBrowser = {
+  cookie: string;
+  sessionId: string;
+  user: { id: string; name: string; email: string; emailVerified: boolean };
+  flowCookies: Map<string, string>;
+};
+const nativeBrowsers = new Map<string, NativeBrowser>();
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -101,31 +118,58 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into workspaces (account_id, name) values (${account!.id}, 'Google Drive workspace') returning id`;
   await shared!
     .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
-  for (const subjectId of ["subject-a", "subject-b"]) {
+  for (const subjectId of [SUBJECT_A, SUBJECT_B]) {
+    const userId = subjectId.slice("user:".length);
+    if (!nativeBrowsers.has(subjectId)) {
+      const email = `${userId}@drive-fixture.example.test`;
+      await shared!.admin`insert into auth_users (id, name, email, email_verified)
+        values (${userId}, 'Google Drive native fixture', ${email}, true)`;
+      await shared!.admin`insert into auth_identities (id, user_id, provider_id, account_id)
+        values (${randomUUID()}, ${userId}, 'credential', ${userId})`;
+      const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      const sessionId = randomUUID();
+      await shared!.admin`insert into auth_sessions (
+        id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+      ) values (${sessionId}, ${userId}, ${randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision})`;
+      nativeBrowsers.set(subjectId, {
+        cookie: `google-drive-native-session=${sessionId}`,
+        sessionId,
+        user: { id: userId, name: "Google Drive native fixture", email, emailVerified: true },
+        flowCookies: new Map(),
+      });
+    }
+    const [personal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'Google Drive native Personal') returning id`;
+    await shared!.admin`insert into workspace_inference_controls (workspace_id, account_id)
+      values (${personal!.id}, ${account!.id})`;
+    await shared!.admin`insert into organization_memberships (
+      account_id, subject_id, role, status, personal_workspace_id
+    ) values (${account!.id}, ${subjectId}, ${subjectId === SUBJECT_A ? "owner" : "member"},
+      'active', ${personal!.id})`;
     await shared!.admin`
       insert into workspace_memberships (
         account_id, workspace_id, subject_id, subject_label, role, permissions
       ) values (
         ${account!.id}, ${workspace!.id}, ${subjectId}, ${subjectId}, 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
+        ${shared!.admin.json(["connections:read", "connections:write", "workspace:admin"])}
       )`;
   }
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-async function bearer(
+async function delegatedHuman(
   workspace: { accountId: string; workspaceId: string },
   subjectId: string,
   permissions: Permission[],
-): Promise<string> {
-  return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
-    accountId: workspace.accountId,
-    workspaceId: workspace.workspaceId,
+): Promise<DelegatedHumanAuthorization> {
+  return {
+    organizationId: workspace.accountId,
     subjectId,
     permissions,
-    principalKind: "human_session",
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  })}`;
+    workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+  };
 }
 
 function googleFixture(
@@ -141,7 +185,7 @@ function googleFixture(
   const tokenRequests: URLSearchParams[] = [];
   const apiAuthorizationHeaders: string[] = [];
   const fileListQueries: string[] = [];
-  const fetch: typeof globalThis.fetch = async (input, init) => {
+  const fetch = (async (...[input, init]: Parameters<typeof globalThis.fetch>) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     if (url.href === "https://oauth2.googleapis.com/token") {
       const body =
@@ -244,7 +288,7 @@ function googleFixture(
       });
     }
     return new Response("not found", { status: 404 });
-  };
+  }) as unknown as typeof globalThis.fetch;
   return { fetch, tokenRequests, apiAuthorizationHeaders, fileListQueries };
 }
 
@@ -257,7 +301,7 @@ function deferred<T>() {
 }
 
 function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Settings> = {}) {
-  return createApp({
+  const server = createApp({
     settings: { ...settings, ...overrides },
     db: client.db,
     bus: {} as never,
@@ -266,9 +310,57 @@ function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Setti
       triggerScheduledTask: async () => {},
       deleteScheduledTaskSchedule: async () => {},
     } as never,
-    managedAuth: null,
+    managedAuth: {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const cookies = (headers.get("cookie") ?? "").split(";").map((value) => value.trim());
+          const browser = [...nativeBrowsers.values()].find((candidate) =>
+            cookies.includes(candidate.cookie),
+          );
+          return {
+            headers: new Headers(),
+            response: browser ? { session: { id: browser.sessionId }, user: browser.user } : null,
+          };
+        },
+      },
+    },
     googleDriveFetch,
   } as never);
+  return Object.assign(server, {
+    delegatedRequest(path: string, init: RequestInit, proof: DelegatedHumanAuthorization) {
+      return dispatchDelegatedRequest(server, path, init, proof);
+    },
+  });
+}
+
+function dispatchDelegatedRequest(
+  server: { fetch(request: Request): Response | Promise<Response> },
+  path: string,
+  init: RequestInit,
+  proof: DelegatedHumanAuthorization,
+) {
+  const headers = new Headers(init.headers);
+  expect(headers.has("authorization")).toBe(false);
+  if (typeof init.body === "string")
+    headers.set("content-length", String(Buffer.byteLength(init.body)));
+  const request = new Request(new URL(path, "http://127.0.0.1:8000"), { ...init, headers });
+  stampDelegatedHumanAuthorization(request, proof);
+  return server.fetch(request);
+}
+
+function browserCookie(subjectId = SUBJECT_A): string {
+  const browser = nativeBrowsers.get(subjectId)!;
+  return [browser.cookie, ...browser.flowCookies.values()].join("; ");
+}
+
+function rememberFlowCookies(response: Response, subjectId = SUBJECT_A): void {
+  const browser = nativeBrowsers.get(subjectId)!;
+  expect(response.headers.getSetCookie().length).toBeGreaterThan(0);
+  for (const cookie of response.headers.getSetCookie()) {
+    expect(cookie).toContain("HttpOnly");
+    const pair = cookie.split(";", 1)[0]!;
+    browser.flowCookies.set(pair.slice(0, pair.indexOf("=")), pair);
+  }
 }
 
 async function startConnection(
@@ -282,19 +374,50 @@ async function startConnection(
     {
       method: "POST",
       headers: {
-        authorization: await bearer(workspace, "subject-a", [
-          "connections:read",
-          "connections:write",
-        ]),
+        cookie: browserCookie(),
         "content-type": "application/json",
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
       body: JSON.stringify({ ...(connectionId ? { connectionId } : {}), capability }),
     },
   );
+  if (response.status === 200) rememberFlowCookies(response);
   const body = (await response.json()) as { authorizationUrl?: string };
   return { response, authorizationUrl: body.authorizationUrl ?? "" };
 }
+
+describe("verified Drive fixture transport", () => {
+  test("preserves exact request proof and UTF-8 body length without authorizing a clone", async () => {
+    const server = new Hono();
+    server.use("*", bodyLimit({ maxSize: 65_536 }));
+    const proof: DelegatedHumanAuthorization = {
+      organizationId: randomUUID(),
+      subjectId: SUBJECT_A,
+      permissions: ["connections:read", "connections:write"],
+      workspaceScope: { kind: "selected", workspaceIds: [randomUUID()] },
+    };
+    const body = JSON.stringify({ label: "Drive résumé" });
+    server.post("/fixture", async (c) => {
+      expect(verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)).toEqual(proof);
+      expect(verifiedDelegatedHumanAuthorizationForRequest(c.req.raw.clone())).toBeNull();
+      expect(c.req.header("content-length")).toBe(String(Buffer.byteLength(body)));
+      expect(c.req.header("authorization")).toBeUndefined();
+      return c.json(await c.req.json());
+    });
+    const response = await dispatchDelegatedRequest(
+      server,
+      "/fixture",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      },
+      proof,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ label: "Drive résumé" });
+  });
+});
 
 async function connect(
   workspace: { accountId: string; workspaceId: string },
@@ -308,8 +431,9 @@ async function connect(
   expect(state).toBeTruthy();
   const callback = await app(google.fetch).request(
     `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state!)}`,
+    { headers: { cookie: browserCookie() } },
   );
-  const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a");
+  const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, SUBJECT_A);
   const connection = connections.find(
     (candidate) => candidate.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE,
   );
@@ -318,6 +442,100 @@ async function connect(
 }
 
 describe("Google Drive local source preview", () => {
+  test("requires independent native consent after typed initiation and denies legacy bearer redemption", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const server = app(google.fetch);
+    const installPath = `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/install`;
+    const legacyAuthorization = `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
+      ...workspace,
+      subjectId: SUBJECT_A,
+      permissions: ["connections:read", "connections:write"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}`;
+    const legacyStart = await server.request(installPath, {
+      method: "POST",
+      headers: { authorization: legacyAuthorization, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(legacyStart.status).toBe(403);
+    const proof = await delegatedHuman(workspace, SUBJECT_A, [
+      "connections:read",
+      "connections:write",
+    ]);
+    const started = await server.delegatedRequest(
+      installPath,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+      proof,
+    );
+    expect(started.status, await started.clone().text()).toBe(200);
+    const handoff = new URL((await started.json()).authorizationUrl);
+    expect(handoff.origin).toBe("http://127.0.0.1:8000");
+    expect(handoff.searchParams.has("state")).toBe(false);
+    expect(google.tokenRequests).toEqual([]);
+    const nativeStart = await server.request(handoff.href, {
+      headers: { cookie: browserCookie() },
+    });
+    expect(nativeStart.status, await nativeStart.clone().text()).toBe(302);
+    rememberFlowCookies(nativeStart);
+    const providerUrl = new URL(nativeStart.headers.get("location")!);
+    expect(providerUrl.origin).toBe("https://accounts.google.com");
+    const state = providerUrl.searchParams.get("state")!;
+    const callbackPath = `/v1/integrations/google-drive/callback?${new URLSearchParams({ state, code: "fixture-code" })}`;
+    expect((await server.request(callbackPath)).status).toBe(403);
+    expect(
+      (
+        await server.request(callbackPath, {
+          headers: { cookie: nativeBrowsers.get(SUBJECT_A)!.cookie },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await server.delegatedRequest(callbackPath, {}, proof)).status).toBe(403);
+    expect(
+      (
+        await server.delegatedRequest(
+          callbackPath,
+          {
+            headers: { cookie: browserCookie() },
+          },
+          proof,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(callbackPath, {
+          headers: { cookie: browserCookie(), authorization: legacyAuthorization },
+        })
+      ).status,
+    ).toBe(403);
+    const copiedCookies = [
+      nativeBrowsers.get(SUBJECT_B)!.cookie,
+      ...nativeBrowsers.get(SUBJECT_A)!.flowCookies.values(),
+    ].join("; ");
+    expect(
+      (await server.request(callbackPath, { headers: { cookie: copiedCookies } })).status,
+    ).toBe(403);
+    expect(google.tokenRequests).toEqual([]);
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+    const completed = await server.request(callbackPath, { headers: { cookie: browserCookie() } });
+    expect(completed.status).toBe(302);
+    expect(completed.headers.get("location")).toContain("google_drive=connected");
+    expect(google.tokenRequests).toHaveLength(1);
+    expect(google.tokenRequests[0]!.get("code_verifier")?.length).toBeGreaterThan(40);
+    expect(
+      (await listConnectionsMetadata(client.db, workspace.workspaceId, SUBJECT_A)).filter(
+        (connection) => connection.metadata.credentialRole === GOOGLE_DRIVE_CREDENTIAL_ROLE,
+      ),
+    ).toHaveLength(1);
+  });
+
   test.each([
     ["google-drive-knowledge", GOOGLE_DRIVE_READONLY_SCOPE],
     ["google-drive-publish", GOOGLE_DRIVE_FILE_SCOPE],
@@ -472,13 +690,10 @@ describe("Google Drive local source preview", () => {
     const state = authorizationUrl.searchParams.get("state");
     const callback = await app(google.fetch).request(
       `/v1/integrations/google-drive/callback?code=fixture-code&picked_file_ids=folder-1&state=${encodeURIComponent(state!)}`,
+      { headers: { cookie: browserCookie() } },
     );
     expect(callback.headers.get("location")).toContain("google_drive=connected");
-    const [connection] = await listConnectionsMetadata(
-      client.db,
-      workspace.workspaceId,
-      "subject-a",
-    );
+    const [connection] = await listConnectionsMetadata(client.db, workspace.workspaceId, SUBJECT_A);
     expect(connection).toMatchObject({
       id: source.connection.id,
       grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE, GOOGLE_DRIVE_FILE_SCOPE].sort(),
@@ -498,7 +713,7 @@ describe("Google Drive local source preview", () => {
       select policy, server_id, tool_name, action_name
       from connector_action_policies
       where workspace_id = ${workspace.workspaceId} and connection_id = ${connection!.id}`;
-    expect(policies).toEqual([
+    expect([...policies]).toEqual([
       {
         policy: "ask",
         server_id: "google-drive-publishing",
@@ -523,7 +738,7 @@ describe("Google Drive local source preview", () => {
     expect(connected.connection).toMatchObject({
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: SUBJECT_A,
       providerDomain: "googleapis.com",
       kind: "oauth2",
       status: "active",
@@ -544,7 +759,7 @@ describe("Google Drive local source preview", () => {
       connectionId: connected.connection.id,
       providerDomain: "googleapis.com",
       kind: "oauth2",
-      subjectId: "subject-a",
+      subjectId: SUBJECT_A,
       allowSubjectOwned: true,
     });
     expect(credential?.credential).toMatchObject({
@@ -556,6 +771,7 @@ describe("Google Drive local source preview", () => {
 
     const replay = await app(google.fetch).request(
       `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(connected.state)}`,
+      { headers: { cookie: browserCookie() } },
     );
     expect(replay.status).toBe(302);
     expect(replay.headers.get("location")).toContain("google_drive=error");
@@ -588,12 +804,13 @@ describe("Google Drive local source preview", () => {
       const state = new URL(start.authorizationUrl).searchParams.get("state");
       const callback = await app(google.fetch).request(
         `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state!)}`,
+        { headers: { cookie: browserCookie() } },
       );
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("reason=scope_not_granted");
       expect(google.apiAuthorizationHeaders).toEqual([]);
       expect(
-        (await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).filter(
+        (await listConnectionsMetadata(client.db, workspace.workspaceId, SUBJECT_A)).filter(
           (connection) => connection.providerDomain === "googleapis.com",
         ),
       ).toEqual([]);
@@ -605,19 +822,17 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
       "workspace:admin",
     ]);
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(browse.status).toBe(200);
     const listed = (await browse.json()) as {
@@ -642,12 +857,11 @@ describe("Google Drive local source preview", () => {
     const save = await app(google.fetch, {
       ...releaseReadinessLimits,
       sandboxBackend: "selfhosted",
-    }).request(
+    }).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
         method: "POST",
         headers: {
-          authorization,
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
@@ -672,13 +886,14 @@ describe("Google Drive local source preview", () => {
           readPolicy: "allow",
         }),
       },
+      authorization,
     );
     expect(save.status).toBe(200);
     const persisted = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,
       connected.connection.id,
-      "subject-a",
+      SUBJECT_A,
     );
     expect(persisted?.metadata).toMatchObject({
       documentDestination: {
@@ -777,18 +992,17 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
       "scheduled_tasks:manage",
       "workspace:admin",
     ]);
-    const sourceResponse = await app(google.fetch).request(
+    const sourceResponse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
         method: "POST",
         headers: {
-          authorization,
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
@@ -807,6 +1021,7 @@ describe("Google Drive local source preview", () => {
           readPolicy: "allow",
         }),
       },
+      authorization,
     );
     expect(sourceResponse.status).toBe(200);
     const [task] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
@@ -818,27 +1033,38 @@ describe("Google Drive local source preview", () => {
       where id = ${connected.connection.id}
     `;
     const base = `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${task.id}`;
-    const renamed = await app(google.fetch).request(base, {
-      method: "PATCH",
-      headers: {
-        authorization,
-        "content-type": "application/json",
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    const renamed = await app(google.fetch).delegatedRequest(
+      base,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({ name: "Renamed source" }),
       },
-      body: JSON.stringify({ name: "Renamed source" }),
-    });
+      authorization,
+    );
     expect(renamed.status, await renamed.clone().text()).toBe(200);
     expect(await renamed.json()).toMatchObject({ name: "Renamed source" });
 
-    const paused = await app(google.fetch).request(`${base}/pause`, {
-      method: "POST",
-      headers: { authorization, [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
-    });
+    const paused = await app(google.fetch).delegatedRequest(
+      `${base}/pause`,
+      {
+        method: "POST",
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
+      },
+      authorization,
+    );
     expect(paused.status).toBe(200);
-    const resumed = await app(google.fetch).request(`${base}/resume`, {
-      method: "POST",
-      headers: { authorization, [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
-    });
+    const resumed = await app(google.fetch).delegatedRequest(
+      `${base}/resume`,
+      {
+        method: "POST",
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
+      },
+      authorization,
+    );
     expect(resumed.status, await resumed.clone().text()).toBe(200);
     expect(await resumed.json()).toMatchObject({ status: "active", name: "Renamed source" });
   });
@@ -854,7 +1080,7 @@ describe("Google Drive local source preview", () => {
           accountId: crypto.randomUUID(),
           workspaceId: crypto.randomUUID(),
           connectionId: crypto.randomUUID(),
-          connectionOwnerSubjectId: "subject-a",
+          connectionOwnerSubjectId: SUBJECT_A,
           eventId: "event-disabled",
           driveId: null,
         },
@@ -864,17 +1090,16 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
       "workspace:admin",
     ]);
-    const save = await app(google.fetch).request(
+    const save = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
         method: "POST",
         headers: {
-          authorization,
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
@@ -893,6 +1118,7 @@ describe("Google Drive local source preview", () => {
           readPolicy: "allow",
         }),
       },
+      authorization,
     );
     expect(save.status).toBe(200);
 
@@ -925,7 +1151,7 @@ describe("Google Drive local source preview", () => {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       connectionId: connected.connection.id,
-      connectionOwnerSubjectId: "subject-a",
+      connectionOwnerSubjectId: SUBJECT_A,
       eventId: "workspace-event-1",
       driveId: null,
     };
@@ -947,7 +1173,7 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
       "workspace:admin",
@@ -957,28 +1183,31 @@ describe("Google Drive local source preview", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/` +
       `${connected.connection.id}/source`;
     const saveSelection = async (syncEnabled: boolean): Promise<Response> =>
-      await app(google.fetch).request(endpoint, {
-        method: "POST",
-        headers: {
-          authorization,
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      await app(google.fetch).delegatedRequest(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({
+            sources: [
+              {
+                id: "folder-1",
+                name: "Product",
+                mimeType: "application/vnd.google-apps.folder",
+                driveId: null,
+              },
+            ],
+            destination: { authorityKind: "workspace", collectionId: null },
+            syncCadence: "hourly",
+            syncEnabled,
+            readPolicy: "allow",
+          }),
         },
-        body: JSON.stringify({
-          sources: [
-            {
-              id: "folder-1",
-              name: "Product",
-              mimeType: "application/vnd.google-apps.folder",
-              driveId: null,
-            },
-          ],
-          destination: { authorityKind: "workspace", collectionId: null },
-          syncCadence: "hourly",
-          syncEnabled,
-          readPolicy: "allow",
-        }),
-      });
+        authorization,
+      );
 
     expect((await saveSelection(true)).status).toBe(200);
     const [createdTask] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
@@ -986,27 +1215,23 @@ describe("Google Drive local source preview", () => {
     if (!createdTask?.agentConfig.knowledgeSource) {
       throw new Error("knowledge source schedule was not created");
     }
-    const wrongSubjectDelete = await app(google.fetch).request(
+    const wrongSubjectDelete = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
       {
         method: "DELETE",
-        headers: {
-          authorization: await bearer(workspace, "subject-b", ["scheduled_tasks:manage"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_B, ["scheduled_tasks:manage"]),
     );
     expect(wrongSubjectDelete.status).toBe(403);
     expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(1);
-    const deleteResponse = await app(google.fetch).request(
+    const deleteResponse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
       {
         method: "DELETE",
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(deleteResponse.status).toBe(200);
     expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(0);
@@ -1014,7 +1239,7 @@ describe("Google Drive local source preview", () => {
       client.db,
       workspace.workspaceId,
       connected.connection.id,
-      "subject-a",
+      SUBJECT_A,
     );
     expect(disabledConnection?.metadata.selectedSources).toEqual([
       expect.objectContaining({ id: "folder-1", syncEnabled: false, configGeneration: 2 }),
@@ -1063,25 +1288,28 @@ describe("Google Drive local source preview", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/` +
       `${connected.connection.id}/source`;
     const save = async (
-      authorization: string,
+      authorization: DelegatedHumanAuthorization,
       destination: Record<string, unknown>,
     ): Promise<Response> =>
-      await app(google.fetch).request(endpoint, {
-        method: "POST",
-        headers: {
-          authorization,
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      await app(google.fetch).delegatedRequest(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({
+            sources: [],
+            ...destination,
+            syncCadence: "hourly",
+            readPolicy: "allow",
+          }),
         },
-        body: JSON.stringify({
-          sources: [],
-          ...destination,
-          syncCadence: "hourly",
-          readPolicy: "allow",
-        }),
-      });
+        authorization,
+      );
 
-    const writer = await bearer(workspace, "subject-a", ["connections:write"]);
+    const writer = await delegatedHuman(workspace, SUBJECT_A, ["connections:write"]);
     const deniedWorkspace = await save(writer, {
       destination: { authorityKind: "workspace", collectionId: null },
     });
@@ -1091,7 +1319,7 @@ describe("Google Drive local source preview", () => {
     });
     expect(deniedOrganization.status).toBe(403);
 
-    const workspaceAdmin = await bearer(workspace, "subject-a", [
+    const workspaceAdmin = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:write",
       "workspace:admin",
     ]);
@@ -1103,7 +1331,7 @@ describe("Google Drive local source preview", () => {
           client.db,
           workspace.workspaceId,
           connected.connection.id,
-          "subject-a",
+          SUBJECT_A,
         )
       )?.metadata.documentDestination,
     ).toEqual({
@@ -1124,16 +1352,16 @@ describe("Google Drive local source preview", () => {
           client.db,
           workspace.workspaceId,
           connected.connection.id,
-          "subject-a",
+          SUBJECT_A,
         )
       )?.metadata.documentDestination,
     ).toMatchObject({
       authorityKind: "personal",
       authorityWorkspaceId: workspace.workspaceId,
-      authoritySubjectId: "subject-a",
+      authoritySubjectId: SUBJECT_A,
     });
 
-    const accountAdmin = await bearer(workspace, "subject-a", [
+    const accountAdmin = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:write",
       "account:admin",
     ]);
@@ -1147,7 +1375,7 @@ describe("Google Drive local source preview", () => {
           client.db,
           workspace.workspaceId,
           connected.connection.id,
-          "subject-a",
+          SUBJECT_A,
         )
       )?.metadata.documentDestination,
     ).toMatchObject({
@@ -1163,22 +1391,22 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
     ]);
     const lifecycleRequest = (action: "pause" | "resume", expectedVersion: number) =>
-      app(google.fetch).request(
+      app(google.fetch).delegatedRequest(
         `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/lifecycle`,
         {
           method: "PATCH",
           headers: {
-            authorization,
             "content-type": "application/json",
             [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
           body: JSON.stringify({ action, expectedVersion }),
         },
+        authorization,
       );
 
     const [firstPause, duplicatePause] = await Promise.all([
@@ -1195,14 +1423,12 @@ describe("Google Drive local source preview", () => {
     expect(pausedBodies[0]?.connection.version).toBe(pausedBodies[1]?.connection.version);
 
     google.apiAuthorizationHeaders.length = 0;
-    const blockedBrowse = await app(google.fetch).request(
+    const blockedBrowse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(blockedBrowse.status).toBe(409);
     expect(await blockedBrowse.json()).toMatchObject({
@@ -1223,14 +1449,12 @@ describe("Google Drive local source preview", () => {
       },
     });
 
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(browse.status).toBe(200);
   });
@@ -1247,14 +1471,12 @@ describe("Google Drive local source preview", () => {
       where id = ${connected.connection.id}
     `;
     google.apiAuthorizationHeaders.length = 0;
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
     );
     expect(browse.status).toBe(401);
     expect((await browse.json()) as { error: { message: string } }).toMatchObject({
@@ -1268,7 +1490,7 @@ describe("Google Drive local source preview", () => {
         client.db,
         workspace.workspaceId,
         connected.connection.id,
-        "subject-a",
+        SUBJECT_A,
       ),
     ).toMatchObject({
       status: "needs_reauth",
@@ -1301,14 +1523,12 @@ describe("Google Drive local source preview", () => {
     `;
     google.apiAuthorizationHeaders.length = 0;
 
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
     );
 
     expect(browse.status).toBe(401);
@@ -1324,7 +1544,7 @@ describe("Google Drive local source preview", () => {
         client.db,
         workspace.workspaceId,
         connected.connection.id,
-        "subject-a",
+        SUBJECT_A,
       ),
     ).toMatchObject({
       status: "needs_reauth",
@@ -1346,14 +1566,12 @@ describe("Google Drive local source preview", () => {
     `;
     google.apiAuthorizationHeaders.length = 0;
 
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
     );
 
     expect(browse.status).toBe(200);
@@ -1364,7 +1582,7 @@ describe("Google Drive local source preview", () => {
         client.db,
         workspace.workspaceId,
         connected.connection.id,
-        "subject-a",
+        SUBJECT_A,
       ),
     ).toMatchObject({
       status: "active",
@@ -1378,17 +1596,15 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const google = googleFixture();
     const connected = await connect(workspace, google);
-    const authorization = await bearer(workspace, "subject-a", ["connections:read"]);
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]);
     const sharedDriveId = "0AF9DylqqXWK2Uk9PVA";
     const sharedDriveUrl = `https://drive.google.com/drive/u/0/folders/${sharedDriveId}`;
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=${encodeURIComponent(sharedDriveUrl)}`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(browse.status).toBe(200);
     expect(await browse.json()).toMatchObject({
@@ -1402,14 +1618,12 @@ describe("Google Drive local source preview", () => {
     });
     expect(google.fileListQueries).toEqual([`'${sharedDriveId}' in parents and trashed = false`]);
 
-    const lookalike = await app(google.fetch).request(
+    const lookalike = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=${encodeURIComponent(`https://example.com/drive/folders/${sharedDriveId}`)}`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(lookalike.status).toBe(400);
   });
@@ -1448,14 +1662,12 @@ describe("Google Drive local source preview", () => {
         where id = ${connected.connection.id}
       `;
       google.apiAuthorizationHeaders.length = 0;
-      const browse = await app(google.fetch).request(
+      const browse = await app(google.fetch).delegatedRequest(
         `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
         {
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-          },
+          headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
         },
+        await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
       );
       expect(browse.status).toBe(401);
       const responseBody = JSON.stringify(await browse.json());
@@ -1468,7 +1680,7 @@ describe("Google Drive local source preview", () => {
         client.db,
         workspace.workspaceId,
         connected.connection.id,
-        "subject-a",
+        SUBJECT_A,
       );
       expect(persisted).toMatchObject({
         status: fixture.status,
@@ -1499,14 +1711,12 @@ describe("Google Drive local source preview", () => {
       },
     });
     const connected = await connect(workspace, google);
-    const browse = await app(google.fetch).request(
+    const browse = await app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
     );
     expect(browse.status).toBe(403);
     const responseBody = JSON.stringify(await browse.json());
@@ -1516,7 +1726,7 @@ describe("Google Drive local source preview", () => {
       client.db,
       workspace.workspaceId,
       connected.connection.id,
-      "subject-a",
+      SUBJECT_A,
     );
     expect(persisted).toMatchObject({
       status: "needs_reauth",
@@ -1533,23 +1743,21 @@ describe("Google Drive local source preview", () => {
     const providerRequestStarted = deferred<void>();
     const staleProviderResponse = deferred<Response>();
     const fixtureFetch = google.fetch;
-    google.fetch = async (input, init) => {
+    google.fetch = (async (...[input, init]: Parameters<typeof globalThis.fetch>) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.pathname === "/drive/v3/files") {
         providerRequestStarted.resolve();
         return await staleProviderResponse.promise;
       }
       return await fixtureFetch(input, init);
-    };
+    }) as unknown as typeof globalThis.fetch;
     const connected = await connect(workspace, google);
-    const browsePromise = app(google.fetch).request(
+    const browsePromise = app(google.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:read"]),
     );
     await providerRequestStarted.promise;
 
@@ -1582,7 +1790,7 @@ describe("Google Drive local source preview", () => {
       client.db,
       workspace.workspaceId,
       connected.connection.id,
-      "subject-a",
+      SUBJECT_A,
     );
     expect(persisted).toMatchObject({
       id: connected.connection.id,
@@ -1607,25 +1815,26 @@ describe("Google Drive local source preview", () => {
     const state = new URL(reconnect.authorizationUrl).searchParams.get("state");
     const callback = await app(second.fetch).request(
       `/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state!)}`,
+      { headers: { cookie: browserCookie() } },
     );
     expect(callback.headers.get("location")).toContain("reason=account_mismatch");
 
-    const generic = await app(second.fetch).request(
+    const generic = await app(second.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections`,
       {
         method: "POST",
         headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
         body: JSON.stringify({
           providerDomain: "googleapis.com",
           kind: "oauth2",
-          subjectId: "subject-a",
+          subjectId: SUBJECT_A,
           credential: { access_token: "fabricated" },
         }),
       },
+      await delegatedHuman(workspace, SUBJECT_A, ["connections:write"]),
     );
     expect(generic.status).toBe(422);
   });
@@ -1643,7 +1852,7 @@ describe("Google Drive local source preview", () => {
       connectionId: connected.connection.id,
       providerDomain: "googleapis.com",
       kind: "oauth2",
-      subjectId: "subject-a",
+      subjectId: SUBJECT_A,
       allowSubjectOwned: true,
     });
     expect(credential?.credential.refresh_token).toBe("google-refresh-token");
@@ -1654,7 +1863,7 @@ describe("Google Drive local source preview", () => {
     const workspace = await freshWorkspace();
     const first = googleFixture();
     const connected = await connect(workspace, first);
-    const authorization = await bearer(workspace, "subject-a", [
+    const authorization = await delegatedHuman(workspace, SUBJECT_A, [
       "connections:read",
       "connections:write",
     ]);
@@ -1663,17 +1872,17 @@ describe("Google Drive local source preview", () => {
       idempotencyKey: `disconnect:${connected.connection.id}:${connected.connection.version}`,
     });
     const disconnect = () =>
-      app(first.fetch).request(
+      app(first.fetch).delegatedRequest(
         `/v1/workspaces/${workspace.workspaceId}/connections/${connected.connection.id}`,
         {
           method: "DELETE",
           headers: {
-            authorization,
             "content-type": "application/json",
             [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
           body: disconnectBody,
         },
+        authorization,
       );
     const [firstDisconnect, duplicateDisconnect] = await Promise.all([disconnect(), disconnect()]);
     expect(firstDisconnect.status).toBe(200);
@@ -1699,14 +1908,12 @@ describe("Google Drive local source preview", () => {
     expect(first.tokenRequests).toHaveLength(1);
     expect(first.apiAuthorizationHeaders).toHaveLength(1);
 
-    const blockedBrowse = await app(first.fetch).request(
+    const blockedBrowse = await app(first.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
       {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: { [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
       },
+      authorization,
     );
     expect(blockedBrowse.status).toBe(409);
     expect(first.apiAuthorizationHeaders).toHaveLength(1);
@@ -1716,7 +1923,7 @@ describe("Google Drive local source preview", () => {
     expect(reconnected.callback.headers.get("location")).toContain("google_drive=connected");
     expect(reconnected.connection).toMatchObject({
       id: connected.connection.id,
-      subjectId: "subject-a",
+      subjectId: SUBJECT_A,
       status: "active",
       version: firstBody.connection.version + 1,
       metadata: {
@@ -1732,7 +1939,7 @@ describe("Google Drive local source preview", () => {
         client.db,
         workspace.workspaceId,
         connected.connection.id,
-        "subject-a",
+        SUBJECT_A,
       ),
     ).toMatchObject({
       status: "active",
@@ -1742,12 +1949,11 @@ describe("Google Drive local source preview", () => {
     expect(first.tokenRequests).toHaveLength(1);
     expect(first.apiAuthorizationHeaders).toHaveLength(1);
 
-    const currentDisconnect = await app(samePermission.fetch).request(
+    const currentDisconnect = await app(samePermission.fetch).delegatedRequest(
       `/v1/workspaces/${workspace.workspaceId}/connections/${connected.connection.id}`,
       {
         method: "DELETE",
         headers: {
-          authorization,
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
@@ -1756,6 +1962,7 @@ describe("Google Drive local source preview", () => {
           idempotencyKey: `disconnect:${connected.connection.id}:${reconnected.connection.version}`,
         }),
       },
+      authorization,
     );
     expect(currentDisconnect.status).toBe(200);
 
@@ -1763,7 +1970,7 @@ describe("Google Drive local source preview", () => {
     const switched = await connect(workspace, second);
     expect(switched.callback.headers.get("location")).toContain("google_drive=connected");
     expect(switched.connection).toMatchObject({
-      subjectId: "subject-a",
+      subjectId: SUBJECT_A,
       status: "active",
       metadata: {
         googlePermissionId: "google-permission-b",
@@ -1785,7 +1992,7 @@ describe("Google Drive local source preview", () => {
     }).request(`/v1/workspaces/${workspace.workspaceId}/connections/google-drive/install`, {
       method: "POST",
       headers: {
-        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        cookie: browserCookie(),
         "content-type": "application/json",
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },

@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes, createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { requireAccessGrantAuthorization, stampDelegatedHumanAuthorization } from "@opengeni/core";
+import {
+  requireAccessGrantAuthorization,
+  stampDelegatedHumanAuthorization,
+  verifiedDelegatedHumanAuthorizationForRequest,
+} from "@opengeni/core";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
@@ -273,12 +279,18 @@ function oauthRequest(
   workspace: { accountId: string; workspaceId: string },
   payload: Record<string, unknown> = {},
 ): Request {
+  const body = JSON.stringify(payload);
   const request = new Request(
     `https://app.example.test/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      headers: {
+        "content-type": "application/json",
+        // Model the exact buffered dispatch; otherwise Hono rebuilds the raw
+        // Request while limiting its body and drops its request-local proof.
+        "content-length": String(Buffer.byteLength(body)),
+      },
+      body,
     },
   );
   stampDelegatedHumanAuthorization(request, {
@@ -349,6 +361,28 @@ function grantFor(workspace: { accountId: string; workspaceId: string }): Access
     metadata: {},
   } as AccessGrant;
 }
+
+describe("verified OAuth fixture transport", () => {
+  test("keeps exact request-local proof through standard Hono body limiting", async () => {
+    const workspace = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+    const payload = { connectionId: crypto.randomUUID() };
+    const request = oauthRequest(workspace, payload);
+    const server = new Hono();
+    server.use("*", bodyLimit({ maxSize: 65_536 }));
+    server.post("/v1/workspaces/:workspaceId/connections/fiken/oauth/start", async (c) => {
+      // This mock-only test checks transport identity, not live DB authority.
+      if (!verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
+        return c.json({ error: "unverified request" }, 401);
+      }
+      expect(c.req.raw).toBe(request);
+      return c.json(await c.req.json());
+    });
+    expect((await server.fetch(request.clone())).status).toBe(401);
+    const response = await server.fetch(request);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(payload);
+  });
+});
 
 describe("verifyFikenApiToken", () => {
   test("maps companies and validates slugs", async () => {

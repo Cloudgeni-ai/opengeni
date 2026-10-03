@@ -8,7 +8,12 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
 } from "@opengeni/config";
-import { createDb, installApiIntegration, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  installApiIntegration,
+  synchronizeCanonicalHumanLoginBindings,
+  type DbClient,
+} from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
 import {
   acquireSharedTestDatabase,
@@ -77,6 +82,11 @@ async function fixture(overrides: Partial<ApiRouteDeps> = {}) {
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   const app = new Hono();
+  let nativeBrowser: {
+    cookie: string;
+    sessionId: string;
+    user: { id: string; name: string; email: string; emailVerified: boolean };
+  } | null = null;
   app.onError((error, c) => {
     if (error instanceof OrganizationIntegrationDeniedError)
       return c.json({ message: error.message }, 403);
@@ -97,6 +107,19 @@ async function fixture(overrides: Partial<ApiRouteDeps> = {}) {
       slackSigningSecret: "slack-signing-fixture",
     }),
     bus: new MemoryEventBus(),
+    managedAuth: {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const cookie = (headers.get("cookie") ?? "").split(";").map((value) => value.trim());
+          const browser =
+            nativeBrowser && cookie.includes(nativeBrowser.cookie) ? nativeBrowser : null;
+          return {
+            headers: new Headers(),
+            response: browser ? { session: { id: browser.sessionId }, user: browser.user } : null,
+          };
+        },
+      },
+    },
     ...overrides,
   } as unknown as ApiRouteDeps;
   registerConnectionRoutes(app, deps);
@@ -124,6 +147,42 @@ async function fixture(overrides: Partial<ApiRouteDeps> = {}) {
       return app.request(`/v1/workspaces/${workspaceId}/${path}`, {
         method,
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    },
+    async nativeRequest(path: string, method: string, body?: unknown) {
+      if (!nativeBrowser) {
+        const userId = crypto.randomUUID();
+        const nativeSubjectId = `user:${userId}`;
+        const email = `${userId}@direct-policy.example.test`;
+        await shared.admin`insert into auth_users (id, name, email, email_verified)
+          values (${userId}, 'Native direct policy fixture', ${email}, true)`;
+        await shared.admin`insert into auth_identities (id, user_id, provider_id, account_id)
+          values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+        const [personal] = await shared.admin<
+          { id: string }[]
+        >`insert into workspaces (account_id, name)
+          values (${accountId}, 'Native policy Personal') returning id`;
+        await shared.admin`insert into workspace_inference_controls (workspace_id, account_id)
+          values (${personal!.id}, ${accountId})`;
+        await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+          values (${accountId}, ${nativeSubjectId}, 'member', 'active', ${personal!.id})`;
+        await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
+          values (${accountId}, ${workspaceId}, ${nativeSubjectId}, ${nativeSubjectId}, 'member', ${shared.admin.json([...permissions])})`;
+        const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+        const sessionId = crypto.randomUUID();
+        await shared.admin`insert into auth_sessions (id, user_id, token, expires_at, identity_id, identity_revision, auth_revision)
+          values (${sessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+            ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision})`;
+        nativeBrowser = {
+          cookie: `direct-policy-native-session=${sessionId}`,
+          sessionId,
+          user: { id: userId, name: "Native direct policy fixture", email, emailVerified: true },
+        };
+      }
+      return app.request(`/v1/workspaces/${workspaceId}/${path}`, {
+        method,
+        headers: { cookie: nativeBrowser.cookie, "content-type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     },
@@ -293,7 +352,7 @@ test("Fiken direct install rechecks policy after provider verification before cr
       exchanges++;
       await tighten();
       return Response.json([{ slug: "fixture-company", name: "Fixture company" }]);
-    }) as typeof fetch,
+    }) as unknown as typeof fetch,
   });
   tighten = () => f.restrict();
   const response = await f.request("connections/fiken/install", "POST", {
@@ -308,11 +367,15 @@ test("Fiken direct install rechecks policy after provider verification before cr
 test("Slack bot setup uses its dedicated key, never the personal Slack permission", async () => {
   const f = await fixture();
   await f.restrict(["slack-personal"]);
-  const denied = await f.request("connections/slack-bot/install", "POST", {});
+  const denied = await f.nativeRequest("connections/slack-bot/install", "POST", {});
   expect(denied.status, await denied.text()).toBe(403);
   await f.restrict(["slack-bot"]);
-  const allowed = await f.request("connections/slack-bot/install", "POST", {});
-  expect(allowed.status, await allowed.text()).toBe(200);
+  const legacyBearer = await f.request("connections/slack-bot/install", "POST", {});
+  expect(legacyBearer.status, await legacyBearer.text()).toBe(403);
+  const allowed = await f.nativeRequest("connections/slack-bot/install", "POST", {});
+  expect(allowed.status, await allowed.clone().text()).toBe(200);
+  expect(new URL((await allowed.json()).authorizationUrl).origin).toBe("https://slack.com");
+  expect(allowed.headers.getSetCookie().some((cookie) => cookie.includes("HttpOnly"))).toBe(true);
 });
 
 async function installFacetFixture(
