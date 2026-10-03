@@ -935,58 +935,57 @@ work, exact replays, same-model/existing-session continuations, and
 administrative-only task/trigger/binding edits retain definitions. Committed
 keyed session shells replay before active-only checks.
 
-Human preferences require frozen causal identity. Command/timeout successors
-preserve immutable receipts, separate causal claims and live personal-grant
-admission; see [run lifecycle](run-lifecycle.md).
+Human preferences freeze causal identity; command/timeout successors retain
+immutable receipts, distinct causal claims and live personal-grant admission:
+[lifecycle](run-lifecycle.md).
 
-`session_turns.initiating_human_subject_id` never authorizes alone:
-`artifacts:publish`, archive, restore, and exact mutation fences apply;
-pure service work fails closed. See [run lifecycle](run-lifecycle.md).
+`session_turns.initiating_human_subject_id` alone never authorizes:
+`artifacts:publish`/archive/restore require exact mutation fences; pure service
+work fails closed. [Lifecycle](run-lifecycle.md).
 
-All tool calls share the current authorized catalog, execution fences, and
-approval requirements, regardless of loading, backend, or model/Codemode entry.
+All model/Codemode calls share current authorized catalogs, execution fences and
+approvals across backends/loading paths.
 
-The closed always-visible first-request local tool set is `exec_command`,
+Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, `list_models` (lists, never switches models), and optional
-[`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
-require progressive search.
+[`code_search`](code-search.md). Other non-MCP functions/non-eager MCP schemas require search.
 
-Repository descriptors use sandbox-bound `repository_skill_read`, separate
-from managed `skill_read`: [run lifecycle](run-lifecycle.md).
+Configured-router visibility never joins pending non-eager MCP preparation;
+execution joins the exact catalog. Exposed routers remain in the prefix after
+empty discovery.
 
-Repository Skills: `.agents/skills`; runtime bundles:
+Repository descriptors use sandbox-bound `repository_skill_read`, not managed
+`skill_read`: [lifecycle](run-lifecycle.md).
+
+Skills: `.agents/skills`; runtime bundles:
 `packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
-client assets/docs from `.agents/skills/opengeni-client`; tests detect drift.
-Tools/host selection gate `opengeni-schedules`; the Schedules shortcut sends
-only the request and time zone.
+client assets/docs from `.agents/skills/opengeni-client`; drift-tested.
+Tools/host-gated `opengeni-schedules`; shortcut sends only request/time zone.
 
-Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
+Reading/management/host selection: [Skill design](design/skills-system.md).
 
-Each follow-up provider request reconciles complete SDK history into durable
-call/result truth; the first request has none to flush. Empty Responses
-terminals reconstruct observed `output_item.done` events in numeric
-`output_index` order, without synthetic items for sparse indices; duplicates
-remain invalid.
+Follow-up provider requests reconcile complete SDK history into durable call/results;
+first requests flush nothing. Empty Responses terminals reconstruct observed
+`output_item.done` by numeric `output_index`, without synthetic sparse-index
+items; duplicates remain invalid.
 
-Text-only turns can start without compute provisioning or contacting a
-Connected Machine. Filesystem, process, Git, browser, or computer tools resolve
-the exact current target and validate its epoch and authority.
+Text-only turns need no compute provisioning/Connected Machine contact.
+Filesystem/process/Git/browser/computer tools resolve exact current targets
+and validate epochs/authority.
 
-Explicit Variable Sets freeze for execution in ascending precedence.
-Session-control reconfiguration requires quiescence and rotates managed compute; it never
-hot-swaps active credentials.
+Explicit Variable Sets freeze in ascending precedence. Reconfiguration requires
+quiescence and rotates managed compute, never hot-swapping active credentials.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
-[`connected-machines.md`](connected-machines.md). Variable Set lifecycle and
-ordering are canonical in [`variable-sets.md`](variable-sets.md).
+[`connected-machines.md`](connected-machines.md). Variable Set lifecycle/ordering:
+[`variable-sets.md`](variable-sets.md).
 
-Configured agents always receive discovery mechanics; `media` gates image/video
-guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
-and may suggest bounded authorized descriptors. Suggestions neither load schemas
-nor grant execution; exact `tool_search` resolves them.
+Configured agents retain discovery; `media` gates image/video guidance.
+Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
+suggestions, never schemas/authority; exact `tool_search` resolves them.
 
 ### 5.6 Files, knowledge, and artifacts
 
