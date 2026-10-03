@@ -1,0 +1,14 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@opengeni/sdk": ["../../packages/sdk/src/index.ts"],
+      "@opengeni/react/session": ["../../packages/react/src/session.ts"],
+      "@opengeni/react-native": ["../../packages/react-native/src/index.ts"],
+      "@opengeni/react-native/*": ["../../packages/react-native/src/*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

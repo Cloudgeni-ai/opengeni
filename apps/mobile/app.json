@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "OpenGeni",
+    "slug": "opengeni",
+    "scheme": "opengeni",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "dev.opengeni.app",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "dev.opengeni.app",
+      "edgeToEdgeEnabled": true
+    },
+    "plugins": ["expo-router", "expo-secure-store", "expo-web-browser"]
+  }
+}

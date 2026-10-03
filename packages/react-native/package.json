@@ -1,0 +1,40 @@
+{
+  "name": "@opengeni/react-native",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Native (React Native / Expo) session surfaces and adapters for OpenGeni.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./adapters": {
+      "types": "./src/adapters.ts",
+      "default": "./src/adapters.ts"
+    },
+    "./expo": {
+      "types": "./src/expo.ts",
+      "default": "./src/expo.ts"
+    }
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*"
+  },
+  "peerDependencies": {
+    "expo": ">=57",
+    "expo-crypto": "*",
+    "expo-document-picker": "*",
+    "expo-file-system": "*",
+    "expo-image-picker": "*",
+    "react": ">=19",
+    "react-native": ">=0.80"
+  }
+}
