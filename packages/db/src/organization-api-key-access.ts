@@ -137,8 +137,8 @@ export function organizationApiKeyPolicyProjection(
   if (row.credentialKind !== "organization") return {};
   const workspaceScope: OrganizationWorkspaceScope =
     row.workspaceScope === "selected" ? { kind: "selected", workspaceIds } : { kind: "all" };
-  // The deferred scope lifecycle revokes empty selected keys at commit. Do
-  // not publish an invalid transient selected set or rewrite legacy storage.
+  // A selected scope whose workspaces were all deleted reaches nothing.
+  // Never rewrite legacy storage here.
   const normalized = normalizeOrganizationAccessPolicy({
     preset: "custom",
     permissions: row.permissions as Permission[],

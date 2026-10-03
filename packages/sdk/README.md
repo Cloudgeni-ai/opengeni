@@ -331,8 +331,8 @@ manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
 mints a read-only master key: it inventories shared workspaces and reads their
 sessions, events, and files, but cannot create sessions, send messages, or mint
 keys. This legacy `access: "read"` tier is distinct from the broader explicit
-`read_only` preset, which includes every read/list/view/search permission,
-including `secrets:read` and `variable-sets:read`.
+`read_only` preset, which includes every read/list/view/search permission
+except the secret-value reads `secrets:read` and `variable-sets:read`.
 
 Create or edit with `policy: { preset, permissions, workspaceScope }` for exact
 grants. `OrganizationAccessPreset` is `"read_only" | "full" | "custom"`;
@@ -340,8 +340,8 @@ the label never adds permissions and the server recomputes it from the selected
 set. Explicit `full` selects every canonical non-deprecated permission; `custom`
 has no implicit grants or scope. Even `workspace:admin` grants no wildcard under
 an explicit policy. Scope is `{ kind: "all" }` (current and future shared
-workspaces) or `{ kind: "selected", workspaceIds }` (1..500 unique same-org
-shared-workspace IDs). Personal workspaces are always excluded.
+workspaces) or `{ kind: "selected", workspaceIds }` (up to 500 unique same-org
+shared-workspace IDs; empty reaches none). Personal workspaces are always excluded.
 
 `updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
 requires at least one change; `description: null` clears it. Metadata-only edits

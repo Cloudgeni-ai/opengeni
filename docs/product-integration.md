@@ -507,7 +507,7 @@ Personal workspaces and managed-human **Only me** sessions are never included.
 For the legacy sessions-and-files-only tier, use
 `createOrganizationApiKey(organizationId, { name, access: "read" })`.
 An explicit `read_only` preset is broader: it includes every canonical
-read/list/view/search permission, including plaintext-secret reads.
+read/list/view/search permission except plaintext secret values.
 
 ## Canonical provisioning flow
 
@@ -568,7 +568,7 @@ type OrganizationAccessPolicy = {
 
 | Preset | Permission selection |
 | --- | --- |
-| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, including `secrets:read` and `variable-sets:read` |
+| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value reads `secrets:read` and `variable-sets:read` |
 | `full` | Every canonical, non-deprecated `Permission`, including explicit administration and plaintext-secret permissions |
 | `custom` | Exactly the permissions chosen, including an empty list; no implicit permissions or workspace scopes |
 
@@ -583,9 +583,10 @@ set. The SDK has handwritten wire mirrors and sends the supplied list unchanged;
 it does not import contracts at runtime or expand labels.
 
 `{ kind: "all" }` includes all current and future shared workspaces in the
-organization. `{ kind: "selected", workspaceIds }` requires 1..500 unique UUIDs
+organization. `{ kind: "selected", workspaceIds }` takes up to 500 unique UUIDs
 for existing shared workspaces in that same organization; cross-organization,
-missing, and Personal IDs are rejected. Personal workspaces are excluded from
+missing, and Personal IDs are rejected. When selected workspaces are deleted the
+key simply stops reaching them; an empty selection reaches none. Personal workspaces are excluded from
 both scopes, regardless of preset. Workspace and organization-session lists
 filter to the live scope; a selected scope never silently falls back to all.
 

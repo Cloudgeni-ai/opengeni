@@ -249,16 +249,21 @@ describe("organization access wire parity", () => {
       (permission) => permission !== "environments:manage" && permission !== "environments:use",
     );
     const read = organizationAccessPresetPermissions("read_only");
-    expect(read).toContain("secrets:read");
-    expect(read).toContain("variable-sets:read");
+    expect(read).not.toContain("secrets:read");
+    expect(read).not.toContain("variable-sets:read");
     expect(read).toEqual(
-      canonical.filter((permission) => /:(read|list|view|search)$/.test(permission)),
+      canonical.filter(
+        (permission) =>
+          /:(read|list|view|search)$/.test(permission) &&
+          permission !== "secrets:read" &&
+          permission !== "variable-sets:read",
+      ),
     );
     expect(organizationAccessPresetPermissions("full")).toEqual(canonical);
   });
 
   test("selected scope enforces unique bounded workspace IDs", () => {
-    expect(ContractScope.safeParse({ kind: "selected", workspaceIds: [] }).success).toBe(false);
+    expect(ContractScope.safeParse({ kind: "selected", workspaceIds: [] }).success).toBe(true);
     expect(
       ContractScope.safeParse({ kind: "selected", workspaceIds: [WORKSPACE_ID, WORKSPACE_ID] })
         .success,

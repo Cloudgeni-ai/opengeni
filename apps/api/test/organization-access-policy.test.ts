@@ -466,6 +466,11 @@ describe("organization key policy API and canonical access", () => {
         }),
       ),
     };
+    track(
+      spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+        callback({} as never),
+      ),
+    );
     track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
     track(
       spyOn(db, "lockActiveExternalOrganizationKeyAuthority").mockResolvedValue({

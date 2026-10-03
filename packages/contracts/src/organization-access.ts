@@ -16,7 +16,6 @@ export const OrganizationWorkspaceScope = z.discriminatedUnion("kind", [
             .uuid()
             .transform((id) => id.toLowerCase()),
         )
-        .min(1)
         .max(500)
         .refine((ids) => new Set(ids).size === ids.length, "Workspace IDs must be unique"),
     })
@@ -32,8 +31,14 @@ const aliases: Partial<Record<Permission, Permission>> = {
   "environments:use": "variable-sets:use",
 };
 const canonicalPermissions = Permission.options.filter((permission) => !aliases[permission]);
-const readOnlyPermissions = canonicalPermissions.filter((permission) =>
+/** Everything that only observes. Reading secret values observes too. */
+const observationalPermissions = canonicalPermissions.filter((permission) =>
   /:(read|list|view|search)$/.test(permission),
+);
+/** Secret values are opt-in: Read only leaves them out, Custom can add them. */
+const secretValuePermissions = new Set<Permission>(["secrets:read", "variable-sets:read"]);
+const readOnlyPermissions = observationalPermissions.filter(
+  (permission) => !secretValuePermissions.has(permission),
 );
 
 /** Custom has no implicit permissions. Presets are expanded only by this helper. */
@@ -47,10 +52,10 @@ export function organizationAccessPresetPermissions(
       : [];
 }
 
-/** True for any subset of observational permissions, including an empty set. */
+/** True when nothing can be changed, including an empty set and secret-value reads. */
 export function isReadOnlyPermissionSet(permissions: readonly Permission[]): boolean {
   return permissions.every((permission) =>
-    readOnlyPermissions.includes(aliases[permission] ?? permission),
+    observationalPermissions.includes(aliases[permission] ?? permission),
   );
 }
 

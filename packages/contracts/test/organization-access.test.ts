@@ -19,21 +19,30 @@ describe("organization access policy", () => {
     expect(OrganizationActor.options).toEqual(["user", "organization"]);
   });
 
-  test("read-only includes every canonical read/list/view/search scope", () => {
+  test("read-only includes every read/list/view/search scope except secret values", () => {
     const permissions = organizationAccessPresetPermissions("read_only");
     expect(permissions).toEqual(
-      Permission.options.filter((permission) => /:(read|list|view|search)$/.test(permission)),
+      Permission.options.filter(
+        (permission) =>
+          /:(read|list|view|search)$/.test(permission) &&
+          permission !== "secrets:read" &&
+          permission !== "variable-sets:read",
+      ),
     );
     for (const permission of [
       "account:read",
       "stream:view",
       "documents:search",
       "secrets:list",
-      "secrets:read",
-      "variable-sets:read",
       "billing:read",
     ] as const)
       expect(permissions).toContain(permission);
+    expect(permissions).not.toContain("secrets:read");
+    expect(permissions).not.toContain("variable-sets:read");
+    // Reading secret values changes nothing, so Custom can add it and stay read-only.
+    expect(isReadOnlyPermissionSet([...permissions, "secrets:read", "variable-sets:read"])).toBe(
+      true,
+    );
     expect(isReadOnlyPermissionSet(permissions)).toBe(true);
     expect(isReadOnlyPermissionSet([])).toBe(true);
     expect(isReadOnlyPermissionSet(["sessions:read"])).toBe(true);
@@ -91,10 +100,10 @@ describe("organization access policy", () => {
     ).toBe("custom");
   });
 
-  test("selected scope validates unique normalized UUIDs and a bounded nonempty set", () => {
+  test("selected scope validates unique normalized UUIDs, up to 500; empty reaches nothing", () => {
     expect(
       OrganizationWorkspaceScope.safeParse({ kind: "selected", workspaceIds: [] }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       OrganizationWorkspaceScope.safeParse({
         kind: "selected",

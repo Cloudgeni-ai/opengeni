@@ -71,20 +71,20 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 
 `og.asUser(externalUserId, { source })` returns a client that acts as one of your onboarded users.
 
-| Area                         | Highlights                                                                                                                                    |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Area                         | Highlights                                                                                                                                                             |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Organizations and workspaces | Organization API-key create/list/get/update/delete and explicit access policies, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace` |
-| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                         |
-| Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                |
-| Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools` |
-| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                                             |
-| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                                                  |
-| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression                                        |
-| Files                        | Upload, attach, and download workspace files                                                                                                  |
-| Goals                        | Read, update, pause, resume, and clear a session goal                                                                                         |
-| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                                                       |
-| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                                                          |
-| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                                    |
+| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                                                  |
+| Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                                         |
+| Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools`                          |
+| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                                                                      |
+| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                                                                           |
+| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression                                                                 |
+| Files                        | Upload, attach, and download workspace files                                                                                                                           |
+| Goals                        | Read, update, pause, resume, and clear a session goal                                                                                                                  |
+| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                                                                                |
+| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                                                                                   |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                                                             |
 
 In a chat UI, wire Stop to `pauseSession`: it is resumable, and messages sent while paused queue until `resumeSession`. `cancelSession` is terminal for the session and its children.
 

@@ -1,10 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import {
-  acquireOwnerMigratedTestDatabase,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   ApiKey,
   normalizeOrganizationAccessPolicy,
@@ -30,11 +26,10 @@ import {
   lockActiveExternalOrganizationKeyAuthority,
 } from "../src/external-identities";
 import { lockConnectionSetupKeyAuthority } from "../src/connection-setup-authority";
+import { organizationApiKeyAllowsWorkspace } from "../src/organization-api-key-access";
 import { rawRows } from "../src/database";
 import { FORCE_RLS_TABLES, RUNTIME_TABLE_PRIVILEGES } from "../src/runtime-posture";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
-import { migrate } from "../src/migrate";
-import { provisionRoles } from "../src/provision-roles";
 
 const budget = 180_000;
 const requireReal = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -87,10 +82,7 @@ test(
     expect(migration).not.toMatch(/UPDATE\s+api_keys\s+SET\s+permissions/i);
     expect(migration).toContain("REFERENCES api_keys(id, account_id) ON DELETE CASCADE");
     expect(migration).toContain("REFERENCES workspaces(id, account_id) ON DELETE CASCADE");
-    expect(migration).toContain("DEFERRABLE INITIALLY DEFERRED");
-    expect(migration).toContain(
-      "REVOKE ALL ON FUNCTION revoke_empty_organization_api_key_workspace_scope() FROM PUBLIC",
-    );
+    expect(migration).not.toContain("revoke_empty_organization_api_key_workspace_scope");
     expect(FORCE_RLS_TABLES).toContain("organization_api_key_workspaces");
     expect(RUNTIME_TABLE_PRIVILEGES.organization_api_key_workspaces).toEqual([
       "SELECT",
@@ -370,7 +362,7 @@ describe.skipIf(!available)("organization API key policy real PostgreSQL", () =>
   );
 
   test(
-    "composite FKs reject cross-tenant tuples and scope links cascade without widening authority",
+    "composite FKs reject cross-tenant tuples; deleting a selected workspace never widens a key",
     async () => {
       const created = await key(policy([firstWorkspaceId]));
       for (const [workspaceId, tupleAccount] of [
@@ -393,9 +385,9 @@ describe.skipIf(!available)("organization API key policy real PostgreSQL", () =>
       const [hash] = await shared!.admin`select key_hash from api_keys where id = ${disposable.id}`;
       await shared!.admin`delete from workspaces where id = ${disposableWorkspaceId}`;
       const projected = await getOrganizationApiKey(client.db, accountId, disposable.id);
-      if (!projected) throw new Error("Revoked organization key must remain readable");
-      expect(projected.revokedAt).not.toBeNull();
-      expect(projected.workspaceScope).toEqual({ kind: "all" });
+      if (!projected) throw new Error("Organization key must remain readable");
+      expect(projected.revokedAt).toBeNull();
+      expect(projected.workspaceScope).toEqual({ kind: "selected", workspaceIds: [] });
       expect(projected.permissionMode).toBe("explicit");
       expect(projected.permissions).toEqual(disposable.permissions);
       expect(ApiKey.parse(projected)).toEqual(projected);
@@ -403,9 +395,14 @@ describe.skipIf(!available)("organization API key policy real PostgreSQL", () =>
         (item) => item.id === disposable.id,
       );
       expect(ApiKey.parse(listed)).toEqual(projected);
-      expect(await findActiveApiKeyByHash(client.db, hash!.key_hash)).toBeNull();
+      expect((await findActiveApiKeyByHash(client.db, hash!.key_hash))?.id).toBe(disposable.id);
       expect(
-        await lockActiveExternalOrganizationKey(client.db, accountId, disposable.id),
+        await lockActiveExternalOrganizationKey(
+          client.db,
+          accountId,
+          disposable.id,
+          firstWorkspaceId,
+        ),
       ).toBeNull();
       expect(
         await findActiveWorkspaceApiKeyById(client.db, {
@@ -424,7 +421,7 @@ describe.skipIf(!available)("organization API key policy real PostgreSQL", () =>
   );
 
   test(
-    "deferred lifecycle preserves final nonempty replacements, surviving links and rolled-back deletes",
+    "scope replacements, partial removals and rolled-back deletes keep exactly the remaining links",
     async () => {
       const created = await key(policy([firstWorkspaceId]));
       const replaced = await updateOrganizationApiKey(client.db, accountId, created.id, {
@@ -462,120 +459,27 @@ describe.skipIf(!available)("organization API key policy real PostgreSQL", () =>
   );
 
   test(
-    "deferred lifecycle operates after tenant restoration and preserves ambient account, workspace and hash",
+    "a selected key whose workspaces are all deleted stays active and reaches no workspace",
     async () => {
       const created = await key(policy([firstWorkspaceId]));
-      const sibling = await key(policy([firstWorkspaceId]));
-      await client.db.transaction(async (tx) => {
-        await tx.execute(sql`select set_config('opengeni.account_id', ${otherAccountId}, true),
-          set_config('opengeni.workspace_id', ${foreignWorkspaceId}, true)`);
-        await withRlsContext(tx, { accountId }, async (scoped) => {
-          await scoped.execute(
-            sql`delete from organization_api_key_workspaces where api_key_id = ${created.id}::uuid`,
-          );
-        });
-        await tx.execute(
-          sql`select set_config('opengeni.api_key_hash', 'ambient-unrelated-hash', true)`,
+      await withRlsContext(client.db, { accountId }, async (scoped) => {
+        await scoped.execute(
+          sql`delete from organization_api_key_workspaces where api_key_id = ${created.id}::uuid`,
         );
-        await tx.execute(
-          sql`set constraints organization_api_key_workspaces_empty_scope immediate`,
-        );
-        expect(
-          await rawRows(
-            tx,
-            sql`select current_setting('opengeni.account_id') as account,
-          current_setting('opengeni.workspace_id') as workspace,
-          current_setting('opengeni.api_key_hash') as hash`,
-          ),
-        ).toEqual([
-          {
-            account: otherAccountId,
-            workspace: foreignWorkspaceId,
-            hash: "ambient-unrelated-hash",
-          },
-        ]);
       });
-      const revoked = await getOrganizationApiKey(client.db, accountId, created.id);
-      expect(revoked?.revokedAt).not.toBeNull();
-      expect(ApiKey.parse(revoked).workspaceScope).toEqual({ kind: "all" });
-      expect((await getOrganizationApiKey(client.db, accountId, sibling.id))?.revokedAt).toBeNull();
-    },
-    budget,
-  );
-
-  test(
-    "trigger-only lifecycle runs as a NOSUPERUSER NOBYPASSRLS owner under FORCE RLS",
-    async () => {
-      const owned = await acquireOwnerMigratedTestDatabase("organization_key_scope_owner");
-      if (!owned)
-        throw new Error("Real owner-migrated PostgreSQL required for key scope lifecycle");
-      let ownerClient: DbClient | undefined;
-      let runtimeClient: DbClient | undefined;
-      try {
-        await migrate(owned.ownerUrl);
-        await provisionRoles(owned.adminUrl, {
-          appPassword: owned.appPassword,
-          rlsStrategy: "force",
-        });
-        ownerClient = createDb(owned.ownerUrl);
-        const runtimeUrl = new URL(owned.ownerUrl);
-        runtimeUrl.username = "opengeni_app";
-        runtimeUrl.password = owned.appPassword;
-        runtimeClient = createDb(runtimeUrl.toString());
-        const tenant = crypto.randomUUID();
-        const workspace = crypto.randomUUID();
-        const hash = crypto.randomUUID();
-        await owned.admin`insert into managed_accounts (id, name) values (${tenant}, 'Owner lifecycle')`;
-        await owned.admin`insert into workspaces (id, account_id, name) values (${workspace}, ${tenant}, 'Owner lifecycle')`;
-        const created = await createOrganizationApiKey(runtimeClient.db, {
-          accountId: tenant,
-          name: "Owner lifecycle",
-          prefix: "fixture",
-          keyHash: hash,
-          permissions: [],
-          policy: policy([workspace]),
-        });
-        const [authority] =
-          await owned.admin`select r.rolsuper, r.rolbypassrls, p.prosecdef, p.proconfig,
-          pg_get_userbyid(p.proowner) as owner,
-          has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as runtime_execute,
-          exists(select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as public_execute,
-          t.tgdeferrable, t.tginitdeferred
-          from pg_proc p join pg_roles r on r.oid = p.proowner
-          join pg_trigger t on t.tgfoid = p.oid
-          where p.oid = 'revoke_empty_organization_api_key_workspace_scope()'::regprocedure`;
-        expect(authority).toMatchObject({
-          rolsuper: false,
-          rolbypassrls: false,
-          prosecdef: true,
-          owner: owned.ownerRole,
-          runtime_execute: false,
-          public_execute: false,
-          tgdeferrable: true,
-          tginitdeferred: true,
-        });
-        expect(authority!.proconfig).toContain("search_path=pg_catalog, public, pg_temp");
+      const after = await getOrganizationApiKey(client.db, accountId, created.id);
+      expect(after?.revokedAt).toBeNull();
+      expect(ApiKey.parse(after).workspaceScope).toEqual({ kind: "selected", workspaceIds: [] });
+      for (const workspaceId of [firstWorkspaceId, secondWorkspaceId])
         expect(
-          await owned.admin`select relname, relforcerowsecurity from pg_class
-          where oid in ('api_keys'::regclass, 'organization_api_key_workspaces'::regclass)
-            and (not relrowsecurity or not relforcerowsecurity)`,
-        ).toHaveLength(0);
-        await withRlsContext(runtimeClient.db, { accountId: tenant }, async (tx) => {
-          await tx.execute(
-            sql`delete from organization_api_key_workspaces where api_key_id = ${created.id}::uuid`,
-          );
-        });
-        const revoked = await getOrganizationApiKey(runtimeClient.db, tenant, created.id);
-        expect(revoked?.revokedAt).not.toBeNull();
-        expect(ApiKey.parse(revoked).workspaceScope).toEqual({ kind: "all" });
-        expect(await findActiveApiKeyByHash(runtimeClient.db, hash)).toBeNull();
-        expect(await getOrganizationApiKey(ownerClient.db, tenant, created.id)).toEqual(revoked);
-      } finally {
-        await runtimeClient?.close();
-        await ownerClient?.close();
-        await owned.release();
-      }
+          await client.db.transaction((tx) =>
+            organizationApiKeyAllowsWorkspace(
+              tx,
+              { id: created.id, accountId, workspaceScope: "selected" },
+              workspaceId,
+            ),
+          ),
+        ).toBe(false);
     },
     budget,
   );

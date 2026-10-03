@@ -207,19 +207,26 @@ describe("archived import PostgreSQL persistence", () => {
         organizationTenancyCanonicalActivationEnabled: true,
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
-      // The later 0586 maintenance cutover intentionally requires a new binary
-      // for its runtime-granted quota table. Keep the immutable evaluator and
-      // complete catalog. The organization key scope table is a second later gap.
+      // Later maintenance cutovers (Slack quotas, Claude account pools and the
+      // organization key scope join) intentionally require a new binary. Keep the
+      // immutable evaluator and complete catalog and check two of those gaps.
       const laterQuotaGap =
         "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
-      const incompatibleScopeTable =
-        "RLS tables are absent from the declared contract: organization_api_key_workspaces";
+      const missingScopeTable = (violations: string[]) =>
+        violations.some(
+          (violation) =>
+            violation.startsWith("RLS tables are absent from the declared contract:") &&
+            violation.includes("organization_api_key_workspaces"),
+        );
       expect(
         old.evaluateRuntimeDatabasePosture(
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual(expect.arrayContaining([laterQuotaGap, incompatibleScopeTable]));
+      ).toSatisfy(
+        (violations: string[]) =>
+          violations.includes(laterQuotaGap) && missingScopeTable(violations),
+      );
       await oldProvision.provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -230,7 +237,7 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toContain(incompatibleScopeTable);
+      ).toSatisfy(missingScopeTable);
       await provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -264,7 +271,10 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual(expect.arrayContaining([laterQuotaGap, incompatibleScopeTable]));
+      ).toSatisfy(
+        (violations: string[]) =>
+          violations.includes(laterQuotaGap) && missingScopeTable(violations),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

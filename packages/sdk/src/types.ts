@@ -5130,7 +5130,7 @@ export type OrganizationWorkspaceScope =
   | { kind: "all" }
   | {
       kind: "selected";
-      /** 1..500 unique shared-workspace IDs belonging to the same organization. */
+      /** Up to 500 unique shared-workspace IDs in the same organization. Empty reaches none. */
       workspaceIds: string[];
     };
 

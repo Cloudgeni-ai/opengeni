@@ -18,13 +18,13 @@ Session operations are workspace-scoped; organization routes manage shared works
 
 ## Credentials
 
-| Credential             | Transport                       | Lifetime                 | Notes                                                                                                                                                                                                        |
-| ---------------------- | ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Credential             | Transport                       | Lifetime                 | Notes                                                                                                                                                                 |
+| ---------------------- | ------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Organization API key   | `Authorization: Bearer ogk_...` | Until revoked or expired | Shown once, stored hashed. Explicit permissions across all or selected shared workspaces, or a legacy access tier. Personal workspaces are excluded. Server-side only |
-| Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                                                       |
-| Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                                                       |
-| Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                                                          |
-| Managed web session    | Cookie                          | Session                  | Email/password or enabled Google/GitHub sign-in in `managed` mode                                                                                                                                            |
+| Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                |
+| Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                |
+| Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                   |
+| Managed web session    | Cookie                          | Session                  | Email/password or enabled Google/GitHub sign-in in `managed` mode                                                                                                     |
 
 ## Personal sign-in methods
 
@@ -69,22 +69,23 @@ const { apiKey, token } = await adminClient.createOrganizationApiKey(organizatio
 // Store token on the server; it is returned only at creation.
 ```
 
-| Policy preset | Permissions |
-| --- | --- |
-| `read_only` | Every canonical read/list/view/search permission, including `secrets:read` and `variable-sets:read` |
-| `full` | Every canonical, non-deprecated permission |
-| `custom` | Exactly your chosen permissions; no implicit grants or workspace scope |
+| Policy preset | Permissions                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------ |
+| `read_only`   | Every canonical read/list/view/search permission except secret values (`secrets:read`, `variable-sets:read`) |
+| `full`        | Every canonical, non-deprecated permission                                                                   |
+| `custom`      | Exactly your chosen permissions; no implicit grants or workspace scope                                       |
 
 The preset label never adds permissions. The server canonicalizes the supplied
 list and recomputes the label; even `preset: "full"` grants only the permissions
 you send. Under an explicit policy, every permission—including `workspace:admin`—is
-chosen individually; admin is not a wildcard. `read_only` includes plaintext-secret
-reads, so use a custom list if a reporting backend should not read secrets.
+chosen individually; admin is not a wildcard. `read_only` leaves out plaintext
+secret values; add `secrets:read` or `variable-sets:read` to a custom list when a
+backend needs them.
 
 Scope `{ kind: "all" }` includes all current and future shared workspaces in the
-organization. `{ kind: "selected", workspaceIds }` accepts 1..500 unique existing
+organization. `{ kind: "selected", workspaceIds }` accepts up to 500 unique existing
 shared-workspace IDs from that same organization. Missing, cross-organization,
-and Personal IDs are rejected. Neither scope includes Personal workspaces.
+and Personal IDs are rejected. An empty selection reaches no workspace. Neither scope includes Personal workspaces.
 
 For existing integrations, the legacy creation selectors remain supported:
 
