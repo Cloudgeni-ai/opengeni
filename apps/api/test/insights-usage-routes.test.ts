@@ -309,6 +309,35 @@ describe("unified Insights route discipline", () => {
     ]);
   });
 
+  test("same-subject billing-only and readable-workspace requests do not share in-flight results", async () => {
+    const pending: Array<() => void> = [];
+    const read = spyOn(core, "getInsightsUsage").mockImplementation(async (_db, input) => {
+      await new Promise<void>((resolve) => {
+        pending.push(resolve);
+        if (pending.length === 2) for (const release of pending) release();
+      });
+      return responseFor(input);
+    });
+    spies.push(read);
+    const app = appFor();
+    const [billing, readable] = await Promise.all([
+      token(["billing:read"], "user:same-actor"),
+      token(["billing:read", "sessions:read"], "user:same-actor"),
+    ]);
+    const results = await Promise.all(
+      [billing, readable].map((authorization) =>
+        app.request(`http://x/v1/organizations/${accountId}/insights/usage?range=month`, {
+          headers: { authorization },
+        }),
+      ),
+    );
+    expect(results.map((result) => result.status)).toEqual([200, 200]);
+    expect(read.mock.calls).toHaveLength(2);
+    expect(read.mock.calls.map(([, input]) => input.detailsWorkspaceIds)).toEqual(
+      expect.arrayContaining([[], [workspaceId]]),
+    );
+  });
+
   test("sharing keys distinguish actors, scopes, every filter and calls cursors", () => {
     const scope = { accountId, workspaceId };
     const baseline = insightsUsageCoalesceKey(scope, { range: "week", provider: ["a"] }, "actor:a");

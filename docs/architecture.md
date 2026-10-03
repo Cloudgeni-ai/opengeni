@@ -1037,15 +1037,14 @@ credits-path price and is zero for externally billed calls.
 Insights counts every ledger row, including private/missing/deleted sessions;
 `privateChats` exposes person-only amounts. Details/samples remain actor-visible;
 debits remain unchanged.
-Daily usage and model-call rollups are maintained by transactional source-row
-deltas, not a scheduled refresh. Readers combine complete UTC days with exact
-raw partial-day edges and resolve current session visibility and metadata at
-read time. Deleted retained usage is separate from other people's Only-me
-amounts; no private session ID/title is a group or filter facet. Organization
-Personal amounts preserve the existing membership-name granularity without
-exposing another person's Personal workspace ID or name. The owner-only
-FORCE-RLS backfill, runtime grants, rolling compatibility and parity checks are
-described in [`insights-daily-rollups.md`](insights-daily-rollups.md).
+The unified query readers initially read recorded facts with exact UTC windows
+and resolve current session visibility and metadata at read time. Daily
+write-maintained rollups are a separate performance follow-up; raw YTD reads
+are not a latency guarantee. Deleted retained usage is separate from other
+people's Only-me amounts; no private session ID/title is a group or filter
+facet. Organization Personal amounts preserve existing membership-name
+granularity only where independently authorized, never another person's
+Personal workspace ID or name.
 
 The additive workspace/organization `insights/usage` and `insights/calls` GET
 routes use the narrow `@opengeni/contracts/insights-usage` subpath. Workspace
@@ -1055,12 +1054,11 @@ session access. Exact UTC ranges, repeated filters, groups, payer totals,
 token-knownness coverage and a nullable prior window share one query contract.
 Charged totals follow actual debit-ledger amounts, not nominal usage prices
 that can exceed a balance-clipped debit. List totals are recorded provider
-estimates across all payers. Forward list class snapshots are captured only
-when supported by the recorded counters and price context. Eligible historical
-calls allocate their fixed recorded estimate using catalog-rate token weights,
-with per-call micro conservation and an explicit approximation flag; allocation
-never changes a recorded total. Missing counters, totals or rates remain unknown,
-not invented zeroes. Reasoning is a subset of output, never an extra cost class.
+estimates across all payers. Durable usage events preserve supported list-class
+snapshots verbatim; missing snapshots remain null until source-backed capture
+or an explicitly approximate fixed-total historical allocation supplies them.
+Missing counters, totals or rates remain unknown, not invented zeroes. Reasoning
+is a subset of output, never an extra cost class.
 The prior cache denominator is exposed separately so an empty prior
 window cannot appear to have a cache-hit comparison.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,

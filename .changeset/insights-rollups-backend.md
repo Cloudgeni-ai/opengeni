@@ -7,7 +7,7 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Add write-maintained daily Insights rollups and unified workspace/organization
-usage and visible-call readers without changing debit or access semantics.
+Add unified workspace/organization usage and visible-call readers over recorded
+facts without changing debit or access semantics.
 Distinguish deleted retained usage from private amounts and expose the prior
 cache denominator and historical telemetry coverage.
