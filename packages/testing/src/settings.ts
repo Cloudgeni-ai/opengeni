@@ -3,8 +3,11 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
+  getSettings,
   type Settings,
 } from "@opengeni/config";
+
+const defaultApiDatabasePoolMax = getSettings({}).apiDatabasePoolMax;
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -13,6 +16,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
+    apiDatabasePoolMax: defaultApiDatabasePoolMax,
     dbSchema: "",
     rlsStrategy: "force",
     runtimeDatabaseRole: "opengeni_app",
