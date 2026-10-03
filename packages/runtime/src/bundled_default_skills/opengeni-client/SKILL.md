@@ -21,7 +21,7 @@ UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 For first-time organization and workspace provisioning, start with
 [OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
 the embedding code. That skills-only workflow uses the coding agent's own
-browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+browser and public REST/SDK, with a full-access setup key; no OpenGeni MCP
 server is required.
 
 Do not confuse two meanings of "skill": this file teaches a customer's coding
