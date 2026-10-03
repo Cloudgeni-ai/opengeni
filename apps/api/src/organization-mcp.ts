@@ -236,9 +236,12 @@ async function callAction(
   for (const name of pathParameters(entry.path)) {
     const value = input.pathParameters[name];
     if (!value) return failure(`Missing path parameter ${name}.`);
+    // Encoding leaves "." alone, so a dot segment would reach another route.
+    if (value === "." || value === "..") return failure(`Invalid path parameter ${name}.`);
     path = path.replace(`:${name}`, encodeURIComponent(value));
   }
   const url = new URL(path, context.origin);
+  if (url.pathname !== path) return failure("Invalid path parameters.");
   for (const [key, value] of Object.entries(input.query)) {
     for (const each of Array.isArray(value) ? value : [value])
       url.searchParams.append(key, String(each));

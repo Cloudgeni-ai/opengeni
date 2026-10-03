@@ -184,6 +184,13 @@ describe("organization MCP server", () => {
     expect((await call("opengeni_action_call", { id: "createSession", body: {} })).value).toContain(
       "Missing path parameter workspaceId",
     );
+    for (const dots of [".", ".."]) {
+      const escaped = await call("opengeni_action_call", {
+        id: "listSessionPage",
+        pathParameters: { workspaceId: dots },
+      });
+      expect(escaped).toEqual({ isError: true, value: "Invalid path parameter workspaceId." });
+    }
     expect((await call("opengeni_action_call", { id: "nope" })).isError).toBe(true);
     expect((await call("opengeni_action_call", { id: "getAccessContext" })).value).toMatchObject({
       status: 302,
