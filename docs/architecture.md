@@ -1380,6 +1380,13 @@ Managed download tools use the existing explicit workspace-save API; bytes stay 
 Linux managed-browser cleanup and recovery share exact profile/executable and
 process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
 
+Explicit managed Chromium working-directory recovery uses the internal
+[`working-runtime-journal.ts`](../packages/browserd/src/working-runtime-journal.ts)
+launch/retirement receipt. Exact directory, controller, token, placement and
+process proof gates recovery; unknown launch outcomes cannot dispatch again.
+Cleanup retains its exact holder and directory until retirement and journal
+closure settle. See [`packages/browserd`](../packages/browserd/README.md).
+
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).

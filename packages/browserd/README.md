@@ -27,6 +27,24 @@ Recovery scans receipts with bounded keyset reads inside one atomic transaction,
 avoiding simultaneous raw-row and duplicate observation collections. Corruption
 in a later receipt rolls back earlier recovery changes.
 
+An explicit recovery request can reuse an eligible managed Chromium working
+directory after controller restart. Its internal launch journal binds the exact
+session/controller, current tokens and placement, directory identity, launch
+settings, and owned process birth/executable/CDP endpoint. Recovery attaches to a
+proven live process, or launches only after complete proof that the old process
+and other profile writers are absent. Unsettled launch receipts prevent another
+launch. Attached browsers, ephemeral contexts, and unattested directories do not
+enter this path. Accepted interaction commands remain replay-only receipts.
+Explicit close records retirement before process cleanup. If retirement
+settlement fails, other stores close while the exact directory and cleanup
+holder remain available for retry; removal requires completed retirement and
+closed journals.
+
+The API's existing missing-active-controller path sends this recovery intent for
+managed Chromium private profiles after rechecking source access and exact
+controller, token, placement, route, and holder authority. Refused or uncertain
+recovery never falls back to a fresh create or saved-profile restore.
+
 Each Browser/Computer journal authority retains at most 10,000 operations and
 256 MiB of serialized receipts (64 MiB per receipt). Inserts and settlements
 evict the oldest terminal receipts until both limits fit; in-flight records
