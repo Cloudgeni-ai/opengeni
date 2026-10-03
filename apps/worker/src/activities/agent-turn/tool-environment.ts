@@ -47,7 +47,7 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import { materializeGmailFile } from "../gmail-files";
+import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
@@ -990,10 +990,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "Connector attachment sandbox is unavailable",
     );
     const sandbox = sandboxAccess.sandbox;
+    const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
     const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
-      workspaceRoot: "/workspace",
+      workspaceRoot: machineRoot ?? "/workspace",
+      ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
       leaseEpoch: sandboxAccess.leaseEpoch,
       emit: async (events) => {
         await eventing.publish?.(events, true);
@@ -1098,21 +1100,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             "Gmail attachment filesystem is unavailable",
           );
           const runAs = sandboxRunAs(runSettings);
+          const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
           const channel = new SandboxChannelAService({
             session: access.session,
-            workspaceRoot: "/workspace",
+            workspaceRoot: machineRoot ?? "/workspace",
+            ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
             leaseEpoch: access.leaseEpoch,
             ...(runAs ? { runAs } : {}),
           });
-          const file = await channel.fsRead({
-            path: request.path,
-            maxBytes: request.maxBytes + 1,
-            encoding: "base64",
-            workspaceOnly: true,
-          });
-          const bytes = Buffer.from(file.content, "base64");
-          if (file.truncated || bytes.byteLength > request.maxBytes) throw new Error("Gmail file input exceeds the maximum size");
-          return bytes;
+          return await readGmailFileFromChannel(channel, request);
         },
         refreshOwnedCommand: async (commandId) => {
           throwIfWorkerShuttingDown();

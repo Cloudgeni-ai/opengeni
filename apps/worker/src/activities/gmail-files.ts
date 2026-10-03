@@ -2,6 +2,25 @@ import { createHash } from "node:crypto";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GmailFileMaterializationRequest } from "@opengeni/runtime/gmail-rest-mcp";
 import type { ConnectorAttachmentMaterializer } from "@opengeni/runtime";
+import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
+
+/** Use the selected filesystem namespace, retaining descriptor confinement and
+ * one extra byte to distinguish a complete exact-limit input from truncation. */
+export async function readGmailFileFromChannel(
+  channel: Pick<SandboxChannelAService, "fsRead">,
+  request: { path: string; maxBytes: number },
+): Promise<Uint8Array> {
+  const file = await channel.fsRead({
+    path: request.path,
+    maxBytes: request.maxBytes + 1,
+    encoding: "base64",
+    workspaceOnly: true,
+  });
+  const bytes = Buffer.from(file.content, "base64");
+  if (file.truncated || bytes.byteLength > request.maxBytes)
+    throw new Error("Gmail file input exceeds the maximum size");
+  return bytes;
+}
 
 /** Gmail returns base64url JSON, while the exact filesystem importer consumes
  * byte streams. Stage only inside the worker; no URL or bytes reach a tool result. */
