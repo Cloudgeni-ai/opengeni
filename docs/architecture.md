@@ -1428,6 +1428,10 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 
 ### 7.6 SDK, React, web, and embedding
 
+Legacy organization usage summary and workspace-page implementations live in the
+focused SDK `organization-usage` module. Root, `core`, and `browser` clients retain
+their public methods and load that module on demand.
+
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 

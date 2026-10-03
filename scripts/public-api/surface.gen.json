@@ -189,7 +189,7 @@
       "method": "GET",
       "path": "/v1/billing/usage-summary",
       "sdk": [
-        "OpenGeniClient.getOrganizationUsageSummary"
+        "getOrganizationUsageSummary"
       ],
       "request": [
         "OrganizationUsagePeriod"
@@ -202,7 +202,7 @@
       "method": "GET",
       "path": "/v1/billing/usage-workspaces",
       "sdk": [
-        "OpenGeniClient.getOrganizationUsageWorkspacePage"
+        "getOrganizationUsageWorkspacePage"
       ],
       "request": [
         "OrganizationUsagePeriod"
@@ -27182,6 +27182,10 @@
     "@opengeni/sdk/organization-private-session-settings": {
       "getOrganizationPrivateSessionSettings": "value",
       "updateOrganizationPrivateSessionSettings": "value"
+    },
+    "@opengeni/sdk/organization-usage": {
+      "getOrganizationUsageSummary": "value",
+      "getOrganizationUsageWorkspacePage": "value"
     },
     "@opengeni/sdk/organization-user-setup": {
       "previewOrganizationUserSetup": "value",

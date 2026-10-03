@@ -58,6 +58,10 @@
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
     },
+    "./organization-usage": {
+      "types": "./src/organization-usage.ts",
+      "default": "./src/organization-usage.ts"
+    },
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"

@@ -326,7 +326,11 @@ available, a short session reference keeps rows distinguishable. The display
 automatically yields to the later `session.title_set` value.
 
 Browser consoles that do not need operator-only surfaces can import
-`OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
+`OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Legacy organization usage
+summary and workspace-page methods remain available on every client and load
+their implementation on demand. The focused typed functions are also available
+from `@opengeni/sdk/organization-usage`; the console's Insights page uses its
+current usage query instead. Document authority migration
 and Default-collection backfill methods stay available on the backward-compatible
 root and `@opengeni/sdk/core` clients, or through the focused
 `@opengeni/sdk/document-authority` entry:

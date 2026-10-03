@@ -2879,8 +2879,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     try {
-      await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
+      const workspaceId = await openFreshWorkspaceThroughApi(
+        page,
+        apiBaseUrl,
+        webBaseUrl,
+        "Nested attention workspace",
+      );
       const parent = await createSessionThroughApi(
         page,
         apiBaseUrl,
@@ -2973,6 +2977,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
+      await expectWorkspaceNeedsYouCount(page, apiBaseUrl, workspaceId, 1);
       await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
@@ -3006,8 +3011,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     try {
-      await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
+      const workspaceId = await openFreshWorkspaceThroughApi(
+        page,
+        apiBaseUrl,
+        webBaseUrl,
+        "Deep pinned attention workspace",
+      );
       const root = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Deep pinned root");
       await withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
         await scoped.execute(sql`update workspaces
@@ -3047,6 +3056,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, root, true);
       await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      await expectWorkspaceNeedsYouCount(page, apiBaseUrl, workspaceId, 1);
       await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
       await page.getByRole("menuitem", { name: /^Status/ }).focus();
       await page.keyboard.press("ArrowRight");
@@ -4142,6 +4152,44 @@ async function reactCommitCount(page: Page): Promise<number> {
     () =>
       (window as Window & { __opengeniReactCommitCount?: number }).__opengeniReactCommitCount ?? 0,
   );
+}
+
+async function openFreshWorkspaceThroughApi(
+  page: Page,
+  apiBaseUrl: string,
+  webBaseUrl: string,
+  name: string,
+): Promise<string> {
+  // Workspace-wide attention includes prior scenarios. Create an independent
+  // workspace through the same configured principal before asserting its count.
+  await page.goto(webBaseUrl);
+  await workspaceFromPage(page);
+  const response = await page.request.post(`${apiBaseUrl}/v1/workspaces`, {
+    data: { name },
+  });
+  expect(response.status()).toBe(201);
+  const workspaceId: string = (await response.json()).id;
+  await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+  expect(await workspaceFromPage(page)).toBe(workspaceId);
+  return workspaceId;
+}
+
+async function expectWorkspaceNeedsYouCount(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  expected: number,
+): Promise<void> {
+  const response = await page.request.get(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions`, {
+    params: {
+      view: "page",
+      projection: "summary",
+      parentSessionId: "null",
+      includeTotals: "true",
+    },
+  });
+  expect(response.status()).toBe(200);
+  expect((await response.json()).totals?.needsYouCount).toBe(expected);
 }
 
 async function workspaceFromPage(

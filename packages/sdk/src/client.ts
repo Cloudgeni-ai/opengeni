@@ -8444,16 +8444,8 @@ export class OpenGeniClient {
     },
     requestOptions: OpenGeniRequestOptions = {},
   ): Promise<import("@opengeni/contracts").OrganizationUsageSummary> {
-    return await this.requestJson(
-      "GET",
-      "/v1/billing/usage-summary",
-      undefined,
-      {
-        accountId: options.accountId,
-        period: options.period ?? "month",
-      },
-      requestOptions,
-    );
+    const usage = await import("./organization-usage");
+    return await usage.getOrganizationUsageSummary(this, options, requestOptions);
   }
 
   async getOrganizationModelUsage(
@@ -8486,18 +8478,8 @@ export class OpenGeniClient {
     },
     requestOptions: OpenGeniRequestOptions = {},
   ): Promise<import("@opengeni/contracts").OrganizationUsageWorkspacePage> {
-    return await this.requestJson(
-      "GET",
-      "/v1/billing/usage-workspaces",
-      undefined,
-      {
-        accountId: options.accountId,
-        period: options.period ?? "month",
-        until: options.until,
-        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
-      },
-      requestOptions,
-    );
+    const usage = await import("./organization-usage");
+    return await usage.getOrganizationUsageWorkspacePage(this, options, requestOptions);
   }
 
   async getBillingUsage(
