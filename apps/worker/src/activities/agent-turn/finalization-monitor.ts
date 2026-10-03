@@ -1,4 +1,4 @@
-import type { Observability } from "@opengeni/observability";
+import { turnExecutionTelemetryKey, type Observability } from "@opengeni/observability";
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import { armTurnQuiescenceWatchdog } from "./quiescence";
 
@@ -42,10 +42,21 @@ export function startTurnFinalizationMonitor(input: {
   details: TurnHeartbeatDetails;
   heartbeat: (details: TurnHeartbeatDetails) => void;
   requestWorkerDrain: () => void;
+  execution?: { workspaceId: string; sessionId: string; attemptId: string };
   timeoutMs?: number;
   slowAfterMs?: number;
 }) {
   const { observability, details } = input;
+  const correlation: { correlationId?: string } = {};
+  diagnose(() => {
+    if (input.execution) {
+      correlation.correlationId = turnExecutionTelemetryKey(
+        input.execution.workspaceId,
+        input.execution.sessionId,
+        input.execution.attemptId,
+      );
+    }
+  });
   if (!initialized.has(observability)) {
     for (const stage of TURN_FINALIZATION_STAGES) {
       diagnose(() => observability.incrementGauge({ ...INFLIGHT, labels: { stage }, amount: 0 }));
@@ -88,6 +99,7 @@ export function startTurnFinalizationMonitor(input: {
               surface: "turn_finalization",
               outcome: "containment",
               reason: next,
+              ...correlation,
             });
           } catch {
             // Diagnostic failure must never disable physical containment.
@@ -104,6 +116,7 @@ export function startTurnFinalizationMonitor(input: {
               surface: "turn_finalization",
               outcome: "slow",
               reason: next,
+              ...correlation,
             });
           }),
         input.slowAfterMs ?? 30_000,

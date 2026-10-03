@@ -127,6 +127,11 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       }
     },
     requestWorkerDrain: deps.requestWorkerDrain,
+    execution: {
+      workspaceId: deps.input.workspaceId,
+      sessionId: deps.input.sessionId,
+      attemptId: deps.input.attemptId,
+    },
   });
   try {
     monitor.enter("tool_writers");
