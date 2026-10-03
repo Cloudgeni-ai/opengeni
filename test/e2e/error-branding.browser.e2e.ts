@@ -92,14 +92,17 @@ describe("native embedded error presentation", () => {
           expect(
             await page
               .locator("[data-og-chat]")
-              .evaluate((node) => getComputedStyle(node).getPropertyValue("--og-color-bg").trim()),
+              .evaluate((node) => getComputedStyle(node).backgroundColor),
           ).toBe(
             await page
               .locator("[data-error-preview]")
-              .evaluate((node) => getComputedStyle(node).getPropertyValue("--og-color-bg").trim()),
+              .evaluate((node) => getComputedStyle(node).backgroundColor),
           );
           expect(await input.evaluate((node) => getComputedStyle(node).fontFamily)).not.toBe("");
-          const field = page.locator("[data-og-new-chat-composer] > div");
+          const field = page
+            .locator("[data-og-new-chat-composer] > div")
+            .filter({ has: page.locator("textarea") });
+          expect(await field.count()).toBe(1);
           expect(await field.evaluate((node) => getComputedStyle(node).borderRadius)).not.toBe(
             "0px",
           );
