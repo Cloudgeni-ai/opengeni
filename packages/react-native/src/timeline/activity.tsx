@@ -55,6 +55,8 @@ export type NativeToolRenderer = (props: NativeToolRendererProps) => ReactNode |
 export interface NativeActivityOptions {
   /** Per-tool overrides keyed by exact tool name or MCP leaf. */
   toolRenderers?: Record<string, NativeToolRenderer> | undefined;
+  /** Host renderer consulted for every tool call (return null for the shared row). */
+  renderTool?: NativeToolRenderer | undefined;
   /** Active compute label for exec previews ("on <label> · …"). */
   computeLabel?: string | null | undefined;
   renderMarkdown?:
@@ -329,8 +331,9 @@ function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }
     ? item.name.slice(item.name.lastIndexOf("__") + 2)
     : item.name;
   const custom = options.toolRenderers?.[item.name] ?? options.toolRenderers?.[leaf];
-  if (custom) {
-    const node = custom({ item, presentation, compact });
+  for (const renderer of [custom, options.renderTool]) {
+    if (!renderer) continue;
+    const node = renderer({ item, presentation, compact });
     if (node != null) return <>{node}</>;
   }
   return <PresentedToolRow presentation={presentation} compact={compact} />;

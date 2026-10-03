@@ -121,11 +121,18 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const activityOptions = useMemo<NativeActivityOptions>(
     () => ({
       toolRenderers: props.toolRenderers,
+      renderTool: props.renderTool,
       computeLabel: props.computeLabel,
       renderMarkdown: props.renderMarkdown,
       onOpenSession: props.onOpenSession,
     }),
-    [props.toolRenderers, props.computeLabel, props.renderMarkdown, props.onOpenSession],
+    [
+      props.toolRenderers,
+      props.renderTool,
+      props.computeLabel,
+      props.renderMarkdown,
+      props.onOpenSession,
+    ],
   );
   const context: GroupContext = {
     facets: props.facets,
