@@ -1057,6 +1057,11 @@ that can exceed a balance-clipped debit. List totals are recorded provider
 estimates across all payers. Durable usage events preserve supported list-class
 snapshots verbatim; missing snapshots remain null until source-backed capture
 or an explicitly approximate fixed-total historical allocation supplies them.
+Future list estimates use comparison-only schedules independently of debit
+pricing. Current usage frames do not establish geography/service-tier price
+provenance, so their forward class splits remain null; Gateway-reported totals
+remain authoritative. Neither comparison lookup changes the nominal credit
+price or authorizes a previously unpriced debit.
 Missing counters, totals or rates remain unknown, not invented zeroes. Reasoning
 is a subset of output, never an extra cost class.
 The prior cache denominator is exposed separately so an empty prior

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
+import * as config from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -419,6 +420,92 @@ describe("recordAuthoritativeModelCallFact", () => {
     });
     expect(billing).not.toHaveProperty("upstreamProvider");
     expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("reviewed list-only pricing supplies future estimates without becoming debit authority", async () => {
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+      debitedMicros: 0,
+    } as never);
+    restores.push(
+      () => usageSpy.mockRestore(),
+      () => debitSpy.mockRestore(),
+    );
+    const settings = {
+      ...billedSettings(),
+      openaiModel: "gpt-6.1-sol",
+      openaiAllowedModels: "gpt-6.1-sol",
+    };
+    const input = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-list-only",
+      turnId: "turn-list-only",
+      turnAttemptId: "attempt-list-only",
+      model: "gpt-6.1-sol",
+      externallyBilled: true,
+      usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+      sourceKey: "response-list-only",
+    };
+    expect(await recordModelUsageAndDebitCredits(settings, db, input)).toMatchObject({
+      billingPath: "external",
+      pricedCostMicros: 0,
+      estimatedProviderCostMicros: 7000,
+      equivalentCreditCostMicros: null,
+      pricingSource: "configured_list_price",
+      listByClassMicros: null,
+      listByClassApprox: false,
+    });
+    expect(debitSpy).not.toHaveBeenCalled();
+    await expect(
+      recordModelUsageAndDebitCredits(settings, db, { ...input, externallyBilled: false }),
+    ).rejects.toThrow("Missing model pricing for gpt-6.1-sol");
+    expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("comparison snapshot totals never replace the nominal debit or equivalent-credit calculation", async () => {
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+      debitedMicros: 37,
+    } as never);
+    const snapshotSpy = spyOn(config, "calculateModelListUsageCostSnapshot").mockReturnValue({
+      providerCostMicros: 9999,
+      creditCostMicros: 999999,
+      listByClassMicros: null,
+      listByClassApprox: false,
+    });
+    restores.push(
+      () => usageSpy.mockRestore(),
+      () => debitSpy.mockRestore(),
+      () => snapshotSpy.mockRestore(),
+    );
+    expect(
+      await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-debit-independent",
+        turnId: "turn-debit-independent",
+        turnAttemptId: "attempt-debit-independent",
+        model: "codex/gpt-5.6-sol",
+        externallyBilled: false,
+        usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+        sourceKey: "response-debit-independent",
+      }),
+    ).toMatchObject({
+      pricedCostMicros: 14700,
+      estimatedProviderCostMicros: 9999,
+      equivalentCreditCostMicros: 14700,
+      listByClassMicros: null,
+    });
+    expect(snapshotSpy.mock.calls[0]?.[3]).toEqual({
+      latencyMode: "standard",
+      priceContextKnown: false,
+    });
+    expect(debitSpy.mock.calls[0]?.[1].requestedAmountMicros).toBe(14700);
+    expect(usageSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+      eventType: "model.cost",
+      quantity: 14700,
+    });
   });
 
   test("persists free external billing authority before a soft fact-write failure", async () => {

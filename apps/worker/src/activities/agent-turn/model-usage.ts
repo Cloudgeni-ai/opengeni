@@ -16,7 +16,9 @@ import {
 import {
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedProviderCostMicros,
+  calculateModelListUsageCostSnapshot,
   calculateModelUsageCostBreakdown,
+  configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   resolveModelProvider,
   responseSatisfiesLatencyMode,
@@ -723,10 +725,30 @@ export async function recordModelUsageAndDebitCredits(
   const hasCompleteCoreTokenTelemetry =
     normalizedUsage.telemetry.inputTokens !== null &&
     normalizedUsage.telemetry.outputTokens !== null;
+  // Comparison rates are deliberately separate from debit authority. The
+  // current usage frame does not establish geography/service-tier provenance,
+  // so forward class splits stay unknown even when a total estimate is priced.
+  const listPricingSchedules = configuredModelListPricingSchedules(settings);
+  const configuredListPricingModel = listPricingSchedules[input.model]
+    ? input.model
+    : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
+      ? input.model.slice("codex/".length)
+      : null;
+  const listSnapshot =
+    !gatewayBilling && hasCompleteCoreTokenTelemetry && configuredListPricingModel
+      ? calculateModelListUsageCostSnapshot(settings, configuredListPricingModel, sanitizedUsage, {
+          latencyMode: input.latencyMode ?? "standard",
+          priceContextKnown: false,
+        })
+      : null;
+  const listClasses = {
+    listByClassMicros: listSnapshot?.listByClassMicros ?? null,
+    listByClassApprox: listSnapshot?.listByClassApprox ?? false,
+  };
   const estimatedProviderCostMicros = gatewayBilling
     ? (pricingBreakdown?.providerCostMicros ?? null)
     : hasCompleteCoreTokenTelemetry
-      ? (pricingBreakdown?.providerCostMicros ?? null)
+      ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
       : null;
   const equivalentCreditCostMicros =
     pricingBreakdown && !unpinnedWorkspaceGatewayModel
@@ -779,6 +801,7 @@ export async function recordModelUsageAndDebitCredits(
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
+      ...listClasses,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
@@ -791,6 +814,7 @@ export async function recordModelUsageAndDebitCredits(
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
+      ...listClasses,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
@@ -845,6 +869,7 @@ export async function recordModelUsageAndDebitCredits(
     estimatedProviderCostMicros,
     equivalentCreditCostMicros,
     pricingSource,
+    ...listClasses,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
