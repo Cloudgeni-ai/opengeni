@@ -643,6 +643,37 @@ function writesSessions(node: t.CallExpression): boolean {
   );
 }
 
+const sessionActivityGateWrappers = [
+  "withSessionActivityRlsContext",
+  "withRestoredSessionActivityRlsContext",
+  "withWorkspaceSessionActivityRls",
+  "withWorkspaceSubjectSessionActivityRls",
+  "retrySessionActivityRls",
+  "withWorkspaceSessionEventActivityRls",
+  "retryWorkspaceSessionEventActivityPersistence",
+  "withSessionCodexCapacityMutation",
+];
+
+function hasSessionActivityBoundary(node: t.Node, source: string): boolean {
+  let ancestor = parentNodes.get(node);
+  while (ancestor) {
+    if (
+      isCallExpression(ancestor) &&
+      sessionActivityGateWrappers.includes(callName(ancestor) ?? "")
+    ) {
+      return true;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  const enclosing = namedEnclosingFunction(node);
+  return Boolean(
+    enclosing?.node.body &&
+    /\bSessionActivityDatabase\b/.test(
+      source.slice(enclosing.node.start, enclosing.node.body.start),
+    ),
+  );
+}
+
 const tenancyQuiescenceTables = {
   sessions: "sessions",
   sessionTurns: "session_turns",
@@ -849,10 +880,14 @@ function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
   );
 }
 
-function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
+function functionCalls(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
-    if (isNamedFunctionNode(node)) return;
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) found = true;
     if (!found) forEachChild(node, visit);
   };
@@ -980,10 +1015,14 @@ function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[]
   );
 }
 
-function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
+function callPositions(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
-    if (isNamedFunctionNode(node)) return;
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       positions.push(nodeStart(node));
     }
@@ -1011,13 +1050,16 @@ describe("session_events writer inventory", () => {
     const sourceFile = parseSourceFile(
       "factory.ts",
       `
-      function factory() {
+      function createScopedSubscriptionCapacityWaiters() {
         function protectedWriter(tx: SessionActivityDatabase) {
           lockSessionEventWriteRows(tx, { controlLock: "share" });
           tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
+          tx.update(schema.sessions);
         }
         const unprotectedWriter = (tx: Database) => {
           tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
           tx.update(schema.sessions);
         };
         return { protectedWriter, unprotectedWriter };
@@ -1025,13 +1067,33 @@ describe("session_events writer inventory", () => {
     `,
     );
     const writers: Array<{ name: string; node: FunctionLikeDeclaration }> = [];
+    const violations: string[] = [];
+    const aliasedWriters: Record<string, string[]> = {};
+    const bindings = new Map([
+      [
+        "createScopedSubscriptionCapacityWaiters",
+        ["claude_capacity_waiters", "xai_capacity_waiters"],
+      ],
+    ]);
     const visit = (node: t.Node): void => {
       if (isCallExpression(node) && insertsSessionEvents(node)) {
         writers.push(namedEnclosingFunction(node)!);
       }
+      if (isCallExpression(node)) {
+        const tables = parameterizedWaiterMutationTables(node, bindings);
+        if (tables.length) aliasedWriters[namedEnclosingFunction(node)!.name] = tables;
+        if (writesSessions(node) && !hasSessionActivityBoundary(node, sourceFile.source)) {
+          violations.push(namedEnclosingFunction(node)!.name);
+        }
+      }
       forEachChild(node, visit);
     };
     visit(sourceFile.program);
+    expect(violations).toEqual(["unprotectedWriter"]);
+    expect(aliasedWriters).toEqual({
+      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+    });
     expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
     const factory = sourceFile.program.body[0]!;
     expect(isFunctionDeclaration(factory)).toBe(true);
@@ -1046,6 +1108,33 @@ describe("session_events writer inventory", () => {
     expect(
       sourceFile.source.slice(writers[1]!.node.start, writers[1]!.node.body!.start),
     ).not.toContain("SessionActivityDatabase");
+  });
+
+  test("forbidden effects inside invoked named retry callbacks remain visible", () => {
+    const sourceFile = parseSourceFile(
+      "retry.ts",
+      `
+      function command() {
+        function retryCallback() { publishSessionEventIds(); }
+        return runSessionCommandPersistenceTransaction(retryCallback);
+      }
+    `,
+    );
+    const visit = (node: t.Node): void => {
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    const command = sourceFile.program.body[0]!;
+    if (!isFunctionDeclaration(command)) throw new Error("Expected a command declaration");
+    expect(functionCalls(command, "runSessionCommandPersistenceTransaction")).toBe(true);
+    // Scope-local positive evidence cannot certify the sibling callback, while
+    // recursive forbidden-effect checks must still reject its publication.
+    expect(functionCalls(command, "publishSessionEventIds")).toBe(false);
+    expect(functionCalls(command, "publishSessionEventIds", true)).toBe(true);
+    const persistence = callPositions(command, "runSessionCommandPersistenceTransaction")[0]!;
+    const forbidden = callPositions(command, "publishSessionEventIds", true);
+    expect(forbidden).toHaveLength(1);
+    expect(forbidden[0]).toBeLessThan(persistence);
   });
 
   test("pins all 18 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
@@ -1212,16 +1301,6 @@ describe("session_events writer inventory", () => {
 
   test("every production session-row writer has an activity gate or exact maintenance boundary", () => {
     const violations: string[] = [];
-    const gateWrappers = [
-      "withSessionActivityRlsContext",
-      "withRestoredSessionActivityRlsContext",
-      "withWorkspaceSessionActivityRls",
-      "withWorkspaceSubjectSessionActivityRls",
-      "retrySessionActivityRls",
-      "withWorkspaceSessionEventActivityRls",
-      "retryWorkspaceSessionEventActivityPersistence",
-      "withSessionCodexCapacityMutation",
-    ];
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
@@ -1230,13 +1309,7 @@ describe("session_events writer inventory", () => {
       const sourceFile = parseSourceFile(path, source);
       const checked = new Set<string>();
       const checkWriter = (node: t.Node): void => {
-        let ancestor = parentNodes.get(node);
-        while (ancestor) {
-          if (isCallExpression(ancestor) && gateWrappers.includes(callName(ancestor) ?? "")) {
-            return;
-          }
-          ancestor = parentNodes.get(ancestor);
-        }
+        if (hasSessionActivityBoundary(node, source)) return;
         const enclosing = namedEnclosingFunction(node);
         if (!enclosing) {
           violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
@@ -1293,10 +1366,7 @@ describe("session_events writer inventory", () => {
           violations.push(`${key} has no function body`);
           return;
         }
-        const signature = source.slice(enclosing.node.start, body.start);
-        if (!/\bSessionActivityDatabase\b/.test(signature)) {
-          violations.push(`${key} has no activity-gated handle or wrapper`);
-        }
+        violations.push(`${key} has no activity-gated handle or wrapper`);
       };
       const visit = (node: t.Node): void => {
         if (isCallExpression(node) && writesSessions(node)) checkWriter(node);
@@ -1725,10 +1795,10 @@ describe("session_events writer inventory", () => {
     expect(functionCalls(retryHelper!, "runIdempotentPersistenceTransaction")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSessionActivityRls")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSubjectSessionActivityRls")).toBe(true);
-    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishSessionEventIds")).toBe(false);
-    expect(functionCalls(retryHelper!, "requestControlWakeDispatch")).toBe(false);
+    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishSessionEventIds", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "requestControlWakeDispatch", true)).toBe(false);
 
     for (const commandName of [
       "sendAgentSessionMessage",
@@ -1750,7 +1820,7 @@ describe("session_events writer inventory", () => {
         "publishSessionEventIds",
         "requestControlWakeDispatch",
       ]) {
-        for (const effect of callPositions(command!, externalEffect)) {
+        for (const effect of callPositions(command!, externalEffect, true)) {
           expect(persistence).toBeLessThan(effect);
         }
       }
