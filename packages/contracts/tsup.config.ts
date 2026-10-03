@@ -33,6 +33,7 @@ export default defineConfig({
     "src/session-titles.ts",
     "src/session-list-entries.ts",
     "src/organization-model-usage.ts",
+    "src/insights-usage.ts",
     "src/session-final-reply.ts",
     "src/site-session-http.ts",
     "src/slack-bot-scopes.ts",
