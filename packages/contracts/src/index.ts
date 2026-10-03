@@ -12114,23 +12114,25 @@ export const InstallLibrarySkillRequest = z
   .strict();
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
-export const InstalledSkill = z.object({
-  skillReceipt: SkillWriteReceipt.optional(),
-  capabilityId: z.string().min(1),
-  pluginId: z.string().uuid(),
-  pluginVersionId: z.string().uuid(),
-  facetId: z.string().uuid(),
-  pluginInstallationId: z.string().uuid(),
-  facetInstallationId: z.string().uuid(),
-  installationVersion: z.number().int().positive(),
-  source: SkillInstallationSource,
-  version: z.string().min(1).max(96),
-  sourceUrl: z.string().url(),
-  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  name: z.string(),
-  status: z.literal("installed"),
-});
+export const InstalledSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    skillReceipt: SkillWriteReceipt.optional(),
+    capabilityId: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    facetId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    facetInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url(),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    name: z.string(),
+    status: z.literal("installed"),
+  }),
+);
 export type InstalledSkill = z.infer<typeof InstalledSkill>;
 
 export const CapabilityComponentOwner = z.object({
@@ -12849,21 +12851,23 @@ export const InstallPluginRequest = z
   .strict();
 export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
-export const InstalledPlugin = z
-  .object({
-    skillWrites: z.array(SkillWriteReceipt).optional(),
-    skillPublications: z.array(SkillPublicationReceipt).optional(),
-    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-    pluginKey: z.string().min(1),
-    version: z.string().min(1),
-    pluginId: z.string().uuid(),
-    pluginVersionId: z.string().uuid(),
-    pluginInstallationId: z.string().uuid(),
-    installationVersion: z.number().int().positive(),
-    componentCount: z.number().int().positive(),
-    status: z.literal("installed"),
-  })
-  .strict();
+export const InstalledPlugin = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      skillWrites: z.array(SkillWriteReceipt).optional(),
+      skillPublications: z.array(SkillPublicationReceipt).optional(),
+      skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
+      pluginKey: z.string().min(1),
+      version: z.string().min(1),
+      pluginId: z.string().uuid(),
+      pluginVersionId: z.string().uuid(),
+      pluginInstallationId: z.string().uuid(),
+      installationVersion: z.number().int().positive(),
+      componentCount: z.number().int().positive(),
+      status: z.literal("installed"),
+    })
+    .strict(),
+);
 export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
 
 export const PluginInstallationSummary = z
@@ -16245,76 +16249,78 @@ export const HumanInputOption = z.object({
 });
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
 
-export const HumanInputQuestion = z
-  .object({
-    id: z.string().min(1).max(64),
-    kind: HumanInputQuestionKind,
-    prompt: z.string().min(1).max(4096),
-    label: z.string().min(1).max(128).nullable().optional(),
-    helpText: z.string().max(2048).nullable().optional(),
-    // Strict model tool schemas encode an absent optional object as null.
-    // A real review reference still requires every authority-bearing field.
-    skillReview: SkillReviewReference.nullable().optional(),
-    options: z.array(HumanInputOption).max(20).default([]),
-    required: z.boolean().default(true),
-    // Retained on the wire for older hosts. OpenGeni's stock runtime and
-    // surfaces always expose Other for choice questions, including requests
-    // that were persisted before that became the default behavior.
-    allowOther: z.boolean().default(false),
-    // Selection bounds only — agents invent useless text char mins/maxes.
-    // Answer strings stay platform-capped on HumanInputAnswer (~8192).
-    validation: z
-      .object({
-        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
-        maxSelections: z.number().int().positive().max(20).nullable().optional(),
-      })
-      .nullable()
-      .optional(),
-  })
-  .superRefine((question, ctx) => {
-    const optionIds = new Set(question.options.map((option) => option.id));
-    if (optionIds.size !== question.options.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["options"],
-        message: "option ids must be unique",
-      });
-    }
-    if (question.kind === "text") {
-      if (question.options.length > 0) {
+export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(64),
+      kind: HumanInputQuestionKind,
+      prompt: z.string().min(1).max(4096),
+      label: z.string().min(1).max(128).nullable().optional(),
+      helpText: z.string().max(2048).nullable().optional(),
+      // Strict model tool schemas encode an absent optional object as null.
+      // A real review reference still requires every authority-bearing field.
+      skillReview: SkillReviewReference.nullable().optional(),
+      options: z.array(HumanInputOption).max(20).default([]),
+      required: z.boolean().default(true),
+      // Retained on the wire for older hosts. OpenGeni's stock runtime and
+      // surfaces always expose Other for choice questions, including requests
+      // that were persisted before that became the default behavior.
+      allowOther: z.boolean().default(false),
+      // Selection bounds only — agents invent useless text char mins/maxes.
+      // Answer strings stay platform-capped on HumanInputAnswer (~8192).
+      validation: z
+        .object({
+          minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
+          maxSelections: z.number().int().positive().max(20).nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+    })
+    .superRefine((question, ctx) => {
+      const optionIds = new Set(question.options.map((option) => option.id));
+      if (optionIds.size !== question.options.length) {
         ctx.addIssue({
           code: "custom",
           path: ["options"],
-          message: "text questions cannot have options",
+          message: "option ids must be unique",
         });
       }
-      if (question.allowOther) {
+      if (question.kind === "text") {
+        if (question.options.length > 0) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["options"],
+            message: "text questions cannot have options",
+          });
+        }
+        if (question.allowOther) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["allowOther"],
+            message: "text questions do not use Other",
+          });
+        }
+      } else if (question.options.length === 0) {
         ctx.addIssue({
           code: "custom",
-          path: ["allowOther"],
-          message: "text questions do not use Other",
+          path: ["options"],
+          message: "select questions require options",
         });
       }
-    } else if (question.options.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["options"],
-        message: "select questions require options",
-      });
-    }
-    const validation = question.validation;
-    if (
-      validation?.minSelections != null &&
-      validation?.maxSelections != null &&
-      validation.minSelections > validation.maxSelections
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["validation"],
-        message: "minSelections exceeds maxSelections",
-      });
-    }
-  });
+      const validation = question.validation;
+      if (
+        validation?.minSelections != null &&
+        validation?.maxSelections != null &&
+        validation.minSelections > validation.maxSelections
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["validation"],
+          message: "minSelections exceeds maxSelections",
+        });
+      }
+    }),
+);
 export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
 
 /** Only known presentation wire differences are equivalent. This is not
@@ -16361,17 +16367,19 @@ export const HumanInputRequestStatus = z.enum([
 ]);
 export type HumanInputRequestStatus = z.infer<typeof HumanInputRequestStatus>;
 
-export const RequestHumanInputToolInput = z.object({
-  questions: z.array(HumanInputQuestion).min(1).max(20),
-  allowSkip: z.boolean().default(false),
-  expiresInSeconds: z
-    .number()
-    .int()
-    .positive()
-    .max(30 * 24 * 60 * 60)
-    .nullable()
-    .optional(),
-});
+export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    questions: z.array(HumanInputQuestion).min(1).max(20),
+    allowSkip: z.boolean().default(false),
+    expiresInSeconds: z
+      .number()
+      .int()
+      .positive()
+      .max(30 * 24 * 60 * 60)
+      .nullable()
+      .optional(),
+  }),
+);
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
 export const HumanInputAnswer = z.object({
@@ -16401,24 +16409,26 @@ export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
 ]);
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
 
-export const SessionHumanInputRequest = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  turnId: z.string().uuid(),
-  turnGeneration: z.number().int().positive(),
-  creationAttemptId: z.string().uuid(),
-  toolCallId: z.string().min(1).max(1024),
-  status: HumanInputRequestStatus,
-  questions: z.array(HumanInputQuestion).min(1).max(20),
-  allowSkip: z.boolean(),
-  response: HumanInputResponse.nullable(),
-  respondedBy: z.string().max(1024).nullable(),
-  respondedAt: z.string().nullable(),
-  expiresAt: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    turnGeneration: z.number().int().positive(),
+    creationAttemptId: z.string().uuid(),
+    toolCallId: z.string().min(1).max(1024),
+    status: HumanInputRequestStatus,
+    questions: z.array(HumanInputQuestion).min(1).max(20),
+    allowSkip: z.boolean(),
+    response: HumanInputResponse.nullable(),
+    respondedBy: z.string().max(1024).nullable(),
+    respondedAt: z.string().nullable(),
+    expiresAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type SessionHumanInputRequest = z.infer<typeof SessionHumanInputRequest>;
 
 /**
