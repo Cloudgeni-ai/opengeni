@@ -12,8 +12,16 @@ const unexpected = mock(async () => {
   throw new Error("The playground called the API");
 });
 const client = new Proxy({}, { get: () => unexpected });
+const startSession = mock(
+  async (_workspaceId: string, _submission: unknown, _options: unknown) => ({
+    id: "00000000-0000-4000-8000-0000000000f1",
+  }),
+);
+const navigate = mock(async (_to: unknown) => undefined);
 const context = {
   client,
+  busy: false,
+  startSession,
   clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" }, models: [] },
   authSession: { user: { name: "Ada Lovelace", email: "ada@example.test" } },
   accessContext: {
@@ -27,6 +35,7 @@ const context = {
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
+  useNavigate: () => navigate,
   Link: ({
     children,
     to,
@@ -44,6 +53,7 @@ mock.module("@tanstack/react-router", () => ({
 }));
 
 const { PlaygroundRoute } = await import("./playground");
+const { ADD_AGENT_DEFAULT_PROMPT } = await import("@/components/new-session-starters");
 const journeys = await import("@/lib/onboarding-journey");
 
 const realSetTimeout = globalThis.setTimeout;
@@ -66,6 +76,8 @@ beforeEach(() => {
   localStorage.clear();
   journeys.resetOnboardingJourneysForTests();
   unexpected.mockClear();
+  startSession.mockClear();
+  navigate.mockClear();
 });
 
 async function settle(rounds = 40) {
@@ -147,21 +159,35 @@ describe("playground", () => {
       expect(chat(container)).toContain("Where is my order #4417?");
       expect(chat(container)).toContain("I can't see orders yet.");
       expect(step(container, "ask").textContent).toContain("That's <OpenGeniChat />");
+      // Nothing moves on by itself: the step waits for Next.
+      expect(currentStep(container)).toBe("ask");
+      await press(buttonIn(step(container, "ask"), "Next"));
       expect(currentStep(container)).toBe("style");
       expect(
         journeys.readOnboardingJourney(journeys.onboardingJourneyStorageKey(SUBJECT, ORG))!.marks
           .playground,
       ).toBeString();
 
-      // 2. Restyle: the product's tokens change and styles.css shows the line.
+      // 2. Restyle: the product's tokens change, and the component file marks
+      // the line, right next to <OpenGeniChat />, until the next change.
       await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Indigo"]'));
       const product = container.querySelector<HTMLElement>("[data-playground-product]")!;
       expect(product.style.getPropertyValue("--og-color-accent")).toBe("#5b4bff");
-      expect(code(container)).toContain("--og-color-accent: #5b4bff;");
-      // The panel opened the file the click changed.
       expect(container.querySelector("[role='tab'][aria-selected='true']")!.textContent).toBe(
-        "styles.css",
+        "Support.jsx",
       );
+      expect(code(container)).toContain('"--og-color-accent": "#5b4bff",');
+      expect(
+        Array.from(
+          container.querySelectorAll("[data-state='active'] pre [data-changed]"),
+          (line) => line.textContent,
+        ),
+      ).toEqual([
+        '        "--og-color-accent": "#5b4bff",',
+        '        "--og-color-primary": "#5b4bff",',
+      ]);
+      expect(currentStep(container)).toBe("style");
+      await press(buttonIn(step(container, "style"), "Next"));
       expect(currentStep(container)).toBe("tools");
 
       // 3. Tools: new chats get them, and the code gains the MCP server line.
@@ -174,12 +200,23 @@ describe("playground", () => {
       await press(buttonIn(step(container, "tools"), "Ask in a new chat"));
       expect(chat(container)).toContain("out for delivery with UPS");
       expect(step(container, "tools").textContent).toContain("through your MCP server");
+      await press(buttonIn(step(container, "tools"), "Next"));
       expect(currentStep(container)).toBe("ship");
 
-      // 4. Add it to your product: the Developer settings.
-      const link = step(container, "ship").querySelector("a")!;
-      expect(link.textContent).toContain("Add it to your product");
-      expect(link.getAttribute("href")).toContain("section=developer");
+      // 4. Add it to your product: a real chat in this workspace that guides them.
+      expect(startSession).not.toHaveBeenCalled();
+      await press(buttonIn(step(container, "ship"), "Add it to your product"));
+      expect(startSession).toHaveBeenCalledTimes(1);
+      const [workspace, submission, options] = startSession.mock.calls[0]!;
+      expect(workspace).toBe(DEVELOPMENT);
+      expect(submission).toEqual({ text: ADD_AGENT_DEFAULT_PROMPT });
+      expect((options as { instructions: string }).instructions).toContain(
+        "read the opengeni-client Skill",
+      );
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId: DEVELOPMENT, sessionId: "00000000-0000-4000-8000-0000000000f1" },
+      });
       expect(unexpected).not.toHaveBeenCalled();
     } finally {
       await unmount();

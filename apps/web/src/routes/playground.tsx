@@ -1,6 +1,6 @@
 import "@/components/playground/playground.css";
 
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, ArrowRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
@@ -18,14 +18,17 @@ import {
   type GuideStepId,
 } from "@/components/playground/guide";
 import { GuidePanel, STEP_TITLES, type AgentSettingId } from "@/components/playground/guide-panel";
+import { ADD_TO_PRODUCT_INSTRUCTIONS } from "@/components/playground/add-to-product";
 import { integrationCode } from "@/components/playground/integration-code";
 import { createRecordedClient, type RecordedAnswer } from "@/components/playground/recorded-client";
 import { defaultChatStyle, type ChatStyle } from "@/components/playground/style-knobs";
+import { ADD_AGENT_DEFAULT_PROMPT } from "@/components/new-session-starters";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { MANAGED_API_ORIGIN } from "@/lib/coding-agent-setup";
 import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-journey";
+import { useFirstRunStarters } from "@/lib/first-run-starters";
 import { cn } from "@/lib/utils";
 
 function storageGet(key: string): string | null {
@@ -71,6 +74,7 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   const journeyKey = organizationId ? onboardingJourneyStorageKey(subject, organizationId) : null;
   const guideKey = `og.playground:v3:${encodeURIComponent(subject)}:guide`;
   const wide = useWide();
+  const navigate = useNavigate();
 
   const [guide, dispatch] = useReducer(guideReducer, guideKey, (key) =>
     parseGuideState(storageGet(key)),
@@ -150,17 +154,33 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     [settings, style],
   );
   const person = context.authSession?.user.name || context.authSession?.user.email || "You";
-  const sharedTarget = routeWorkspace?.kind === "shared" ? routeWorkspace.id : null;
+  const firstRun = useFirstRunStarters(workspaceId);
+  const [shipping, setShipping] = useState(false);
+  // "Add it to your product" opens a real chat in this workspace that walks
+  // the person through it, on the workspace's default model.
+  const ship = async () => {
+    if (shipping || context.busy) return;
+    dispatch({ type: "shipped" });
+    setShipping(true);
+    try {
+      const created = await context.startSession(
+        workspaceId,
+        { text: firstRun.productPrompt || ADD_AGENT_DEFAULT_PROMPT },
+        { instructions: ADD_TO_PRODUCT_INSTRUCTIONS },
+      );
+      if (created)
+        await navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId: created.id },
+        });
+    } finally {
+      setShipping(false);
+    }
+  };
   const shipAction = (
-    <Button asChild size="sm" onClick={() => dispatch({ type: "shipped" })}>
-      <Link
-        to="/workspaces/$workspaceId/organization"
-        params={{ workspaceId: sharedTarget ?? workspaceId }}
-        search={{ section: "developer" } as never}
-      >
-        Add it to your product
-        <ArrowRightIcon aria-hidden="true" />
-      </Link>
+    <Button type="button" size="sm" disabled={shipping} onClick={() => void ship()}>
+      Add it to your product
+      <ArrowRightIcon aria-hidden="true" />
     </Button>
   );
 
@@ -174,7 +194,7 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   const codePanel = (
     <CodePanel
       files={files}
-      className="rounded-[14px] border border-border bg-surface lg:h-[34%] lg:max-h-[320px] lg:min-h-[220px] lg:shrink-0"
+      className="rounded-[14px] border border-border bg-surface lg:h-[42%] lg:max-h-[420px] lg:min-h-[260px] lg:shrink-0"
     />
   );
   return (
@@ -256,6 +276,7 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
             onSetting={changeSetting}
             onAsk={ask}
             onSkip={() => dispatch({ type: "skip" })}
+            onNext={() => dispatch({ type: "next" })}
             shipAction={shipAction}
           />
           {wide ? null : codePanel}

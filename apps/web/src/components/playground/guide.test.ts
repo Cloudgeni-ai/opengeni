@@ -8,30 +8,36 @@ const withTools = { ...DEFAULT_AGENT_SETTINGS, tools: true };
 const run = (...events: GuideEvent[]) => events.reduce(guideReducer, INITIAL_GUIDE);
 
 describe("playground guide", () => {
-  test("walks ask, restyle, tools, then adding it to a product", () => {
+  test("walks ask, restyle, tools, then adding it, waiting for Next each time", () => {
     let state = run({ type: "answered", question: "order", settings: plain });
-    expect(state).toEqual({ current: "style", done: ["ask"] });
+    // Done, but it stays on the step so its note can be read.
+    expect(state).toEqual({ current: "ask", done: ["ask"] });
+    state = guideReducer(state, { type: "next" });
+    expect(state.current).toBe("style");
     state = guideReducer(state, { type: "styled" });
-    expect(state).toEqual({ current: "tools", done: ["ask", "style"] });
+    expect(state).toEqual({ current: "style", done: ["ask", "style"] });
+    state = guideReducer(state, { type: "next" });
     // An answer without tools doesn't prove the tools step.
     state = guideReducer(state, { type: "answered", question: "order", settings: plain });
-    expect(state.current).toBe("tools");
+    expect(state).toEqual({ current: "tools", done: ["ask", "style"] });
     state = guideReducer(state, { type: "answered", question: "order", settings: withTools });
-    expect(state).toEqual({ current: "ship", done: ["ask", "style", "tools"] });
+    expect(state).toEqual({ current: "tools", done: ["ask", "style", "tools"] });
+    state = guideReducer(state, { type: "next" });
+    expect(state.current).toBe("ship");
     state = guideReducer(state, { type: "shipped" });
-    expect(state).toEqual({ current: null, done: ["ask", "style", "tools", "ship"] });
+    expect(state.done).toEqual(["ask", "style", "tools", "ship"]);
+    expect(guideReducer(state, { type: "next" }).current).toBeNull();
   });
 
-  test("nothing is locked: an early step ticks off and is skipped later", () => {
+  test("nothing is locked: an early step ticks off and Next skips it", () => {
     let state = run({ type: "styled" });
     expect(state).toEqual({ current: "ask", done: ["style"] });
     state = guideReducer(state, { type: "answered", question: "charged", settings: plain });
-    expect(state.current).toBe("tools");
+    expect(guideReducer(state, { type: "next" }).current).toBe("tools");
     // A first answer that already used tools completes both steps at once.
-    expect(run({ type: "answered", question: "order", settings: withTools })).toEqual({
-      current: "style",
-      done: ["ask", "tools"],
-    });
+    const both = run({ type: "answered", question: "order", settings: withTools });
+    expect(both).toEqual({ current: "ask", done: ["ask", "tools"] });
+    expect(guideReducer(both, { type: "next" }).current).toBe("style");
   });
 
   test("a demo answer outside the script doesn't count as using tools", () => {

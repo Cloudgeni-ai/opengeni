@@ -2,8 +2,9 @@ import type { AgentSettings, QuestionId } from "./acme-script";
 
 /* ----------------------------------------------------------------------------
    The playground's light guide: four steps, each done by using the control it
-   names. Nothing is locked; doing a later step early just ticks it off, and
-   the guide moves to the next step not yet done.
+   names. Nothing is locked, and nothing moves on by itself: finishing a step
+   ticks it off and shows what happened, and the guide waits for Next (or
+   Skip) before pointing at the next step not yet done.
    -------------------------------------------------------------------------- */
 
 export const GUIDE_STEPS = ["ask", "style", "tools", "ship"] as const;
@@ -21,6 +22,7 @@ export type GuideEvent =
   | { type: "answered"; question: QuestionId; settings: AgentSettings }
   | { type: "styled" }
   | { type: "shipped" }
+  | { type: "next" }
   | { type: "skip" }
   | { type: "jump"; step: GuideStepId }
   | { type: "dismiss" }
@@ -35,9 +37,13 @@ function nextOpen(done: readonly GuideStepId[], after: GuideStepId): GuideStepId
 
 function complete(state: GuideState, step: GuideStepId): GuideState {
   if (state.done.includes(step)) return state;
-  const done = [...state.done, step];
-  // Finishing the step in view moves on; finishing another one just ticks it.
-  return { current: state.current === step ? nextOpen(done, step) : state.current, done };
+  // The guide stays on the step in view, so its "what happened" note can be read.
+  return { ...state, done: [...state.done, step] };
+}
+
+/** Points at the next step not yet done (or finishes). */
+function advance(state: GuideState): GuideState {
+  return state.current ? { ...state, current: nextOpen(state.done, state.current) } : state;
 }
 
 /** Which step an event completes, if any. */
@@ -57,8 +63,10 @@ export function completedStep(event: GuideEvent): GuideStepId | null {
 
 export function guideReducer(state: GuideState, event: GuideEvent): GuideState {
   switch (event.type) {
+    case "next":
+      return advance(state);
     case "skip":
-      return state.current ? complete(state, state.current) : state;
+      return state.current ? advance(complete(state, state.current)) : state;
     case "jump":
       return { ...state, current: event.step };
     case "dismiss":

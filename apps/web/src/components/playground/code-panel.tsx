@@ -19,11 +19,10 @@ import {
   type CodeFileId,
 } from "./integration-code";
 
-const MARK_MS = 2400;
-
 /**
  * The few lines a product writes, live: every playground control rewrites
- * them, the panel opens the file it touched and marks the changed lines.
+ * them, the panel opens the file it touched and marks the changed lines until
+ * the next change. The page file, with the chat's styling on it, shows first.
  */
 export function CodePanel({
   files,
@@ -43,10 +42,9 @@ export function CodePanel({
     previous.current = files;
     const touched = (Object.keys(changed) as CodeFileId[])[0];
     if (!touched) return;
+    // The marks stay until the next change, so there is time to read them.
     setMarked(changed);
     setActive(touched);
-    const timer = setTimeout(() => setMarked({}), MARK_MS);
-    return () => clearTimeout(timer);
   }, [files]);
 
   // Bring the first changed line into view inside the code, never the page.

@@ -27,12 +27,12 @@ const STEP_HINTS: Record<GuideStepId, string> = {
   ask: "Type in the chat, or pick a question.",
   style: "It updates live.",
   tools: "The agent can then look things up. Settings apply to new chats.",
-  ship: "Your coding agent can set this up in a few minutes.",
+  ship: "A chat walks you through it: API key, install, the few components.",
 };
 
 const STEP_DONE: Record<GuideStepId, string> = {
   ask: "That's <OpenGeniChat />: streaming, steps and chat history built in.",
-  style: "That's one CSS variable. See styles.css.",
+  style: "Just props on the component. See the marked lines.",
   tools: "It used Acme's own API, through your MCP server.",
   ship: "",
 };
@@ -56,6 +56,7 @@ export function GuidePanel({
   onSetting,
   onAsk,
   onSkip,
+  onNext,
   shipAction,
 }: {
   guide: GuideState;
@@ -72,7 +73,8 @@ export function GuidePanel({
   /** Ask a question; `newChat` starts a chat with the current settings. */
   onAsk: (text: string, options: { newChat: boolean }) => void;
   onSkip: () => void;
-  /** The link to the Developer settings, rendered by the route. */
+  onNext: () => void;
+  /** Starts the chat that helps add it to a product, rendered by the route. */
   shipAction: ReactNode;
 }) {
   const ask = (text: string, newChat: boolean, label = text) => (
@@ -88,14 +90,14 @@ export function GuidePanel({
   );
   return (
     <ol aria-label="Try it in four steps" className="grid gap-1">
-      <Step id="ask" guide={guide} onSkip={onSkip}>
+      <Step id="ask" guide={guide} onSkip={onSkip} onNext={onNext}>
         <div className="flex flex-wrap gap-1.5">
           {ask(QUESTIONS.order, false)}
           {ask(QUESTIONS.charged, false)}
           {followUp ? ask(followUp, false) : null}
         </div>
       </Step>
-      <Step id="style" guide={guide} onSkip={onSkip}>
+      <Step id="style" guide={guide} onSkip={onSkip} onNext={onNext}>
         <div className="grid gap-2.5">
           <div
             role="radiogroup"
@@ -157,7 +159,7 @@ export function GuidePanel({
           </div>
         </div>
       </Step>
-      <Step id="tools" guide={guide} onSkip={onSkip}>
+      <Step id="tools" guide={guide} onSkip={onSkip} onNext={onNext}>
         <div className="grid">
           {SETTING_ROWS.map((row) => (
             <label
@@ -184,7 +186,7 @@ export function GuidePanel({
           ) : null}
         </div>
       </Step>
-      <Step id="ship" guide={guide} onSkip={onSkip}>
+      <Step id="ship" guide={guide} onSkip={onSkip} onNext={onNext}>
         {shipAction}
       </Step>
     </ol>
@@ -195,11 +197,13 @@ function Step({
   id,
   guide,
   onSkip,
+  onNext,
   children,
 }: {
   id: GuideStepId;
   guide: GuideState;
   onSkip: () => void;
+  onNext: () => void;
   children: ReactNode;
 }) {
   const number = GUIDE_STEPS.indexOf(id) + 1;
@@ -241,9 +245,15 @@ function Step({
           <p className="text-xs leading-[18px] text-fg-muted">{note}</p>
         </div>
         {current && id !== "ship" ? (
-          <Button type="button" size="xs" variant="ghost" className="-my-0.5" onClick={onSkip}>
-            Skip
-          </Button>
+          done ? (
+            <Button type="button" size="xs" variant="outline" className="-my-0.5" onClick={onNext}>
+              Next
+            </Button>
+          ) : (
+            <Button type="button" size="xs" variant="ghost" className="-my-0.5" onClick={onSkip}>
+              Skip
+            </Button>
+          )
         ) : null}
       </div>
       <div className="pl-8">{children}</div>

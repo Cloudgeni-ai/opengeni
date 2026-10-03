@@ -195,7 +195,7 @@ export type TimedEvent = Readonly<{
 }>;
 
 /** How fast the recording plays: close to a real quick model. */
-export const SCRIPT_TIMING = { queueMs: 120, startMs: 380, wordMs: 34, beatGapMs: 240 } as const;
+export const SCRIPT_TIMING = { queueMs: 150, startMs: 450, wordMs: 45, beatGapMs: 380 } as const;
 
 function words(text: string): string[] {
   return text.match(/\S+\s*/gu) ?? [];

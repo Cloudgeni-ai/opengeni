@@ -22,7 +22,8 @@ const text = (files: CodeFile[], id: CodeFileId) => codeText(files.find((file) =
 describe("playground integration code", () => {
   test("is the documented integration: key on the server, OpenGeniChat on the page", () => {
     const files = integrationCode(style, DEFAULT_AGENT_SETTINGS, ORIGIN);
-    expect(files.map((file) => file.name)).toEqual(["server.ts", "Support.tsx", "styles.css"]);
+    // The component file, with its styling on it, comes first.
+    expect(files.map((file) => file.name)).toEqual(["Support.jsx", "server.ts"]);
     const server = text(files, "server");
     expect(server).toContain(`baseUrl: "${ORIGIN}"`);
     expect(server).toContain("apiKey: process.env.OPENGENI_API_KEY");
@@ -35,7 +36,13 @@ describe("playground integration code", () => {
     expect(page).toContain("<OpenGeniChat />");
     expect(page).not.toContain("apiKey");
     expect(page).not.toContain("data-og-theme");
-    expect(text(files, "styles")).toContain(`--og-color-accent: ${style.accent.value};`);
+    expect(page).toContain("dark is the default theme");
+    expect(page).toContain(`"--og-color-accent": "${style.accent.value}",`);
+    // The styling sits right on the component it styles.
+    const lines = page.split("\n");
+    const chatLine = lines.findIndex((entry) => entry.includes("<OpenGeniChat />"));
+    const accentLine = lines.findIndex((entry) => entry.includes("--og-color-accent"));
+    expect(chatLine - accentLine).toBeLessThan(8);
     expect(INSTALL_COMMAND).toBe("npm i @opengeni/sdk @opengeni/react");
   });
 
@@ -57,9 +64,10 @@ describe("playground integration code", () => {
     expect(server).toContain('agent: { capabilities: { from: "none", knowledge: true } }');
     expect(server).toContain('chats: "private"');
     expect(server).toContain('reasoningEffort: "high"');
-    expect(text(all, "page")).toContain('data-og-theme="light"');
-    expect(text(all, "styles")).toContain(`--og-color-accent: ${ACCENTS[1]!.value};`);
-    expect(text(all, "styles")).toContain(`--og-radius-lg: ${CORNERS[2]!.lg}px;`);
+    const page = text(all, "page");
+    expect(page).toContain('data-og-theme="light"');
+    expect(page).toContain(`"--og-color-accent": "${ACCENTS[1]!.value}",`);
+    expect(page).toContain(`"--og-radius-lg": "${CORNERS[2]!.lg}px",`);
     // Every keyed line lives in the file the panel opens for that control.
     for (const file of all)
       for (const line of file.lines) if (line.key) expect(FILE_FOR_KEY[line.key]).toBe(file.id);
@@ -72,7 +80,13 @@ describe("playground integration code", () => {
       DEFAULT_AGENT_SETTINGS,
       ORIGIN,
     );
-    expect(changedLines(before, recolored)).toEqual({ styles: [1, 2] });
+    const recoloredPage = recolored.find((file) => file.id === "page")!;
+    const marked = changedLines(before, recolored);
+    expect(Object.keys(marked)).toEqual(["page"]);
+    expect(marked.page!.map((index) => recoloredPage.lines[index]!.key)).toEqual([
+      "accent",
+      "accent",
+    ]);
     const tooled = integrationCode(style, { ...DEFAULT_AGENT_SETTINGS, tools: true }, ORIGIN);
     const changed = changedLines(before, tooled);
     expect(Object.keys(changed)).toEqual(["server"]);
