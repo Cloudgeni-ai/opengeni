@@ -1498,7 +1498,8 @@ describe("organization onboarding UI", () => {
         "preview-organization",
         {
           name: "Setup (full access)",
-          description: "Created at signup so an agent can set up Opengeni in your product end to end.",
+          description:
+            "Created at signup so an agent can set up Opengeni in your product end to end.",
           access: "full",
           expiresAt: expect.any(String),
         },
