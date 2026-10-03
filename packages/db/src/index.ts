@@ -36598,32 +36598,60 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
  * disjoint tree: a single-parent cycle cannot be reachable from a parentless
  * root. UNION also deduplicates defensive legacy edges. Exact target scopes
  * seed only their own row; pinned paths leave the ordinary project summaries.
+ * Materialize narrow RLS-authorized rows before recursion so tree depth cannot
+ * multiply base-table permission checks or personal-state scans.
  */
 async function sessionListTotalsInScope(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListTotals> {
+  const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
-    ...sessionFilters({ ...options, parentSessionId: null, needsYouOnly: false }),
+    ...sessionFilters({
+      ...options,
+      parentSessionId: null,
+      needsYouOnly: false,
+      archiveStatus: "all",
+    }),
+    ...(archiveStatus === "all"
+      ? []
+      : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
   );
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive roots as materialized (
+    with recursive tree_sessions as materialized (
+      select id, account_id, parent_session_id, status, direct_control_state,
+        direct_pause_revision, subtree_run_override_revision,
+        active_turn_id, input_wait_until, input_wait_turn_id
+      from ${schema.sessions} where workspace_id = ${workspaceId}
+    ), personal_state as materialized (
+      select workspace_id, subject_id, session_id, pinned, archived,
+        acknowledged_sequence, manually_unread_through, actively_working
+      from ${schema.sessionPins}
+      where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
+    ), roots as materialized (
       select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
+        ${schema.sessions.accountId} as account_id,
         ${schema.sessions.status} as status,
         ${schema.sessions.directControlState} as direct_control_state,
         ${schema.sessions.directPauseRevision} as direct_pause_revision,
         ${schema.sessions.subtreeRunOverrideRevision} as subtree_run_override_revision,
+        ${schema.sessions.activeTurnId} as active_turn_id,
+        ${schema.sessions.inputWaitUntil} as input_wait_until,
+        ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
-        exists (select 1 from ${schema.sessionPins} archived
-          where archived.workspace_id = ${workspaceId} and archived.subject_id = ${options.subjectId}
-            and archived.session_id = ${schema.sessions.id} and archived.archived) as archived
-      from ${schema.sessions} where ${rootFilters}
-    ), nodes(root_id, channel_id, id, status, pause_revision, pinned_path, related) as (
-      select root.id, root.channel_id, root.id, root.status,
+        coalesce(root_personal.archived, false) as archived
+      from ${schema.sessions}
+      left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
+      left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
+      where ${rootFilters}
+    ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
+        input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related) as (
+      select root.id, root.channel_id, root.id, root.account_id, root.status,
+        root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
         greatest(
           case when control.workspace_state = 'paused' and
             (root.subtree_run_override_revision is null or
@@ -36634,10 +36662,10 @@ async function sessionListTotalsInScope(
         coalesce(personal.pinned, false), root.related
       from roots root join ${schema.workspaceInferenceControls} control
         on control.workspace_id = ${workspaceId}
-      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
-        and personal.subject_id = ${options.subjectId} and personal.session_id = root.id
+      left join personal_state personal on personal.session_id = root.id
       union
-      select parent.root_id, parent.channel_id, child.id, child.status,
+      select parent.root_id, parent.channel_id, child.id, child.account_id, child.status,
+        child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
         greatest(
           case when child.subtree_run_override_revision is null or
               child.subtree_run_override_revision <= parent.pause_revision
@@ -36645,10 +36673,8 @@ async function sessionListTotalsInScope(
           case when child.direct_control_state = 'paused' then child.direct_pause_revision end
         ),
         parent.pinned_path or coalesce(personal.pinned, false), parent.related
-      from nodes parent join ${schema.sessions} child on child.parent_session_id = parent.id
-        and child.workspace_id = ${workspaceId}
-      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
-        and personal.subject_id = ${options.subjectId} and personal.session_id = child.id
+      from nodes parent join tree_sessions child on child.parent_session_id = parent.id
+      left join personal_state personal on personal.session_id = child.id
       where parent.related
     ), attention_roots as (
       select root_id, bool_or(status = 'requires_action') as attention
@@ -36669,9 +36695,9 @@ async function sessionListTotalsInScope(
           where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
             and turn.status = 'requires_action'
         ) end as attention_since,
-        nodes.status = 'idle' and session.active_turn_id is null
-          and session.input_wait_until is not null
-          and session.input_wait_turn_id = (
+        nodes.status = 'idle' and nodes.active_turn_id is null
+          and nodes.input_wait_until is not null
+          and nodes.input_wait_turn_id = (
             select finished.id from ${schema.sessionTurns} finished
             where finished.workspace_id = ${workspaceId} and finished.session_id = nodes.id
               and finished.finished_at is not null
@@ -36684,16 +36710,14 @@ async function sessionListTotalsInScope(
                   finishedAt: sql`finished.finished_at`,
                   metadata: sql`finished.metadata`,
                 },
-                sql`session.input_wait_turn_id`,
+                sql`nodes.input_wait_turn_id`,
               )}
             order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
           ) as input_wait
-      from nodes join ${schema.sessions} session on session.workspace_id = ${workspaceId}
-        and session.id = nodes.id
+      from nodes
       join ${schema.sessionEventCursors} cursor on cursor.workspace_id = ${workspaceId}
-        and cursor.session_id = nodes.id and cursor.account_id = session.account_id
-      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
-        and personal.subject_id = ${options.subjectId} and personal.session_id = nodes.id
+        and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
+      left join personal_state personal on personal.session_id = nodes.id
       join roots root on root.id = nodes.root_id
       join root_attention attention on attention.id = nodes.root_id
       where not root.archived and not nodes.pinned_path
