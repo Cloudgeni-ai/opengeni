@@ -1,10 +1,14 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { DEVELOPER_SETUP_API_KEY_PRESET } from "@opengeni/contracts";
+import { DEVELOPER_SETUP_API_KEY_PRESET, type Permission } from "@opengeni/contracts";
 import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ModelsFormPage } from "@/components/models/models-ui";
+import {
+  PermissionChecklist,
+  WorkspaceScopeFields,
+} from "@/components/organization-access/organization-access-fields";
 import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
@@ -28,6 +32,12 @@ import {
   userErrorTextWithoutReference,
 } from "@/lib/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
+import {
+  policySummary,
+  presetPermissions,
+  scopeSummary,
+  type OrganizationWorkspaceScope,
+} from "@/lib/organization-access";
 import type { ApiKey } from "@/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
@@ -49,16 +59,18 @@ export type OrganizationApiKeysSectionProps = {
   onViewChange?: (view: "new-key" | undefined) => void;
   /** This server accepts agent settings: the quick start shows `agent`. */
   agentSettings?: boolean;
+  /** Shared workspaces for "Only selected workspaces"; null while loading. */
+  workspaces?: { id: string; name: string }[] | null;
 };
 
 const defaultKeyName = "Organization automation";
 
-type KeyAccessChoice = "full" | "read" | "developer_setup";
+type KeyAccessChoice = "full" | "read" | "developer_setup" | "custom";
 const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
   {
     value: "full",
     label: "Full access",
-    description: "Create, configure and run shared workspaces and manage their API keys.",
+    description: "Everything, including people, keys, billing and secret values.",
   },
   {
     value: DEVELOPER_SETUP_API_KEY_PRESET.id,
@@ -68,7 +80,13 @@ const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
   {
     value: "read",
     label: "Read only",
-    description: "Read shared workspaces, sessions and files. Can't create or change anything.",
+    description:
+      "See sessions, files, knowledge and settings. Can't change anything or read secret values.",
+  },
+  {
+    value: "custom",
+    label: "Custom",
+    description: "Pick exactly what it can do.",
   },
 ];
 
@@ -176,7 +194,11 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
     return (
       <>
         {status}
-        <CreateApiKeyPage onClose={() => setView(undefined)} onCreate={createKey} />
+        <CreateApiKeyPage
+          onClose={() => setView(undefined)}
+          onCreate={createKey}
+          workspaces={props.workspaces ?? null}
+        />
       </>
     );
   }
@@ -267,6 +289,9 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                     <span translate="no" className="font-mono">
                       {apiKey.prefix}…
                     </span>
+                    {apiKey.permissionMode === "explicit" && apiKey.policy
+                      ? ` · ${policySummary(apiKey.policy)} · ${scopeSummary(apiKey.policy.workspaceScope, props.workspaces ?? null)}`
+                      : null}
                     {apiKey.description ? ` · ${apiKey.description}` : null}
                   </>
                 }
@@ -346,13 +371,18 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 function CreateApiKeyPage({
   onClose,
   onCreate,
+  workspaces,
 }: {
   onClose: () => void;
   onCreate: (request: CreateOrganizationApiKeyRequest) => Promise<string | null>;
+  workspaces: { id: string; name: string }[] | null;
 }) {
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
   const [access, setAccess] = useState<KeyAccessChoice>("full");
+  const [custom, setCustom] = useState<string[]>(() => presetPermissions("read_only"));
+  const [scope, setScope] = useState<OrganizationWorkspaceScope>({ kind: "all" });
+  const [accessError, setAccessError] = useState<{ permissions?: string; workspaces?: string }>({});
   const [nameError, setNameError] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -398,7 +428,7 @@ function CreateApiKeyPage({
         backLabel="Developer"
         onClose={onClose}
         title="Create API key"
-        description="For server access to shared workspaces. It can't open Personal workspaces or read secret values."
+        description="For servers and agents that can't sign in through a browser. It never opens Personal workspaces."
         submitLabel="Create API key"
         pendingLabel="Creating…"
         onSubmit={async () => {
@@ -407,11 +437,35 @@ function CreateApiKeyPage({
             setNameError("Name the key.");
             return false;
           }
+          const permissions =
+            access === "custom"
+              ? custom
+              : access === "read"
+                ? presetPermissions("read_only")
+                : presetPermissions("full");
+          if (access === "custom" && permissions.length === 0) {
+            setAccessError({ permissions: "Pick at least one permission." });
+            return false;
+          }
+          if (scope.kind === "selected" && scope.workspaceIds.length === 0) {
+            setAccessError({ workspaces: "Choose at least one workspace." });
+            return false;
+          }
           try {
             const created = await onCreate({
               name: trimmed,
               ...(description.trim() ? { description: description.trim() } : {}),
-              ...(access === "full" ? {} : { access }),
+              // Developer setup keeps its own server-defined tier.
+              ...(access === "developer_setup"
+                ? { access }
+                : {
+                    policy: {
+                      preset:
+                        access === "custom" ? "custom" : access === "read" ? "read_only" : "full",
+                      permissions: permissions as Permission[],
+                      workspaceScope: scope,
+                    },
+                  }),
             });
             if (created === null) return false;
             setToken(created);
@@ -453,11 +507,38 @@ function CreateApiKeyPage({
             <SelectMenu
               options={KEY_ACCESS_CHOICES}
               value={access}
-              onValueChange={setAccess}
+              onValueChange={(next) => {
+                setAccess(next);
+                setAccessError({});
+              }}
               showMetaInTrigger={false}
               className="w-full"
             />
           </Field>
+          {access === "custom" ? (
+            <Field label="Permissions" group error={accessError.permissions}>
+              <PermissionChecklist
+                selected={custom}
+                canGrant={() => true}
+                onChange={(next) => {
+                  setCustom(next);
+                  setAccessError({});
+                }}
+              />
+            </Field>
+          ) : null}
+          {access === "developer_setup" ? null : (
+            <WorkspaceScopeFields
+              organizationName="this organization"
+              scope={scope}
+              onScopeChange={(next) => {
+                setScope(next);
+                setAccessError({});
+              }}
+              workspaces={workspaces}
+              {...(accessError.workspaces ? { error: accessError.workspaces } : {})}
+            />
+          )}
         </FieldStack>
       </ModelsFormPage>
     </div>

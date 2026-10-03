@@ -117,6 +117,7 @@ export const SECTION_KEYS = [
   "page-general",
   "page-access",
   "page-api-keys",
+  "page-connected-agents",
   "page-models",
   "page-variable-sets",
   "page-variable-set-detail",
@@ -839,6 +840,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Keys for automation, with presets, an expiry and a token shown once.",
     usedOn: "Workspace settings",
     load: () => import("./page-api-keys"),
+  },
+  {
+    key: "page-connected-agents",
+    group: "Pages",
+    title: "Connected agents",
+    purpose:
+      "Outside agents working in the organization over MCP: whose they are, what they can do and where.",
+    usedOn: "Organization settings > Developer, agent sign-in",
+    load: () => import("./page-connected-agents"),
   },
   {
     key: "page-models",

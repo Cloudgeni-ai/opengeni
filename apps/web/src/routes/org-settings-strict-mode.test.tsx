@@ -111,6 +111,15 @@ const updateCompanyProfileAgentPolicy = mock(
   }),
 );
 const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({ models: [] }));
+// The Developer page lists shared workspaces for "Only selected workspaces"
+// and the person's connected agents; these tests don't read them.
+const getOrganizationAdministrationOverview = mock(async (_accountId: string) => {
+  throw new Error("not used");
+});
+const listOrganizationMcpConnections = mock(async (_accountId: string) => ({
+  connections: [],
+  canManageAll: true,
+}));
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -133,6 +142,8 @@ const context = {
     getCompanyProfileAgentPolicy,
     updateCompanyProfileAgentPolicy,
     getWorkspaceModelCatalog,
+    getOrganizationAdministrationOverview,
+    listOrganizationMcpConnections,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },

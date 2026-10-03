@@ -141,6 +141,7 @@ export const CLIENT_PAGES = [
   "checkout-return",
   "integration-return",
   "device",
+  "connect-agent",
   "reset-password",
   "setup-account",
   "account-auth",

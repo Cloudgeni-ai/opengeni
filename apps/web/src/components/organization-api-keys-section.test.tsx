@@ -4,6 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
+import { presetPermissions } from "@/lib/organization-access";
 import type { ApiKey } from "@/types";
 
 const toastSuccess = mock((_message: string) => undefined);
@@ -95,7 +96,17 @@ afterAll(() => {
 describe("organization API keys section", () => {
   test.each([
     ["Developer setup", { access: "developer_setup" }, "expires after 24 hours"],
-    ["Read only", { access: "read" }, "Can't create or change anything"],
+    [
+      "Read only",
+      {
+        policy: {
+          preset: "read_only",
+          permissions: presetPermissions("read_only"),
+          workspaceScope: { kind: "all" },
+        },
+      },
+      "Can't change anything or read secret values",
+    ],
   ] as const)(
     "submits the exact %s choice on the existing create page",
     async (label, choice, hint) => {
@@ -176,13 +187,18 @@ describe("organization API keys section", () => {
     await act(async () => button(container, "Create API key").click());
     const form = container.querySelector("form");
     if (!form) throw new Error("Missing Create API key page");
-    expect(container.textContent).toContain("can't open Personal workspaces");
+    expect(container.textContent).toContain("It never opens Personal workspaces");
     expect(container.textContent).not.toContain("workspace:read");
     await act(async () => form.requestSubmit());
     await flush();
 
     expect(createApiKey).toHaveBeenCalledWith({
       name: "Organization automation",
+      policy: {
+        preset: "full",
+        permissions: presetPermissions("full"),
+        workspaceScope: { kind: "all" },
+      },
     });
     expect(container.textContent).toContain("API key created");
     expect(container.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe(

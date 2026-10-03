@@ -44,6 +44,7 @@ import {
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
 import type { OrganizationView } from "@/lib/organization-route";
+import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
 import {
@@ -60,6 +61,11 @@ const CheckoutCreditsCelebration = lazy(async () => {
 const OrganizationDeveloperIntegrations = lazy(async () => {
   const module = await import("@/components/workspace-developer-settings");
   return { default: module.OrganizationDeveloperIntegrations };
+});
+
+const LazyOrganizationConnectedAgents = lazy(async () => {
+  const module = await import("@/components/organization-access/organization-connected-agents");
+  return { default: module.OrganizationConnectedAgents };
 });
 
 const LazyOrganizationInsightsPage = lazy(async () => {
@@ -285,7 +291,25 @@ export function OrgSettingsRoute({
     Boolean(accountId) &&
     hasAccountPermission(context.accessContext, accountId, "account:admin");
   // A webhook or provider page, or a form, brings its own back link and title.
-  const developerSubPage = Boolean(developer?.view || developer?.webhook);
+  const developerSubPage = Boolean(developer?.view || developer?.webhook || developer?.agent);
+  // Connected agents belong to the people who connect them, so any signed-in
+  // member sees their own; keys and services have none.
+  const showConnectedAgents =
+    Boolean(accountId) &&
+    context.clientConfig.productAccessMode === "managed" &&
+    context.accessContext.subjectId.startsWith("user:");
+  // Shared workspaces for an API key's "Only selected workspaces".
+  const organizationWorkspaces = useOrganizationWorkspaces(
+    client,
+    accountId,
+    section === "developer" && canManageOrganizationApiKeys && Boolean(accountId),
+  );
+  const connectedAgentsLocation =
+    developer?.view === "connect-agent"
+      ? { view: "connect-agent" as const }
+      : developer?.agent
+        ? { agent: developer.agent }
+        : {};
   const navigateDeveloper = (next: DeveloperLocation) =>
     void navigate({
       to: "/workspaces/$workspaceId/organization",
@@ -419,7 +443,31 @@ export function OrgSettingsRoute({
             />
           ) : null}
 
-          {!modelsRefused && section === "developer" && developerSubPage ? (
+          {!modelsRefused &&
+          section === "developer" &&
+          showConnectedAgents &&
+          (developer?.view === "connect-agent" || developer?.agent) ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationConnectedAgents
+                key={`${identityKey}:connected-agents`}
+                client={client}
+                organizationId={accountId}
+                organizationName={fallbackLabel}
+                location={connectedAgentsLocation}
+                onNavigate={navigateDeveloper}
+                {...(canManageOrganizationApiKeys
+                  ? {
+                      onCreateApiKey: () =>
+                        void navigate({
+                          to: "/workspaces/$workspaceId/organization",
+                          params: { workspaceId },
+                          search: { section: "developer", view: "new-key" },
+                        }),
+                    }
+                  : {})}
+              />
+            </Suspense>
+          ) : !modelsRefused && section === "developer" && developerSubPage ? (
             <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
               <OrganizationDeveloperIntegrations
                 key={`${identityKey}:developer-integrations`}
@@ -432,6 +480,18 @@ export function OrgSettingsRoute({
             </Suspense>
           ) : !modelsRefused && section === "developer" ? (
             <div className="flex min-w-0 flex-col gap-8">
+              {organizationView !== "new-key" && showConnectedAgents ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationConnectedAgents
+                    key={`${identityKey}:connected-agents`}
+                    client={client}
+                    organizationId={accountId}
+                    organizationName={fallbackLabel}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                  />
+                </Suspense>
+              ) : null}
               <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
                 <LazyOrganizationApiKeysSection
                   key={`${identityKey}:organization-api-keys`}
@@ -453,6 +513,7 @@ export function OrgSettingsRoute({
                   deleteApiKey={async (apiKeyId) =>
                     await client.deleteOrganizationApiKey(accountId, apiKeyId)
                   }
+                  workspaces={organizationWorkspaces.workspaces}
                 />
               </Suspense>
               {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (

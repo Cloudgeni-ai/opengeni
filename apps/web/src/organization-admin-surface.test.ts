@@ -202,7 +202,8 @@ describe("organization administration surface", () => {
     expect(apiKeySource).toContain(
       "Server credentials that create and run every shared workspace, never Personal ones.",
     );
-    expect(apiKeySource).toContain("It can't open Personal workspaces or read secret values.");
+    expect(apiKeySource).toContain("It never opens Personal workspaces.");
+    expect(apiKeySource).toContain("Can't change anything or read secret values.");
     expect(apiKeySource).toContain('title="API key created"');
     expect(apiKeySource).not.toContain("fixedPermissions");
     expect(apiKeySource).not.toContain('"workspace:read"');
