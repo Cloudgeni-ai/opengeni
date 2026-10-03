@@ -1,7 +1,7 @@
 /**
  * Loads Insights usage for one scope. Asks the usage query API first and falls
  * back to the older endpoints (through `usage-adapter.ts`) when this
- * deployment doesn't serve it yet (404/405).
+ * deployment doesn't serve the route at all.
  */
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 
@@ -13,13 +13,21 @@ import {
 } from "./usage-adapter";
 import type {
   UsageCall,
+  UsageFilterField,
   UsageFilters,
   UsageQuery,
   UsageResponse,
   UsageScope,
 } from "./usage-contract";
 
-export type UsageLoad = { usage: UsageResponse; calls: UsageCall[] | null };
+export type UsageLoad = {
+  usage: UsageResponse;
+  /** Recent calls the older endpoint returned with the totals; null when they load separately. */
+  calls: UsageCall[] | null;
+  source: "usage" | "legacy";
+  /** Filters in the URL this source can't apply, so the page can say so. */
+  ignoredFilters: UsageFilterField[];
+};
 
 const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
   groupBy: [
@@ -66,13 +74,37 @@ function basePath(scope: UsageScope): string {
     : `/v1/organizations/${scope.accountId}/insights`;
 }
 
-function unsupported(error: unknown): boolean {
-  const status = (error as { status?: unknown } | null)?.status;
-  return status === 404 || status === 405 || status === 501;
+/**
+ * The route itself is missing (an older API): the API's catch-all 404, a 405
+ * or a 501. A 404 from the handler (an unknown workspace) is a real error.
+ */
+export function routeUnsupported(error: unknown): boolean {
+  const failure = error as { status?: unknown; code?: unknown; message?: unknown } | null;
+  if (failure?.status === 405 || failure?.status === 501) return true;
+  return (
+    failure?.status === 404 &&
+    (failure.message === "Resource not found." || failure.message === "Not Found")
+  );
 }
 
-/** Remembers, per scope kind, that this deployment has no usage query API. */
-const legacyOnly = new Set<UsageScope["kind"]>();
+/** Deployments without the usage query API, remembered briefly per API and scope kind. */
+const LEGACY_TTL_MS = 5 * 60_000;
+const legacyUntil = new Map<string, number>();
+
+function legacyKey(client: OpenGeniClient, scope: UsageScope): string {
+  return `${(client as unknown as { baseUrl?: string }).baseUrl ?? ""}|${scope.kind}`;
+}
+
+/** Tests: forget which deployments lacked the usage query API. */
+export function resetUsageSourceMemo(): void {
+  legacyUntil.clear();
+}
+
+function ignored(query: UsageQuery, supported: readonly UsageFilterField[]): UsageFilterField[] {
+  return (Object.entries(query.filters) as Array<[UsageFilterField, string[] | undefined]>)
+    .filter(([field, values]) => (values?.length ?? 0) > 0 && !supported.includes(field))
+    .map(([field]) => field);
+}
 
 export async function loadUsage(
   client: OpenGeniClient,
@@ -87,23 +119,26 @@ export async function loadUsage(
     return {
       usage: { ...fixtureUsage({ scope, groupBy: query.groupBy }), range: query.range },
       calls: null,
+      source: "usage",
+      ignoredFilters: [],
     };
   }
-  if (!legacyOnly.has(scope.kind)) {
+  const memo = legacyKey(client, scope);
+  if ((legacyUntil.get(memo) ?? 0) <= Date.now()) {
     try {
       const usage = await client.requestJson<
-        Omit<UsageResponse, "capabilities"> & {
-          capabilities?: UsageResponse["capabilities"];
-        }
+        Omit<UsageResponse, "capabilities"> & { capabilities?: UsageResponse["capabilities"] }
       >("GET", `${basePath(scope)}/usage`, undefined, queryParams(query), { signal });
-      // Recent calls come from `.../insights/calls`, loaded when that tab opens.
+      const capabilities = usage.capabilities ?? ALL_CAPABILITIES;
       return {
-        usage: { ...usage, capabilities: usage.capabilities ?? ALL_CAPABILITIES },
+        usage: { ...usage, capabilities },
         calls: null,
+        source: "usage",
+        ignoredFilters: ignored(query, capabilities.filters),
       };
     } catch (error) {
-      if (!unsupported(error)) throw error;
-      legacyOnly.add(scope.kind);
+      if (!routeUnsupported(error)) throw error;
+      legacyUntil.set(memo, Date.now() + LEGACY_TTL_MS);
     }
   }
   if (scope.kind === "workspace") {
@@ -112,13 +147,25 @@ export async function loadUsage(
       signal,
       ...legacyWorkspaceFilters(query),
     });
-    return workspaceUsageFromSnapshot(response.snapshot, query, scope);
+    const { usage, calls } = workspaceUsageFromSnapshot(response.snapshot, query, scope);
+    return {
+      usage,
+      calls,
+      source: "legacy",
+      ignoredFilters: ignored(query, usage.capabilities.filters),
+    };
   }
   const data = await client.getOrganizationModelUsage(
     { accountId: scope.accountId, period: legacyRange(query.range) },
     { signal },
   );
-  return { usage: organizationUsageFromModelUsage(data, query), calls: null };
+  const usage = organizationUsageFromModelUsage(data, query);
+  return {
+    usage,
+    calls: null,
+    source: "legacy",
+    ignoredFilters: ignored(query, usage.capabilities.filters),
+  };
 }
 
 export async function loadUsageCalls(
@@ -137,8 +184,4 @@ export async function loadUsageCalls(
     { ...params, limit: "50" },
     { signal },
   );
-}
-
-export function usesLegacySource(scope: UsageScope["kind"]): boolean {
-  return legacyOnly.has(scope);
 }

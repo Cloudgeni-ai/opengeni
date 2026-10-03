@@ -157,6 +157,8 @@ export type UsageResponse = {
     filters: UsageFilterField[];
     ranges: UsageRange[];
     seriesGroups: boolean;
+    /** False when each filter takes one value (the older endpoints). */
+    multiValue?: boolean;
   };
 };
 

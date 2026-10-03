@@ -147,8 +147,8 @@ export function StackedBarChart(props: {
         {activeBucket ? (
           <div
             data-chart-tooltip
-            className="pointer-events-none absolute top-0 z-10 w-max max-w-64 min-w-40 -translate-x-1/2 rounded-lg border border-border bg-surface-3/95 px-2.5 py-2 shadow-sm backdrop-blur-md"
-            style={{ left: `clamp(84px, ${tooltipLeftPct}%, calc(100% - 84px))` }}
+            className="pointer-events-none absolute top-0 z-10 w-max max-w-56 min-w-40 -translate-x-1/2 rounded-lg border border-border bg-surface-3/95 px-2.5 py-2 shadow-sm backdrop-blur-md"
+            style={{ left: `clamp(112px, ${tooltipLeftPct}%, calc(100% - 112px))` }}
           >
             <p className="text-2xs font-medium text-fg-subtle">{activeBucket.title}</p>
             <p className="mt-0.5 text-xs font-semibold text-fg tabular-nums">
@@ -182,11 +182,12 @@ export function StackedBarChart(props: {
         ) : null}
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          className="block h-auto w-full touch-pan-y outline-none"
+          className="block h-auto w-full touch-pan-y rounded-md outline-none focus-visible:ring-2 focus-visible:ring-fg/30"
           role="img"
           aria-label={`${props.label}. ${empty ? "No usage." : "Use the arrow keys to read each bar."}`}
           tabIndex={empty ? -1 : 0}
           onPointerMove={onMove}
+          onPointerDown={onMove}
           onKeyDown={onKeyDown}
           onBlur={() => setActive(null)}
           onFocus={() => setActive((current) => current ?? props.buckets.length - 1)}

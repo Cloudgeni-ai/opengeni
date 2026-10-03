@@ -9,13 +9,14 @@ import type { UsageSearch } from "./usage-search";
 
 let nextUsage: UsageResponse;
 let nextError: unknown = null;
+let nextCalls: unknown[] = [];
 const requests: Array<{ path: string; query: Record<string, string> }> = [];
 
 const requestJson = mock(
   async (_method: string, path: string, _body: unknown, query: Record<string, string>) => {
     requests.push({ path, query });
     if (nextError) throw nextError;
-    if (path.endsWith("/calls")) return { calls: [], nextCursor: null };
+    if (path.endsWith("/calls")) return { calls: nextCalls, nextCursor: null };
     return nextUsage;
   },
 );
@@ -47,11 +48,14 @@ afterAll(() => {
 beforeEach(() => {
   nextUsage = fixtureUsage();
   nextError = null;
+  nextCalls = [];
+  resetUsageSourceMemo();
   requests.length = 0;
   requestJson.mockClear();
 });
 
 const { UsageDashboard } = await import("./usage-dashboard");
+const { resetUsageSourceMemo } = await import("./usage-source");
 
 const WORKSPACE: UsageScope = {
   kind: "workspace",
@@ -273,18 +277,168 @@ describe("Insights usage dashboard", () => {
     }
   });
 
-  test("falls back to the older Insights endpoint where the usage API doesn't exist", async () => {
-    nextError = Object.assign(new Error("not found"), { status: 404 });
-    const getWorkspaceInsights = mock(async () => {
-      throw Object.assign(new Error("boom"), { status: 500 });
+  test("recent calls never link other people's private or deleted chats", async () => {
+    const call = (
+      id: string,
+      sessionKind: string,
+      sessionId: string | null,
+      title: string | null,
+    ) => ({
+      id,
+      occurredAt: "2026-10-03T10:00:00.000Z",
+      workspaceId: WORKSPACE.workspaceId,
+      sessionId,
+      sessionTitle: title,
+      sessionKind,
+      provider: "codex-subscription",
+      model: "codex/gpt-6.1-sol",
+      payer: "subscription",
+      tokens: { uncachedInput: 10, cacheRead: 90, cacheWrite: 0, output: 5, reasoning: 1 },
+      chargedMicros: 0,
+      listMicros: 1_000,
     });
-    (context.client as Record<string, unknown>).getWorkspaceInsights = getWorkspaceInsights;
-    const view = await render();
+    nextCalls = [
+      call("c1", "visible", "aaaaaaaa-0000-4000-8000-000000000009", "Ship it"),
+      call("c2", "private", null, null),
+      call("c3", "deleted", null, null),
+    ];
+    const view = await render({ tab: "calls" });
     try {
-      expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
-      expect(view.container.textContent).toContain("Insights couldn't load");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(requests.some((request) => request.path.endsWith("/insights/calls"))).toBe(true);
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Private chat");
+      expect(text).toContain("Deleted chat");
+      const actions = [
+        ...view.container.querySelectorAll<HTMLButtonElement>("button[data-row-action]"),
+      ];
+      expect(actions.map((button) => button.textContent)).toEqual(["Ship it"]);
+      await act(async () => actions[0]?.click());
+      expect(view.opened).toEqual([
+        ["aaaaaaaa-0000-4000-8000-000000000009", WORKSPACE.workspaceId],
+      ]);
     } finally {
       await view.unmount();
+    }
+  });
+
+  test("one filter option per model name applies every id behind it", async () => {
+    nextUsage = fixtureUsage();
+    nextUsage.facets.models = [
+      { provider: "organization-claude-subscription", model: "claude-opus-5-5" },
+      { provider: "workspace-claude-subscription", model: "claude-opus-5-5" },
+      { provider: "anthropic", model: "claude-opus-5-5" },
+    ];
+    const view = await render({
+      model:
+        "organization-claude-subscription/claude-opus-5-5,workspace-claude-subscription/claude-opus-5-5",
+    });
+    try {
+      const chips = [...view.container.querySelectorAll('[aria-label="Active filters"] li')].map(
+        (chip) => chip.textContent,
+      );
+      expect(chips).toEqual(["Model:Claude Opus 5.5 · Claude plan"]);
+      await act(async () =>
+        view.container
+          .querySelector<HTMLButtonElement>('[aria-label^="Remove filter Model"]')
+          ?.click(),
+      );
+      expect(view.changes.at(-1)).toEqual({});
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a different workspace never shows the previous one's numbers", async () => {
+    const view = await render();
+    try {
+      expect(breakdownTitles(view.container)).toContain("GPT 6.1 Sol");
+    } finally {
+      await view.unmount();
+    }
+    nextError = Object.assign(new Error("denied"), { status: 403 });
+    const other = await render(
+      {},
+      { ...WORKSPACE, workspaceId: "99999999-9999-4999-8999-999999999999" },
+    );
+    try {
+      expect(breakdownTitles(other.container)).toEqual([]);
+    } finally {
+      await other.unmount();
+    }
+  });
+
+  test("falls back to the older Insights endpoint only when the route is missing", async () => {
+    nextError = Object.assign(new Error("Resource not found."), { status: 404 });
+    const getWorkspaceInsights = mock(async () => ({
+      snapshot: {
+        range: "week",
+        windowStart: "2026-09-26T00:00:00.000Z",
+        windowEnd: "2026-10-03T00:00:00.000Z",
+        generatedAt: "2026-10-03T00:00:00.000Z",
+        models: [
+          {
+            id: "m",
+            model: "codex/gpt-6.1-sol",
+            provider: "codex-subscription",
+            billing: "external",
+            calls: 10,
+            inputTokens: 1_000,
+            outputTokens: 100,
+            cachedTokens: 900,
+            cacheInputTokens: 1_000,
+            cacheWriteTokens: 0,
+            reasoningTokens: 20,
+            totalTokens: 1_100,
+            tokenKnownCalls: 10,
+            cacheKnownCalls: 10,
+            creditUsd: 0,
+            estimatedProviderUsd: 2.5,
+            estimatedProviderCostKnownCalls: 10,
+            equivalentCreditUsd: 2.6,
+            equivalentCreditCostKnownCalls: 10,
+          },
+        ],
+        projects: [],
+        drivers: [],
+        privateChats: [],
+        schedules: [],
+        series: [],
+        recentCalls: [],
+        facets: [],
+        priorCalls: 0,
+        priorTotalTokens: 0,
+        priorCreditUsd: 0,
+        priorEstimatedProviderUsd: 0,
+        priorEstimatedProviderCostKnownCalls: 0,
+        driverGroups: 0,
+        driversTruncated: false,
+        dataThrough: null,
+      },
+    }));
+    (context.client as Record<string, unknown>).getWorkspaceInsights = getWorkspaceInsights;
+    const view = await render({ payer: "own_key" });
+    try {
+      expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
+      expect(breakdownTitles(view.container)).toEqual(["GPT 6.1 Sol"]);
+      expect(view.container.textContent).toContain("~$2.50");
+      // The older endpoint can't filter by payer, and the page says so.
+      expect(view.container.textContent).toContain("can't filter by paid with yet");
+    } finally {
+      await view.unmount();
+    }
+    // A handler's own 404 (an unknown workspace) is an error, not a missing route.
+    resetUsageSourceMemo();
+    nextError = Object.assign(new Error("workspace not found"), { status: 404 });
+    getWorkspaceInsights.mockClear();
+    const missing = await render();
+    try {
+      expect(getWorkspaceInsights).not.toHaveBeenCalled();
+      expect(missing.container.textContent).toContain("Insights couldn't load");
+    } finally {
+      await missing.unmount();
     }
   });
 });

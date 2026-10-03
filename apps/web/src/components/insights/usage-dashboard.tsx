@@ -5,7 +5,7 @@ import { OpenGeniCreditsTile, ProviderTile } from "@/components/models/provider-
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
-import { HelpTip } from "@/components/ui/inline-help";
+import { HelpTip, InlineHelp } from "@/components/ui/inline-help";
 import {
   ListRow,
   ListRowSkeleton,
@@ -118,7 +118,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
   const query = useMemo(() => usageQuery(props.search), [props.search]);
   const queryKey = JSON.stringify(query);
   const metric = usageMetric(props.search);
-  const [load, setLoad] = useState<{ key: string; data: UsageLoad } | null>(null);
+  const [load, setLoad] = useState<{ scope: string; key: string; data: UsageLoad } | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
@@ -134,7 +134,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
     loadUsage(client, props.scope, JSON.parse(queryKey), controller.signal)
       .then((data) => {
         if (controller.signal.aborted) return;
-        setLoad({ key: queryKey, data });
+        setLoad({ scope: scopeKey, key: queryKey, data });
         setLoading(false);
       })
       .catch((caught: unknown) => {
@@ -149,7 +149,11 @@ export function UsageDashboard(props: UsageDashboardProps) {
   const update = (change: UsageSearchChange) =>
     props.onSearchChange(nextUsageSearch(props.search, change));
 
-  const usage = load?.data.usage ?? null;
+  // Another workspace's (or the organization's) numbers never stand in for this one's.
+  const current = load?.scope === scopeKey ? load : null;
+  const usage = current?.data.usage ?? null;
+
+  useEffect(() => setChipLabels({}), [scopeKey]);
   const rows = useMemo(() => (usage ? breakdownRows(usage, labels) : []), [usage, labels]);
 
   useEffect(() => {
@@ -195,7 +199,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
 
   if (!usage) return <DashboardSkeleton />;
 
-  const stale = loading || load?.key !== queryKey;
+  const stale = loading || current?.key !== queryKey;
   const capabilities = usage.capabilities;
   const groupOptions = GROUP_ORDER.filter(
     (group) =>
@@ -213,6 +217,13 @@ export function UsageDashboard(props: UsageDashboardProps) {
         chipLabels={chipLabels}
         onChange={update}
       />
+      {current && current.data.ignoredFilters.length > 0 ? (
+        <InlineHelp icon>
+          {`This server can't filter by ${current.data.ignoredFilters
+            .map((field) => FILTER_FIELD_LABEL[field].toLowerCase())
+            .join(" or ")} yet, so these numbers include everything.`}
+        </InlineHelp>
+      ) : null}
       {error ? (
         <div role="alert">
           <Notice
@@ -243,7 +254,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
           <EmptyState
             variant="page"
             icon={<CalendarIcon />}
-            title={`No model usage ${rangeLabel(query.range).toLowerCase() === "today" ? "today" : `in ${rangeLabel(query.range).toLowerCase()}`}`}
+            title={emptyTitle(usage.range)}
             description="Usage shows here as soon as an agent calls a model."
             action={
               query.range !== "ytd" ? (
@@ -281,7 +292,8 @@ export function UsageDashboard(props: UsageDashboardProps) {
               query={query}
               groupOptions={groupOptions}
               tab={props.search.tab === "calls" ? "calls" : "breakdown"}
-              legacyCalls={load?.data.calls ?? null}
+              legacyCalls={current?.data.calls ?? null}
+              source={current?.data.source ?? "usage"}
               labels={labels}
               onChange={update}
               onOpenSession={props.onOpenSession}
@@ -297,6 +309,19 @@ export function UsageDashboard(props: UsageDashboardProps) {
       </div>
     </div>
   );
+}
+
+function emptyTitle(range: UsageResponse["range"]): string {
+  switch (range) {
+    case "today":
+      return "No model usage today";
+    case "month":
+      return "No model usage this month";
+    case "ytd":
+      return "No model usage this year";
+    default:
+      return `No model usage in the ${rangeLabel(range).toLowerCase()}`;
+  }
 }
 
 /* ----------------------------------------------------------------------------
@@ -328,73 +353,101 @@ function FilterBar(props: {
     capabilities.filters.includes(field) &&
     (field !== "workspaceId" || props.scope.kind === "organization");
 
+  // One option per name: the same model on a workspace and an organization
+  // Claude plan reads (and filters) as one. An option's id is its raw ids
+  // joined by "," (the URL's own separator), so picking it applies them all.
   const groups: ToolbarFilterGroup[] = [];
-  const push = (field: UsageFilterField, options: Array<{ id: string; label: string }>) => {
+  const value: ToolbarFilterValue = {};
+  const push = (field: UsageFilterField, options: Array<{ ids: string[]; label: string }>) => {
     if (!allowed(field) && (filters[field]?.length ?? 0) === 0) return;
-    const selected = filters[field] ?? [];
-    const merged = [...options];
-    for (const id of selected) {
-      if (!merged.some((option) => option.id === id)) {
-        merged.push({ id, label: props.chipLabels[id] ?? chipFallback(field, id, props.labels) });
+    const selected = new Set(filters[field] ?? []);
+    const merged = mergeOptions(options);
+    const chosen: string[] = [];
+    const covered = new Set<string>();
+    for (const option of merged) {
+      if (option.ids.every((id) => selected.has(id))) {
+        chosen.push(option.id);
+        for (const id of option.ids) covered.add(id);
       }
     }
-    if (merged.length < 2 && selected.length === 0) return;
-    groups.push({ id: field, label: FILTER_FIELD_LABEL[field], options: merged });
+    for (const id of selected) {
+      if (covered.has(id)) continue;
+      merged.push({
+        id,
+        ids: [id],
+        label: props.chipLabels[id] ?? chipFallback(field, id, props.labels),
+      });
+      chosen.push(id);
+    }
+    if (merged.length < 2 && selected.size === 0) return;
+    value[field] = chosen;
+    groups.push({
+      id: field,
+      label: FILTER_FIELD_LABEL[field],
+      options: merged.map(({ id, label }) => ({ id, label })),
+    });
   };
   push(
     "workspaceId",
-    facets.workspaces.filter((w) => !w.personal).map((w) => ({ id: w.id, label: w.name })),
+    facets.workspaces.filter((w) => !w.personal).map((w) => ({ ids: [w.id], label: w.name })),
   );
+  const modelNames = facets.models.map((m) => ({
+    ids: [modelFilterKey(m.provider, m.model)],
+    model: modelDisplayName(m.provider, m.model, props.labels),
+    provider: providerDisplayName(m.provider),
+  }));
   push(
     "model",
-    dedupeByLabel(
-      facets.models.map((m) => ({
-        id: modelFilterKey(m.provider, m.model),
-        label: modelDisplayName(m.provider, m.model, props.labels),
-      })),
-    ),
+    modelNames.map((m) => ({
+      ids: m.ids,
+      // Name the plan or API only when the same model runs on more than one.
+      label: modelNames.some((other) => other.model === m.model && other.provider !== m.provider)
+        ? `${m.model} · ${m.provider}`
+        : m.model,
+    })),
   );
   push(
     "provider",
-    dedupeByLabel(facets.providers.map((p) => ({ id: p, label: providerDisplayName(p) }))),
+    facets.providers.map((p) => ({ ids: [p], label: providerDisplayName(p) })),
   );
   push(
     "payer",
-    (facets.payers.length > 0 ? facets.payers : []).map((p) => ({ id: p, label: payerName(p) })),
+    facets.payers.map((p) => ({ ids: [p], label: payerName(p) })),
   );
   push(
     "projectId",
-    facets.projects.map((p) => ({ id: p.id, label: p.name })),
+    facets.projects.map((p) => ({ ids: [p.id], label: p.name })),
   );
   push(
     "person",
     facets.people.map((p) => ({
-      id: p.key,
+      ids: [p.key],
       label: p.you ? `${p.name ?? "You"} (you)` : (p.name ?? "Someone"),
     })),
   );
   push(
     "scheduleId",
-    facets.schedules.map((s) => ({ id: s.id, label: s.name })),
+    facets.schedules.map((s) => ({ ids: [s.id], label: s.name })),
   );
   push("rootSessionId", []);
 
-  const value: ToolbarFilterValue = Object.fromEntries(
-    Object.entries(filters).map(([field, values]) => [field, values ?? []]),
-  );
+  const single = capabilities.multiValue === false;
   const onValueChange = (next: ToolbarFilterValue) => {
     const fields = new Set([...Object.keys(next), ...Object.keys(value)]) as Set<UsageFilterField>;
-    let search: UsageSearchChange = {};
+    let change: UsageSearchChange | null = null;
     for (const field of fields) {
-      const before = (value[field] ?? []).join(",");
-      const after = [...(next[field] ?? [])];
-      if (before !== after.join(",")) search = { ...search, filter: { field, values: after } };
+      const before = value[field] ?? [];
+      let after = [...(next[field] ?? [])];
+      if (before.join("\n") === after.join("\n")) continue;
+      // The older endpoints take one value per filter: the newest pick wins.
+      if (single && after.length > 1) after = after.filter((id) => !before.includes(id)).slice(-1);
+      change = { filter: { field, values: after.flatMap((id) => id.split(",")) } };
     }
     if (Object.keys(next).every((field) => (next[field] ?? []).length === 0)) {
       props.onChange({ clearFilters: true });
       return;
     }
-    if (search.filter) props.onChange(search);
+    if (change) props.onChange(change);
   };
   const ranges = RANGES.filter((range) => capabilities.ranges.includes(range.id));
 
@@ -422,15 +475,19 @@ function FilterBar(props: {
   );
 }
 
-function dedupeByLabel(options: Array<{ id: string; label: string }>) {
-  const seen = new Set<string>();
-  return options
-    .sort((a, b) => a.label.localeCompare(b.label))
-    .filter((option) => {
-      if (seen.has(option.label)) return false;
-      seen.add(option.label);
-      return true;
-    });
+function mergeOptions(
+  options: Array<{ ids: string[]; label: string }>,
+): Array<{ id: string; ids: string[]; label: string }> {
+  const byLabel = new Map<string, string[]>();
+  for (const option of options) {
+    byLabel.set(option.label, [...(byLabel.get(option.label) ?? []), ...option.ids]);
+  }
+  return [...byLabel.entries()]
+    .map(([label, ids]) => {
+      const unique = [...new Set(ids)].sort();
+      return { id: unique.join(","), ids: unique, label };
+    })
+    .sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function chipFallback(field: UsageFilterField, id: string, labels: ModelLabelSource): string {
@@ -543,7 +600,9 @@ function KpiTiles(props: { usage: UsageResponse }) {
         label="Model calls"
         value={totals.calls.toLocaleString("en-US")}
         {...withDelta(prior ? changeDelta(totals.calls, prior.calls, comparison) : undefined)}
-        caption={`${formatCount(totals.calls > 0 ? tokens / totals.calls : 0)} tokens per call`}
+        {...(totals.calls > 0 && !tokensUnknown
+          ? { caption: `${formatCount(tokens / totals.calls)} tokens per call` }
+          : {})}
       />
       <StatTile
         label="Tokens"
@@ -634,7 +693,11 @@ function OverTimePanel(props: {
       const order = props.rows.slice(0, 6);
       const seriesOut: ChartSeries[] = order.map((row, index) => ({
         id: row.id,
-        label: row.detail && usage.groupBy === "model" ? row.label : row.label,
+        // Two series that read the same ("Private chats" for two people) add their detail.
+        label:
+          row.detail && order.some((other) => other !== row && other.label === row.label)
+            ? `${row.label} · ${row.detail}`
+            : row.label,
         text: SERIES_TONES[index]!.text,
         bg: SERIES_TONES[index]!.bg,
       }));
@@ -935,6 +998,7 @@ function BreakdownPanel(props: {
   groupOptions: readonly UsageGroupBy[];
   tab: "breakdown" | "calls";
   legacyCalls: UsageCall[] | null;
+  source: UsageLoad["source"];
   labels: ModelLabelSource;
   onChange: (change: UsageSearchChange) => void;
   onOpenSession?: ((sessionId: string, workspaceId: string | null) => void) | undefined;
@@ -1002,6 +1066,7 @@ function BreakdownPanel(props: {
           scope={props.scope}
           query={props.query}
           legacyCalls={props.legacyCalls}
+          source={props.source}
           labels={props.labels}
           onOpenSession={props.onOpenSession}
         />
@@ -1154,6 +1219,7 @@ function RecentCalls(props: {
   scope: UsageScope;
   query: ReturnType<typeof usageQuery>;
   legacyCalls: UsageCall[] | null;
+  source: UsageLoad["source"];
   labels: ModelLabelSource;
   onOpenSession?: ((sessionId: string, workspaceId: string | null) => void) | undefined;
 }) {
@@ -1161,20 +1227,28 @@ function RecentCalls(props: {
   const [state, setState] = useState<
     { key: string; calls: UsageCall[] } | { key: string; error: unknown } | null
   >(null);
-  const key = JSON.stringify(props.query.filters) + props.query.range;
+  const key = JSON.stringify([
+    props.scope.kind,
+    props.scope.workspaceId ?? props.scope.accountId,
+    props.query.filters,
+    props.query.range,
+  ]);
+  // The older endpoints have no calls route; their calls come with the totals.
+  const fetches = !props.legacyCalls && props.source === "usage";
   useEffect(() => {
-    if (props.legacyCalls) return;
+    if (!fetches) return;
     const controller = new AbortController();
     loadUsageCalls(client, props.scope, props.query, controller.signal)
       .then((response) => !controller.signal.aborted && setState({ key, calls: response.calls }))
       .catch((error: unknown) => !controller.signal.aborted && setState({ key, error }));
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, key, props.legacyCalls]);
+  }, [client, key, fetches]);
 
-  const calls = props.legacyCalls ?? (state && "calls" in state ? state.calls : null);
+  const loaded = state?.key === key ? state : null;
+  const calls = props.legacyCalls ?? (loaded && "calls" in loaded ? loaded.calls : null);
   if (!calls) {
-    if (state && "error" in state) {
+    if (!fetches || (loaded && "error" in loaded)) {
       return (
         <p className="py-6 text-center text-sm text-fg-muted">
           Recent calls aren't available here yet.

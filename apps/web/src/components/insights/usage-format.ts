@@ -1,10 +1,4 @@
-import type {
-  UsageCostClass,
-  UsageMeasures,
-  UsagePayerId,
-  UsageRange,
-  UsageTokens,
-} from "./usage-contract";
+import type { UsageMeasures, UsagePayerId, UsageRange, UsageTokens } from "./usage-contract";
 
 export const RANGES: ReadonlyArray<{ id: UsageRange; label: string; short: string }> = [
   { id: "today", label: "Today", short: "Today" },
@@ -99,10 +93,6 @@ export function inputTotal(tokens: UsageTokens): number {
   return tokens.uncachedInput + tokens.cacheRead + tokens.cacheWrite;
 }
 
-export function tokenClassValue(tokens: UsageTokens, id: TokenClassId): number {
-  return tokens[id];
-}
-
 /** Share of input served from cache, or null when no call reported cache use. */
 export function cacheHitRate(measures: UsageMeasures): number | null {
   if (measures.cacheKnownCalls === 0) return null;
@@ -156,6 +146,7 @@ export function usd(micros: number): number {
 export function formatMoney(micros: number, options: { compact?: boolean } = {}): string {
   const value = usd(micros);
   const abs = Math.abs(value);
+  if (abs > 0 && abs < 0.0001) return "<$0.0001";
   if (options.compact && abs >= 10_000) {
     return `$${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value)}`;
   }
@@ -177,8 +168,9 @@ export function formatMoneyAxis(micros: number): string {
 }
 
 export function formatCount(value: number): string {
-  if (value >= 1_000_000_000) return `${trim(value / 1_000_000_000)}B`;
-  if (value >= 1_000_000) return `${trim(value / 1_000_000)}M`;
+  // Round first so 999,999 reads "1M", not "1000K".
+  if (value >= 999_950_000) return `${trim(value / 1_000_000_000)}B`;
+  if (value >= 999_950) return `${trim(value / 1_000_000)}M`;
   if (value >= 10_000) return `${trim(value / 1_000)}K`;
   return Math.round(value).toLocaleString("en-US");
 }
@@ -205,10 +197,6 @@ export function formatChange(change: number): string {
   const rounded = Math.abs(pct) >= 10 ? Math.round(pct) : Math.round(pct * 10) / 10;
   if (rounded === 0) return "0%";
   return `${rounded > 0 ? "+" : "−"}${Math.abs(rounded)}%`;
-}
-
-export function costClassMicros(measures: UsageMeasures, id: UsageCostClass): number | null {
-  return measures.listByClassMicros ? measures.listByClassMicros[id] : null;
 }
 
 export function formatBucket(start: string, bucket: "hour" | "day", long = false): string {

@@ -81,7 +81,10 @@ function totalsOnlyMeasures(input: {
 }): UsageMeasures {
   const chargedMicros = micros(input.creditUsd);
   const listMicros = micros(input.estimatedProviderUsd);
-  const external = Math.round(listMicros * input.externalShare);
+  // The older endpoint doesn't split these rows by payer: credits pay for what
+  // was charged, and the rest of the list price follows the window's mix.
+  const external = chargedMicros > 0 ? 0 : Math.round(listMicros * input.externalShare);
+  const externalCalls = external > 0 ? Math.round(input.calls * input.externalShare) : 0;
   return {
     ...emptyMeasures(),
     calls: input.calls,
@@ -90,8 +93,20 @@ function totalsOnlyMeasures(input: {
     listMicros,
     pricedCalls: input.pricedCalls ?? 0,
     byPayer: {
-      opengeni_credits: { calls: 0, chargedMicros, listMicros: listMicros - external },
-      subscription: { calls: input.calls, chargedMicros: 0, listMicros: external },
+      opengeni_credits: {
+        calls: input.calls - externalCalls,
+        chargedMicros,
+        listMicros: listMicros - external,
+      },
+      ...(external > 0
+        ? {
+            subscription: {
+              calls: Math.max(1, externalCalls),
+              chargedMicros: 0,
+              listMicros: external,
+            },
+          }
+        : {}),
     },
   };
 }
@@ -312,6 +327,7 @@ export function workspaceUsageFromSnapshot(
       filters: ["provider", "model", "rootSessionId"],
       ranges: ["today", "week", "month", "ytd"],
       seriesGroups: false,
+      multiValue: false,
     },
   };
 
@@ -484,6 +500,7 @@ export function organizationUsageFromModelUsage(
       filters: [],
       ranges: ["today", "week", "month", "ytd"],
       seriesGroups: false,
+      multiValue: false,
     },
   };
 }

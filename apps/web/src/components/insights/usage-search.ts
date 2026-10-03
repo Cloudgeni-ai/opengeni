@@ -32,22 +32,6 @@ export type UsageSearch = {
   sched?: string;
 };
 
-export const USAGE_SEARCH_KEYS = [
-  "range",
-  "group",
-  "metric",
-  "split",
-  "tab",
-  "ws",
-  "prov",
-  "model",
-  "payer",
-  "proj",
-  "who",
-  "root",
-  "sched",
-] as const satisfies ReadonlyArray<keyof UsageSearch>;
-
 const FILTER_KEYS: Record<UsageFilterField, keyof UsageSearch> = {
   workspaceId: "ws",
   provider: "prov",
@@ -166,13 +150,4 @@ export function nextUsageSearch(current: UsageSearch, change: UsageSearchChange)
     merged[key] = change.filter.values.length > 0 ? change.filter.values.join(",") : undefined;
   }
   return parseUsageSearch(merged);
-}
-
-/** Pick the dashboard's keys out of a route's raw search. */
-export function pickUsageSearch(search: Record<string, unknown>): Record<string, string> {
-  return Object.fromEntries(
-    USAGE_SEARCH_KEYS.flatMap((key) =>
-      typeof search[key] === "string" ? [[key, search[key] as string]] : [],
-    ),
-  );
 }

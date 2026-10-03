@@ -381,7 +381,7 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
-// Mirrors USAGE_SEARCH_KEYS in components/insights/usage-search.ts (kept here
+// Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
 // so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
   "view",
