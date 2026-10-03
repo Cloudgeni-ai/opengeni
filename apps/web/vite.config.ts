@@ -360,8 +360,12 @@ export default defineConfig({
               // Organization API-key setup is dynamically imported by Developer
               // settings. Pin its implementation here too so shared dependencies
               // cannot merge it into the direct-session graph.
+              // The shared organization access form eagerly combines workspace
+              // permission groups. Keep its helper and fields with those groups
+              // so the lazy agent consent route cannot read uninitialized data
+              // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
