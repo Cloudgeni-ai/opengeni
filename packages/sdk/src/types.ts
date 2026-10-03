@@ -8304,7 +8304,7 @@ export type InsightsSpendDriver = {
 
 export type InsightsProjectRow = {
   id: string;
-  kind: "project" | "other" | "unfiled" | "unavailable";
+  kind: "project" | "other" | "unfiled" | "unavailable" | "deleted";
   label: string;
   projects: number;
   rootSessions: number;
