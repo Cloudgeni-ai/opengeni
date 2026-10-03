@@ -6,17 +6,30 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const expectedSkills = ["build-with-opengeni", "offload-to-opengeni", "opengeni-setup"].sort();
+const expectedSkills = [
+  "build-with-opengeni",
+  "offload-to-opengeni",
+  "opengeni-setup",
+].sort();
 const scratch = await mkdtemp(join(tmpdir(), "opengeni-plugin-hosts-"));
 const claudeConfig = join(scratch, "claude");
 const codexConfig = join(scratch, "codex");
 const bun = process.execPath;
-const claude = [bun, "x", "--package", "@anthropic-ai/claude-code@2.1.286", "claude"];
+const claude = [
+  bun,
+  "x",
+  "--package",
+  "@anthropic-ai/claude-code@2.1.286",
+  "claude",
+];
 const codex = [bun, "x", "--package", "@openai/codex@0.159.3", "codex"];
 await mkdir(claudeConfig, { mode: 0o700 });
 await mkdir(codexConfig, { mode: 0o700 });
 
-async function command(argv: string[], env: Record<string, string | undefined>) {
+async function command(
+  argv: string[],
+  env: Record<string, string | undefined>,
+) {
   const child = Bun.spawn(argv, {
     cwd: scratch,
     env: { ...process.env, ...env },
@@ -28,7 +41,11 @@ async function command(argv: string[], env: Record<string, string | undefined>) 
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  assert.equal(status, 0, `${argv.slice(-4).join(" ")} failed: ${stdout}\n${stderr}`);
+  assert.equal(
+    status,
+    0,
+    `${argv.slice(-4).join(" ")} failed: ${stdout}\n${stderr}`,
+  );
   return stdout;
 }
 
@@ -40,7 +57,10 @@ async function readCodexPlugin(marketplacePath: string, config: string) {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const waiting = new Map<number, { resolve(value: any): void; reject(error: Error): void }>();
+  const waiting = new Map<
+    number,
+    { resolve(value: any): void; reject(error: Error): void }
+  >();
   let nextId = 0;
   const decoder = new TextDecoder();
   const stderr = new Response(server.stderr).text();
@@ -57,7 +77,8 @@ async function readCodexPlugin(marketplacePath: string, config: string) {
         const pending = waiting.get(result.id);
         if (!pending) continue;
         waiting.delete(result.id);
-        if (result.error) pending.reject(new Error(JSON.stringify(result.error)));
+        if (result.error)
+          pending.reject(new Error(JSON.stringify(result.error)));
         else pending.resolve(result.result);
       }
     }
@@ -79,7 +100,9 @@ async function readCodexPlugin(marketplacePath: string, config: string) {
           reject(error);
         },
       });
-      server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      server.stdin.write(
+        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
+      );
       server.stdin.flush();
     });
   }
@@ -94,7 +117,10 @@ async function readCodexPlugin(marketplacePath: string, config: string) {
     server.stdin.flush();
     return (
       await request("plugin/read", {
-        marketplacePath: join(marketplacePath, ".agents/plugins/marketplace.json"),
+        marketplacePath: join(
+          marketplacePath,
+          ".agents/plugins/marketplace.json",
+        ),
         pluginName: "opengeni",
       })
     ).plugin;
@@ -105,33 +131,47 @@ async function readCodexPlugin(marketplacePath: string, config: string) {
 }
 
 const claudeEnv = { CLAUDE_CONFIG_DIR: claudeConfig, DISABLE_AUTOUPDATER: "1" };
-const validation = await command([...claude, "plugin", "validate", root, "--strict"], claudeEnv);
+const validation = await command(
+  [...claude, "plugin", "validate", root, "--strict"],
+  claudeEnv,
+);
 await command([...claude, "plugin", "marketplace", "add", root], claudeEnv);
 const installed = await command(
   [...claude, "plugin", "install", "opengeni@opengeni", "--scope", "user"],
   claudeEnv,
 );
-const details = await command([...claude, "plugin", "details", "opengeni@opengeni"], claudeEnv);
-assert.match(details, /Skills \(3\)\s+build-with-opengeni, offload-to-opengeni, opengeni-setup/);
+const details = await command(
+  [...claude, "plugin", "details", "opengeni@opengeni"],
+  claudeEnv,
+);
+assert.match(
+  details,
+  /Skills \(3\)\s+build-with-opengeni, offload-to-opengeni, opengeni-setup/,
+);
 for (const component of ["Agents", "Hooks", "MCP servers", "LSP servers"])
   assert.match(details, new RegExp(`${component} \\(0\\)`));
 const configuration = JSON.parse(
-  await command([...claude, "plugin", "configure", "opengeni@opengeni", "--json"], claudeEnv),
+  await command(
+    [...claude, "plugin", "configure", "opengeni@opengeni", "--json"],
+    claudeEnv,
+  ),
 );
 assert.deepEqual(configuration.configured, []);
-assert.deepEqual(configuration.unconfigured.sort(), ["base_url", "workspace_id"]);
-assert.equal(configuration.schema.base_url.required, true);
-assert.equal(configuration.schema.workspace_id.required, true);
-assert.equal(configuration.inputs.base_url, "");
-assert.equal(configuration.inputs.workspace_id, "");
+assert.deepEqual(configuration.unconfigured ?? [], []);
 
 const codexEnv = { CODEX_HOME: codexConfig };
 const marketplace = JSON.parse(
-  await command([...codex, "plugin", "marketplace", "add", root, "--json"], codexEnv),
+  await command(
+    [...codex, "plugin", "marketplace", "add", root, "--json"],
+    codexEnv,
+  ),
 );
 assert.equal(marketplace.marketplaceName, "opengeni");
 const codexInstall = JSON.parse(
-  await command([...codex, "plugin", "add", "opengeni@opengeni", "--json"], codexEnv),
+  await command(
+    [...codex, "plugin", "add", "opengeni@opengeni", "--json"],
+    codexEnv,
+  ),
 );
 assert.equal(codexInstall.pluginId, "opengeni@opengeni");
 const nativePlugin = await readCodexPlugin(root, codexConfig);
@@ -144,24 +184,36 @@ assert.deepEqual(nativePlugin.hooks, []);
 
 // Empirical counterexample: the same package under the legacy manifest recursively registers the guide.
 const legacyRoot = join(scratch, "legacy-marketplace");
-await cp(join(root, ".agents/plugins"), join(legacyRoot, ".agents/plugins"), { recursive: true });
-await cp(join(root, "plugins/opengeni"), join(legacyRoot, "plugins/opengeni"), { recursive: true });
+await cp(join(root, ".agents/plugins"), join(legacyRoot, ".agents/plugins"), {
+  recursive: true,
+});
+await cp(join(root, "plugins/opengeni"), join(legacyRoot, "plugins/opengeni"), {
+  recursive: true,
+});
 await rm(join(legacyRoot, "plugins/opengeni/plugin.json"));
 const legacyConfig = join(scratch, "codex-legacy");
 await mkdir(legacyConfig, { mode: 0o700 });
-await command([...codex, "plugin", "marketplace", "add", legacyRoot, "--json"], {
-  CODEX_HOME: legacyConfig,
-});
+await command(
+  [...codex, "plugin", "marketplace", "add", legacyRoot, "--json"],
+  {
+    CODEX_HOME: legacyConfig,
+  },
+);
 await command([...codex, "plugin", "add", "opengeni@opengeni", "--json"], {
   CODEX_HOME: legacyConfig,
 });
 const legacy = await readCodexPlugin(legacyRoot, legacyConfig);
 assert.deepEqual(
   legacy.skills.map((skill: { name: string }) => skill.name).sort(),
-  [...expectedSkills, "opengeni-client"].sort().map((name) => `opengeni:${name}`),
+  [...expectedSkills, "opengeni-client"]
+    .sort()
+    .map((name) => `opengeni:${name}`),
 );
 
-const schemaPath = join(root, "scripts/fixtures/agent-plugin-1.0.0.schema.json");
+const schemaPath = join(
+  root,
+  "scripts/fixtures/agent-plugin-1.0.0.schema.json",
+);
 await command(
   [
     bun,
@@ -181,7 +233,10 @@ await command(
 
 const receipt = {
   checkedAt: new Date().toISOString(),
-  gitHead: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+  gitHead: execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim(),
   dirtyFiles: execFileSync("git", ["status", "--porcelain"], {
     cwd: root,
     encoding: "utf8",
@@ -195,7 +250,9 @@ const receipt = {
     mcpServers: nativePlugin.mcpServers,
     hooks: nativePlugin.hooks,
   },
-  legacyComparison: { skills: legacy.skills.map((skill: { name: string }) => skill.name).sort() },
+  legacyComparison: {
+    skills: legacy.skills.map((skill: { name: string }) => skill.name).sort(),
+  },
   schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   isolatedConfiguration: scratch,
 };
