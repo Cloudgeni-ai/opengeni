@@ -756,21 +756,23 @@ export function withRunCredentialEnvironment(cmd: string, sessionId: string): st
 
 /**
  * Preserve the provider session identity/capabilities while decorating only
- * command creation. Non-command methods stay bound to the original instance.
+ * command creation. Trailing invocation options stay unchanged; non-command
+ * methods stay bound to the original instance.
  */
 export function withRunCredentialsSession<T extends object>(session: T, sessionId: string): T {
   return new Proxy(session, {
     get(target, property, receiver) {
       if (property === "exec" || property === "execCommand") {
         const command = Reflect.get(target, property, target) as
-          | ((args: ExecCommandArgs) => Promise<unknown>)
+          | ((args: ExecCommandArgs, ...callArgs: unknown[]) => Promise<unknown>)
           | undefined;
         if (!command) return undefined;
-        return async (args: ExecCommandArgs) =>
-          await command.call(target, {
-            ...args,
-            cmd: withRunCredentialEnvironment(args.cmd, sessionId),
-          });
+        return async (args: ExecCommandArgs, ...callArgs: unknown[]) =>
+          await command.call(
+            target,
+            { ...args, cmd: withRunCredentialEnvironment(args.cmd, sessionId) },
+            ...callArgs,
+          );
       }
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? value.bind(target) : value;
