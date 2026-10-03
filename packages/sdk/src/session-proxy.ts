@@ -76,25 +76,26 @@ export type SessionProxyCreateInput = {
   idempotencyKey?: string | undefined;
 };
 
-/** Which browser action is about to forward a user message. */
+/** Which browser action is about to forward a user message or response. */
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
   delivery: "create" | "send" | "steer" | "submit";
 };
 
-/** Server-side additions the host attaches to one forwarded user message. */
+/** Server-side additions the host attaches to one forwarded user message or response. */
 export type SessionProxyMessageExtras = {
   /**
    * Model-visible context for this message (current page, time zone, today's
-   * date). Placed before any context the browser sent. Not secret.
+   * date). Placed before any context the browser sent. Not secret. Ignored for
+   * approval decisions and human-input responses, which are not new messages.
    */
   modelContext?: string | undefined;
   /**
    * Header-only credential rotation for MCP servers already attached to the
    * session (for example a fresh short-lived per-user bearer), applied
-   * atomically as the message is accepted. Ignored for `create`, where the
-   * `createSession` hook sets the initial headers.
+   * atomically as the message or response is accepted. Ignored for `create`,
+   * where the `createSession` hook sets the initial headers.
    */
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
 };
@@ -135,8 +136,9 @@ export type SessionProxyHandlerOptions = {
     | undefined;
   /**
    * Called before every forwarded user message (send, steer, composer submit,
-   * and browser-started create). Return server-owned `modelContext` and MCP
-   * credential rotations, or a `Response` to reject the message.
+   * and browser-started create), approval decision, and human-input response.
+   * Return server-owned `modelContext` (messages only) and MCP credential
+   * rotations, or a `Response` to reject the action.
    */
   beforeForwardMessage?:
     | ((
@@ -361,6 +363,21 @@ export function createSessionProxyHandler(
         return {
           ...message,
           ...(modelContext ? { modelContext } : {}),
+          ...(extras?.mcpCredentialUpdates?.length
+            ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
+            : {}),
+        };
+      };
+      /** Responses reuse send hooks unchanged; only credentials are added. */
+      const forwardResponse = async (
+        value: unknown,
+        input: SessionProxyMessageInput,
+      ): Promise<Record<string, unknown> | Response> => {
+        const payload = browserPayload(value);
+        const extras = await messageExtras(input);
+        if (extras instanceof Response) return extras;
+        return {
+          ...payload,
           ...(extras?.mcpCredentialUpdates?.length
             ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
             : {}),
@@ -644,10 +661,13 @@ export function createSessionProxyHandler(
           });
         case "POST events": {
           const event = clientEvent(body);
-          if (event.type !== "user.message") {
-            return json(await client.requestJson("POST", `${session}/events`, event));
-          }
-          const payload = await forwardMessage(event.payload, { sessionId, delivery: "send" });
+          const payload =
+            event.type === "user.message"
+              ? await forwardMessage(event.payload, { sessionId, delivery: "send" })
+              : await forwardResponse(event.payload, {
+                  sessionId,
+                  delivery: "send",
+                });
           return await forward(
             `${session}/events`,
             payload instanceof Response ? payload : { ...event, payload },
@@ -1020,8 +1040,8 @@ function createInput(body: Record<string, unknown> | undefined): SessionProxyCre
   return { initialMessage, ...(idempotencyKey ? { idempotencyKey } : {}) };
 }
 
-/** Browser message/draft input: no credential rotation, file resources only, optional model lock. */
-function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string, unknown> {
+/** Browser payloads cannot supply server-owned credential rotations. */
+function browserPayload(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     reject(400, "invalid_body", "A JSON object body is required.");
   }
@@ -1029,6 +1049,12 @@ function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string
   if (Object.hasOwn(input, "mcpCredentialUpdates")) {
     reject(403, "credential_update_not_allowed", "MCP credentials are server-owned.");
   }
+  return input;
+}
+
+/** Browser message/draft input: no credential rotation, file resources only, optional model lock. */
+function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string, unknown> {
+  const input = browserPayload(value);
   if (input.resources !== undefined) {
     if (
       !Array.isArray(input.resources) ||

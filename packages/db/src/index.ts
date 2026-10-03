@@ -32029,6 +32029,26 @@ async function updateSessionMcpServerCredentialsInTransaction(
   return { servers, missingIds };
 }
 
+/** A response and its write-only header replacements share one commit. */
+async function applySessionResponseMcpCredentialUpdatesInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
+  },
+): Promise<void> {
+  if (!input.mcpCredentialUpdates?.length) return;
+  const result = await updateSessionMcpServerCredentialsInTransaction(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    updates: input.mcpCredentialUpdates,
+  });
+  if (result.missingIds.length) {
+    throw new Error(`Unknown session MCP server: ${result.missingIds[0]}`);
+  }
+}
+
 export async function updateSessionMcpApprovalPolicy(
   db: Database,
   input: {
@@ -41771,6 +41791,8 @@ export async function acceptSessionHumanInputResponse(
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     expireOnly?: boolean;
+    /** Validated/encrypted by the API; never copied into the response event. */
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   },
 ): Promise<AcceptSessionHumanInputResponseResult> {
   return await withSessionActivityRlsContext(
@@ -42104,6 +42126,10 @@ export async function acceptSessionHumanInputResponse(
             requestId: request.id,
           });
         }
+        await applySessionResponseMcpCredentialUpdatesInTransaction(
+          tx as unknown as Database,
+          input,
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -84485,6 +84511,8 @@ export async function acceptSessionApprovalDecision(
     sessionId: string;
     subjectId: string;
     payload: Record<string, unknown>;
+    /** Validated/encrypted by the API; never copied into the decision event. */
+    mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
     /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -84496,6 +84524,9 @@ export async function acceptSessionApprovalDecision(
     };
   },
 ): Promise<AcceptSessionApprovalDecisionResult> {
+  // Defense in depth for internal callers: this field is ingress-only even
+  // when a caller accidentally passes the complete public request payload.
+  const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = input.payload;
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -84532,8 +84563,8 @@ export async function acceptSessionApprovalDecision(
             );
             if (
               existing.type !== "user.approvalDecision" ||
-              existingPayload.approvalId !== input.payload.approvalId ||
-              existingPayload.decision !== input.payload.decision
+              existingPayload.approvalId !== payload.approvalId ||
+              existingPayload.decision !== payload.decision
             ) {
               throw new Error("clientEventId belongs to a different approval decision");
             }
@@ -84601,7 +84632,7 @@ export async function acceptSessionApprovalDecision(
             sessionStatus: "requires_action",
           } as const;
         }
-        const approvalId = input.payload.approvalId;
+        const approvalId = payload.approvalId;
         const [runState] = await tx
           .select({
             turnId: schema.agentRunStates.turnId,
@@ -84634,7 +84665,7 @@ export async function acceptSessionApprovalDecision(
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";
-          if (input.payload.decision !== expectedInteractionDecision) {
+          if (payload.decision !== expectedInteractionDecision) {
             throw new Error("Interaction outcome does not match its approval decision");
           }
           const [intervention] = await tx
@@ -84673,9 +84704,8 @@ export async function acceptSessionApprovalDecision(
             },
           );
           if (
-            (input.payload.decision === "approve" &&
-              resolved.intervention.status !== "completed") ||
-            (input.payload.decision === "reject" && resolved.intervention.status === "completed")
+            (payload.decision === "approve" && resolved.intervention.status !== "completed") ||
+            (payload.decision === "reject" && resolved.intervention.status === "completed")
           ) {
             // A response exactly on the deadline can discover expiration only
             // while holding the row lock. Roll the whole transaction back so
@@ -84685,6 +84715,10 @@ export async function acceptSessionApprovalDecision(
             );
           }
         }
+        await applySessionResponseMcpCredentialUpdatesInTransaction(
+          tx as unknown as Database,
+          input,
+        );
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -84698,7 +84732,7 @@ export async function acceptSessionApprovalDecision(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.approvalDecision",
-                payload: input.payload,
+                payload,
                 clientEventId: input.clientEventId ?? null,
               },
               "payload",
@@ -84707,7 +84741,7 @@ export async function acceptSessionApprovalDecision(
           )
           .returning();
         if (!event) throw new Error("Failed to append approval decision");
-        const approvalDecision = input.payload.decision;
+        const approvalDecision = payload.decision;
         if (approvalDecision === "approve" || approvalDecision === "reject") {
           await enqueueChildRequiresActionResolvedOutboxTx(
             tx as unknown as Database,

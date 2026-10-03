@@ -8427,6 +8427,8 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 
@@ -8436,6 +8438,8 @@ export type UserHumanInputResponseEventInput = {
   payload: {
     requestId: string;
     response: SubmitHumanInputResponseRequest;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 

@@ -66,6 +66,8 @@ Selected MCP servers are prepared lazily by default: the model discovers their t
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
 
+The existing `beforeForwardMessage` send hook also refreshes MCP credentials automatically on approval/human-input responses; no integration changes are needed.
+
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
 ## Product-owned repository credentials
