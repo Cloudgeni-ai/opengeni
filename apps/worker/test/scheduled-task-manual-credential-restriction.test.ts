@@ -225,6 +225,10 @@ async function acceptanceFixture(
       version: 1,
       scope: "workspace",
     }),
+    spyOn(db, "getScheduledTaskClaudeProviderAccountAuthoritySnapshot").mockResolvedValue({
+      version: 1,
+      scope: "workspace",
+    } as Awaited<ReturnType<typeof db.getScheduledTaskClaudeProviderAccountAuthoritySnapshot>>),
     spyOn(db, "getScheduledTaskRunPersonalResourceAuthority").mockResolvedValue(null),
     spyOn(db, "recordUsageEvent").mockResolvedValue(undefined),
     spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<
