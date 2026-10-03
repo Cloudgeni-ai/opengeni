@@ -30,6 +30,9 @@ test("response cache is bounded, fixed-TTL, isolated and fence-invalidated", () 
   expect(cache.size).toBe(128);
   cache.put("oversize", "v", "x".repeat(1024 * 1024));
   expect(cache.get("oversize", "v")).toBeNull();
+  for (let n = 0; n < 100; n++) cache.put(`large:${n}`, "v", { value: "x".repeat(512 * 1024) });
+  expect(cache.size).toBeLessThanOrEqual(16);
+  expect(cache.get("large:99", "v")).not.toBeNull();
 });
 
 test("credential partitions retain only a keyed digest, never raw bearer/cookie values", () => {

@@ -46,8 +46,10 @@ export function createInsightsResponseCache(clock: () => number = () => Date.now
       for (const [existingKey, entry] of entries)
         if (entry.expiresAt <= clock()) remove(existingKey);
       remove(key);
-      while (entries.size >= MAX_ENTRIES || bytes + size > MAX_BYTES)
-        remove(entries.keys().next().value!);
+      for (const existingKey of entries.keys()) {
+        if (entries.size < MAX_ENTRIES && bytes + size <= MAX_BYTES) break;
+        remove(existingKey);
+      }
       entries.set(key, { json, fence, expiresAt: clock() + INSIGHTS_RESPONSE_TTL_MS, bytes: size });
       bytes += size;
     },
