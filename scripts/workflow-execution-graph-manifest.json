@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "d51f1f3779d5b8180f037d3f6a5e6c7f416a516459247adde766142ba1889051"
+      "sha256": "86a20d29c669e0d17848c43892180a21aac8f800153b56bfa964b0866de03e94"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "cfead3d1f4861fbb68286303f0ff027564be79f8325dc28a139208624959af40"
+      "sha256": "8accc7794e4f687df977598374b0d417a5cf34401727bf78771d30862524e918"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -66,7 +66,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "cf388d5503891b91fcf8edaddc7f2ae36f9b7a89743b90e82f068d011cd07dcb"
+      "sha256": "6a06ca719081ec2d0d4dacd4fbc0386dda3e88b746b87c4fb2a9792bc9ccc783"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -204,6 +204,12 @@
       "job": "test",
       "step": "cargo test --workspace",
       "sha256": "6670c980f74155967c09fd3c8fe0be8c8882ee56bc5b23f56b80ef27fd7f669a"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "test",
+      "step": "Prove embedded helper selection with synthetic payloads",
+      "sha256": "8ca64055cb10115c44586bfef4174a651e330e1c476b182725f45b233a005cc5"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -467,7 +473,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Bake and sign exact-SHA canary agent",
-      "sha256": "d29339f15f4e729950ec900b531bb5577ea9150a45f34298c19d4a748f7d5952"
+      "sha256": "03fd91b69ce97d2511822327d8817352c28329ca4a08f876a6598a24517a91e8"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "api-image",
+      "step": "Install canary interaction dependencies",
+      "sha256": "6f5ba06f7f25a87d374e077e5a840ee49feb8af5033ca04085e9b1675f033ce7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -479,7 +491,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Require complete exact-SHA canary agent bake",
-      "sha256": "47df19770be17260ddc5eaafaa3bec4c3693c72107502a9df0405537b68620d6"
+      "sha256": "6e8668a6cf11ed5eb0c37e2fbf8bb8fd472544f088de7ee599c036f1125b5484"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1001,13 +1013,19 @@
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Bake and sign per-SHA agent binaries",
-      "sha256": "2f778ce0ca667ac7edbac85b0aa8db8794a5b6ea9c7ecbec51e9696c746979de"
+      "sha256": "a55dc65d595363acc75ad1763daca817354d49d9317410ba56397af74f32ccc7"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
       "job": "candidate",
       "step": "Freeze candidate producer identity",
       "sha256": "5f30aa97d3c41528bdf284b19ff68599187ce5bce3273c41c0d5780be602498f"
+    },
+    {
+      "workflow": ".github/workflows/release-candidate.yml",
+      "job": "candidate",
+      "step": "Install source interaction dependencies",
+      "sha256": "0d5bf973529b2b707522537c3fa98d21aec0f7d2137c6e7ff3652e94feddaac0"
     },
     {
       "workflow": ".github/workflows/release-candidate.yml",
