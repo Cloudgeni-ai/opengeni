@@ -13,7 +13,10 @@ import {
   createVariableSet,
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
+  getPersonalGitHubRepositorySelectionState,
   listScheduledTaskRuns,
+  persistProviderOAuthConnection,
+  replacePersonalGitHubRepositorySelections,
   requireSession,
   setWorkspaceDefaultRig,
   type DbClient,
@@ -126,11 +129,15 @@ async function createTask(
   });
 }
 
-function activities() {
+function activities(overrides: Partial<import("@opengeni/config").Settings> = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
-        settings: testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" }),
+        settings: testSettings({
+          databaseUrl: shared!.appUrl,
+          sandboxBackend: "none",
+          ...overrides,
+        }),
         db: client.db,
         bus: new MemoryEventBus(),
       }) as unknown as ActivityServices,
@@ -138,6 +145,144 @@ function activities() {
 }
 
 describe("scheduled task default Sandbox Environment", () => {
+  test("target chat and occurrence repositories both enter frozen account authority at admission", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await workspaceFixture();
+    await admin`update workspace_memberships set permissions = '["workspace:admin"]'::jsonb
+      where workspace_id = ${workspace.workspaceId} and subject_id = ${workspace.subjectId}`;
+    const credentialBindingId = crypto.randomUUID();
+    const login = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const connection = await persistProviderOAuthConnection(client.db, {
+      ...workspace,
+      visibleToSubjectId: workspace.subjectId,
+      providerDomain: "github.com",
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "synthetic-credential-never-resolved",
+      grantedScopes: ["repo"],
+      expiresAt: null,
+      metadata: {
+        credentialRole: "opengeni_github_personal",
+        providerFamily: "github",
+        providerPrincipalId: "123456789",
+        githubUserId: "123456789",
+        githubLogin: login,
+        oauthEnvironment: "test",
+        oauthClientMarker: "a".repeat(32),
+        credentialBindingId,
+        connectedAt: now,
+        lastVerifiedAt: now,
+      },
+      createdBySubjectId: workspace.subjectId,
+      updatedBySubjectId: workspace.subjectId,
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "123456789",
+      requireLiveUserAuthority: true,
+      requiredLiveUserPermission: "connections:write",
+      exclusiveProviderPrincipalPerOwner: true,
+    });
+    if (!connection) throw new Error("synthetic personal connection was not created");
+    const initialSelection = await getPersonalGitHubRepositorySelectionState(client.db, {
+      accountId: workspace.accountId,
+      originWorkspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      connectionId: connection.id,
+    });
+    if (!initialSelection) throw new Error("synthetic repository selection is unavailable");
+    const repositories = ["10001", "10002"].map((repositoryId, index) => ({
+      repositoryId,
+      fullName: `${login}/repository-${index}`,
+      canonicalUrl: `https://github.com/${login}/repository-${index}`,
+      defaultBranch: "main",
+      visibility: "private" as const,
+      private: true,
+      archived: false,
+      disabled: false,
+      permissions: { pull: true, push: false, admin: false, maintain: false, triage: false },
+      selectedAccess: "read" as const,
+      lastVerifiedAt: now,
+    }));
+    await replacePersonalGitHubRepositorySelections(client.db, {
+      accountId: workspace.accountId,
+      originWorkspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+      expectedSelectionGeneration: 0,
+      idempotencyKey: crypto.randomUUID(),
+      repositories,
+    });
+    const resources = repositories.map((repository) => ({
+      kind: "repository" as const,
+      uri: repository.canonicalUrl,
+      ref: "main",
+      mountPath: `repos/${repository.repositoryId}`,
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId,
+      repositoryId: repository.repositoryId,
+      access: "read" as const,
+    }));
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Review repositories",
+      resources: [resources[0]!],
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const task = await createValidatedScheduledTask({
+      settings: { ...settings, githubPersonalOauthEnabled: true },
+      db: client.db,
+      objectStorage: null,
+      grant: grantFor(workspace),
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Review both repositories",
+        schedule: { type: "manual" },
+        runMode: "existing_session",
+        targetSessionId: session.id,
+        agentConfig: { prompt: "Compare both repositories", resources, tools: [] },
+      }),
+    });
+    const dispatched = await activities({
+      githubPersonalOauthEnabled: true,
+    }).dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `repository-union-${crypto.randomUUID()}`,
+    });
+    expect(dispatched.action).toBe("signal");
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id);
+    expect(run?.status).toBe("dispatched");
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run!.id,
+    });
+    if (!accepted) throw new Error("scheduled occurrence authority was not captured");
+    const authority = accepted.personalConnectionDelegations.find(
+      (item) => item.connectionType === "github_personal",
+    );
+    expect(
+      authority?.personalGitHubRepositorySelection?.repositories.map(
+        (repository) => repository.repositoryId,
+      ),
+    ).toEqual(["10001", "10002"]);
+    expect((await requireSession(client.db, workspace.workspaceId, session.id)).resources).toEqual(
+      session.resources,
+    );
+    expect(
+      (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig.resources,
+    ).toEqual(resources);
+  }, 60_000);
+
   test("an omitted environment freezes the workspace default at creation and every run rides it", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

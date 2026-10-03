@@ -23,8 +23,15 @@ import {
   taskMetadataFromFormState,
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
-import type { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/sdk";
-import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec } from "@/types";
+import type {
+  CreateScheduledTaskRequest,
+  McpConnectionAccountSelection,
+  UpdateScheduledTaskRequest,
+} from "@opengeni/sdk";
+import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
+import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
+import { mergeResourceRefs } from "@opengeni/contracts";
+import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec, Session } from "@/types";
 
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
 export interface ScheduleLearningUpdate {
@@ -325,6 +332,58 @@ export function overlapPolicyForCreate(
   return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
 }
 
+/** Existing chats, including one already created for a schedule, own their settings. */
+export function scheduleInheritsChatSettings(
+  task: Pick<ScheduledTask, "runMode" | "reusableSessionId">,
+): boolean {
+  return (
+    task.runMode === "existing_session" ||
+    (task.runMode === "reusable_session" && Boolean(task.reusableSessionId))
+  );
+}
+
+/** Retain unshown choices only where the destination can still use them. */
+export function mergeScheduleConnectionAccounts(
+  saved: McpConnectionAccountSelection[],
+  selections: McpConnectionAccountSelection[],
+  editableServerIds: string[],
+  destination: {
+    selectedServerIds: string[];
+    resources: ScheduleDraft["resources"];
+    chat?: Pick<Session, "resources" | "firstPartyMcpTools" | "firstPartyMcpPermissions">;
+  },
+): McpConnectionAccountSelection[] {
+  const eligible = new Set(destination.selectedServerIds);
+  eligible.delete(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+  eligible.delete(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+  if (
+    mergeResourceRefs(destination.chat?.resources ?? [], destination.resources).some(
+      (resource) => resource.kind === "repository" && resource.connectionType === "github_personal",
+    )
+  )
+    eligible.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+  const chat = destination.chat;
+  const permissions = chat?.firstPartyMcpPermissions;
+  // New chats retain the stored publication choice under the server's defaults.
+  // A bound chat instead supplies the exact first-party tool/permission policy.
+  if (
+    !chat ||
+    (chat.firstPartyMcpTools.includes("editable_artifact_export") &&
+      chat.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+      (permissions === null ||
+        permissions === undefined ||
+        (permissions.includes("artifacts:read") && permissions.includes("artifacts:publish"))))
+  )
+    eligible.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+  const replaced = new Set(editableServerIds);
+  return [
+    ...saved.filter(
+      (selection) => eligible.has(selection.serverId) && !replaced.has(selection.serverId),
+    ),
+    ...selections,
+  ];
+}
+
 export function createRequestFromDraft(
   draft: ScheduleDraft,
   options: {
@@ -383,8 +442,31 @@ export function updateRequestFromDraft(
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const targetChanged =
     initial.runMode !== draft.runMode || initial.targetSessionId !== draft.targetSessionId;
-  const oldConfig = agentConfigFromFormState(initial, task);
-  const nextConfig = agentConfigFromFormState(draft, task);
+  const inheritsChatSettings =
+    draft.runMode === "existing_session" ||
+    (draft.runMode === task.runMode && scheduleInheritsChatSettings(task));
+  const materializedReusable = inheritsChatSettings && draft.runMode === "reusable_session";
+  const editableConfig = (form: ScheduleDraft) => {
+    if (!materializedReusable) return agentConfigFromFormState(form, task, initial);
+    const {
+      connectionAccounts: _accounts,
+      connectionAccountsFrozen: _frozen,
+      slackBotConnectionId: _bot,
+      slackBotChannelId: _channel,
+      ...retained
+    } = { connectionAccountsFrozen: undefined, ...task.agentConfig };
+    return {
+      ...retained,
+      prompt: form.prompt,
+      resources: form.resources,
+      ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
+      ...(form.slackBotConnectionId && form.slackBotChannelId
+        ? { slackBotChannelId: form.slackBotChannelId }
+        : {}),
+    };
+  };
+  const oldConfig = editableConfig(initial);
+  const nextConfig = editableConfig(draft);
   const onlyPromptChanged = same({ ...oldConfig, prompt: nextConfig.prompt }, nextConfig);
   const oldMetadata = taskMetadataFromFormState(initial, task);
   const nextMetadata = taskMetadataFromFormState(draft, task);
@@ -417,16 +499,14 @@ export function updateRequestFromDraft(
     ...(draft.runMode === "existing_session" || onlyPromptChanged
       ? initial.prompt === draft.prompt
         ? {}
-        : { prompt: draft.prompt.trim() }
+        : { prompt: draft.prompt }
       : same(oldConfig, nextConfig)
         ? {}
         : { agentConfig: nextConfig }),
-    ...(draft.runMode === "existing_session" || initial.variableSetId === draft.variableSetId
+    ...(inheritsChatSettings || initial.variableSetId === draft.variableSetId
       ? {}
       : { variableSetId: draft.variableSetId }),
-    ...(draft.runMode === "existing_session" || initial.rigId === draft.rigId
-      ? {}
-      : { rigId: draft.rigId }),
+    ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
   };
 }
 

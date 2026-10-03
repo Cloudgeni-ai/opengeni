@@ -103,6 +103,7 @@ import {
   runTimeLabel,
   scheduleErrorReference,
   scheduleErrorText,
+  scheduleInheritsChatSettings,
   scheduleWords,
 } from "./schedule-model";
 import {
@@ -752,8 +753,15 @@ function Setup({
   const variableSets = useVariableSets({ enabled: canListSets });
   const rigs = useWorkspaceRigs({ enabled: Boolean(task.rigId) });
   const [chat, setChat] = useState<Session | null>(null);
-  const targetId = task.runMode === "existing_session" ? task.targetSessionId : null;
+  const inheritsChatSettings = scheduleInheritsChatSettings(task);
+  const targetId =
+    task.runMode === "existing_session"
+      ? task.targetSessionId
+      : task.runMode === "reusable_session"
+        ? task.reusableSessionId
+        : null;
   useEffect(() => {
+    setChat(null);
     if (!targetId || !access.canTargetSessions) return;
     let live = true;
     void client
@@ -785,7 +793,7 @@ function Setup({
   return (
     <DetailFacts>
       <DetailFact label="Each run">{EACH_RUN[task.runMode]}</DetailFact>
-      {task.runMode === "existing_session" && targetId ? (
+      {inheritsChatSettings && targetId ? (
         <DetailFact label="Chat">
           {chat || access.canReadSessionIds ? (
             <button
@@ -803,7 +811,7 @@ function Setup({
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
       ) : null}
-      {task.runMode !== "existing_session" && task.variableSetId ? (
+      {!inheritsChatSettings && task.variableSetId ? (
         <DetailFact label="Variable set">
           <Link
             to="/workspaces/$workspaceId/variable-sets/$variableSetId"
@@ -826,7 +834,7 @@ function Setup({
           </span>
         </DetailFact>
       ) : null}
-      {task.runMode !== "existing_session" && task.rigId ? (
+      {!inheritsChatSettings && task.rigId ? (
         <DetailFact label="Environment">
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
@@ -837,7 +845,7 @@ function Setup({
           </Link>
         </DetailFact>
       ) : null}
-      {task.runMode !== "existing_session" && tools.length > 0 ? (
+      {!inheritsChatSettings && tools.length > 0 ? (
         <DetailFact label="Tools">{tools.join(", ")}</DetailFact>
       ) : null}
       {description ? <DetailFact label="Description">{description}</DetailFact> : null}
@@ -866,7 +874,7 @@ function ScheduleAside({
   const state = scheduledTaskStateLabel(task);
   const next = nextRunOf(task, now);
   const model = useMemo(() => {
-    if (isKnowledgeSync(task) || task.runMode === "existing_session") return null;
+    if (isKnowledgeSync(task) || scheduleInheritsChatSettings(task)) return null;
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
@@ -911,7 +919,7 @@ function ScheduleAside({
           {catalog.loading ? "Loading…" : model}
         </DetailAsideItem>
       ) : null}
-      {isKnowledgeSync(task) ? null : task.runMode === "existing_session" ? (
+      {isKnowledgeSync(task) ? null : scheduleInheritsChatSettings(task) ? (
         <DetailAsideItem label="Settings">
           Uses the chat’s model, tools and machine.
         </DetailAsideItem>

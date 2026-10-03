@@ -1,6 +1,7 @@
 # Scheduled task access: drift, refresh, and failed-access notices
 
-A scheduled task freezes what its runs may use when it is saved:
+A scheduled task captures its account authority when it is saved. For runs that
+create a chat, it also stores the chat's initial tool selection:
 
 - its connectors (`agentConfig.tools`);
 - the connector accounts it uses (`agentConfig.connectionAccounts`, frozen with
@@ -9,9 +10,10 @@ A scheduled task freezes what its runs may use when it is saved:
 - for a task an agent created, the creating session's OpenGeni tools,
   permissions and access policy (the creator policy, migration 0428).
 
-Later workspace changes never reach a task on their own. That is deliberate:
-a schedule must not widen itself, and an agent must not widen a narrowed
-session through a schedule. The cost is that a task quietly falls behind: a
+Later workspace defaults do not widen those saved selections. Existing chats,
+including a reusable schedule's chat after its first run, supply their own
+model, tools and machine. Their scheduled runs still use the schedule's
+captured account authority. A task can therefore fall behind: a
 connector the workspace now gives every new schedule is missing, newer OpenGeni
 tools are absent, or the account it chose was disconnected. This page describes
 how OpenGeni shows that, how the owner refreshes it, and how the owner learns
@@ -40,7 +42,9 @@ generations are still revalidated before execution.
 
 Separate-agent work is explicit: `reusable_session` creates a chat for the
 schedule; `new_session_per_run` creates a fresh chat per occurrence. Those modes
-take `agentConfig` creation settings.
+take `agentConfig` creation settings. After a reusable chat exists, change its
+execution settings in that chat. The schedule editor and MCP summary identify
+those settings as inherited rather than displaying stale creation defaults.
 
 ## Editing messages and destinations
 
@@ -298,4 +302,3 @@ from durable facts and never acts early; a person answering first wins.
 Further pending approvals of the same wait are rejected one by one as they
 surface, since their deadline has already passed. Skill-review questions need a
 person and are never timed out. An agent still can never decide an approval.
-
