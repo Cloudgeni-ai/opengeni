@@ -211,15 +211,23 @@ describe("CatalogItemPage", () => {
   test("existing social history stays manageable while unavailable provider authorization is withheld", async () => {
     for (const provider of ["x", "reddit"] as const) {
       for (const status of ["connected", "needs_reauth", "disabled"] as const) {
-        const account = {
-          id: "existing-social",
+        const account: SocialConnection = {
+          id: "00000000-0000-4000-8000-000000000001",
+          accountId: "00000000-0000-4000-8000-000000000002",
+          workspaceId: "00000000-0000-4000-8000-000000000003",
           provider,
           status,
-          subjectId: null,
           ownership: "workspace",
           accountHandle: "existing-account",
           accountName: "Existing account",
-        } as SocialConnection;
+          externalAccountId: null,
+          scopes: [],
+          credentialRef: null,
+          tokenMetadata: {},
+          metadata: {},
+          createdAt: "2026-10-03T00:00:00.000Z",
+          updatedAt: "2026-10-03T00:00:00.000Z",
+        };
         // The API catalog may project enabled=false despite an existing row.
         const social = item({
           kind: "api",

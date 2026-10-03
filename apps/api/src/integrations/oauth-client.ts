@@ -1837,7 +1837,7 @@ export function gmailOAuthClientConfigured(settings: Settings): boolean {
 
 function isConfidentialOAuthClient(client: {
   clientId: string;
-  clientSecret?: string;
+  clientSecret?: string | undefined;
   tokenEndpointAuthMethod: string;
 }): boolean {
   return Boolean(

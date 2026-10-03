@@ -39,6 +39,49 @@ function model(id: string, patch: Partial<IntegrationViewModel> = {}): Integrati
     ...patch,
   };
 }
+function connection(patch: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+  return {
+    id: "00000000-0000-4000-8000-000000000001",
+    accountId: "00000000-0000-4000-8000-000000000002",
+    workspaceId: "00000000-0000-4000-8000-000000000003",
+    subjectId: "user:test",
+    providerDomain: "gmailmcp.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {},
+    createdBySubjectId: "user:test",
+    updatedBySubjectId: "user:test",
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+    ...patch,
+  };
+}
+function socialConnection(patch: Partial<SocialConnection> = {}): SocialConnection {
+  return {
+    id: "00000000-0000-4000-8000-000000000004",
+    accountId: "00000000-0000-4000-8000-000000000002",
+    workspaceId: "00000000-0000-4000-8000-000000000003",
+    provider: "x",
+    status: "connected",
+    ownership: "workspace",
+    accountHandle: "existing-account",
+    accountName: "Existing account",
+    externalAccountId: null,
+    scopes: [],
+    credentialRef: null,
+    tokenMetadata: {},
+    metadata: {},
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:00.000Z",
+    ...patch,
+  };
+}
 function item(patch: Partial<CapabilityCatalogItem> = {}): CapabilityCatalogItem {
   return {
     kind: "mcp",
@@ -276,12 +319,11 @@ describe("native connection readiness", () => {
       const disabled = item({ mcpUrl, source: "registry", enabled: false });
       const facts = {
         connections: [
-          {
-            id: "saved",
-            kind: "oauth2",
+          connection({
+            providerDomain: new URL(mcpUrl).hostname,
             metadata: { mcpUrl },
             status: "needs_reauth",
-          } as ConnectionMetadata,
+          }),
         ],
         socialConnections: [],
       };
@@ -305,7 +347,7 @@ describe("native connection readiness", () => {
       for (const status of ["connected", "needs_reauth", "disabled"] as const) {
         const facts = {
           connections: [],
-          socialConnections: [{ provider, status } as SocialConnection],
+          socialConnections: [socialConnection({ provider, status })],
         };
         expect(nativeCatalogItemVisible(disabled, catalog([]), facts)).toBe(true);
         expect(nativeCatalogItemNotice(disabled, catalog([]), () => {}, facts)).toBeUndefined();
@@ -317,13 +359,13 @@ describe("native connection readiness", () => {
     const fiken = item({ kind: "api", surfaceType: "first_party_fiken" });
     const facts = {
       connections: [
-        {
-          id: "saved-fiken",
+        connection({
+          id: "00000000-0000-4000-8000-000000000005",
           subjectId: null,
           kind: "api_key",
           providerDomain: "fiken.no",
           metadata: { credentialRole: "fiken_api_token" },
-        } as ConnectionMetadata,
+        }),
       ],
       socialConnections: [],
     };
