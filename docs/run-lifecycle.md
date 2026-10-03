@@ -597,6 +597,10 @@ successors; once connectivity returns, recovery preserves the accepted turn,
 trigger and frozen authority with bounded, signal-interruptible backoff. Query
 text, generic provider socket errors, permanent DB rejections and unknown tool
 outcomes do not grant this recovery authority.
+Transport evidence belongs to its trusted DB source subtree, never an unrelated
+aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
+regardless of sibling order. Duplicate references/cycles consume no extra node
+budget; an incomplete or overflowed cause graph grants no recovery authority.
 
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
