@@ -171,7 +171,7 @@ async function turn(input: Awaited<ReturnType<typeof fixture>>) {
     );
     await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     await tx.execute(
-      sql`insert into session_turn_attempts (id, account_id, workspace_id, session_id, turn_id, execution_generation, state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id, verified_control_revision, mcp_approval_policies) values (${attemptId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${turnId}, 1, 'running', ${workflowId}, 'fixture-run', 'fixture-activity', 0, '{}'::jsonb)`,
+      sql`insert into session_turn_attempts (id, account_id, workspace_id, session_id, turn_id, execution_generation, state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id, verified_control_revision, mcp_approval_policies) values (${attemptId}, ${input.accountId}, ${input.workspaceId}, ${sessionId}, ${turnId}, 1, 'running', ${workflowId}, ${"fixture-run-" + attemptId}, 'fixture-activity', 0, '{}'::jsonb)`,
     );
   });
   return { sessionId, turnId, attemptId, workflowId };
@@ -1176,4 +1176,54 @@ test("pool lock contention does not consume lease TTL and expired holders advanc
   const stillHeld = await acquireClaudeCredentialLease(client.db, request);
   expect(stillHeld.reused).toBe(true);
   expect(stillHeld.generation).toBe(next.generation);
+});
+
+test("cleanup skips another turn's locked expired lease instead of blocking a live holder", async () => {
+  const input = await fixture(),
+    { a } = await pool(input);
+  const accepted = await turn(input),
+    other = await turn(input);
+  const request = {
+    ...input,
+    ...accepted,
+    holderId: "fixture-live-holder",
+    upstreamModelId: "claude-opus-fixture",
+    pinnedCredentialId: a.account.id,
+    pinSource: "policy" as const,
+    leaseTtlMs: 5000,
+  };
+  const lease = await acquireClaudeCredentialLease(client.db, request);
+  await acquireClaudeCredentialLease(client.db, {
+    ...request,
+    ...other,
+    holderId: "fixture-expired-holder",
+  });
+  await shared.admin`UPDATE claude_credential_leases SET leased_until = clock_timestamp() - interval '1 second' WHERE turn_id = ${other.turnId}`;
+  let locked!: () => void, unlock!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  const holding = shared.admin.begin(async (tx) => {
+    await tx`SELECT id FROM claude_credential_leases WHERE turn_id = ${other.turnId} FOR UPDATE`;
+    locked();
+    await release;
+  });
+  await ready;
+  try {
+    const outcome = await Promise.race([
+      acquireClaudeCredentialLease(client.db, request),
+      Bun.sleep(1000).then(() => {
+        throw new Error("Unrelated lease blocked acquisition");
+      }),
+    ]);
+    expect(outcome.reused).toBe(true);
+    expect(outcome.generation).toBe(lease.generation);
+    expect(outcome.leasedUntil!.getTime()).toBeGreaterThan(Date.now());
+  } finally {
+    unlock();
+    await holding;
+  }
 });

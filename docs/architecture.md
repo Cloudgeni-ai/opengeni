@@ -18,12 +18,11 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
-NATS transports reconstructible events. The API authorizes; workers execute.
+Postgres persists state, Temporal coordinates execution, NATS transports events.
+The API authorizes; workers execute.
 
-External users require live membership and `asUser()` identity, never labels.
-Visibility differs from `agentAccess`; Personal Knowledge follows the verified
-active-turn user. Task notes coordinate; links never merge users.
+External users require live membership and `asUser()`. Visibility and `agentAccess`
+differ; Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
@@ -33,18 +32,15 @@ enforcement, preserving context.
 `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors, granting no capabilities/credentials.
 
-Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
-[`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+[Account binding](remote-mcp-credentials.md).
 
 [`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
 owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
-never omitted-tools queue arrays. Connection-backed MCPs use native authentication,
-excluding provider targeting/headers, including historical work. Signed credential
-callbacks carry accepted-turn informational initiators. Children inherit bounded
-lineage; internal continuations freeze causal-turn provenance at claim without
-replacing service principals. Renewals retain turn snapshots, never mutable
-session state. See
+never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
+Signed callbacks retain accepted initiators; children inherit bounded lineage.
+Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
+and service principals. See
 [`workspace-integrations.md`](workspace-integrations.md).
 
 ---
@@ -1072,9 +1068,7 @@ Claude account pools: [setup and quotas](model-providers.md#claude-subscription-
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
 [Allocator and picker rules](codex-subscription-rotation.md).
-Migration 0492 requires drained API/control/turn processes, runtime-login
-inventory, migration, role provisioning, and matching binaries; never restart
-pre-0492 code. Accepted turns recover from checkpoints.
+[Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),

@@ -7,7 +7,7 @@ import {
   XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshot,
 } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { inArray, and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -1429,20 +1429,36 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             )
             .for("update")
             .limit(1);
+          // Expired leases from other turns are housekeeping, never a reason
+          // to wait while holding this turn's lease/pool locks.
+          const cleanupNow = input.now ?? sql`clock_timestamp()`;
+          await tx.delete(tables.credentialLeases).where(
+            inArray(
+              tables.credentialLeases.id,
+              tx
+                .select({ id: tables.credentialLeases.id })
+                .from(tables.credentialLeases)
+                .where(
+                  and(
+                    eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                    lte(tables.credentialLeases.leasedUntil, cleanupNow),
+                  ),
+                )
+                .for("update", { skipLocked: true }),
+            ),
+          );
           const clock = input.now
             ? undefined
             : await tx.execute(sql`select clock_timestamp() as observed_at`);
           const now = input.now ?? new Date(clock![0]!.observed_at as string);
-          const leasedUntil = new Date(now.getTime() + leaseTtlMs);
           const existing = retained && retained.leasedUntil > now ? retained : undefined;
-          await tx
-            .delete(tables.credentialLeases)
-            .where(
-              and(
-                eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                lte(tables.credentialLeases.leasedUntil, now),
-              ),
-            );
+          if (retained && !existing)
+            await tx
+              .delete(tables.credentialLeases)
+              .where(eq(tables.credentialLeases.id, retained.id));
+          const freshDeadline = input.now
+            ? new Date(input.now.getTime() + leaseTtlMs)
+            : sql`clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond')`;
 
           const candidates = await tx
             .select(credentialAllocationColumns)
@@ -1508,7 +1524,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
                   existing.holderId === input.holderId
                     ? existing.generation
                     : existing.generation + 1,
-                leasedUntil,
+                leasedUntil: freshDeadline,
                 updatedAt: now,
               })
               .where(eq(tables.credentialLeases.id, existing.id))
@@ -1549,20 +1565,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               accounts: candidates.map(subscriptionAccountMetadataFromRow),
             };
           }
-          const [lease] = await tx
-            .insert(tables.credentialLeases)
-            .values({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              authorityScope: snapshot.scope,
-              ownerOrganizationMembershipId: ownerMembershipId,
-              credentialId: selected.id,
-              turnId: input.turnId,
-              holderId: input.holderId,
-              generation: retained ? retained.generation + 1 : 1,
-              leasedUntil,
-            })
-            .returning();
           await tx
             .update(tables.credentials)
             .set({
@@ -1584,6 +1586,20 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               })
               .where(eq(tables.rotationSettings.id, settings.id));
           }
+          const [lease] = await tx
+            .insert(tables.credentialLeases)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
+              credentialId: selected.id,
+              turnId: input.turnId,
+              holderId: input.holderId,
+              generation: retained ? retained.generation + 1 : 1,
+              leasedUntil: freshDeadline,
+            })
+            .returning();
           return {
             credentialId: selected.id,
             rotationEnabled: settings.rotationEnabled,
