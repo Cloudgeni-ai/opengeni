@@ -1227,3 +1227,56 @@ test("cleanup skips another turn's locked expired lease instead of blocking a li
     await holding;
   }
 });
+
+test("expiry during a quota read advances the holder generation at the lease update", async () => {
+  const input = await fixture(),
+    { a } = await pool(input),
+    accepted = await turn(input);
+  const request = {
+    ...input,
+    ...accepted,
+    holderId: "fixture-delayed-read-holder",
+    upstreamModelId: "claude-opus-fixture",
+    pinnedCredentialId: a.account.id,
+    pinSource: "policy" as const,
+    leaseTtlMs: 1500,
+  };
+  const first = await acquireClaudeCredentialLease(client.db, request);
+  let locked!: () => void, unlock!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  const holding = shared.admin.begin(async (tx) => {
+    await tx`LOCK TABLE claude_subscription_account_usage IN ACCESS EXCLUSIVE MODE`;
+    locked();
+    await release;
+  });
+  await ready;
+  const acquiring = acquireClaudeCredentialLease(client.db, request);
+  try {
+    let blocked = false;
+    for (let retry = 0; retry < 100; retry++) {
+      const [row] =
+        await shared.admin`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%claude_subscription_account_usage%') AS blocked`;
+      if (row!.blocked) {
+        blocked = true;
+        break;
+      }
+      await Bun.sleep(5);
+    }
+    expect(blocked).toBe(true);
+    await Bun.sleep(Math.max(0, first.leasedUntil!.getTime() - Date.now()) + 30);
+  } finally {
+    unlock();
+    await holding;
+  }
+  const next = await acquiring;
+  expect(next.generation).toBe(first.generation! + 1);
+  expect(next.leasedUntil!.getTime()).toBeGreaterThan(Date.now());
+  await releaseClaudeCredentialLease(client.db, { ...request, generation: first.generation! });
+  const retained = await acquireClaudeCredentialLease(client.db, request);
+  expect(retained.generation).toBe(next.generation);
+});

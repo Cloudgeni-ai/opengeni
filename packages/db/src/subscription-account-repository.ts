@@ -1522,7 +1522,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
                 holderId: input.holderId,
                 generation:
                   existing.holderId === input.holderId
-                    ? existing.generation
+                    ? sql`CASE WHEN ${tables.credentialLeases.leasedUntil} > ${input.now ?? sql`clock_timestamp()`} THEN ${tables.credentialLeases.generation} ELSE ${tables.credentialLeases.generation} + 1 END`
                     : existing.generation + 1,
                 leasedUntil: freshDeadline,
                 updatedAt: now,
