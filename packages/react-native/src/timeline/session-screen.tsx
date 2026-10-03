@@ -3,13 +3,14 @@ import {
   type AgentMessageItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
+import { Button } from "./controls";
 import { ApprovalStrip, HumanInputCard } from "./decisions";
 import { QueueDock } from "./queue-dock";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
@@ -68,6 +69,13 @@ export function NativeSessionScreen({
   const waitingOnInput = humanInput.requests.length > 0 && status === "requires_action";
   const busy = composer.sending || composer.pausing || composer.resuming;
   const { ratings, rate } = useTurnRatings(feedback);
+  const failed = controller.connectionState === "error";
+  useAutoRecover(
+    failed && controller.active,
+    controller.connectionState === "live",
+    controller.refresh,
+  );
+  const empty = items.length === 0;
   // Web order beside Copy: reply feedback, then host actions (fork, share…).
   const renderMessageActions = useCallback(
     (item: AgentMessageItem | UserMessageItem) => {
@@ -96,6 +104,20 @@ export function NativeSessionScreen({
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
         items={items}
         status={status}
+        emptyState={
+          empty && failed ? (
+            <LoadFailure
+              message={controller.error?.message}
+              onRetry={() => void controller.refresh()}
+            />
+          ) : empty && controller.initialLoading ? (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <ActivityIndicator color={theme.colors["fg-muted"]} />
+            </View>
+          ) : (
+            timelineProps.emptyState
+          )
+        }
         trailing={
           <>
             {waitingOnInput ? (
@@ -151,6 +173,52 @@ export function NativeSessionScreen({
           </>
         }
       />
+    </View>
+  );
+}
+
+/**
+ * A failed session stream retries with backoff (1s doubling to 30s) while the
+ * screen is active, so a transient API outage recovers without a relaunch.
+ */
+function useAutoRecover(failed: boolean, live: boolean, refresh: () => Promise<void>) {
+  const delay = useRef(1_000);
+  useEffect(() => {
+    // Only a live stream ends the outage; a retry briefly clears the error.
+    if (live) delay.current = 1_000;
+  }, [live]);
+  useEffect(() => {
+    if (!failed) return;
+    const timer = setTimeout(() => {
+      delay.current = Math.min(delay.current * 2, 30_000);
+      void refresh();
+    }, delay.current);
+    return () => clearTimeout(timer);
+  }, [failed, refresh]);
+}
+
+function LoadFailure({ message, onRetry }: { message?: string | undefined; onRetry: () => void }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 }}>
+      <Icon name="circle-alert" size={20} color={theme.colors["status-failed"]} />
+      <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: theme.colors.fg }}>
+        Couldn't load this session
+      </Text>
+      {message ? (
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            lineHeight: 18,
+            color: theme.colors["fg-muted"],
+            textAlign: "center",
+          }}
+        >
+          {message}
+        </Text>
+      ) : null}
+      <Button label="Retry" onPress={onRetry} />
     </View>
   );
 }
