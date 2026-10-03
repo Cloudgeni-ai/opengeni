@@ -1,4 +1,5 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
@@ -362,27 +363,177 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   });
 }
 
+/** Complete structured-cause graph or no recovery authority. Budget distinct
+ * objects (including array containers), not queue positions/duplicate refs.
+ * The separate link ceiling bounds huge duplicate arrays without truncating
+ * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
+function databaseRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+  const graph = new Map<object, Set<object>>();
+  const queue: object[] = [];
+  let links = 0;
+  const add = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || graph.has(value)) return true;
+    if (graph.size >= 64) return false;
+    graph.set(value, new Set());
+    queue.push(value);
+    return true;
+  };
+  if (!add(error)) return null;
+  try {
+    for (const current of queue) {
+      const record = current as Record<string, unknown>;
+      const children = Array.isArray(current)
+        ? current
+        : ["cause", "original", "driverError", "error", "errors"].map((key) => record[key]);
+      for (const child of children) {
+        if (++links > 4096 || !add(child)) return null;
+        if (child && typeof child === "object") graph.get(current)!.add(child);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return graph;
+}
+
 function retryableDatabaseFailureCode(
   error: unknown,
+  requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
-  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  if (!persistenceFailure) {
-    const driver = findPostgresDriverError(error);
-    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
-    if (isRetryablePersistenceSqlState(driverSqlState)) {
-      return databaseFailureCode(driverSqlState);
+  try {
+    const graph = databaseRecoveryCauseGraph(error);
+    if (!graph) return null;
+    const transports = new Set<object>();
+    const boundaries = new Set<object>();
+    const ownDatabaseNodes = new Set<object>();
+    const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    // Ask the canonical transport predicate about ONLY this node's facts. Its
+    // recursive search must not pair a DB sibling with an unrelated provider.
+    for (const node of graph.keys()) {
+      if (isRoutingMutationOutcomeUnknownError(node)) return null;
+      const record = node as Record<string, unknown>;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseTransportFailure(record)
+          : isRetryableDatabaseTransportFailure({ code: record.code, errno: record.errno })
+      )
+        transports.add(node);
+      const sqlState = isSessionEventPersistenceError(node)
+        ? node.details.sqlState
+        : record.name === "PostgresError" && typeof record.code === "string"
+          ? record.code
+          : null;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+          : isDatabaseConnectionSqlState(sqlState)
+      )
+        transports.add(node);
+      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+        // Only actual errors raised at our ORM/typed persistence boundary own
+        // their driver subtree. A PostgresError name, SDK wrapper or provider
+        // socket by itself is never own-client provenance for a running turn.
+        const queue: object[] = [node];
+        for (const source of queue) {
+          if (ownDatabaseNodes.has(source)) continue;
+          ownDatabaseNodes.add(source);
+          queue.push(...graph.get(source)!);
+        }
+      }
     }
+    const hasOwnTransport = (boundary: object): boolean => {
+      const seen = new Set<object>();
+      const queue = [boundary];
+      for (const node of queue) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        if (transports.has(node)) return true;
+        queue.push(...graph.get(node)!);
+      }
+      return false;
+    };
+    // Inspect ALL trusted DB evidence before returning a permit. A permanent,
+    // auth or uncertain SQLSTATE vetoes every sibling regardless of traversal
+    // order; a deeper transport/reset cannot override it either.
+    for (const node of graph.keys()) {
+      const record = node as Record<string, unknown>;
+      if (node instanceof DrizzleQueryError) {
+        boundaries.add(node);
+        if (hasOwnTransport(node)) codes.add("db_failure");
+      }
+      const typed = isSessionEventPersistenceError(node);
+      if (!typed && record.name !== "PostgresError") continue;
+      boundaries.add(node);
+      const sqlState = typed
+        ? node.details.sqlState
+        : typeof record.code === "string"
+          ? record.code
+          : null;
+      const connectionOutage = requireDatabaseProvenance
+        ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+        : isDatabaseConnectionSqlState(sqlState);
+      const code = typed
+        ? retryablePersistenceFailureCode(sqlState)
+        : connectionOutage || isRetryablePersistenceSqlState(sqlState)
+          ? databaseFailureCode(sqlState)
+          : null;
+      if (
+        !code ||
+        (requireDatabaseProvenance &&
+          !connectionOutage &&
+          !(sqlState === null && hasOwnTransport(node)))
+      )
+        return null;
+      if (!requireDatabaseProvenance || ownDatabaseNodes.has(node)) codes.add(code);
+    }
+    // Preserve the legacy pre-execution transport-only allowance, but never
+    // borrow it across an explicit DB boundary with no eligible own evidence.
+    if (!requireDatabaseProvenance && boundaries.size === 0 && transports.size > 0)
+      codes.add("db_failure");
+    // Stable classification for multiple positive DB siblings too.
+    for (const code of ["db_failure", "db_deadlock", "db_serialization_failure"] as const)
+      if (codes.has(code)) return code;
+    return null;
+  } catch {
+    // Unreadable structured facts are no more authority than unreadable edges.
+    return null;
   }
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
-    return "db_failure";
-  }
+}
+
+const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "CONNECT_TIMEOUT",
+]);
+
+function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>): boolean {
+  return [record.code, record.errno].some(
+    (code) => typeof code === "string" && RUNNING_TURN_DATABASE_TRANSPORT_CODES.has(code),
+  );
+}
+
+function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (sqlState.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function retryablePersistenceFailureCode(
+  sqlState: string | null,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
   if (
-    !persistenceFailure ||
     !(
       sqlState === null ||
       sqlState.startsWith("08") ||
-      sqlState.startsWith("40") ||
+      isRetryablePersistenceSqlState(sqlState) ||
       sqlState.startsWith("53") ||
       sqlState === "55P03" ||
       sqlState === "57014" ||
@@ -394,19 +545,22 @@ function retryableDatabaseFailureCode(
   ) {
     return null;
   }
-  return persistenceFailure.details.code;
+  return databaseFailureCode(sqlState);
 }
 
 /**
- * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
- * recovery lane. Permanent database/state failures remain terminal; only the
- * same operational outage classes that are safe before claim are admitted.
+ * Carry one exact claimed attempt into the workflow's DB-only
+ * recovery lane. Permanent database/state failures remain terminal. The
+ * running-turn lane additionally requires a closed own-client outage class;
+ * existing pre-execution recovery classifications are unchanged.
  */
 export function postClaimDatabaseRecoveryFailure(input: {
   error: unknown;
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  /** Require an actual own-client boundary and the closed running-turn allowlist. */
+  requireDatabaseProvenance?: boolean;
   sandboxSetupOutcomeUnknown?: true;
   sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
@@ -414,8 +568,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
     providerRecoveryCount: number;
   };
 }): ApplicationFailure | null {
-  const code = retryableDatabaseFailureCode(input.error);
-  if (!code || input.executionGeneration < 1) return null;
+  const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
+  if (
+    !code ||
+    input.executionGeneration < 1 ||
+    (input.requireDatabaseProvenance && code !== "db_failure")
+  )
+    return null;
   if (
     (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
     ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&

@@ -49,6 +49,7 @@ export function useClaudeUsage({
   credentialChanged.current = onCredentialChanged;
   const generation = useRef(0);
   const refreshingKey = useRef<{ key: string; request: number } | null>(null);
+  const reconnectNotified = useRef<string | null>(null);
   const [state, setState] = useState<{
     key: string;
     value: ClaudeSubscriptionUsage | null;
@@ -94,6 +95,12 @@ export function useClaudeUsage({
           return;
         }
         setState({ key, value: result, error: false, loading: false, refreshing: false });
+        if (result.refreshStatus === "reconnect") {
+          if (reconnectNotified.current !== key) {
+            reconnectNotified.current = key;
+            await credentialChanged.current?.();
+          }
+        } else if (reconnectNotified.current === key) reconnectNotified.current = null;
       } catch {
         if (currentKey.current !== key || generation.current !== request) return;
         setState((previous) => ({

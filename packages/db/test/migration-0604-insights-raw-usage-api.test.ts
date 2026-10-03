@@ -48,7 +48,8 @@ let accountId: string,
   subjectId: string;
 const migrationName = "0604_insights_raw_usage_api.sql";
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
-const preMigrationRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
+const servingCompatibleRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
+const preMigrationRevision = "a15e7a5f4d7322903b614992a09973ebab268721";
 const postureOptions = {
   expectedRole: "opengeni_app",
   rlsStrategy: "force" as const,
@@ -57,6 +58,8 @@ const postureOptions = {
 };
 let stagingBaselineViolations: Record<"current" | "old" | "restored", string[]>;
 let preMigrationBaselineViolations: Record<"current" | "old" | "restored", string[]>;
+let servingBaselineViolations: Record<"current" | "old" | "restored", string[]>;
+let servingCurrentBaselineViolations: Record<"current" | "old" | "restored", string[]>;
 async function frozenRuntime<T>(
   revision: string,
   run: (
@@ -205,6 +208,34 @@ beforeAll(async () => {
         return { current, old, restored: await inspect() };
       },
     );
+    servingBaselineViolations = await frozenRuntime(
+      servingCompatibleRevision,
+      async (runtime, oldProvision) => {
+        const inspect = async (reader = runtime) =>
+          reader.evaluateRuntimeDatabasePosture(
+            await reader.inspectRuntimeDatabasePosture(client.db, postureOptions),
+            postureOptions,
+          );
+        const current = await inspect(),
+          baselineCurrent = await inspect(baselineRuntime);
+        await oldProvision.provisionRoles(fixture.adminUrl, {
+          appPassword: fixture.appPassword,
+          rlsStrategy: "force",
+        });
+        const old = await inspect(),
+          baselineOld = await inspect(baselineRuntime);
+        await provisionRoles(fixture.adminUrl, {
+          appPassword: fixture.appPassword,
+          rlsStrategy: "force",
+        });
+        servingCurrentBaselineViolations = {
+          current: baselineCurrent,
+          old: baselineOld,
+          restored: await inspect(baselineRuntime),
+        };
+        return { current, old, restored: await inspect() };
+      },
+    );
   });
   await fixture.admin`delete from schema_migrations where name=${migrationName}`;
   await migrate(fixture.ownerUrl, undefined, {
@@ -266,8 +297,8 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   );
 });
 
-test("frozen pre-0603 passes; serving staging retains exact existing full-catalog readiness blockers", async () => {
-  for (const revision of [stagingRevision, preMigrationRevision]) {
+test("frozen pre-0604 passes; old serving modules retain exact existing full-catalog readiness blockers", async () => {
+  for (const revision of [stagingRevision, servingCompatibleRevision, preMigrationRevision]) {
     const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
     await frozenRuntime(revision, async (old, oldProvision) => {
       if (revision === stagingRevision) {
@@ -285,13 +316,25 @@ test("frozen pre-0603 passes; serving staging retains exact existing full-catalo
             await old.inspectRuntimeDatabasePosture(client.db, postureOptions),
             postureOptions,
           ),
-        ).toEqual(revision === stagingRevision ? stagingBaselineViolations[provisioner] : []);
+        ).toEqual(
+          revision === stagingRevision
+            ? stagingBaselineViolations[provisioner]
+            : revision === servingCompatibleRevision
+              ? servingBaselineViolations[provisioner]
+              : [],
+        );
         expect(
           evaluateRuntimeDatabasePosture(
             await inspectRuntimeDatabasePosture(client.db, postureOptions),
             postureOptions,
           ),
-        ).toEqual(revision === stagingRevision ? preMigrationBaselineViolations[provisioner] : []);
+        ).toEqual(
+          revision === stagingRevision
+            ? preMigrationBaselineViolations[provisioner]
+            : revision === servingCompatibleRevision
+              ? servingCurrentBaselineViolations[provisioner]
+              : [],
+        );
       };
       await verify("current");
       await oldProvision.provisionRoles(fixture.adminUrl, roles);

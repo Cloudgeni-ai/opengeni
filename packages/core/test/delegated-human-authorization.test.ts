@@ -5,7 +5,7 @@ import {
   Workspace,
   signDelegatedAccessToken,
   type AccessContext,
-  type Permission,
+  Permission,
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -76,7 +76,8 @@ function bounds(overrides: Partial<DelegatedHumanAuthorization> = {}): Delegated
   return {
     organizationId,
     subjectId,
-    permissions: ["workspace:admin", "secrets:read"],
+    // Full access: every permission, literally (access settings are explicit).
+    permissions: [...Permission.options],
     workspaceScope: { kind: "all" },
     ...overrides,
   };
@@ -547,7 +548,42 @@ describe("request-local verified delegated native human", () => {
     ).toBe(200);
   });
 
+  test("workspace:admin in a Custom setting is literal, never a wildcard for what was left out", async () => {
+    live.workspaceGrants[0]!.permissions = ["workspace:admin"];
+    const custom: Permission[] = ["workspace:admin", "sessions:read"];
+    expect((await app("sessions:read").fetch(stampedRequest({ permissions: custom }))).status).toBe(
+      200,
+    );
+    const authorization = observed.at(-1)!;
+    expect(authorization.grant.permissionMode).toBe("explicit");
+    for (const leftOut of ["secrets:write", "api_keys:manage", "sessions:create"] as Permission[])
+      expect(
+        hasPermission(authorization.grant.permissions, leftOut, authorization.grant.permissionMode),
+      ).toBe(false);
+    for (const leftOut of ["secrets:write", "api_keys:manage", "sessions:create"] as Permission[])
+      expect((await app(leftOut).fetch(stampedRequest({ permissions: custom }))).status).toBe(403);
+    // Full access still reaches everything the person's own role can do.
+    expect(
+      (await app("secrets:write").fetch(stampedRequest({ permissions: [...Permission.options] })))
+        .status,
+    ).toBe(200);
+  });
+
   test("account permissions intersect literally: workspace admin never implies account admin or billing", async () => {
+    // The person's own organization grant holds workspace:admin too (legacy
+    // shape); the agent's grant still never reads it as account:admin.
+    live.accountGrants[0]!.permissions = ["workspace:admin", "account:read"];
+    expect(
+      (await app().fetch(stampedRequest({ permissions: ["workspace:admin", "account:read"] })))
+        .status,
+    ).toBe(200);
+    const legacyShaped = observed.at(-1)!;
+    expect(legacyShaped.accountGrant?.permissions).toEqual(["account:read", "workspace:admin"]);
+    for (const permission of ["account:admin", "billing:manage", "members:manage"] as const)
+      expect(hasPermission(legacyShaped.accountGrant!.permissions, permission)).toBe(false);
+    expect(() => requireAccountAdminAuthorizationStamp(legacyShaped)).toThrow();
+    observed.length = 0;
+
     live.accountGrants[0]!.permissions = [
       "account:read",
       "account:admin",

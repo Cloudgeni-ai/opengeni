@@ -293,6 +293,10 @@ import type {
   CreateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
   OrganizationMcpConnectionList,
+  OrganizationServiceAccount,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
   UpdateOrganizationMcpConnectionRequest,
   McpConnectionRequest,
   McpConnectionDecision,
@@ -8622,6 +8626,62 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  /** Service accounts: organization identities with no person behind them. */
+  async listOrganizationServiceAccounts(
+    organizationId: string,
+  ): Promise<ListOrganizationServiceAccountsResponse> {
+    return await this.requestJson<ListOrganizationServiceAccountsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts`,
+    );
+  }
+
+  async getOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+    );
+  }
+
+  /** Create a service account; give it keys with `createOrganizationApiKey({ serviceAccountId })`. */
+  async createOrganizationServiceAccount(
+    organizationId: string,
+    request: CreateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "POST",
+      `/v1/organizations/${organizationId}/service-accounts`,
+      request,
+    );
+  }
+
+  /** Rename it or change its role; making it a member narrows its keys at once. */
+  async updateOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+    request: UpdateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+      request,
+    );
+  }
+
+  /** Delete a service account; every key it holds is revoked at once. */
+  async deleteOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
     );
   }
 

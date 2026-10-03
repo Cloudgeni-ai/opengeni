@@ -60,6 +60,7 @@ import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-rout
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import {
   parseAgentParam,
+  parseServiceAccountParam,
   parseDeveloperView,
   parseWebhookParam,
   type DeveloperView,
@@ -630,6 +631,7 @@ const workspaceOrganizationRoute = createRoute({
     workspace?: string;
     webhook?: string;
     agent?: string;
+    serviceAccount?: string;
   } & InsightsRawSearch &
     ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
@@ -647,6 +649,8 @@ const workspaceOrganizationRoute = createRoute({
             : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const agent = section === "developer" ? parseAgentParam(search.agent) : undefined;
+    const serviceAccount =
+      section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
@@ -668,6 +672,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
       ...(agent ? { agent } : {}),
+      ...(serviceAccount ? { serviceAccount } : {}),
       ...(section === "insights"
         ? Object.fromEntries(
             INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -1070,6 +1075,7 @@ function Organization() {
     workspace,
     webhook,
     agent,
+    serviceAccount,
     from,
     fromLabel,
   } = workspaceOrganizationRoute.useSearch();
@@ -1090,6 +1096,7 @@ function Organization() {
               ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
               ...(webhook ? { webhook } : {}),
               ...(agent ? { agent } : {}),
+              ...(serviceAccount ? { serviceAccount } : {}),
             }
           : undefined
       }

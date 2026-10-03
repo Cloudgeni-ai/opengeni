@@ -52,6 +52,23 @@ import {
   validateOrganizationApiKeyWorkspaceScope,
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
+import {
+  effectiveKeyPermissions,
+  insertOrganizationServiceAccount,
+  lockOrganizationServiceAccount,
+  OrganizationServiceAccountRoleError,
+  permissionsBeyondServiceAccountRole,
+  serviceAccountsForKeys,
+} from "./organization-service-accounts";
+export {
+  createOrganizationServiceAccount,
+  deleteOrganizationServiceAccount,
+  getOrganizationServiceAccount,
+  listOrganizationServiceAccounts,
+  OrganizationServiceAccountNotFoundError,
+  OrganizationServiceAccountRoleError,
+  updateOrganizationServiceAccount,
+} from "./organization-service-accounts";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
@@ -186,7 +203,7 @@ import {
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
   scheduledRunHumanWaitsInRlsContext,
@@ -510,6 +527,7 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
+  ClaudeSubscriptionCredential,
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
@@ -4267,6 +4285,9 @@ export async function createOrganizationApiKey(
     maxActiveKeys?: number | null;
     rotationSourceApiKeyId?: string | null;
     policy?: OrganizationAccessPolicy;
+    /** The holder; omitted creates a service account named after the key. */
+    serviceAccountId?: string | null;
+    createdBySubjectId?: string | null;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
@@ -4274,6 +4295,40 @@ export async function createOrganizationApiKey(
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
       const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+      const storedPermissions = policy?.permissions ?? input.permissions;
+      const effective = effectiveKeyPermissions({
+        permissions: storedPermissions,
+        permissionMode: policy ? "explicit" : "legacy",
+      });
+      // A key creating a key (rotation) keeps it with the same service account.
+      const [rotationHolder] =
+        !input.serviceAccountId && input.rotationSourceApiKeyId
+          ? await scopedDb
+              .select({ serviceAccountId: schema.apiKeys.serviceAccountId })
+              .from(schema.apiKeys)
+              .where(
+                and(
+                  eq(schema.apiKeys.accountId, input.accountId),
+                  eq(schema.apiKeys.id, input.rotationSourceApiKeyId),
+                ),
+              )
+          : [];
+      const holderId = input.serviceAccountId ?? rotationHolder?.serviceAccountId ?? null;
+      const serviceAccount = holderId
+        ? await lockOrganizationServiceAccount(scopedDb, input.accountId, holderId)
+        : await insertOrganizationServiceAccount(scopedDb, {
+            accountId: input.accountId,
+            name: input.name,
+            description: input.description ?? null,
+            // Least privilege: admin only when the key needs it.
+            role:
+              permissionsBeyondServiceAccountRole("member", effective).length > 0
+                ? "admin"
+                : "member",
+            createdBySubjectId: input.createdBySubjectId ?? null,
+          });
+      const beyond = permissionsBeyondServiceAccountRole(serviceAccount.role, effective);
+      if (beyond.length > 0) throw new OrganizationServiceAccountRoleError(beyond);
       if (policy)
         await validateOrganizationApiKeyWorkspaceScope(
           scopedDb,
@@ -4320,9 +4375,10 @@ export async function createOrganizationApiKey(
           description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
-          permissions: policy?.permissions ?? input.permissions,
+          permissions: storedPermissions,
           permissionMode: policy ? "explicit" : "legacy",
           workspaceScope: policy?.workspaceScope.kind ?? "all",
+          serviceAccountId: serviceAccount.id,
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
@@ -4334,10 +4390,17 @@ export async function createOrganizationApiKey(
           row.id,
           policy.workspaceScope,
         );
-      return mapApiKey(
-        row,
-        policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
-      );
+      return {
+        ...mapApiKey(
+          row,
+          policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
+        ),
+        serviceAccount: {
+          id: serviceAccount.id,
+          name: serviceAccount.name,
+          role: serviceAccount.role,
+        },
+      };
     },
   );
 }
@@ -4368,7 +4431,8 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
       .orderBy(desc(schema.apiKeys.createdAt))
       .for("share");
     const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, rows);
-    return rows.map((row) => mapApiKey(row, scopes.get(row.id)));
+    const holders = await serviceAccountsForKeys(scopedDb, rows);
+    return rows.map((row) => withHolder(mapApiKey(row, scopes.get(row.id)), row, holders));
   });
 }
 
@@ -4392,7 +4456,11 @@ export async function getOrganizationApiKey(
       .for("share");
     if (!row) return null;
     const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(tx, [row]),
+    );
   });
 }
 
@@ -4419,6 +4487,11 @@ export async function updateOrganizationApiKey(
     const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
     if (policy)
       await validateOrganizationApiKeyWorkspaceScope(tx, accountId, policy.workspaceScope);
+    if (policy && prior.serviceAccountId) {
+      const holder = await lockOrganizationServiceAccount(tx, accountId, prior.serviceAccountId);
+      const beyond = permissionsBeyondServiceAccountRole(holder.role, policy.permissions);
+      if (beyond.length > 0) throw new OrganizationServiceAccountRoleError(beyond);
+    }
     const [row] = await tx
       .update(schema.apiKeys)
       .set({
@@ -4439,7 +4512,11 @@ export async function updateOrganizationApiKey(
     if (policy)
       await replaceOrganizationApiKeyWorkspaceScope(tx, accountId, keyId, policy.workspaceScope);
     const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(tx, [row]),
+    );
   });
 }
 
@@ -4531,7 +4608,11 @@ export async function revokeOrganizationApiKey(
       .returning();
     if (!row) return null;
     const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(scopedDb, [row]),
+    );
   });
 }
 
@@ -28143,6 +28224,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       leaseFence?: { holderId: string; generation: number };
       credentialQuarantine?: XaiCredentialLeaseQuarantine;
       expectedCredentialVersion?: number;
+      credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
       now?: Date;
     },
   ): Promise<ArmXaiCapacityWaitResult> {
@@ -28161,6 +28243,8 @@ function createScopedSubscriptionCapacityWaiters(options: {
     if (input.credentialQuarantine && !input.leaseFence) {
       throw new Error(options.label + " credential quarantine requires an exact lease fence");
     }
+    if (options.provider === "claude" && input.credentialQuarantine && !input.credentialTokenFence)
+      throw new Error("Claude credential quarantine requires the exact dispatched token");
     if (
       input.credentialQuarantine?.kind === "cooldown" &&
       (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
@@ -28250,7 +28334,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   and(
                     eq(tables.credentialLeases.workspaceId, input.workspaceId),
                     eq(tables.credentialLeases.turnId, input.turnId),
-                    gt(tables.credentialLeases.leasedUntil, now),
                   ),
                 )
                 .for("update")
@@ -28310,6 +28393,15 @@ function createScopedSubscriptionCapacityWaiters(options: {
               lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
               lease.holderId === input.leaseFence.holderId &&
               lease.generation === input.leaseFence.generation);
+          const leaseStillLive = async () => {
+            if (!input.leaseFence) return true;
+            if (!lease) return false;
+            const [clock] = await rawRows<{ live: boolean }>(
+              tx,
+              sql`select ${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp() as live`,
+            );
+            return clock?.live === true;
+          };
           if (
             !session ||
             !attempt ||
@@ -28322,6 +28414,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             (goalId !== null &&
               (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
             !leaseFenceValid ||
+            !(await leaseStillLive()) ||
             !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
           ) {
             return {
@@ -28334,6 +28427,43 @@ function createScopedSubscriptionCapacityWaiters(options: {
           if (input.credentialQuarantine) {
             if (!lease)
               throw new Error(options.label + " credential quarantine lost its lease fence");
+            const [credential] = await tx
+              .select({ encrypted: tables.credentials.credentialEncrypted })
+              .from(tables.credentials)
+              .where(
+                and(
+                  eq(tables.credentials.accountId, input.accountId),
+                  eq(tables.credentials.id, lease.credentialId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!credential || !(await leaseStillLive()))
+              return {
+                action: "stale",
+                waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                events: [],
+              } as const;
+            if (options.provider === "claude" && input.credentialTokenFence) {
+              const fence = input.credentialTokenFence;
+              const token = credential
+                ? ClaudeSubscriptionCredential.parse(
+                    JSON.parse(decryptEnvironmentValue(fence.encryptionKey, credential.encrypted)),
+                  ).token
+                : null;
+              const current = Buffer.from(token ?? ""),
+                observed = Buffer.from(fence.observedAccessToken);
+              if (
+                !token ||
+                current.length !== observed.length ||
+                !timingSafeEqual(current, observed)
+              )
+                return {
+                  action: "stale",
+                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  events: [],
+                } as const;
+            }
             const updated = await tx
               .update(tables.credentials)
               .set(
@@ -28354,6 +28484,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   eq(tables.credentials.accountId, input.accountId),
                   options.credentialWorkspacePredicate(input.workspaceId),
                   eq(tables.credentials.id, lease.credentialId),
+                  sql`${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp()`,
                   ...(input.expectedCredentialVersion === undefined
                     ? []
                     : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
@@ -28361,7 +28492,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               )
               .returning({ id: tables.credentials.id });
             if (updated.length !== 1) {
-              if (input.expectedCredentialVersion !== undefined)
+              if (input.leaseFence)
                 return {
                   action: "stale",
                   waiter: existing ? mapXaiCapacityWaiter(existing) : null,
@@ -87429,6 +87560,16 @@ async function withSocialConnectionSubjectRls<T>(
   return subjectId
     ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
     : await withWorkspaceRls(db, workspaceId, fn);
+}
+
+function withHolder(
+  key: ApiKey,
+  row: typeof schema.apiKeys.$inferSelect,
+  holders: Awaited<ReturnType<typeof serviceAccountsForKeys>>,
+): ApiKey {
+  if (row.credentialKind !== "organization") return key;
+  const holder = row.serviceAccountId ? holders.get(row.serviceAccountId) : undefined;
+  return { ...key, serviceAccount: holder ? { ...holder } : null };
 }
 
 function mapApiKey(row: typeof schema.apiKeys.$inferSelect, workspaceIds?: string[]): ApiKey {

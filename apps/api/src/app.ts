@@ -228,6 +228,7 @@ import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
+import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
@@ -1687,6 +1688,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerOrganizationMcpConnectionRoutes(app, routeDeps);
+  registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
   registerBrowserSessionRoutes(app, routeDeps);
@@ -3456,12 +3458,13 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   return !segments.includes("mcp") && !segments.includes("codemode");
 }
 
-/** Client-safe agent-configuration rollout projection. */
+/** Client-safe agent-configuration projection. */
 function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
   return {
-    enabled: policy.admissionEnabled,
-    defaultForNewSessions: policy.defaultForNewSessions,
+    // Deprecated: agent configuration is always on. Kept for client compatibility.
+    enabled: true,
+    defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
       const reason = policy.unavailable[id];
       return reason === undefined ? { id, available: true } : { id, available: false, reason };

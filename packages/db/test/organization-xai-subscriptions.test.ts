@@ -40,6 +40,7 @@ import {
   getCodexCredentialStatus,
   getOrganizationCodexRotationSettings,
   selectXaiCredentialForUse,
+  workspaceXaiSubscriptionActiveForAuthority,
   setXaiSessionAccountPin,
   upsertWorkspaceVercelAiGatewayConnection,
   upsertWorkspaceOpenRouterConnection,
@@ -282,6 +283,13 @@ realTest(
       authoritySnapshot: organizationSnapshot,
     };
     expect((await getXaiRotationSettings(client.db, source))?.activeCredentialId).toBe(second.id);
+    expect(
+      await workspaceXaiSubscriptionActiveForAuthority(
+        client.db,
+        testSettings({ supergrokSubscriptionEnabled: true }),
+        source,
+      ),
+    ).toBe(true);
     expect(
       (
         await selectXaiCredentialForUse(client.db, {

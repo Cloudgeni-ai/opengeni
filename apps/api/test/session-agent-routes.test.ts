@@ -30,8 +30,8 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { withMcpClient } from "./helpers/first-party-tool-client";
 
 // Agent configuration on the public session API: create, PUT .../agent with the
-// shared tool-policy CAS, typed 422s, the admission switch, the default-for-new-
-// sessions switch, MCP child narrowing, and previously mutable endpoints.
+// shared tool-policy CAS, typed 422s, the omitted-agent default, MCP child
+// narrowing, and previously mutable endpoints.
 
 const SECRET = "agent-config-route-test-secret";
 const ENVIRONMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 43).toString("base64");
@@ -69,23 +69,19 @@ afterAll(async () => {
 }, 60_000);
 
 type Grant = Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
-type Switches = { admission?: boolean; defaultForNewSessions?: boolean };
-
-function settings(switches: Switches = {}) {
+function settings() {
   return testSettings({
     productAccessMode: "managed",
     delegationSecret: SECRET,
     environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
     sandboxBackend: "none",
-    agentConfigAdmissionEnabled: switches.admission ?? false,
-    agentConfigDefaultForNewSessions: switches.defaultForNewSessions ?? false,
   });
 }
 
-function routeDeps(switches: Switches = {}): ApiRouteDeps {
+function routeDeps(): ApiRouteDeps {
   const noop = async () => undefined;
   return {
-    settings: settings(switches),
+    settings: settings(),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {
@@ -105,8 +101,8 @@ function routeDeps(switches: Switches = {}): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-function app(switches: Switches = {}): Hono {
-  const deps = routeDeps(switches);
+function app(): Hono {
+  const deps = routeDeps();
   return createApp({
     settings: deps.settings,
     db: client.db,
@@ -192,48 +188,23 @@ function sorted(values: readonly string[]): string[] {
   return [...values].sort();
 }
 
-describe("agent configuration admission switch (real PostgreSQL)", () => {
-  test("off: any agent input and PUT .../agent are 422 agent_config_not_enabled", async () => {
+describe("agent configuration client config and MCP (real PostgreSQL)", () => {
+  test("client config always reports agent configuration on", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app();
-    const rejected = await create(target, grant, { agent: { capabilities: "none" } });
-    expect(rejected.status).toBe(422);
-    expect(rejected.json.details.code).toBe("agent_config_not_enabled");
-
-    const legacy = await create(target, grant, {});
-    expect(legacy.status).toBe(202);
-    expect(legacy.json.agent).toBeNull();
-    expect(legacy.json.effectiveTools).toBeUndefined();
-    expect(sorted(legacy.json.firstPartyMcpTools)).toEqual(sorted(DEFAULT_FIRST_PARTY_MCP_TOOLS));
-
-    const put = await putAgent(target, await humanBearer(grant), grant, legacy.json.id, {
-      agent: { capabilities: "none" },
-      expectedVersion: 1,
-    });
-    expect(put.status).toBe(422);
-    expect(put.json.error.details.code).toBe("agent_config_not_enabled");
-
-    const config = await request(target, await humanBearer(grant), "GET", "/v1/config/client");
-    expect(config.json.agentConfig).toMatchObject({ enabled: false, defaultForNewSessions: false });
+    const config = await request(app(), await humanBearer(grant), "GET", "/v1/config/client");
+    expect(config.json.agentConfig).toMatchObject({ enabled: true, defaultForNewSessions: true });
     expect(config.json.agentConfig.capabilities).toHaveLength(13);
-    const enabled = await request(
-      app({ admission: true }),
-      await humanBearer(grant),
-      "GET",
-      "/v1/config/client",
-    );
-    expect(enabled.json.agentConfig.enabled).toBe(true);
   });
 
-  test("MCP discovery exposes agent selection only when admission is enabled", async () => {
+  test("MCP session_create exposes optional agent selection", async () => {
     if (!available) return;
     const grant = await fixture();
     const root = await rootSession(grant, null);
     const attempt = await liveAttempt(grant, root.id);
-    const discoverSchema = async (switches: Switches) => {
+    const discoverSchema = async () => {
       const server = buildOpenGeniMcpServer(
-        routeDeps(switches),
+        routeDeps(),
         agentGrant(grant, attempt, ["session_create"]),
       );
       return withMcpClient(server, async (mcpClient) => {
@@ -244,35 +215,29 @@ describe("agent configuration admission switch (real PostgreSQL)", () => {
         return tool!.inputSchema;
       });
     };
-    const off = await discoverSchema({});
-    const on = await discoverSchema({ admission: true });
-    for (const schema of [off, on]) {
-      expect(schema.properties).toHaveProperty("initialMessage");
-      expect(schema.required).toContain("initialMessage");
-      expect(schema.required).not.toContain("agent");
-    }
-    expect(off.properties).not.toHaveProperty("agent");
-    const { agent, ...remainingProperties } = on.properties!;
-    expect(agent).toMatchObject({
+    const schema = await discoverSchema();
+    expect(schema.properties).toHaveProperty("initialMessage");
+    expect(schema.required).toContain("initialMessage");
+    expect(schema.required).not.toContain("agent");
+    expect(schema.properties!.agent).toMatchObject({
       type: "object",
       properties: { capabilities: { anyOf: expect.any(Array) } },
     });
-    expect({ ...on, properties: remainingProperties }).toEqual(off);
   });
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
-  test('"all" reproduces the legacy tools exactly; "none" keeps runtime mechanics', async () => {
+  test('"all" matches an omitted agent exactly; "none" keeps runtime mechanics', async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
-    const legacy = await create(target, grant, {});
+    const target = app();
+    const omitted = await create(target, grant, {});
     const all = await create(target, grant, { agent: { capabilities: "all" } });
     expect(all.status).toBe(202);
     expect(all.json.agent).toMatchObject({ version: 1, from: "all", source: "request" });
-    expect(all.json.firstPartyMcpTools).toEqual(legacy.json.firstPartyMcpTools);
-    expect(all.json.tools).toEqual(legacy.json.tools);
-    expect(all.json.toolPolicy).toEqual(legacy.json.toolPolicy);
+    expect(all.json.firstPartyMcpTools).toEqual(omitted.json.firstPartyMcpTools);
+    expect(all.json.tools).toEqual(omitted.json.tools);
+    expect(all.json.toolPolicy).toEqual(omitted.json.toolPolicy);
     expect(all.json.effectiveTools.capabilities.goals).toBe(true);
 
     const none = await create(target, grant, { agent: { capabilities: "none" } });
@@ -291,7 +256,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
   test("typed 422s: goal conflict, instructions alias conflict, explicit tool conflict", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const goalConflict = await create(target, grant, {
       goal: { text: "Ship it" },
       agent: { capabilities: { from: "all", goals: false } },
@@ -316,7 +281,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
   test("a goal implies goals; instructions alias writes the session instructions", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const created = await create(target, grant, {
       goal: { text: "Ship it" },
       agent: { capabilities: "none", instructions: "Answer briefly.", identity: "Acme" },
@@ -328,24 +293,23 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(created.json.firstPartyMcpTools).toContain("goal_complete");
   });
 
-  test("default-for-new-sessions resolves omitted agent to all with legacy tools", async () => {
+  test("an omitted agent resolves to all with the default tools", async () => {
     if (!available) return;
     const grant = await fixture();
-    const legacy = await create(app(), grant, {});
-    const defaulted = await create(app({ defaultForNewSessions: true }), grant, {});
+    const defaulted = await create(app(), grant, {});
     expect(defaulted.json.agent).toMatchObject({ from: "all", source: "deployment_default" });
-    expect(defaulted.json.firstPartyMcpTools).toEqual(legacy.json.firstPartyMcpTools);
-    expect(defaulted.json.tools).toEqual(legacy.json.tools);
+    expect(sorted(defaulted.json.firstPartyMcpTools)).toEqual(
+      sorted(DEFAULT_FIRST_PARTY_MCP_TOOLS),
+    );
   });
 
-  test("workspace defaults apply only with admission on", async () => {
+  test("workspace defaults apply to an omitted agent", async () => {
     if (!available) return;
     const grant = await fixture();
     await updateWorkspaceSettings(client.db, grant.workspaceId, {
       sessionAgentDefaults: { capabilities: { from: "none", knowledge: true }, identity: "Ws bot" },
     });
-    expect((await create(app(), grant, {})).json.agent).toBeNull();
-    const created = await create(app({ admission: true }), grant, {});
+    const created = await create(app(), grant, {});
     expect(created.json.agent).toMatchObject({
       source: "workspace_default",
       identity: "Ws bot",
@@ -360,7 +324,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
   test("CAS, next-attempt event, stale 409, human widening adds tools back", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const bearer = await humanBearer(grant);
     const created = await create(target, grant, { agent: { capabilities: "none" } });
     const sessionId = created.json.id as string;
@@ -399,13 +363,17 @@ describe("PUT .../agent (real PostgreSQL)", () => {
   test("a legacy session converts from its current effective state without widening", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
-    const legacy = await create(target, grant, {
-      firstPartyMcpTools: ["set_session_title", "wait_for_input", "goal_set", "goal_update"],
-    });
-    const converted = await putAgent(target, await humanBearer(grant), grant, legacy.json.id, {
+    const target = app();
+    // Sessions created before agent configuration keep a null config.
+    const legacy = await rootSession(grant, null, [
+      "set_session_title",
+      "wait_for_input",
+      "goal_set",
+      "goal_update",
+    ]);
+    const converted = await putAgent(target, await humanBearer(grant), grant, legacy.id, {
       agent: { identity: "Converted" },
-      expectedVersion: legacy.json.toolPolicyVersion,
+      expectedVersion: legacy.toolPolicyVersion,
     });
     expect(converted.status).toBe(200);
     expect(converted.json.agent.source).toBe("legacy_conversion");
@@ -445,7 +413,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
     });
     const attempt = await liveAttempt(grant, root.id);
     const bearer = await agentBearer(grant, attempt, root.firstPartyMcpTools);
-    const target = app({ admission: true });
+    const target = app();
     const widened = await putAgent(target, bearer, grant, root.id, {
       agent: { capabilities: { from: "none", subagents: true, goals: true } },
       expectedVersion: root.toolPolicyVersion,
@@ -464,7 +432,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
   test("previously mutable endpoints still work on a configured session", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const bearer = await humanBearer(grant);
     const created = await create(target, grant, {
       agent: { capabilities: { from: "all", goals: false } },
@@ -510,14 +478,14 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
   test("children inherit the parent's configuration and may only narrow it", async () => {
     if (!available) return;
     const grant = await fixture();
-    const parentTarget = app({ admission: true });
+    const parentTarget = app();
     const parent = await create(parentTarget, grant, {
       agent: { capabilities: { from: "none", subagents: true } },
     });
     const root = (await getSession(client.db, grant.workspaceId, parent.json.id))!;
     const attempt = await liveAttempt(grant, root.id);
     const server = buildOpenGeniMcpServer(
-      routeDeps({ admission: true }),
+      routeDeps(),
       agentGrant(grant, attempt, root.firstPartyMcpTools),
     );
     const widened = await callMcpTool(server, "session_create", {
@@ -550,12 +518,16 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
 
 // ---------------------------------------------------------------------------
 
-async function rootSession(grant: Grant, agentConfig: Session["agent"]) {
+async function rootSession(
+  grant: Grant,
+  agentConfig: Session["agent"],
+  legacyFirstPartyMcpTools: FirstPartyMcpToolName[] = ["session_create"],
+) {
   const firstPartyMcpTools: FirstPartyMcpToolName[] = agentConfig
     ? [...RUNTIME_TOOLS, "session_create", "sessions_list"].map(
         (tool) => tool as FirstPartyMcpToolName,
       )
-    : ["session_create"];
+    : legacyFirstPartyMcpTools;
   return await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,

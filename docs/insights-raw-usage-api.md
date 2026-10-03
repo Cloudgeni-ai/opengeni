@@ -64,17 +64,20 @@ privacy/authority ceilings, class snapshots, microsecond cursors, exact UTC
 midnight, grants, capability cleanup and runtime posture. Daily-rollup
 bootstrap/maintenance tests are retained in the separate rollup branch.
 
-Serving staging API `2a5ab6f512a05bf28afce38ac4259dea861d3669` is also
+Historical staging API `2a5ab6f512a05bf28afce38ac4259dea861d3669` is also
 tested before/after this migration against the **complete** current catalog,
 with both old and current provisioners. Its pre-existing readiness blockers
 from main's Claude pool tables (0598), selected-key table (0600) and Slack
 rate-limit DML (0597) remain identical; 0604 adds no violations. The old
 provisioner removes newer required grants, so current-role provisioning must
 be restored at cutover. This is not a claim that the serving old binary is
-ready on the combined main schema. Frozen pre-0603 (f893cb5) and current
+ready on the combined main schema. The f893cb5 modules (independently verified
+equivalent to serving e61's runtime-posture/role-relationships/provisioner blobs)
+are also compared before/after with both provisioners, preserving any main-0603
+service-account inventory blockers. Frozen pre-0604 (a15e7a5) and current
 runtime/provisioner readiness pass without exclusions or widened grants.
 
-After the synthetic full-HTTP baseline exceeded two seconds, 0604 adds only a
+After the synthetic full-HTTP baseline exceeded two seconds, 0605 adds only a
 concurrent partial debit-period index on account/occurredAt/workspace; no source
 rows, prices, allowances, permissions or policies are changed. The pre-index
 workspace seven-day p95 was 3.59s, workspace 30-day 9.80s, organization seven-day

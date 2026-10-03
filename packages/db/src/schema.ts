@@ -1287,6 +1287,51 @@ export const organizationUserResourceAuthorities = pgTable(
   }),
 );
 
+export type OrganizationServiceAccountRole = "admin" | "member";
+
+/** An organization identity with no person behind it; it holds organization API keys. */
+export const organizationServiceAccounts = pgTable(
+  "organization_service_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    role: text("role").$type<OrganizationServiceAccountRole>().notNull().default("admin"),
+    createdBySubjectId: text("created_by_subject_id"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_service_accounts_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    account: index("organization_service_accounts_account_idx")
+      .on(table.accountId, table.createdAt)
+      .where(sql`${table.deletedAt} is null`),
+    roleValid: check(
+      "organization_service_accounts_role_check",
+      sql`${table.role} in ('admin', 'member')`,
+    ),
+    nameValid: check(
+      "organization_service_accounts_name_check",
+      sql`length(btrim(${table.name})) between 1 and 200`,
+    ),
+    descriptionValid: check(
+      "organization_service_accounts_description_check",
+      sql`${table.description} is null or length(${table.description}) between 1 and 500`,
+    ),
+    creatorValid: check(
+      "organization_service_accounts_creator_check",
+      sql`${table.createdBySubjectId} is null or length(btrim(${table.createdBySubjectId})) between 1 and 1024`,
+    ),
+  }),
+);
+
 export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
 
 export const apiKeys = pgTable(
@@ -1310,6 +1355,8 @@ export const apiKeys = pgTable(
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
+    /** Organization keys: the service account that holds the key. */
+    serviceAccountId: uuid("service_account_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
@@ -1322,6 +1369,18 @@ export const apiKeys = pgTable(
     account: index("api_keys_account_idx").on(table.accountId),
     workspace: index("api_keys_workspace_idx").on(table.workspaceId),
     accountIdentity: uniqueIndex("api_keys_id_account_idx").on(table.id, table.accountId),
+    serviceAccountIndex: index("api_keys_service_account_idx")
+      .on(table.serviceAccountId)
+      .where(sql`${table.serviceAccountId} is not null`),
+    serviceAccount: foreignKey({
+      name: "api_keys_service_account_fk",
+      columns: [table.serviceAccountId, table.accountId],
+      foreignColumns: [organizationServiceAccounts.id, organizationServiceAccounts.accountId],
+    }).onDelete("restrict"),
+    serviceAccountKind: check(
+      "api_keys_service_account_kind_check",
+      sql`${table.serviceAccountId} is null or ${table.credentialKind} = 'organization'`,
+    ),
     accessPolicyValid: check(
       "api_keys_access_policy_check",
       sql`${table.workspaceScope} in ('all', 'selected')
