@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import * as react from "@opengeni/react";
 
-import { changedLines, chatSnippet } from "./chat-snippet";
-import { ACCENTS, defaultChatStyle } from "./style-knobs";
+import * as sdk from "@opengeni/sdk";
+
+import { changedLines, chatSnippet, serverSnippet } from "./chat-snippet";
+import { ACCENTS, customAccent, defaultChatStyle } from "./style-knobs";
 
 const dark = defaultChatStyle("dark");
 
@@ -32,5 +34,21 @@ describe("playground snippet", () => {
       '  <div data-og-theme="light" style={{',
     ]);
     expect(changedLines(before, before)).toEqual([]);
+  });
+
+  test("the server route keeps the key server-side, on the managed service", () => {
+    const lines = serverSnippet("https://app.opengeni.ai").join("\n");
+    expect(lines).toContain('baseUrl: "https://app.opengeni.ai"');
+    expect(lines).toContain("apiKey: process.env.OPENGENI_API_KEY");
+    expect(lines).toContain("createSessionProxyHandler(og, {");
+    expect(typeof sdk.OpenGeniClient).toBe("function");
+    expect(typeof sdk.createSessionProxyHandler).toBe("function");
+  });
+
+  test("a typed brand color counts once it is a full hex", () => {
+    expect(customAccent("#FF5A1F")).toEqual({ name: "Custom", value: "#ff5a1f" });
+    expect(customAccent("ff5a1f")!.value).toBe("#ff5a1f");
+    expect(customAccent("#ff5a")).toBeNull();
+    expect(customAccent("orange")).toBeNull();
   });
 });

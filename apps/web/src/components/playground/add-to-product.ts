@@ -12,3 +12,10 @@ export const ADD_TO_PRODUCT_INSTRUCTIONS = [
   "If they connect or attach the repository, offer to make the changes yourself on a branch.",
   "Keep every message short and concrete.",
 ].join(" ");
+
+/**
+ * How that chat's agent typically opens, shown where no real chat can start
+ * (the walkthrough preview).
+ */
+export const ADD_TO_PRODUCT_FIRST_REPLY =
+  "Happy to help. What's your product, and where does it live: a website, an app or a GitHub repository? Once I know, we'll go step by step: an API key, the install, then the chat component.";

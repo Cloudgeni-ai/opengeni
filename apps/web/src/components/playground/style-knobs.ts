@@ -15,6 +15,12 @@ export const ACCENTS: readonly Accent[] = [
   { name: "Rose", value: "#cf3f73" },
 ];
 
+/** A brand color typed as hex ("#5b4bff" or "5b4bff"), or null until it is one. */
+export function customAccent(value: string): Accent | null {
+  const match = /^#?([0-9a-f]{6})$/iu.exec(value.trim());
+  return match ? { name: "Custom", value: `#${match[1]!.toLowerCase()}` } : null;
+}
+
 export function defaultChatStyle(theme: "light" | "dark"): ChatStyle {
   return { accent: ACCENTS[0]!, theme };
 }

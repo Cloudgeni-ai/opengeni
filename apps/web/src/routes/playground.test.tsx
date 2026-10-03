@@ -34,6 +34,21 @@ const context = {
   workspaces: [{ id: DEVELOPMENT, accountId: ORG, kind: "shared", name: "Development" }],
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
+// The dialog primitive has its own tests; here it only has to open.
+mock.module("@/components/ui/dialog", () => {
+  const Pass = ({ children, ...rest }: { children?: ReactNode } & Record<string, unknown>) => (
+    <div data-ship-preview={"data-ship-preview" in rest ? "" : undefined}>{children}</div>
+  );
+  return {
+    Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
+      open ? <div role="dialog">{children}</div> : null,
+    DialogContent: Pass,
+    DialogHeader: Pass,
+    DialogFooter: Pass,
+    DialogTitle: Pass,
+    DialogDescription: Pass,
+  };
+});
 mock.module("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
   Link: ({
@@ -111,8 +126,9 @@ async function press(element: HTMLElement | null | undefined) {
   await act(async () => element.click());
   await settle();
 }
-const snippet = (container: HTMLElement) =>
-  container.querySelector('pre[aria-label="The code for this chat"]')!;
+const snippet = (container: HTMLElement) => container.querySelector('pre[data-snippet="page"]')!;
+const callout = (container: HTMLElement) =>
+  container.ownerDocument.querySelector<HTMLElement>("[data-callout]");
 const marked = (container: HTMLElement) =>
   Array.from(snippet(container).querySelectorAll("[data-changed]"), (line) => line.textContent);
 
@@ -131,9 +147,16 @@ describe("playground", () => {
       const code = snippet(container).textContent ?? "";
       expect(code).toContain("<OpenGeniChat />");
       expect(snippet(container).querySelectorAll(".og-code-line").length).toBeLessThanOrEqual(12);
-      // No steps, tabs or settings any more.
+      // No steps, tabs or settings: two small Copy buttons, one primary action.
       expect(container.querySelector("[role='tab'], [role='switch'], [data-step]")).toBeNull();
+      expect(buttonIn(container, "Copy Support.jsx")).toBeTruthy();
+      expect(container.querySelector('pre[data-snippet="server"]')!.textContent).toContain(
+        "process.env.OPENGENI_API_KEY",
+      );
       expect(buttonIn(container, "Add it to your product")).toBeTruthy();
+      expect(container.textContent).toContain(
+        "Opens a chat where an agent adds it to your product with you.",
+      );
       expect(unexpected).not.toHaveBeenCalled();
     } finally {
       await unmount();
@@ -200,6 +223,78 @@ describe("playground", () => {
         params: { workspaceId: DEVELOPMENT, sessionId: "00000000-0000-4000-8000-0000000000f1" },
       });
     } finally {
+      await unmount();
+    }
+  });
+
+  test("callouts go chat, color, code, ship, each on the person's action", async () => {
+    const { container, unmount } = await mount();
+    try {
+      expect(callout(container)!.dataset.callout).toBe("chat");
+      expect(callout(container)!.textContent).toContain("<OpenGeniChat />");
+      await press(
+        buttonIn(
+          container.querySelector('[aria-label="Suggested questions"]')!,
+          "Where is my order #4417?",
+        ),
+      );
+      expect(callout(container)!.dataset.callout).toBe("color");
+      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Rose"]'));
+      expect(callout(container)!.dataset.callout).toBe("code");
+      expect(callout(container)!.textContent).toContain("one prop");
+      // Nothing moves on by itself.
+      await settle(20);
+      expect(callout(container)!.dataset.callout).toBe("code");
+      await press(buttonIn(callout(container)!, "Next"));
+      expect(callout(container)!.dataset.callout).toBe("ship");
+      await press(buttonIn(callout(container)!, "Skip"));
+      expect(callout(container)).toBeNull();
+      expect(localStorage.getItem(`og.playground:v4:${encodeURIComponent(SUBJECT)}:tips`)).toBe(
+        "off",
+      );
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("your own brand color and the phone preview", async () => {
+    localStorage.setItem(`og.playground:v4:${encodeURIComponent(SUBJECT)}:tips`, "off");
+    const { container, unmount } = await mount();
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Your brand color"]',
+      )!;
+      // Type a brand color, through the input's own change handler.
+      const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+      const onChange = (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[
+        propsKey
+      ]!.onChange;
+      await act(async () => onChange({ target: { value: "#ff5a1f" } }));
+      await settle();
+      const product = container.querySelector<HTMLElement>("[data-playground-product]")!;
+      expect(product.style.getPropertyValue("--og-color-accent")).toBe("#ff5a1f");
+      expect(marked(container)).toContain('    "--og-color-accent": "#ff5a1f",');
+      await press(buttonIn(container.querySelector('[aria-label="Preview size"]')!, "Phone"));
+      expect(
+        container.querySelector<HTMLElement>("[data-callout-target='chat']")!.className,
+      ).toContain("max-w-[390px]");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("without a workspace to start chats in, it shows how the chat opens", async () => {
+    const real = context.startSession;
+    (context as { startSession?: unknown }).startSession = undefined;
+    const { container, unmount } = await mount();
+    try {
+      await press(buttonIn(container, "Add it to your product"));
+      const dialog = document.querySelector("[data-ship-preview]")!;
+      expect(dialog.textContent).toContain("A chat like this opens");
+      expect(dialog.textContent).toContain(ADD_AGENT_DEFAULT_PROMPT);
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      context.startSession = real;
       await unmount();
     }
   });
