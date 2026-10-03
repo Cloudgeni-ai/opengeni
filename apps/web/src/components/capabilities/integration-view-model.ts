@@ -18,6 +18,8 @@ export type IntegrationChipLabel =
   | "Needs attention"
   | "Not connected"
   | "Set up by an admin"
+  | "Retired"
+  | "Unavailable"
   | "Access restricted"
   | "Loading"
   | "Installed"

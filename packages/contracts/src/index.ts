@@ -1113,6 +1113,10 @@ export function currentAgentLearningToolSelection(
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  // Keep historical policies parseable without advertising native API execution.
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 

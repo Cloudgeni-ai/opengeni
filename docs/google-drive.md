@@ -13,15 +13,21 @@ materializes a scoped knowledge source and a shared Schedule action:
 - Selecting folders or Shared Drives freezes their exact source boundary,
   organization/workspace/personal destination, initiating subject, owning
   connection identity, source configuration generation, and read policy.
-- The separate **Enable synchronization** decision creates one provider-neutral
-  `knowledge_source_sync` action per enabled boundary and starts an idempotent
-  initial backfill. The action never creates an agent session, invokes a model,
-  or records an agent-run charge.
+- The separate **Enable synchronization** decision creates one ordinary
+  `agent_turn` Schedule per enabled boundary, with the exact source and
+  connection selection in `agentConfig.knowledgeSource`, and starts the initial
+  run. Each run creates an agent session and uses the workspace's configured
+  model and normal agent/model usage accounting. A usable model connection or
+  OpenGeni credits is therefore required.
 - Shared **Schedules** becomes canonical for cadence and the user's per-source
   pause state after creation. A later connector save does not overwrite either.
-- Source inventory, downloads/exports, canonical blobs, Documents, immutable
-  source-object/document-version provenance, and document indexing run in a
-  dedicated checkpointed Temporal workflow.
+- Within the accepted agent attempt, `knowledge_source_fetch` performs bounded,
+  checkpointed source inventory, downloads/exports, canonical storage,
+  source-object/document-version provenance, and source-content preparation.
+  `knowledge_source_read` lets the agent inspect the content changed in that
+  run, and `knowledge_save` records useful findings with evidence. The accepted
+  Agent learning settings govern publication: Automatic publishes, Review first
+  stages changes for review, and Off refuses new Knowledge.
 - The connector's read policy controls interactive connector actions only.
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
@@ -192,8 +198,8 @@ download, and export requests. Only transport failures, HTTP `429`, and HTTP
 `5xx` responses are retried; permanent provider responses retain the existing
 credential, permission, cursor, and reconnect classifications. Retry delay
 honors a bounded `Retry-After` value and otherwise uses capped exponential
-backoff. Exhausting the local policy returns control to the durable sync
-workflow. Physical retry attempts have separate telemetry and do not consume
+backoff. Exhausting the local policy returns control to the accepted source-fetch
+attempt. Physical retry attempts have separate telemetry and do not consume
 additional units from the durable source run's logical provider-request budget.
 
 Use `deploy/helm/opengeni/values.google-drive-readiness.example.yaml` as a
@@ -433,19 +439,23 @@ protector fails.
 Provider revision is observation metadata, not the immutable OpenGeni version
 identity. A revision or metadata/ACL change is recorded even when the bytes,
 Document, and file are unchanged, so the next repair does not repeatedly
-download the same provider observation. Automatic Temporal retries also repair
-both persistence seams: a current immutable version without an index obligation
-gets one, and a pending obligation is re-indexed or settled before the item is
+download the same provider observation. Repeated checkpointed source fetches
+also repair both persistence seams: a current immutable version without an
+index obligation gets one, and a pending obligation is re-indexed or settled before the item is
 accepted as unchanged.
 
 Durable wake receipts retain `scheduled`, `manual`, `initial`, `retry`,
 `repair`, and future `provider_event` provenance even when overlapping fires
 coalesce. Source configuration and lifecycle generations fence wake admission,
-checkpointing, indexing obligations, ACL activation, and settlement. A stable
-per-source workflow ID plus a Postgres lease and one-item execution buffer
-enforce overlap and replay idempotency across worker restarts. Terminal runs
-emit separate knowledge-sync usage events plus low-cardinality run/item/byte
-metrics; they do not emit `agent_run.created`.
+checkpointing, indexing obligations, ACL activation, and settlement. The accepted
+scheduled-run identity, a Postgres source lease, and a one-item execution buffer
+enforce overlap and replay idempotency across worker restarts. Source processing
+emits knowledge-sync usage events and low-cardinality run/item/byte metrics.
+The ordinary scheduled agent session also records its normal agent/model usage;
+source processing does not bypass that accounting. Source-job settlement owns
+the checkpoint and summary, while the ordinary agent lifecycle owns task
+completion. Legacy dedicated source-sync schedules require migration before
+new dispatch; new Drive selections dispatch ordinary agent turns.
 
 A successful source run advances the live source sync generation, and lease
 settlement advances scheduler state to that exact output generation. Index and
@@ -548,8 +558,11 @@ Canonical implementation and proof:
 - `packages/contracts/src/google-drive.ts`
 - `packages/documents/src/google-drive.ts`
 - `apps/worker/src/activities/knowledge-source-sync.ts`
+- `apps/worker/src/activities/agent-turn/knowledge-source-tools.ts`
+- `apps/worker/src/activities/scheduled-tasks.ts`
 - `apps/api/test/google-drive.test.ts`
 - `apps/api/test/google-drive-oauth-isolation.test.ts`
+- `apps/worker/test/knowledge-source-agent-run.test.ts`
 - `packages/documents/test/google-drive.test.ts`
 - `apps/web/src/lib/google-drive-connection.test.ts`
 

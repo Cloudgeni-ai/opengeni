@@ -185,6 +185,7 @@ export type OAuthCallbackResult = {
 type WwwAuthenticateChallenge = McpOAuthChallenge;
 type ProtectedResourceMetadata = McpProtectedResourceMetadata;
 type AuthorizationServerMetadata = McpAuthorizationServerMetadata;
+type OAuthDiscoveryMode = McpOAuthDiscoveryMode | "provider_oauth_metadata";
 
 type OAuthClientRegistration = {
   method: "operator" | "manual" | "cimd" | "dcr";
@@ -216,7 +217,7 @@ type OAuthStatePayload = {
   tokenEndpoint: string;
   authorizationServer: string;
   issuer: string;
-  discoveryMode: McpOAuthDiscoveryMode;
+  discoveryMode: OAuthDiscoveryMode;
   discoveryMetadataSha256?: string;
   protectedResourceMetadataUrl?: string;
   authorizationServerMetadataUrl?: string;
@@ -527,6 +528,7 @@ async function startMcpOAuthWithinDeadline(
   // Catalog defaults are setup preferences; an explicit ownership always wins.
   const requestedOwnership: ConnectionOwnership =
     context.payload.ownership ?? defaultOwnershipFor(profile);
+  assertProfileOwnership(profile, requestedOwnership);
   const returnPath = safeReturnPath(
     context.payload.returnPath ?? workspaceIntegrationsPath(context.workspaceId),
   );
@@ -552,6 +554,7 @@ async function startMcpOAuthWithinDeadline(
   const ownership = existing
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
+  assertProfileOwnership(profile, ownership);
   // Only a managed human can own a personal Connection: personal-authority
   // execution resolves through a delegation snapshot frozen on a human's causal
   // turn, and migration 0256 can mint the `user` authority scope only for a
@@ -559,7 +562,9 @@ async function startMcpOAuthWithinDeadline(
   // choice is never silently downgraded to workspace ownership.
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
 
-  const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
+  const discovery = profile.providerOAuthDiscovery
+    ? await discoverProviderOAuth(mcpUrl, settings, deadline, profile)
+    : await discoverMcpOAuth(mcpUrl, settings, deadline);
   assertDiscoveredAuthorizationServer(settings, discovery.as, profile, providerDomain);
   const resourceParameterSupported =
     discovery.mode === "rfc9728_protected_resource" && profile.sendResourceParameter;
@@ -587,6 +592,20 @@ async function startMcpOAuthWithinDeadline(
       context,
     ),
   );
+  if (
+    profile.confidentialClientRequired &&
+    (!isConfidentialOAuthClient(client) ||
+      !discovery.as.tokenEndpointAuthMethodsSupported.includes(client.tokenEndpointAuthMethod))
+  ) {
+    throw new OAuthStartStageError(
+      "client_registration",
+      "configuration_missing",
+      new HTTPException(503, {
+        message:
+          "Gmail OAuth requires a registered Google Web application client with a secret and supported token authentication",
+      }),
+    );
+  }
   const key = requireEnvironmentEncryption(settings);
   const fullState = createSignedState(requireIntegrationsStateSecret(settings), {
     ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
@@ -925,6 +944,16 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const client = await runCallbackDatabaseStage(deadline, "client_lookup", db, (scopedDb) =>
       clientForState(scopedDb, settings, state),
     );
+    if (
+      builtInOAuthProfileFor(state)?.confidentialClientRequired &&
+      !isConfidentialOAuthClient(client)
+    ) {
+      throw new OAuthCallbackStageError(
+        "client_lookup",
+        "invalid_client",
+        new Error("Gmail OAuth client is unavailable"),
+      );
+    }
     const token = await deadline.run("token_exchange", (signal) =>
       exchangeAuthorizationCode(settings, {
         code: input.code!,
@@ -937,17 +966,33 @@ async function completeMcpOAuthCallbackWithinDeadline(
         signal,
       }),
     );
+    const profile = builtInOAuthProfileFor(state);
+    if (profile?.freshRefreshTokenRequired && !token.refreshToken) {
+      // Never splice a previous account's refresh token into a new grant.
+      // Google can omit refresh_token even after another consent prompt.
+      throw new OAuthCallbackStageError(
+        "token_exchange",
+        "offline_access_unavailable",
+        new Error("Google did not grant offline access. Start a new Gmail connection attempt."),
+      );
+    }
+    const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile);
+    if (
+      profile?.fullRequestedScopesRequired &&
+      profile.requestedScopes?.some((scope) => !scopes.includes(scope))
+    ) {
+      throw new OAuthCallbackStageError(
+        "token_exchange",
+        "insufficient_scope",
+        new Error("Google did not grant the reviewed Gmail permissions."),
+      );
+    }
     const verification = await verifyMcpToolsListNonFatal(
       observability,
       settings,
       state,
       token,
       deadline,
-    );
-    const scopes = grantedScopes(
-      token.scopeText,
-      state.authorizeScopes,
-      builtInOAuthProfileFor(state),
     );
     const credential = credentialBundle(token, state, client);
     const metadata = {
@@ -1069,6 +1114,41 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? error
         : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
+    if (connectOperation && builtInOAuthProfileFor(state)?.key === "official-gmail") {
+      // The external return URL stays exact. Its caller reads the durable
+      // attempt result, which must not remain in flight after a rejected grant.
+      try {
+        await withDatabaseStatementTimeout(db, OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS, (tx) =>
+          finishConnectOperation(tx, state!, {
+            ...connectOperation!,
+            authorize: (locked, _attempt, origin) =>
+              requireConnectOwnerAuthority(locked, state!, "connections:write", origin),
+            commit: async (_locked, current) => ({
+              ...current,
+              revision: current.revision + 1,
+              state: "failed",
+              nextAction: { type: "none" },
+              error: {
+                code: staged.reason,
+                message:
+                  staged.reason === "offline_access_unavailable"
+                    ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Gmail connection attempt."
+                    : staged.reason === "insufficient_scope"
+                      ? "Google did not grant all required Gmail permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                      : "Gmail authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+                retryable: true,
+              },
+            }),
+          }),
+        );
+      } catch (settlementError) {
+        logOAuthCallbackFailure(
+          observability,
+          new OAuthCallbackStageError("persist", "persist_failed", settlementError),
+          state,
+        );
+      }
+    }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
@@ -1320,6 +1400,70 @@ async function discoverMcpOAuth(
     }
     throw error;
   }
+}
+
+/** Exact built-in API bridge discovery never contacts its historical MCP identity. */
+async function discoverProviderOAuth(
+  resource: string,
+  settings: Settings,
+  deadline: OAuthStartDeadline,
+  profile: OAuthProviderProfile,
+) {
+  const pinned = profile.providerOAuthDiscovery;
+  if (!pinned || resource !== profile.requireExactMcpUrl?.url)
+    throw new HTTPException(422, { message: "invalid provider OAuth resource" });
+  const fetched = await deadline.run("authorization_server_metadata", (signal) =>
+    fetchOAuthMetadata(pinned.metadataUrl, settings, signal),
+  );
+  if (fetched.status !== "present")
+    throw new HTTPException(422, { message: "provider OAuth metadata is unavailable" });
+  const raw = fetched.document;
+  const issuer = normalizedIssuerKey(
+    oauthEndpointUrl(requiredString(raw.issuer, "OAuth issuer"), settings, "OAuth issuer"),
+  );
+  if (issuer !== pinned.issuer)
+    throw new HTTPException(422, { message: "provider OAuth issuer did not match its profile" });
+  const as: AuthorizationServerMetadata = {
+    issuer,
+    authorizationServer: pinned.issuer,
+    authorizationEndpoint: oauthEndpointUrl(
+      requiredString(raw.authorization_endpoint, "OAuth authorization endpoint"),
+      settings,
+      "OAuth authorization endpoint",
+    ),
+    tokenEndpoint: oauthEndpointUrl(
+      requiredString(raw.token_endpoint, "OAuth token endpoint"),
+      settings,
+      "OAuth token endpoint",
+    ),
+    clientIdMetadataDocumentSupported: false,
+    tokenEndpointAuthMethodsSupported: stringArray(raw.token_endpoint_auth_methods_supported),
+    codeChallengeMethodsSupported: stringArray(raw.code_challenge_methods_supported),
+    raw,
+    metadataUrl: fetched.url,
+  };
+  if (!as.codeChallengeMethodsSupported.includes("S256"))
+    throw new HTTPException(422, { message: "provider OAuth requires PKCE S256" });
+  return {
+    challenge: { scheme: null, scope: [] } as WwwAuthenticateChallenge,
+    prm: {
+      resource,
+      authorizationServers: [pinned.issuer],
+      scopesSupported: [...(profile.requestedScopes ?? [])],
+      raw: {},
+      metadataUrl: "",
+    } as ProtectedResourceMetadata,
+    as,
+    mode: "provider_oauth_metadata" as const,
+    resource,
+    provenance: {
+      protectedResourceMetadataUrl: null,
+      authorizationServerMetadataUrl: fetched.url,
+      metadataSha256: createHash("sha256")
+        .update(stableJson({ profile: profile.key, resource, metadataUrl: fetched.url, raw }))
+        .digest("hex"),
+    },
+  };
 }
 
 async function probeMcpChallenge(
@@ -1676,6 +1820,33 @@ function operatorClientEntryFor(
   return null;
 }
 
+/** Secret-free readiness for the exact registered client used by Gmail setup. */
+export function gmailOAuthClientConfigured(settings: Settings): boolean {
+  const entry = operatorClientEntryFor(settings, ["https://accounts.google.com"]);
+  return Boolean(
+    entry &&
+    isConfidentialOAuthClient({
+      ...entry,
+      tokenEndpointAuthMethod: tokenAuthMethod(
+        entry.tokenEndpointAuthMethod,
+        Boolean(entry.clientSecret),
+      ),
+    }),
+  );
+}
+
+function isConfidentialOAuthClient(client: {
+  clientId: string;
+  clientSecret?: string;
+  tokenEndpointAuthMethod: string;
+}): boolean {
+  return Boolean(
+    client.clientId.trim() &&
+    client.clientSecret?.trim() &&
+    ["client_secret_post", "client_secret_basic"].includes(client.tokenEndpointAuthMethod),
+  );
+}
+
 function normalizedIssuerKey(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -1909,7 +2080,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     encodedDiscoveryMode &&
     (!authorizationServerMetadataUrl ||
       (discoveryMode === "rfc9728_protected_resource" && !protectedResourceMetadataUrl) ||
-      (discoveryMode === "legacy_2025_03_26_metadata" && protectedResourceMetadataUrl))
+      (discoveryMode !== "rfc9728_protected_resource" && protectedResourceMetadataUrl))
   ) {
     throw new HTTPException(400, { message: "invalid OAuth discovery provenance state" });
   }
@@ -2010,6 +2181,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   };
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
+  assertProfileOwnership(builtInOAuthProfileFor(parsed), parsed.ownership);
   if (Boolean(connectionId) !== Boolean(connectionVersion)) {
     throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
   }
@@ -2020,22 +2192,59 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   ) {
     throw new HTTPException(400, { message: "invalid OAuth discovery binding state" });
   }
+  if (parsed.discoveryMode === "provider_oauth_metadata") {
+    const profile = builtInOAuthProfileFor(parsed);
+    const discovery = profile?.providerOAuthDiscovery;
+    if (
+      !discovery ||
+      parsed.mcpUrl !== profile?.requireExactMcpUrl?.url ||
+      parsed.resource !== parsed.mcpUrl ||
+      parsed.providerDomain !== profile?.postDiscoveryProviderDomain?.domain ||
+      normalizedIssuerKey(parsed.issuer) !== discovery.issuer ||
+      parsed.authorizationServer !== discovery.issuer ||
+      parsed.authorizationServerMetadataUrl !== discovery.metadataUrl ||
+      parsed.resourceParameterSupported
+    ) {
+      throw new HTTPException(400, { message: "invalid provider OAuth discovery binding state" });
+    }
+    assertDiscoveredAuthorizationServer(
+      settings,
+      { ...parsed, authorizationEndpoint: discovery.issuer },
+      profile!,
+      parsed.providerDomain,
+    );
+  }
   return {
     ...parsed,
+    ...(parsed.discoveryMode === "provider_oauth_metadata"
+      ? { issuer: normalizedIssuerKey(parsed.issuer) }
+      : {}),
     ...(connectionId ? { connectionId } : {}),
     ...(connectionVersion !== undefined ? { connectionVersion } : {}),
   };
 }
 
-function discoveryModeValue(value: string | undefined): McpOAuthDiscoveryMode {
+function discoveryModeValue(value: string | undefined): OAuthDiscoveryMode {
   if (!value) {
     // Every state minted before discovery modes existed used RFC 9728 PRM.
     return "rfc9728_protected_resource";
   }
-  if (value === "rfc9728_protected_resource" || value === "legacy_2025_03_26_metadata") {
+  if (
+    value === "rfc9728_protected_resource" ||
+    value === "legacy_2025_03_26_metadata" ||
+    value === "provider_oauth_metadata"
+  ) {
     return value;
   }
   throw new HTTPException(400, { message: "invalid OAuth discovery mode state" });
+}
+
+function assertProfileOwnership(
+  profile: OAuthProviderProfile | null,
+  ownership: ConnectionOwnership,
+): void {
+  if (profile?.requiredOwnership && ownership !== profile.requiredOwnership.ownership)
+    throw new HTTPException(422, { message: profile.requiredOwnership.message });
 }
 
 function connectionOwnership(value: unknown): ConnectionOwnership | undefined {
@@ -2465,7 +2674,7 @@ async function verifyMcpToolsListNonFatal(
         return verifyMcpToolsList(settings, state.mcpUrl, token, signal);
       }
       const response = await fetchOAuth(local.url, settings, {
-        method: "POST",
+        method: local.method ?? "POST",
         signal,
         headers: {
           authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
@@ -2483,7 +2692,12 @@ async function verifyMcpToolsListNonFatal(
       );
       grantRejected = local.isRejectedGrant?.(payload) ?? false;
       providerIdentity = local.validateIdentity(payload);
-      return local.toolsForScopes(grantedScopes(token.scopeText, state.authorizeScopes, profile));
+      const verifiedTools = local.toolsForScopes(
+        grantedScopes(token.scopeText, state.authorizeScopes, profile),
+      );
+      if (local.required && verifiedTools.length === 0)
+        throw new Error("Connector verification did not report an authorized tool scope");
+      return verifiedTools;
     });
     return {
       metadata: {
@@ -2502,6 +2716,7 @@ async function verifyMcpToolsListNonFatal(
     if (staged.reason === "timeout" && deadline.signal.aborted) {
       throw staged;
     }
+    if (builtInOAuthProfileFor(state)?.localToolVerification?.required) throw staged;
     logOAuthVerificationWarning(observability, staged, state);
     return {
       metadata: {

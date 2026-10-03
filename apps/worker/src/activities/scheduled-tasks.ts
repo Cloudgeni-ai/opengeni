@@ -1,4 +1,8 @@
 import {
+  ATLASSIAN_NATIVE_RETIRED_REASON,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
+import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
@@ -348,6 +352,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
+        if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            ATLASSIAN_NATIVE_RETIRED_REASON,
+          );
+          return scheduledRunTerminalResult(ATLASSIAN_NATIVE_RETIRED_REASON);
+        }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
           return await replayScheduledTaskDispatch({
@@ -416,6 +429,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
+      if (isRetiredNativeAtlassianTask(task))
+        return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
         return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
       }
@@ -2071,6 +2086,8 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
+    return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }

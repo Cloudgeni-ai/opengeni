@@ -1345,6 +1345,14 @@ direct-call path.
 Provider adapters may narrow destinations, credentials, and retries, never
 weaken shared connection, approval, idempotency, or audit boundaries.
 
+Jira and Confluence use the hosted Atlassian MCP connector. The retired native
+Atlassian API adapter retains disconnect and historical source/document records,
+but admits no new connection, source configuration, credential delegation, or
+source-fetch execution. Scheduled admission and attempt-bound source fetching
+both enforce that retirement, including existing schedules and accepted work.
+Google Drive keeps its separate native API connection and source features.
+See [`integrations-design.md`](integrations-design.md).
+
 The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
 to model and Codemode execution. Human HTTP/SDK and workspace MCP calls use
 `requireApproval`; provider handling may retain caller operation IDs. Sites
@@ -1368,6 +1376,13 @@ Canonical: [`capabilities.md`](capabilities.md),
 
 MCP OAuth redirects carry a short signed reference to encrypted, time-limited
 Postgres state under workspace RLS, then check the one-use nonce.
+The personal Gmail connector keeps its historical MCP resource identity but
+uses the reviewed REST bridge for tools. Its built-in OAuth profile reads pinned
+Google metadata and verifies Gmail's `users/me/profile`, requiring the reviewed
+scopes and offline grant before commit; setup has no preview MCP dependency.
+Canonical: `apps/api/src/integrations/oauth-profiles.ts`,
+`apps/api/src/integrations/oauth-client.ts`, and
+`packages/runtime/src/gmail-rest-mcp.ts`; see [Gmail MCP bridge](capabilities.md#gmail-mcp-bridge).
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 

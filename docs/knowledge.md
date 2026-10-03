@@ -46,13 +46,16 @@ lasting information, then explicitly retains supporting evidence or a reusable
 reference when warranted.
 Off leaves the file available to the chat while refusing new agent Knowledge.
 Document parsing and indexing are mechanical infrastructure. Configured Drive
-and Atlassian sources are ordinary scheduled agent tasks: their exact source and
+sources are ordinary scheduled agent tasks: their exact source and
 connection selection lives in `agentConfig.knowledgeSource` and is frozen in the
 accepted run. The attempt-only `knowledge_source_fetch` tool transfers and
 prepares source content with provider ACLs and durable checkpoints;
 `knowledge_source_read` lists content changed in that run and reads bounded
 passages. The agent selects findings and saves them with `knowledge_save`.
 No separate ingestion workflow decides what the company should remember.
+Native Jira/Confluence source sync is retired: existing schedules cannot fetch
+new content, while imported Documents and history remain. Atlassian agent tools
+use its hosted MCP connector; see [Atlassian](atlassian.md).
 
 A failed vector-index batch keeps its last completed projection and the durable
 queue retries it with backoff. The stored job reason stays the SQL lifecycle's

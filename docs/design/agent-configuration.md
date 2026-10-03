@@ -198,7 +198,7 @@ Rules:
 | `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
 | `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
 | `workspaceFiles` | files server | off |
-| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken/Atlassian families | off |
+| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
 | `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |
 
 3. **Omitted ⇒ the workspace default, else `"all"`.** Explicit ⇒ starting point

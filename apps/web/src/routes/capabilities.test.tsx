@@ -135,12 +135,13 @@ describe("integration state chips", () => {
     expect(googleDriveChip("connected", false, false).label).toBe("Set up by an admin");
   });
 
-  test("normalizes Atlassian and GitHub states the same way", () => {
-    expect(atlassianChip("connected", true, true).label).toBe("Connected");
-    expect(atlassianChip("paused", true, true).label).toBe("Connected");
-    expect(atlassianChip("needs_attention", true, true).label).toBe("Needs attention");
-    expect(atlassianChip("not_connected", true, true).label).toBe("Not connected");
-    expect(atlassianChip("connected", true, false).label).toBe("Set up by an admin");
+  test("marks historical native Atlassian accounts retired without changing GitHub states", () => {
+    expect(atlassianChip("connected", true, true).label).toBe("Retired");
+    expect(atlassianChip("paused", true, true).label).toBe("Retired");
+    expect(atlassianChip("needs_attention", true, true).label).toBe("Retired");
+    expect(atlassianChip("not_connected", true, true).label).toBe("Retired");
+    expect(atlassianChip("connected", true, false).label).toBe("Retired");
+    expect(atlassianChip("connected", false, false).label).toBe("Access restricted");
 
     const bound: GitHubAppInfo = {
       configured: true,

@@ -38,6 +38,7 @@ import {
   capabilityPresentation,
   presentationPermissions,
 } from "@/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "./integration-view-model";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
@@ -82,6 +83,8 @@ export function CatalogItemPage({
   onConnectAccount,
   onBack,
   backLabel,
+  setupUnavailable,
+  fikenSetup,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -97,7 +100,11 @@ export function CatalogItemPage({
   onConnectAccount?: (() => void) | undefined;
   onBack: () => void;
   backLabel?: string;
+  /** A native readiness check blocks only fresh setup, never existing management. */
+  setupUnavailable?: IntegrationViewModel["notice"];
+  fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
 }) {
+  const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
   const personalOnly = personalOnlyCapability(item);
   const defaultOwnership = personalOnly ? "personal" : defaultCapabilityConnectionOwnership(item);
@@ -425,6 +432,7 @@ export function CatalogItemPage({
               keyPageUrl={keyPageUrl}
               busy={busy}
               onAction={onAction}
+              {...(!item.enabled ? fikenSetup : {})}
             />
           </div>
         </DetailSection>
@@ -532,13 +540,13 @@ export function CatalogItemPage({
         />
       }
       title={title}
-      status={status}
+      status={setupBlocked ? undefined : status}
       chips={community ? <MetaChip variant="outline">Community</MetaChip> : undefined}
       meta={[publisher ? `By ${publisher}` : null, category, isSkill ? "Skill" : null]}
       actions={
-        primary || menu.length ? (
+        (!setupBlocked && primary) || menu.length ? (
           <>
-            {primary}
+            {setupBlocked ? null : primary}
             {menu.length ? <MoreMenu label={`More actions for ${title}`}>{menu}</MoreMenu> : null}
           </>
         ) : undefined
@@ -616,7 +624,31 @@ export function CatalogItemPage({
         ) : null}
       </DetailSection>
 
-      {setup}
+      {setupBlocked ? (
+        <DetailSection>
+          <Notice
+            tone={setupUnavailable.tone}
+            title={setupUnavailable.title}
+            live="polite"
+            action={
+              setupUnavailable.action ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={setupUnavailable.action.onClick}
+                >
+                  {setupUnavailable.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            {setupUnavailable.description}
+          </Notice>
+        </DetailSection>
+      ) : (
+        setup
+      )}
 
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection

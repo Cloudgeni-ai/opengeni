@@ -9,6 +9,7 @@ import {
   personalOnlyCapability,
 } from "./capability-copy";
 import { CatalogItemPage } from "./catalog-item-page";
+import { nativeCatalogItemNotice } from "./native-connect-readiness";
 import { IntegrationPage } from "./integration-page";
 import type { IntegrationViewModel } from "./integration-view-model";
 import { ProviderPage } from "./provider-page";
@@ -182,6 +183,80 @@ describe("CatalogItemPage", () => {
     canManageSkills: true,
     onBack: () => {},
   };
+
+  test("an unavailable native deep link has no connect action and offers retry after a failed check", async () => {
+    const connect = mock(() => {});
+    const retry = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item()}
+        onAction={() => {}}
+        onConnectAccount={connect}
+        setupUnavailable={{
+          tone: "failed",
+          title: "Couldn't check connection availability",
+          action: { label: "Retry", onClick: retry },
+        }}
+      />,
+    );
+    expect(buttons(view.container, "Connect Gmail")).toHaveLength(0);
+    expect(visibleText(view.container)).not.toContain("Not connected");
+    await act(async () => buttons(view.container, "Retry")[0]!.click());
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledTimes(0);
+    await view.unmount();
+  });
+
+  test("a stock Figma direct link explains approved-client access without opening setup", async () => {
+    const figma = item({
+      source: "registry",
+      name: "Figma",
+      mcpUrl: "https://mcp.figma.com/mcp",
+      endpointUrl: "https://mcp.figma.com/mcp",
+      providerDomain: "figma.com",
+    });
+    const connect = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={figma}
+        onAction={() => {}}
+        onConnectAccount={connect}
+        setupUnavailable={nativeCatalogItemNotice(
+          figma,
+          { status: "ready", providers: [] },
+          () => {},
+        )}
+      />,
+    );
+    expect(buttons(view.container, "Connect Figma")).toHaveLength(0);
+    expect(visibleText(view.container)).toContain("Figma requires an approved client");
+    expect(visibleText(view.container)).not.toContain("Everyone in this workspace");
+    expect(connect).toHaveBeenCalledTimes(0);
+    await view.unmount();
+  });
+
+  test("available Fiken token setup does not offer unconfigured OAuth", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item({
+          kind: "api",
+          id: "api:fiken",
+          name: "Fiken",
+          surfaceType: "first_party_fiken",
+          authKind: "api_key",
+        })}
+        onAction={() => {}}
+        fikenSetup={{ tokenAvailable: true, oauthAvailable: false }}
+      />,
+    );
+    expect(buttons(view.container, "Connect Fiken")).toHaveLength(0);
+    expect(buttons(view.container, "Connect for workspace")).toHaveLength(1);
+    expect(visibleText(view.container)).toContain("API token");
+    await view.unmount();
+  });
 
   test("a personal-only sign-in offers no ownership choice and opens the short connect step", async () => {
     const onConnectAccount = mock(() => {});

@@ -1,3 +1,4 @@
+import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
@@ -117,8 +118,10 @@ export type ScheduledTaskFormState = {
 export function scheduledTaskStateLabel(task: ScheduledTask): {
   label: string;
   active: boolean;
-  reason: "active" | "user_paused" | "connection_paused" | "source_disabled";
+  reason: "active" | "user_paused" | "connection_paused" | "source_disabled" | "provider_retired";
 } {
+  if (isRetiredNativeAtlassianTask(task))
+    return { label: "Sync retired", active: false, reason: "provider_retired" };
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
   }

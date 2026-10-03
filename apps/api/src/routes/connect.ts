@@ -68,7 +68,7 @@ import {
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
   googleDriveScopesAllowCapability,
 } from "@opengeni/contracts/google-drive";
-import { ATLASSIAN_CREDENTIAL_ROLE } from "@opengeni/contracts/atlassian";
+import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
 import {
   curatedOAuthReadiness,
   startApiIntegrationProviderOAuth,
@@ -76,7 +76,11 @@ import {
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
 import { executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
-import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import {
+  startMcpOAuth,
+  requireIntegrationsStateSecret,
+  gmailOAuthClientConfigured,
+} from "../integrations/oauth-client";
 import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
@@ -201,21 +205,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       ),
       ConnectProvider.parse({
-        id: "atlassian",
-        label: "Atlassian (Jira and Confluence)",
-        family: "atlassian",
-        readiness:
-          !external || !canWrite || !personal
-            ? "unsupported"
-            : mcpConfigured &&
-                deps.settings.atlassianClientId?.trim() &&
-                deps.settings.atlassianClientSecret?.trim()
-              ? "available"
-              : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
-        setup: ["oauth"],
-      }),
-      ConnectProvider.parse({
         id: "slack-bot",
         label: "Slack workspace bot",
         family: "slack",
@@ -236,12 +225,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite
+          !external || !canWrite || !personal
             ? "unsupported"
-            : mcpConfigured
+            : mcpConfigured && gmailOAuthClientConfigured(deps.settings)
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["workspace", "personal"] : ["workspace"],
+        ownership: personal ? ["personal"] : [],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -519,22 +508,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     : "auth_needed",
             }),
           ];
-        if (connection.metadata.credentialRole === ATLASSIAN_CREDENTIAL_ROLE)
-          return [
-            ConnectAccount.parse({
-              id: connection.id,
-              version: connection.version,
-              providerId: "atlassian",
-              label: String(connection.metadata.displayName ?? "Atlassian"),
-              ownership: "personal",
-              status:
-                connection.status === "revoked"
-                  ? "disabled"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
-            }),
-          ];
         if (isFikenConnection(connection))
           return [
             ConnectAccount.parse({
@@ -590,6 +563,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               status:
                 connection.status === "revoked"
                   ? "disabled"
+                  : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL && connection.subjectId === null
+                    ? "auth_needed"
                   : connection.status === "active"
                     ? "connected"
                     : "auth_needed",
@@ -1316,6 +1291,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
+    if (input.providerId === "atlassian")
+      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
+    if (input.providerId === "gmail" && input.ownership !== "personal")
+      throw new HTTPException(422, { message: "Gmail connections must be personal-owned" });
     let target: URL;
     try {
       target = new URL(input.returnUrl);
