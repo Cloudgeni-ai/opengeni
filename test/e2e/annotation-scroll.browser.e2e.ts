@@ -103,23 +103,20 @@ describe("editable annotation scroll ownership", () => {
           new Promise<void>((resolve) => {
             let generation = 0;
             const onScroll = (event: Event) => {
-              if (event.target === node) generation++;
-            };
-            const onEnd = (event: Event) => {
               if (event.target !== node) return;
-              const endedGeneration = generation;
-              // A layout update may emit another scroll; consume only a painted, quiet end.
+              const movedGeneration = ++generation;
+              const movedTop = node.scrollTop;
+              // Firefox's automated wheel need not emit scrollend. Wait for owned
+              // movement to survive painted frames, restarting when another scroll arrives.
               requestAnimationFrame(() =>
                 requestAnimationFrame(() => {
-                  if (generation !== endedGeneration) return;
+                  if (generation !== movedGeneration || node.scrollTop !== movedTop) return;
                   node.removeEventListener("scroll", onScroll);
-                  node.removeEventListener("scrollend", onEnd);
                   resolve();
                 }),
               );
             };
             node.addEventListener("scroll", onScroll);
-            node.addEventListener("scrollend", onEnd);
           }),
       ),
       page.mouse.wheel(0, 650),
