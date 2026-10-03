@@ -6,10 +6,6 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { execFileSync } from "node:child_process";
-import { readdir } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
-import { allowanceMigrationTail } from "./allowance-migration-tail";
 import {
   applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
@@ -171,79 +167,20 @@ describe("usage allowance DB lifecycle", () => {
     }
   });
 
-  test("old complete readiness and old role provisioning stay compatible with private allowance storage", async () => {
-    const repoRoot = new URL("../../..", import.meta.url).pathname;
-    // Exact integration-aware pre-allowance origin/main ancestor of PR3038. A moving merge-base
-    // would stop exercising the old binary as soon as the PR itself merges.
-    const oldRevision = "30414a09b";
-    const directory = `${repoRoot}/.allowance-old-runtime-${crypto.randomUUID()}`;
-    // Build immutable old source with the current dependency resolver, without
-    // copying/modifying source or substituting today's evaluator constants.
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
-    const root = await mkdtemp(directory);
-    const owner = await acquireOwnerMigratedTestDatabase("allowance-old-readiness");
+  test("current complete readiness and provisioning keep private allowance storage inaccessible", async () => {
+    // 0598 is a maintenance cutover: pre-cutover binaries and provisioners do
+    // not run against its schema. Test the supported complete current posture,
+    // retaining the real private-table and column-only privilege counterexamples.
+    const owner = await acquireOwnerMigratedTestDatabase("allowance-current-readiness");
     if (!owner) throw new Error("Owner-migrated PostgreSQL database unavailable");
-    const ownerSql = postgres(owner.ownerUrl, { max: 1 });
-    const legacyUrl = new URL(owner.adminUrl);
-    legacyUrl.username = "opengeni_app";
-    legacyUrl.password = owner.appPassword;
-    const legacyApp = createDb(legacyUrl.toString());
+    let currentApp: ReturnType<typeof createDb> | undefined;
     try {
-      // The immutable old evaluator must see its actual schema contract plus
-      // the allowance activation, not unrelated future cutovers. Stage those
-      // real migrations locally, then remove every marker and genuinely replay
-      // the tail before checking today's complete posture. Never project away
-      // tables from the evaluator or weaken its undeclared-RLS-table guard.
-      const historicalMigrations = new Set(
-        execFileSync("git", ["ls-tree", "--name-only", oldRevision, "packages/db/drizzle/"], {
-          cwd: repoRoot,
-          encoding: "utf8",
-        })
-          .trim()
-          .split("\n")
-          .map((path) => path.split("/").at(-1)),
-      );
-      const withheld = (await readdir(`${repoRoot}/packages/db/drizzle`))
-        .filter(
-          (name) =>
-            name.endsWith(".sql") &&
-            !historicalMigrations.has(name) &&
-            !(allowanceMigrationTail as readonly string[]).includes(name),
-        )
-        .sort();
-      await ownerSql`create table schema_migrations (
-        name text primary key, applied_at timestamptz not null default now())`;
-      await ownerSql`insert into schema_migrations(name) select unnest(${withheld}::text[])`;
       await migrate(owner.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
-        await writeFile(
-          `${root}/${name}`,
-          execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], {
-            cwd: repoRoot,
-          }),
-        );
-      }
-      const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
-      const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
       const options = {
         expectedRole: "opengeni_app",
         rlsStrategy: "force" as const,
         targetSchema: "public",
       };
-      await oldProvision.provisionRoles(owner.adminUrl, {
-        appRole: "opengeni_app",
-        appPassword: owner.appPassword,
-        rlsStrategy: "force",
-      });
-      const previous = await old.inspectRuntimeDatabasePosture(legacyApp.db, options);
-      expect(old.evaluateRuntimeDatabasePosture(previous, options)).toEqual([]);
-      // No runtime connection may survive the later maintenance cutovers.
-      await legacyApp.close();
-      await ownerSql`delete from schema_migrations where name = any(${withheld}::text[])`;
-      await migrate(owner.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      const receipts = await ownerSql<Array<{ name: string }>>`
-        select name from schema_migrations where name = any(${withheld}::text[]) order by name`;
-      expect(receipts.map((receipt) => receipt.name)).toEqual(withheld);
       // Re-provisioning current roles must both restore new EXECUTE seams and
       // preserve all previously required exact privileges.
       await provisionRoles(owner.adminUrl, {
@@ -251,40 +188,37 @@ describe("usage allowance DB lifecycle", () => {
         appPassword: owner.appPassword,
         rlsStrategy: "force",
       });
-      const currentApp = createDb(legacyUrl.toString());
-      try {
-        const current = await inspectRuntimeDatabasePosture(currentApp.db, options);
-        expect(evaluateRuntimeDatabasePosture(current, options)).toEqual([]);
-        expect(
-          current.tables.some((table) =>
-            (RUNTIME_ALLOWANCE_PRIVATE_TABLES as readonly string[]).includes(table.name),
-          ),
-        ).toBe(false);
-        const unsafe = structuredClone(current);
-        unsafe.privateTables.find((table) => table.name === "workspace_usage_allowances")!.insert =
-          true;
-        expect(evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
-          "usage allowance private table workspace_usage_allowances is missing or unsafe",
-        );
-        // Real catalog probe: table-level checks alone miss column-only DML.
-        await owner.admin`grant insert(config) on opengeni_private.workspace_usage_allowances to opengeni_app`;
-        const columnGrant = await inspectRuntimeDatabasePosture(currentApp.db, options);
-        expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
-          "usage allowance private table workspace_usage_allowances is missing or unsafe",
-        );
-        await provisionRoles(owner.adminUrl, {
-          appRole: "opengeni_app",
-          appPassword: owner.appPassword,
-          rlsStrategy: "force",
-        });
-      } finally {
-        await currentApp.close();
-      }
+      const runtimeUrl = new URL(owner.adminUrl);
+      runtimeUrl.username = "opengeni_app";
+      runtimeUrl.password = owner.appPassword;
+      currentApp = createDb(runtimeUrl.toString());
+      const current = await inspectRuntimeDatabasePosture(currentApp.db, options);
+      expect(evaluateRuntimeDatabasePosture(current, options)).toEqual([]);
+      expect(
+        current.tables.some((table) =>
+          (RUNTIME_ALLOWANCE_PRIVATE_TABLES as readonly string[]).includes(table.name),
+        ),
+      ).toBe(false);
+      const unsafe = structuredClone(current);
+      unsafe.privateTables.find((table) => table.name === "workspace_usage_allowances")!.insert =
+        true;
+      expect(evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
+        "usage allowance private table workspace_usage_allowances is missing or unsafe",
+      );
+      // Real catalog probe: table-level checks alone miss column-only DML.
+      await owner.admin`grant insert(config) on opengeni_private.workspace_usage_allowances to opengeni_app`;
+      const columnGrant = await inspectRuntimeDatabasePosture(currentApp.db, options);
+      expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
+        "usage allowance private table workspace_usage_allowances is missing or unsafe",
+      );
+      await provisionRoles(owner.adminUrl, {
+        appRole: "opengeni_app",
+        appPassword: owner.appPassword,
+        rlsStrategy: "force",
+      });
     } finally {
-      await legacyApp.close();
-      await ownerSql.end({ timeout: 5 });
+      await currentApp?.close();
       await owner.release();
-      await rm(root, { recursive: true, force: true });
     }
   }, 180_000);
 
