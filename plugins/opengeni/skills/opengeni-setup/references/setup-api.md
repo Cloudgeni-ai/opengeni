@@ -440,7 +440,6 @@ by the authenticated administrator, without widening this setup key.
 | 403 | Read `/v1/access/me` and the exact denied permission; verify the organization and that the key is the full-access setup key. |
 | 404 | Recheck deployment feature availability and workspace ownership; never fall back to Personal or production. |
 | 409 | Read current version/digest/grant and compare intended change. Repreview schema drift. Don't reuse an operation id with changed inputs. |
-| 422 `agent_config_not_enabled` | Send no `agent`/`sessionAgentDefaults`; use the explicit legacy path and report agent defaults unconfigured. |
 | 422 `agent_capability_unavailable` | Read advertised capabilities, remove only an optional unsupported capability, otherwise report the missing feature. |
 | 429, 5xx, timeout | Retry reads with bounded backoff. Reconcile writes via mapping/id/operation receipts before any retry; non-idempotent POSTs can have succeeded. |
 | `requires_action` | Inspect approval/human-input events. Let the authenticated user resolve a real required decision, not a fabricated response. |

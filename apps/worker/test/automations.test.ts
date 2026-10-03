@@ -98,6 +98,7 @@ describe("automation dispatch activity", () => {
       assertModelPolicy: async () => undefined,
       assertAuthority: async () => undefined,
       recordUsage: async () => undefined,
+      readWorkspace: async () => ({ settings: {} }) as never,
       createSession: (async (input) => {
         createInput = input as unknown as Record<string, unknown>;
         return {
@@ -167,6 +168,7 @@ describe("automation dispatch activity", () => {
       assertModelPolicy: async () => undefined,
       assertAuthority,
       recordUsage,
+      readWorkspace: async () => ({ settings: {} }) as never,
       createSession: (async (input) => {
         createInput = input as unknown as Record<string, unknown>;
         await input.beforeCreateCommit?.({} as never, sessionId);
@@ -244,6 +246,7 @@ describe("automation dispatch activity", () => {
         assertModelPolicy: async () => undefined,
         assertAuthority: async () => undefined,
         recordUsage: async () => undefined,
+        readWorkspace: async () => ({ settings: {} }) as never,
         createSession: (async (input) => {
           createInput = input as unknown as Record<string, unknown>;
           return {
@@ -300,6 +303,7 @@ describe("automation dispatch activity", () => {
         throw new AutomationAuthorityRevokedError();
       },
       recordUsage: async () => undefined,
+      readWorkspace: async () => ({ settings: {} }) as never,
       createSession: (async (input) => {
         await input.beforeCreateCommit?.({} as never, sessionId);
         throw new Error("unreachable");
@@ -414,7 +418,6 @@ describe("automation agent configuration", () => {
 
   async function dispatch(
     execution: AutomationRunExecution,
-    admission: boolean,
   ): Promise<{ createInput: Record<string, unknown> | null; settle: ReturnType<typeof mock> }> {
     let createInput: Record<string, unknown> | null = null;
     const settle = mock(async () => undefined);
@@ -422,7 +425,7 @@ describe("automation agent configuration", () => {
     const activity = createAutomationActivities(
       async () => ({
         ...(await services()()),
-        settings: testSettings({ sandboxBackend: "none", agentConfigAdmissionEnabled: admission }),
+        settings: testSettings({ sandboxBackend: "none" }),
       }),
       {
         claim: async () => execution,
@@ -444,19 +447,13 @@ describe("automation agent configuration", () => {
       },
     );
     await activity.dispatchAutomationRun({ accountId, workspaceId, runId });
-    if (
-      !admission &&
-      (execution.acceptedExecution.sessionTemplate as { agent?: unknown }).agent === undefined
-    ) {
-      expect(readWorkspace).not.toHaveBeenCalled();
-    }
     return { createInput, settle };
   }
 
-  test("an omitted template agent keeps the exact legacy session input", async () => {
-    const { createInput } = await dispatch(agentRun(undefined), false);
-    expect(createInput).not.toHaveProperty("agentConfig");
+  test("an omitted template agent resolves all and keeps the template tools", async () => {
+    const { createInput } = await dispatch(agentRun(undefined));
     expect(createInput).toMatchObject({
+      agentConfig: { from: "all", source: "deployment_default" },
       firstPartyMcpTools: ["wait_for_input", "goal_set", "knowledge_search"],
       tools: [{ kind: "mcp", id: "acme" }],
       instructions: "Complete only this automation.",
@@ -466,23 +463,11 @@ describe("automation agent configuration", () => {
   test("a template agent resolves and narrows the template's own tools", async () => {
     const { createInput } = await dispatch(
       agentRun({ capabilities: { from: "none", goals: true }, identity: "Ops bot" }),
-      true,
     );
     expect(createInput).toMatchObject({
       agentConfig: { from: "none", identity: "Ops bot", source: "request" },
       firstPartyMcpTools: ["wait_for_input", "goal_set"],
       tools: [{ kind: "mcp", id: "acme" }],
-    });
-  });
-
-  test("a stored template agent with admission off fails the run instead of dropping it", async () => {
-    const { createInput, settle } = await dispatch(agentRun({ capabilities: "none" }), false);
-    expect(createInput).toBeNull();
-    expect(settle).toHaveBeenCalledWith(expect.anything(), {
-      workspaceId,
-      runId,
-      status: "failed",
-      errorCode: "dispatch_failed",
     });
   });
 });

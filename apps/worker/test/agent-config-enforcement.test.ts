@@ -559,7 +559,7 @@ describe("agent configuration reaches the production model request", () => {
   test.each(["api", "slack", "scheduled", "automation", "site_auth_maintenance"] as const)(
     "%s creator retains null legacy and all request parity",
     async (creator: AgentConfigCreator) => {
-      const settings = testSettings({ agentConfigAdmissionEnabled: true });
+      const settings = testSettings();
       const base = {
         creator,
         settings,
@@ -568,7 +568,7 @@ describe("agent configuration reaches the production model request", () => {
         parent: null,
         goal: false,
       };
-      const legacyConfig = resolveSessionAgentConfigForCreate({
+      const omittedConfig = resolveSessionAgentConfigForCreate({
         ...base,
         request: undefined,
       }).config;
@@ -576,8 +576,10 @@ describe("agent configuration reaches the production model request", () => {
         ...base,
         request: { capabilities: "all" },
       }).config;
-      expect(legacyConfig).toBeNull();
-      const legacy = await captureWorkerRequest({ agent: legacyConfig });
+      // An omitted agent resolves "all"; only site-auth maintenance stays null.
+      expect(omittedConfig === null).toBe(creator === "site_auth_maintenance");
+      // Sessions created before agent configuration keep a null config.
+      const legacy = await captureWorkerRequest({ agent: null });
       const configured = await captureWorkerRequest({ agent: allConfig });
       // "all" keeps the legacy tool surface; its prompt is the modular composition (M4).
       expect(configured.request.tools).toEqual(legacy.request.tools);

@@ -207,6 +207,8 @@ export class OpenGeni {
         explicitAgent || implicitAgent ? { ...withoutAgent, agent } : withoutAgent,
       );
     } catch (error) {
+      // Current servers always admit `agent`. This 422 comes only from older
+      // servers that still had agent configuration behind a deployment flag.
       if (
         !(error instanceof OpenGeniApiError) ||
         error.status !== 422 ||

@@ -127,12 +127,12 @@ still enforce current permissions. Existing isolated users need an explicit
 `updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
-and defaults its renderer to `"markdown"` when the server admits agent configuration.
-Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
-and that refusal is cached per facade instance. This avoids a bootstrap request
-and supports older servers that cannot advertise admission. Explicit agent settings
-are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
-deployment operator. The private default with a user now turns personal Knowledge
+and defaults its renderer to `"markdown"`. Current servers always admit agent
+configuration. For older servers that still gate it, only an implicit renderer
+retries once without `agent` on `422 agent_config_not_enabled`, and that refusal
+is cached per facade instance. Explicit agent settings are never stripped: the
+422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for that older server's
+operator. The private default with a user now turns personal Knowledge
 on; pass `memory: false` to keep authoring off.
 Missing organization private-session enablement raises `OpenGeniSetupError`,
 with owner/admin API, SDK and web-app instructions; the proxy preserves that

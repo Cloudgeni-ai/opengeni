@@ -18287,8 +18287,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
-    // Agent configuration rollout: whether `agent` is admitted, whether new
-    // sessions default to a configuration, and per-capability availability.
+    // Agent configuration: per-capability availability. `enabled` and
+    // `defaultForNewSessions` are deprecated; current servers report `true`.
     agentConfig: ClientAgentConfig.default({
       enabled: false,
       defaultForNewSessions: false,

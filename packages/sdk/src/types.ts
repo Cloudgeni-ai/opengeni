@@ -9071,7 +9071,9 @@ export type UpdateSessionAgentRequest = {
 };
 
 export type ClientAgentConfig = {
+  /** @deprecated Agent configuration is always on; current servers always report `true`. */
   enabled: boolean;
+  /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
   defaultForNewSessions: boolean;
   capabilities: Array<{ id: AgentCapabilityId; available: boolean; reason?: string | undefined }>;
 };
@@ -9081,4 +9083,5 @@ export type AgentConfigErrorCode =
   | "agent_capability_unavailable"
   | "agent_config_conflict"
   | "agent_config_widening"
+  /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";

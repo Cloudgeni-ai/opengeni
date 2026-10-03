@@ -203,10 +203,7 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
  * only when set. Enable admission only after every worker runs a 0559-aware
  * image; the default-for-new-sessions switch then turns omitted-`agent` new
  * sessions into `{ capabilities: "all" }`. */
-export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [
-  "OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED",
-  "OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS",
-];
+export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [];
 
 /** Per-channel and per-DM Slack workspace routing. Default ON in
  * @opengeni/config; a valueEnv passthrough emitted only when set, so an unset
