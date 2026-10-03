@@ -683,6 +683,10 @@ const effectiveBudgets = {
     // 2,614,314 raw / 737,561 gzip on main c7c717790 (+2,150 raw / +466 gzip).
     // Keep the established 1.5 KiB allowance; every other cap stays fixed.
     wholeKibEnvelope(2_614_314, 1.5 * kib),
+    // Launch-window merges (history controls, model names, approval copy) add
+    // ~3 KiB to this graph; Linux/x64 CI on main 69b99b61e measures 2,617,458
+    // raw. Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_617_458, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
