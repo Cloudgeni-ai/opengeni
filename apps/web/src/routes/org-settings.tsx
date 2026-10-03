@@ -1,5 +1,5 @@
 // Organization settings: General, People, Workspaces, Organization identity,
-// Models, Integrations, Billing & usage, Developer and Security & data.
+// Models, Integrations, Insights, Billing, Developer and Security & data.
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
 // use are hidden from the rail (lib/organization-settings-access.ts).
@@ -62,6 +62,10 @@ const OrganizationDeveloperIntegrations = lazy(async () => {
   return { default: module.OrganizationDeveloperIntegrations };
 });
 
+const LazyOrganizationInsightsPage = lazy(async () => {
+  const module = await import("@/components/organization/insights-page");
+  return { default: module.OrganizationInsightsPage };
+});
 const LazyOrganizationModelsSection = lazy(async () => {
   const module = await import("@/components/models/organization-models-section");
   return { default: module.OrganizationModelsSection };
@@ -93,8 +97,16 @@ export function OrgSettingsRoute({
   invitation,
   workspace,
   developer,
+  insights,
 }: {
   workspaceId: string;
+  /** Insights: the dashboard selection from the URL and how to change it. */
+  insights?:
+    | {
+        search: Record<string, string>;
+        onSearchChange: (next: Record<string, string | undefined>) => void;
+      }
+    | undefined;
   /** Developer: the webhook or provider page, or form, that is open. */
   developer?: DeveloperLocation | undefined;
   checkout?: "success" | "cancelled";
@@ -318,6 +330,19 @@ export function OrgSettingsRoute({
       onDeleteWorkspace={deleteWorkspace}
     >
       {checkoutCelebration}
+      {section === "insights" ? (
+        <Suspense fallback={null}>
+          <OrganizationInsightsWithName
+            organizationId={accountId}
+            fallbackLabel={fallbackLabel}
+            anchorWorkspaceId={workspaceId}
+            canRead={canReadBilling}
+            search={insights?.search ?? {}}
+            onSearchChange={(next) => insights?.onSearchChange(next)}
+          />
+        </Suspense>
+      ) : null}
+      {section === "insights" ? null : (
       <OrganizationSettingsFrame
         workspaceId={workspaceId}
         fallbackLabel={fallbackLabel}
@@ -459,6 +484,7 @@ export function OrgSettingsRoute({
 
         {!modelsRefused && section === "security" ? <OrganizationSecurityPage /> : null}
       </OrganizationSettingsFrame>
+      )}
     </OrganizationDirectoryProvider>
   );
 }
@@ -536,9 +562,30 @@ function BillingSection({
       back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
-      <DetailPageHeader title="Billing & usage" />
+      <DetailPageHeader title="Billing" />
       <div className="mt-6 min-w-0">{children}</div>
     </DetailPage>
+  );
+}
+
+/** Insights, named with the organization's real name once it has loaded. */
+function OrganizationInsightsWithName({
+  fallbackLabel,
+  ...props
+}: {
+  organizationId: string;
+  fallbackLabel: string;
+  anchorWorkspaceId: string;
+  canRead: boolean;
+  search: Record<string, string>;
+  onSearchChange: (next: Record<string, string | undefined>) => void;
+}) {
+  const directory = useOptionalOrganizationDirectory();
+  return (
+    <LazyOrganizationInsightsPage
+      {...props}
+      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
   );
 }
 

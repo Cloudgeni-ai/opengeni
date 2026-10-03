@@ -223,13 +223,14 @@ describe("settings rail", () => {
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
-        "Billing & usage",
+        "Insights",
+        "Billing",
         "Developer",
         "Security & data",
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 5]);
+      ).toEqual([4, 6]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
