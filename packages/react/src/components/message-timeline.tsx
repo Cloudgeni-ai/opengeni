@@ -746,7 +746,12 @@ export function MessageTimeline({
   const resizeFollowRafRef = useRef<number | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
-  const jumpPillShown = autoFollow && (!pinned || hasNewer || canSkipTipCatchup);
+  // Unpinned is not the same as away from the tip: focusing a control in the
+  // conversation (Copy, a connection card) hands the view to the reader while
+  // they are still at the bottom. Offer the jump only once there is something
+  // below them, or a newer window / catch-up to skip.
+  const [awayFromTip, setAwayFromTip] = useState(false);
+  const jumpPillShown = autoFollow && ((!pinned && awayFromTip) || hasNewer || canSkipTipCatchup);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -2026,6 +2031,15 @@ export function MessageTimeline({
     }
   }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopFollow]);
 
+  // After the scroll authority above has settled each commit, record whether
+  // the reader is away from the tip (content can land below an unpinned
+  // reader without any scroll event).
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- Deliberately runs after every commit.
+  useLayoutEffect(() => {
+    const node = scrollRef.current;
+    if (node && !pinnedRef.current) setAwayFromTip(!isNearBottom(node));
+  });
+
   // Pinned: layout/camera recover tip debt; wheel/keys/pointer-arm unpin
   // immediately; extension jumps settle via scrollend (or one-rAF fallback).
   // Do not tip-follow-yank an in-flight unarmed scroll-away — that ate Vimium.
@@ -2034,6 +2048,8 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
+    // Only an unpinned reader's distance matters for the jump.
+    if (!pinnedRef.current) setAwayFromTip(!isNearBottom(node));
     scheduleQuestionNav();
     const previousTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
