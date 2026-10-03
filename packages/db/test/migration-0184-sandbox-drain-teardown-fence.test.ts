@@ -94,6 +94,9 @@ const withheldMigrationNames = [
   "0534_scheduled_admission_diagnostics.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
+  // Installs inventory read policies with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0547_idle_command_containment.sql",
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
@@ -105,6 +108,8 @@ const withheldMigrationNames = [
   "0582_scheduled_setup_policy_identity.sql",
   // Replaces the private instruction helper from withheld 0466; replay after it.
   "0584_agent_instruction_size_parity.sql",
+  // Requires the withheld cursor table and meaningful attention index.
+  "0585_session_attention_cursor.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

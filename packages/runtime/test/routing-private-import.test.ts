@@ -11,6 +11,7 @@ import {
 
 const csv = Buffer.from('record,total\r\n"Generated ""entry"" ø",9.75\r\n', "utf8");
 const sha256 = createHash("sha256").update(csv).digest("hex");
+type ExecSurface = "exec" | "execCommand";
 
 function request(filename: string): WorkspaceFileImportRequest {
   return {
@@ -39,13 +40,33 @@ class StreamingBackend implements RoutableBackendSession {
   constructor(
     private readonly requests: readonly WorkspaceFileImportRequest[],
     private readonly onStdin: () => void = () => {},
+    private readonly surface: ExecSurface = "exec",
   ) {}
 
   content(path: string): Buffer | undefined {
     return this.#files.get(path);
   }
 
-  async exec(args: unknown): Promise<unknown> {
+  get exec(): RoutableBackendSession["exec"] {
+    return this.surface === "exec" ? this.execute : undefined;
+  }
+
+  get execCommand(): RoutableBackendSession["execCommand"] {
+    return this.surface === "execCommand" ? this.executeCommand : undefined;
+  }
+
+  private async executeCommand(args: unknown): Promise<string> {
+    const result = (await this.execute(args)) as {
+      stdout?: string;
+      exitCode?: number;
+      sessionId?: number;
+    };
+    return result.sessionId === undefined
+      ? `Process exited with code ${result.exitCode}\n\nOutput:\n${result.stdout ?? ""}`
+      : `Process running with session ID ${result.sessionId}\n\nOutput:\n`;
+  }
+
+  private async execute(args: unknown): Promise<unknown> {
     const input = args as { cmd: string; runAs?: string };
     this.commands.push(input);
     if (input.cmd.includes("__OPENGENI_FS_CONFINED_OK__")) {
@@ -61,8 +82,8 @@ class StreamingBackend implements RoutableBackendSession {
     if (input.cmd.startsWith("rm -f ")) {
       const path = input.cmd.match(/^rm -f '([^']+)'$/u)?.[1];
       if (!path) throw new Error("expected private cleanup path");
-      expect(this.#configs.delete(path)).toBe(true);
-      this.cleaned.push(path);
+      // rm -f also succeeds when staging never created the file.
+      if (this.#configs.delete(path)) this.cleaned.push(path);
       return { stdout: "", exitCode: 0 };
     }
     const marker = input.cmd.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
@@ -89,13 +110,21 @@ class StreamingBackend implements RoutableBackendSession {
   }
 }
 
-function fixture(requests: readonly WorkspaceFileImportRequest[], swapOnStdin = false) {
+function fixture(
+  requests: readonly WorkspaceFileImportRequest[],
+  swapOnStdin: boolean,
+  surface: ExecSurface,
+) {
   let pointer: ActivePointer = { activeSandboxId: null, activeEpoch: 0 };
   let resolutions = 0;
   const events: string[] = [];
-  const backend = new StreamingBackend(requests, () => {
-    if (swapOnStdin) pointer = { activeSandboxId: "replacement", activeEpoch: 1 };
-  });
+  const backend = new StreamingBackend(
+    requests,
+    () => {
+      if (swapOnStdin) pointer = { activeSandboxId: "replacement", activeEpoch: 1 };
+    },
+    surface,
+  );
   const routing = new RoutingSandboxSession({
     readPointer: async () => ({ ...pointer }),
     resolveActiveBackend: async (active) => {
@@ -143,68 +172,72 @@ function expectPrivateAuthority(backend: StreamingBackend) {
   expect(backend.commands.every((item) => item.runAs === "fixture-user")).toBe(true);
 }
 
-describe("routed workspace imports without a provider file API", () => {
-  test.each(["single", "batch"] as const)(
-    "%s import retains stdin staging and cleanup under one admission",
-    async (kind) => {
-      const requests = [request("generated-one.csv"), request("generated-two.csv")].slice(
-        0,
-        kind === "single" ? 1 : 2,
-      );
-      const { backend, channel, events, resolutions } = fixture(requests);
-      const receipts =
-        kind === "single"
-          ? [await channel.importWorkspaceFile(requests[0]!)]
-          : await channel.importWorkspaceFiles(requests);
-      expect(receipts.map((item) => item.destinationPath)).toEqual(
-        requests.map((item) => item.destinationPath),
-      );
-      expect(receipts.map((item) => item.revision)).toEqual(kind === "single" ? [1] : [1, 2]);
-      for (const item of requests) {
-        expect(backend.content(item.destinationPath)).toEqual(csv);
-      }
-      expect(resolutions()).toBe(1);
-      expect(events).toEqual([
-        `admitted:${kind === "single" ? "importWorkspaceFile" : "importWorkspaceFiles"}`,
-        "settled:resolved",
-        "fs:emitted",
-      ]);
-      expectPrivateAuthority(backend);
-    },
-  );
+describe.each(["exec", "execCommand"] as const)(
+  "routed workspace imports without a provider file API (%s)",
+  (surface) => {
+    test.each(["single", "batch"] as const)(
+      "%s import retains stdin staging and cleanup under one admission",
+      async (kind) => {
+        const requests = [request("generated-one.csv"), request("generated-two.csv")].slice(
+          0,
+          kind === "single" ? 1 : 2,
+        );
+        const { backend, channel, events, resolutions } = fixture(requests, false, surface);
+        expect(surface === "exec" ? backend.execCommand : backend.exec).toBeUndefined();
+        const receipts =
+          kind === "single"
+            ? [await channel.importWorkspaceFile(requests[0]!)]
+            : await channel.importWorkspaceFiles(requests);
+        expect(receipts.map((item) => item.destinationPath)).toEqual(
+          requests.map((item) => item.destinationPath),
+        );
+        expect(receipts.map((item) => item.revision)).toEqual(kind === "single" ? [1] : [1, 2]);
+        for (const item of requests) {
+          expect(backend.content(item.destinationPath)).toEqual(csv);
+        }
+        expect(resolutions()).toBe(1);
+        expect(events).toEqual([
+          `admitted:${kind === "single" ? "importWorkspaceFile" : "importWorkspaceFiles"}`,
+          "settled:resolved",
+          "fs:emitted",
+        ]);
+        expectPrivateAuthority(backend);
+      },
+    );
 
-  test.each(["single", "batch"] as const)(
-    "%s import cleans on the original provider after a pointer move",
-    async (kind) => {
-      const requests = [request("generated-one.csv"), request("generated-two.csv")].slice(
-        0,
-        kind === "single" ? 1 : 2,
-      );
-      const { backend, channel, events, resolutions } = fixture(requests, true);
-      const operation =
-        kind === "single"
-          ? channel.importWorkspaceFile(requests[0]!)
-          : channel.importWorkspaceFiles(requests);
-      await expect(operation).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
-      expect(backend.staged).toHaveLength(requests.length);
-      expect(resolutions()).toBe(1);
-      expect(events).toEqual([
-        `admitted:${kind === "single" ? "importWorkspaceFile" : "importWorkspaceFiles"}`,
-        "settled:resolved",
-      ]);
-      expectPrivateAuthority(backend);
-    },
-  );
+    test.each(["single", "batch"] as const)(
+      "%s import cleans on the original provider after a pointer move",
+      async (kind) => {
+        const requests = [request("generated-one.csv"), request("generated-two.csv")].slice(
+          0,
+          kind === "single" ? 1 : 2,
+        );
+        const { backend, channel, events, resolutions } = fixture(requests, true, surface);
+        const operation =
+          kind === "single"
+            ? channel.importWorkspaceFile(requests[0]!)
+            : channel.importWorkspaceFiles(requests);
+        await expect(operation).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+        expect(backend.staged).toHaveLength(requests.length);
+        expect(resolutions()).toBe(1);
+        expect(events).toEqual([
+          `admitted:${kind === "single" ? "importWorkspaceFile" : "importWorkspaceFiles"}`,
+          "settled:resolved",
+        ]);
+        expectPrivateAuthority(backend);
+      },
+    );
 
-  test("exact replay retains revision and emits no duplicate workspace mutation", async () => {
-    const source = request("generated.csv");
-    const { backend, channel, events } = fixture([source]);
-    const first = await channel.importWorkspaceFile(source);
-    const replay = await channel.importWorkspaceFile(source);
-    expect(first.replayed).toBe(false);
-    expect(replay).toMatchObject({ ...first, replayed: true });
-    expect(channel.currentRevision()).toBe(1);
-    expect(events.filter((event) => event === "fs:emitted")).toHaveLength(1);
-    expectPrivateAuthority(backend);
-  });
-});
+    test("exact replay retains revision and emits no duplicate workspace mutation", async () => {
+      const source = request("generated.csv");
+      const { backend, channel, events } = fixture([source], false, surface);
+      const first = await channel.importWorkspaceFile(source);
+      const replay = await channel.importWorkspaceFile(source);
+      expect(first.replayed).toBe(false);
+      expect(replay).toMatchObject({ ...first, replayed: true });
+      expect(channel.currentRevision()).toBe(1);
+      expect(events.filter((event) => event === "fs:emitted")).toHaveLength(1);
+      expectPrivateAuthority(backend);
+    });
+  },
+);

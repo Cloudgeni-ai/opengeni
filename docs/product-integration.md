@@ -754,6 +754,10 @@ This does not disable workspace-authored/installed Skills or your inline
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
 
+`builtin:opengeni-schedules` provides schedule-creation guidance when
+`scheduled_tasks_create` is configured. Like other bundles, it can be excluded
+by an explicit selection and does not grant tool permissions.
+
 For an embedded support bot, put `bundledSkillIds: []` in the raw create request
 or `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
 only the product's own inline Skills and intended tools, and use a workspace

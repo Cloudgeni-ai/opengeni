@@ -50,6 +50,8 @@ const getOrganizationUsageSummary = mock(
     nextWorkspaceCursor: null,
     personalWorkspaces: [],
     personalWorkspaceCount: 0,
+    privateChats: [],
+    privateChatsTruncated: false,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -397,7 +399,7 @@ describe("organization billing StrictMode ownership", () => {
     expect(createBillingCheckout).toHaveBeenCalledWith({
       amountUsd: 25,
       accountId,
-      successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
+      successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
     });
     expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
@@ -437,6 +439,8 @@ describe("organization billing StrictMode ownership", () => {
       nextWorkspaceCursor: workspaceId,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     }));
     const container = document.createElement("div");
     document.body.appendChild(container);

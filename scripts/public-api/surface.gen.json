@@ -132,6 +132,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/billing/checkout/:checkoutSessionId",
+      "sdk": [
+        "OpenGeniClient.getBillingCheckout"
+      ],
+      "request": [],
+      "response": [
+        "BillingCheckoutStatus"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/billing/entitlements",
       "sdk": [
         "OpenGeniClient.getBillingEntitlements"
@@ -160,6 +171,19 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/billing/usage-models",
+      "sdk": [
+        "OpenGeniClient.getOrganizationModelUsage"
+      ],
+      "request": [
+        "OrganizationUsagePeriod"
+      ],
+      "response": [
+        "OrganizationModelUsage"
+      ]
     },
     {
       "method": "GET",
@@ -620,10 +644,26 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/private-session-settings",
       "sdk": [
+        "getOrganizationPrivateSessionSettings",
         "settingsPath"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/private-session-settings",
+      "sdk": [
+        "updateOrganizationPrivateSessionSettings"
+      ],
+      "request": [
+        "UpdateOrganizationPrivateSessionSettingsRequest"
+      ],
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
     },
     {
       "method": "GET",
@@ -1179,7 +1219,8 @@
       "method": "DELETE",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.clearWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.clearWorkspaceAllowance",
+        "clearWorkspaceAllowance"
       ],
       "request": [
         "ClearWorkspaceAllowanceRequest"
@@ -1192,7 +1233,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.getWorkspaceAllowance",
+        "getWorkspaceAllowance"
       ],
       "request": [],
       "response": [
@@ -1203,7 +1245,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.setWorkspaceAllowance",
+        "setWorkspaceAllowance"
       ],
       "request": [
         "SetWorkspaceAllowanceRequest"
@@ -1217,7 +1260,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/grants",
       "sdk": [
         "OpenGeniEmbeddingClient.grantWorkspaceCredits",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "grantWorkspaceCredits"
       ],
       "request": [
         "GrantWorkspaceCreditsRequest"
@@ -1231,7 +1275,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/state",
       "sdk": [
         "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getWorkspaceAllowanceState"
       ],
       "request": [],
       "response": [
@@ -2256,10 +2301,15 @@
       "path": "/v1/workspaces/:workspaceId/company-brain/context-receipts",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -2267,20 +2317,30 @@
       "sdk": [
         "OpenGeniDocumentAuthorityClient.exportCompanyBrainOkf",
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -4473,7 +4533,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setMemberAllowance"
+        "OpenGeniEmbeddingClient.setMemberAllowance",
+        "setMemberAllowance"
       ],
       "request": [
         "SetMemberAllowanceRequest"
@@ -5591,6 +5652,7 @@
       "path": "/v1/workspaces/:workspaceId/sessions",
       "sdk": [
         "OpenGeniClient.listSessionPage",
+        "OpenGeniClient.listSessionSummaryPage",
         "OpenGeniClient.listSessions",
         "createSessionProxyHandler"
       ],
@@ -5599,6 +5661,7 @@
       ],
       "response": [
         "Session",
+        "SessionListEntryResponse",
         "SessionListResponse"
       ]
     },
@@ -5630,7 +5693,8 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
       "sdk": [
         "OpenGeniClient.getSession",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "sessionPath"
       ],
       "request": [],
       "response": [
@@ -7188,7 +7252,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
-        "OpenGeniEmbeddingClient.getUsage"
+        "OpenGeniEmbeddingClient.getUsage",
+        "getUsage"
       ],
       "request": [
         "GetUsageRequest"
@@ -7202,7 +7267,8 @@
       "path": "/v1/workspaces/:workspaceId/usage/me",
       "sdk": [
         "OpenGeniEmbeddingClient.getMyUsage",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getMyUsage"
       ],
       "request": [
         "GetMyUsageRequest"
@@ -8134,7 +8200,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -8975,6 +9041,34 @@
         "$.ownerKey": "string!"
       }
     },
+    "BillingBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.balanceMicros": "integer!",
+        "$.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.updatedAt": "string!"
+      }
+    },
+    "BillingCheckoutStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.balance": "ref(BillingBalance)! null",
+        "$.checkoutSessionId": "string!",
+        "$.credit": "object!",
+        "$.credit.amountMicros": "integer!",
+        "$.credit.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.credit.free": "boolean!",
+        "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
+        "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
+      }
+    },
     "BrowserAction": {
       "io": [
         "input"
@@ -9793,7 +9887,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
       }
     },
     "CancelExternalWorkspaceMemberGrantRequest": {
@@ -10071,9 +10165,28 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.requestRestrictions": "array?",
+        "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
+        "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageRequestStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string!",
+        "$.overageResetsAt": "string! null",
+        "$.overageStatus": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.representativeClaim": "ref(ClaudeUsageWindowId)! null",
+        "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.upstreamModelId": "string! null"
       }
     },
     "ClaudeUsageWindow": {
@@ -10085,6 +10198,7 @@
         "$.id": "ref(ClaudeUsageWindowId)!",
         "$.observedAt": "string!",
         "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
         "$.usedPercent": "number! null"
       }
@@ -10193,6 +10307,9 @@
         "$.legacyModelFallback.availability.selectable": "const!=[\"false\"]",
         "$.legacyModelFallback.availability.status": "const!=[\"\\\"unavailable\\\"\"]",
         "$.legacyModelFallback.id": "string!",
+        "$.legal": "object?",
+        "$.legal.privacyPolicyUrl": "string?",
+        "$.legal.termsOfServiceUrl": "string?",
         "$.managedAuthSessionSetMode": "enum!=[\"\\\"broker\\\"\",\"\\\"dual\\\"\",\"\\\"legacy\\\"\"]",
         "$.mcpServers": "array!",
         "$.mcpServers[]": "object",
@@ -10207,6 +10324,7 @@
         "$.structuredServices.fileSystem": "boolean!",
         "$.structuredServices.git": "boolean!",
         "$.structuredServices.terminalEvents": "boolean!",
+        "$.supportEmail": "string?",
         "$.voiceInput": "object!",
         "$.voiceInput.acceptedMimeTypes": "array!",
         "$.voiceInput.acceptedMimeTypes[]": "string",
@@ -10327,6 +10445,46 @@
         "$.status": "enum!=[\"\\\"completed\\\"\",\"\\\"noop\\\"\",\"\\\"pending\\\"\"]"
       }
     },
+    "CompanyBrainContextReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.acceptedAt": "string!",
+        "$.budgetOmittedMemoryCount": "integer!",
+        "$.companyProfileIncluded": "boolean!",
+        "$.companyProfileSnapshotHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.instructionPolicyEntryHash": "string!",
+        "$.memoryEnabled": "boolean!",
+        "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)!",
+        "$.preferenceDescriptorHash": "string! null",
+        "$.renderedMemoryCount": "integer!",
+        "$.rootSessionId": "string!",
+        "$.selectedMemoryCount": "integer!",
+        "$.selectionHash": "string!",
+        "$.sessionId": "string!",
+        "$.sessionRole": "enum!=[\"\\\"child\\\"\",\"\\\"root\\\"\"]",
+        "$.turnContextSnapshotHash": "string!",
+        "$.turnContextSnapshotId": "string!",
+        "$.turnContextSnapshotSource": "enum!=[\"\\\"accepted_turn\\\"\",\"\\\"legacy_first_claim\\\"\"]",
+        "$.turnId": "string!"
+      }
+    },
+    "CompanyBrainContextReceiptPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.hasMore": "boolean!",
+        "$.nextCursor": "string! null",
+        "$.receipts": "array!",
+        "$.receipts[]": "ref(CompanyBrainContextReceipt)"
+      }
+    },
     "CompanyBrainGuidanceClassification": {
       "io": [
         "output"
@@ -10386,6 +10544,42 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"aggregate_content_bytes\\\"\",\"\\\"aggregate_item_count\\\"\",\"\\\"company_profile_history\\\"\",\"\\\"instruction_policy_history\\\"\",\"\\\"preference_count\\\"\",\"\\\"preference_history\\\"\"]"
+      }
+    },
+    "CompanyBrainKnowledgeProposal": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.authority": "ref(KnowledgeAuthority)!",
+        "$.content": "string!",
+        "$.contentHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.projection": "object!",
+        "$.projection.originalContentUtf8Bytes": "integer!",
+        "$.projection.truncated": "boolean!",
+        "$.source": "object!",
+        "$.source.claimId": "string!",
+        "$.source.evidenceId": "string!",
+        "$.status": "const!=[\"\\\"proposed\\\"\"]",
+        "$.targetKey": "string! null",
+        "$.targetKind": "ref(KnowledgeChangeProposalTargetKind)!",
+        "$.targetScope": "string!"
+      }
+    },
+    "CompanyBrainKnowledgeProposalPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.proposals": "array!",
+        "$.proposals[]": "ref(CompanyBrainKnowledgeProposal)",
+        "$.responseBytes": "integer!",
+        "$.truncatedForCount": "boolean!",
+        "$.truncatedForResponseBytes": "boolean!"
       }
     },
     "CompanyBrainOkfPackage": {
@@ -10861,6 +11055,7 @@
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
+        "$.backgroundInput": "boolean?",
         "$.clipboard": "boolean!",
         "$.keyboardInput": "boolean!",
         "$.parallelApps": "boolean!",
@@ -11463,8 +11658,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string?",
-        "$.amountUsd": "number!",
+        "$.amountUsd": "number?",
         "$.cancelUrl": "string?",
+        "$.promotionCode": "string?",
         "$.successUrl": "string?"
       }
     },
@@ -11474,6 +11670,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.amountUsd": "number?",
         "$.checkoutSessionId": "string!",
         "$.url": "string!"
       }
@@ -14340,6 +14537,25 @@
         "$": "enum=[\"\\\"configured_list_price\\\"\",\"\\\"gateway_reported\\\"\"]"
       }
     },
+    "InsightsProjectRow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cacheHitPct": "integer! null",
+        "$.calls": "integer!",
+        "$.creditUsd": "number!",
+        "$.estimatedProviderCostKnownCalls": "integer!",
+        "$.estimatedProviderUsd": "number!",
+        "$.id": "string!",
+        "$.kind": "enum!=[\"\\\"other\\\"\",\"\\\"project\\\"\",\"\\\"unavailable\\\"\",\"\\\"unfiled\\\"\"]",
+        "$.label": "string!",
+        "$.projects": "integer!",
+        "$.rootSessions": "integer!",
+        "$.tokens": "number!"
+      }
+    },
     "InsightsPromptContributionRow": {
       "io": [
         "output"
@@ -15036,6 +15252,15 @@
         "$.scope": "const!=[\"\\\"user\\\"\"]",
         "$.sessionId": "string? null",
         "$.workspaceSharedAcknowledged": "boolean?"
+      }
+    },
+    "KnowledgeAuthority": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.kind": "ref(KnowledgeEntryScope)!"
       }
     },
     "KnowledgeChangeProposalTargetKind": {
@@ -16949,6 +17174,87 @@
         "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
+    "OrganizationModelUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.billing": "array!",
+        "$.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.models": "array!",
+        "$.models[]": "object",
+        "$.models[].model": "string!",
+        "$.models[].provider": "string!",
+        "$.models[].totals": "ref(OrganizationModelUsageTotals)!",
+        "$.modelsTruncated": "boolean!",
+        "$.nextWorkspaceCursor": "string! null",
+        "$.payers": "array!",
+        "$.payers[]": "object",
+        "$.payers[].cacheInputTokens": "string!",
+        "$.payers[].cacheKnownCalls": "string!",
+        "$.payers[].cacheWriteTokens": "string!",
+        "$.payers[].cachedTokens": "string!",
+        "$.payers[].calls": "string!",
+        "$.payers[].creditMicros": "string!",
+        "$.payers[].estimatedProviderKnownCalls": "string!",
+        "$.payers[].estimatedProviderMicros": "string!",
+        "$.payers[].inputTokens": "string!",
+        "$.payers[].outputTokens": "string!",
+        "$.payers[].payer": "enum!=[\"\\\"opengeni_credits\\\"\",\"\\\"own_key\\\"\",\"\\\"subscription\\\"\"]",
+        "$.payers[].tokenKnownCalls": "string!",
+        "$.payers[].totalTokens": "string!",
+        "$.period": "ref(InsightsRange)!",
+        "$.personal": "object!",
+        "$.personal.billing": "array!",
+        "$.personal.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.personal.workspacesWithUsage": "string!",
+        "$.since": "string!",
+        "$.until": "string!",
+        "$.workspaces": "array!",
+        "$.workspaces[]": "object",
+        "$.workspaces[].billing": "array!",
+        "$.workspaces[].billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.workspaces[].name": "string! null",
+        "$.workspaces[].workspaceId": "string!"
+      }
+    },
+    "OrganizationModelUsageTotals": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.billingPath": "ref(InsightsBillingPath)!",
+        "$.cacheInputTokens": "string!",
+        "$.cacheKnownCalls": "string!",
+        "$.cacheWriteTokens": "string!",
+        "$.cachedTokens": "string!",
+        "$.calls": "string!",
+        "$.creditMicros": "string!",
+        "$.estimatedProviderKnownCalls": "string!",
+        "$.estimatedProviderMicros": "string!",
+        "$.inputTokens": "string!",
+        "$.outputTokens": "string!",
+        "$.tokenKnownCalls": "string!",
+        "$.totalTokens": "string!"
+      }
+    },
+    "OrganizationPrivateSessionSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.changed": "boolean?",
+        "$.enabled": "boolean!",
+        "$.organizationId": "string!",
+        "$.updatedAt": "string!",
+        "$.version": "integer!"
+      }
+    },
     "OrganizationProviderCustomModel": {
       "io": [
         "output"
@@ -17201,6 +17507,14 @@
         "$.personalWorkspaceCount": "integer!",
         "$.personalWorkspaces": "array!",
         "$.personalWorkspaces[]": "ref(OrganizationUsagePersonalWorkspace)",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].membershipId": "string! null",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].totals": "array!",
+        "$.privateChats[].totals[]": "ref(OrganizationUsageTotal)",
+        "$.privateChats[].workspaceId": "string!",
+        "$.privateChatsTruncated": "boolean!",
         "$.since": "string!",
         "$.totals": "array!",
         "$.totals[]": "ref(OrganizationUsageTotal)",
@@ -19660,6 +19974,7 @@
         "$.id": "string!",
         "$.observationStatus": "const?=[\"\\\"unavailable\\\"\"]",
         "$.provider": "ref(SessionBackgroundCommandProvider)!",
+        "$.reconciliation": "ref(SessionBackgroundCommandReconciliation)?",
         "$.sessionId": "string!",
         "$.settledAt": "string! null",
         "$.settlementReason": "string! null",
@@ -19696,6 +20011,19 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"connected_machine\\\"\",\"\\\"managed\\\"\"]"
+      }
+    },
+    "SessionBackgroundCommandReconciliation": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attempts": "integer!",
+        "$.claimedAt": "string! null",
+        "$.dueAt": "string!",
+        "$.lastOutcome": "string! null",
+        "$.terminalProof": "unknown! null"
       }
     },
     "SessionBackgroundCommandState": {
@@ -20067,6 +20395,83 @@
         "$.children[].session": "ref(Session)!",
         "$.sessionHasSchedules": "boolean?",
         "$.truncated": "boolean!"
+      }
+    },
+    "SessionListEntry": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.activelyWorking": "boolean!",
+        "$.archiveVersion": "integer!",
+        "$.archived": "boolean!",
+        "$.archivedAt": "string! null",
+        "$.attentionVersion": "integer!",
+        "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
+        "$.channelId": "string! null",
+        "$.createdAt": "string!",
+        "$.createdBy": "ref(TurnInitiator)!",
+        "$.displayTitle": "string!",
+        "$.effectiveControl": "ref(EffectiveSessionControl)!",
+        "$.hasSchedules": "boolean?",
+        "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
+        "$.inputWait": "object? null",
+        "$.inputWait.deadlineAt": "string!",
+        "$.inputWait.reason": "string!",
+        "$.lastSequence": "integer!",
+        "$.parentSessionId": "string! null",
+        "$.pinVersion": "integer!",
+        "$.pinned": "boolean!",
+        "$.pinnedAt": "string! null",
+        "$.renameSeed": "string!",
+        "$.requiresActionSince": "string? null",
+        "$.rootSessionId": "string!",
+        "$.scheduledTaskId": "string! null",
+        "$.siteOrigin": "object! null",
+        "$.siteOrigin.siteId": "string!",
+        "$.siteOrigin.title": "string!",
+        "$.status": "ref(SessionStatus)!",
+        "$.title": "string! null",
+        "$.titleSource": "enum! null=[\"\\\"agent\\\"\",\"\\\"user\\\"\"]",
+        "$.treeStats": "object?",
+        "$.treeStats.activelyWorkingDescendants": "integer?",
+        "$.treeStats.attentionDescendants": "integer!",
+        "$.treeStats.attentionSince": "string? null",
+        "$.treeStats.directChildren": "integer!",
+        "$.treeStats.failedDescendants": "integer!",
+        "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.queuedDescendants": "integer!",
+        "$.treeStats.runningDescendants": "integer!",
+        "$.treeStats.totalDescendants": "integer!",
+        "$.treeStats.truncated": "boolean!",
+        "$.treeStats.unreadDescendants": "integer?",
+        "$.treeStats.unreadFailedDescendants": "integer?",
+        "$.treeStats.waitingDescendants": "integer?",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "SessionListEntryResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
+        "$.filtersApplied": "const?=[\"true\"]",
+        "$.nextCursor": "string! null",
+        "$.originSiteId": "string?",
+        "$.pinned": "array!",
+        "$.pinned[]": "ref(SessionListEntry)",
+        "$.pinnedTruncated": "boolean?",
+        "$.projection": "const!=[\"\\\"summary\\\"\"]",
+        "$.sessions": "array!",
+        "$.sessions[]": "ref(SessionListEntry)",
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
       }
     },
     "SessionListResponse": {
@@ -22153,6 +22558,17 @@
         "$.operationId": "string!"
       }
     },
+    "UpdateOrganizationPrivateSessionSettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.enabled": "boolean!",
+        "$.expectedVersion": "integer!",
+        "$.operationId": "string!"
+      }
+    },
     "UpdateOrganizationRetentionPolicyRequest": {
       "io": [
         "input"
@@ -23496,20 +23912,25 @@
         "$.avgDepth": "number!",
         "$.billableTokenCap": "integer! null",
         "$.billableTokensUsed": "number!",
+        "$.cacheHitPct": "integer!",
         "$.cacheSeriesLabel": "string!",
         "$.creditUsd": "number!",
+        "$.dataThrough": "string! null",
         "$.deepestDepth": "integer!",
         "$.deepestSessionTitle": "string!",
         "$.depth": "array!",
         "$.depth[]": "ref(InsightsDepthBucket)",
+        "$.driverGroups": "integer!",
         "$.drivers": "array!",
         "$.drivers[]": "ref(InsightsSpendDriver)",
+        "$.driversTruncated": "boolean!",
         "$.equivalentCreditCostKnownCalls": "integer!",
         "$.equivalentCreditUsd": "number!",
         "$.estimatedProviderCostKnownCalls": "integer!",
         "$.estimatedProviderUsd": "number!",
         "$.facets": "array!",
         "$.facets[]": "ref(InsightsModelFacet)",
+        "$.facetsTruncated": "boolean!",
         "$.floor": "array!",
         "$.floor[]": "ref(InsightsFloorSession)",
         "$.generatedAt": "string!",
@@ -23534,6 +23955,19 @@
         "$.priorTotalTokens": "number!",
         "$.priorWarmSeconds": "number!",
         "$.priorWorkspaceCreditUsd": "number!",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].calls": "integer!",
+        "$.privateChats[].creditUsd": "number!",
+        "$.privateChats[].estimatedProviderCostKnownCalls": "integer!",
+        "$.privateChats[].estimatedProviderUsd": "number!",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].ownerKey": "string!",
+        "$.privateChats[].tokens": "number!",
+        "$.privateChats[].you": "boolean!",
+        "$.privateChatsTruncated": "boolean!",
+        "$.projects": "array!",
+        "$.projects[]": "ref(InsightsProjectRow)",
         "$.promptContributions": "object!",
         "$.promptContributions.coveredCalls": "integer!",
         "$.promptContributions.estimatedTokens": "integer!",
@@ -23545,9 +23979,13 @@
         "$.rangeLabel": "string!",
         "$.recentCalls": "array!",
         "$.recentCalls[]": "ref(InsightsModelCallRow)",
+        "$.recentCallsTruncated": "boolean!",
         "$.rootSessions": "integer!",
         "$.schedules": "array!",
         "$.schedules[]": "ref(InsightsScheduleRow)",
+        "$.scope": "object!",
+        "$.scope.rootSessionId": "string! null",
+        "$.scope.sessionId": "string! null",
         "$.selfhostedEnabled": "boolean!",
         "$.series": "array!",
         "$.series[]": "ref(InsightsSeriesPoint)",
@@ -23953,7 +24391,8 @@
     },
     "WorkspaceMemoryPromptMode": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"legacy_standing\\\"\",\"\\\"retrieval_only\\\"\"]"
@@ -24587,6 +25026,7 @@
       "BeginExternalIdentityLinkResponse": "type",
       "BeginSessionRealtimeRequest": "type",
       "BillingBalance": "type",
+      "BillingCheckoutStatus": "type",
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
       "BillingSummary": "type",
@@ -24679,6 +25119,7 @@
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
@@ -24962,6 +25403,7 @@
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
+      "formatErrorMessage": "value",
       "formatSseEvent": "value",
       "FsChangedPayload": "type",
       "FsChangeKind": "type",
@@ -25074,10 +25516,12 @@
       "InsightsModelFacet": "type",
       "InsightsModelUsageRow": "type",
       "InsightsPricingSource": "type",
+      "InsightsProjectRow": "type",
       "InsightsPromptContributionRow": "type",
       "InsightsPromptContributions": "type",
       "InsightsRange": "type",
       "InsightsScheduleRow": "type",
+      "InsightsScope": "type",
       "InsightsSeriesPoint": "type",
       "InsightsSpendDriver": "type",
       "InsightsWarmGroupRow": "type",
@@ -25584,6 +26028,7 @@
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
+      "SessionBackgroundCommandReconciliation": "type",
       "SessionCapabilities": "type",
       "SessionCodexAccountsResponse": "type",
       "SessionCommandReceipt": "type",
@@ -25615,6 +26060,9 @@
       "SessionGoalStatus": "type",
       "SessionHumanInputRequest": "type",
       "SessionLineageResponse": "type",
+      "sessionListEntry": "value",
+      "SessionListEntry": "type",
+      "SessionListEntryResponse": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionMcpApprovalPolicy": "type",
@@ -26072,6 +26520,7 @@
       "ConnectorToolPermissionsResponse": "type",
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -26200,6 +26649,7 @@
     "@opengeni/sdk/core": {
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -26814,6 +27264,9 @@
       "importExternalWorkspaceArchivedSession": "value",
       "SessionImportedArchive": "type"
     },
+    "@opengeni/sdk/session-list-entries": {
+      "sessionListEntry": "value"
+    },
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",
       "createSessionProxyHandler": "value",
@@ -27043,6 +27496,7 @@
       "CommandPaletteProps": "type",
       "CommandResult": "type",
       "completeSessionCapabilityOAuth": "value",
+      "COMPOSER_MODEL_UNAVAILABLE_MESSAGE": "value",
       "COMPOSER_PAYMENT_REQUIRED_MESSAGE": "value",
       "ComposerControllerState": "type",
       "ComposerDraftMapContext": "type",
@@ -27117,6 +27571,7 @@
       "EnrollmentConsentProps": "type",
       "EnrollmentDeviceFlow": "value",
       "EnrollmentDeviceFlowProps": "type",
+      "ErrorMessageFormatter": "type",
       "execTruncated": "value",
       "extractSessionRef": "value",
       "FILE_ONLY_MESSAGE_TEXT": "value",
@@ -27173,6 +27628,7 @@
       "isHumanInputEvent": "value",
       "isLastStartedTurnPolicyEvent": "value",
       "isLineageRefreshEvent": "value",
+      "isModelUnavailableSubmissionError": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
@@ -28005,6 +28461,7 @@
       "BrowserFrameWebSocket": "type",
       "BrowserFrameWebSocketFactory": "type",
       "BrowserIdentitiesClient": "type",
+      "BrowserInputFailure": "type",
       "BrowserSessionsClient": "type",
       "BrowserViewer": "value",
       "BrowserViewerNotification": "type",
@@ -28303,6 +28760,7 @@
       "CreateToolRegistryOptions": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "defaultToolRegistry": "value",
+      "ErrorMessageFormatter": "type",
       "GenieLoadingOptions": "type",
       "HumanInputAnswerDraft": "type",
       "HumanInputForm": "value",
@@ -28879,6 +29337,7 @@
       "getAttachedBrowser",
       "getAuthRun",
       "getBilling",
+      "getBillingCheckout",
       "getBillingEntitlements",
       "getBillingUsage",
       "getBrowserActionReceipt",
@@ -28914,6 +29373,7 @@
       "getOrganizationAdministrationOverview",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
+      "getOrganizationModelUsage",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationUsageSummary",
@@ -29044,6 +29504,7 @@
       "listSessionCodexAccounts",
       "listSessionEditableArtifacts",
       "listSessionPage",
+      "listSessionSummaryPage",
       "listSessions",
       "listSiteAuthConnections",
       "listSlackInstallationBindings",

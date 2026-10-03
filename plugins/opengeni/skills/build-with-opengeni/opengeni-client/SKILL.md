@@ -63,10 +63,17 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Two choices belong to the user: who can see a chat (`chats`: private, shared
-  or isolated) and whether the agent may change data. If the request or
-  repository does not settle one, ask ONE short, plain-language question with a
-  recommended answer, before building. Never ask what the repository answers.
+- Two choices belong to the user: who can see a chat (only the person who
+  started it, or their team) and whether the agent may change data. If the
+  request or repository does not settle one, ask ONE short, plain-language
+  question with a recommended answer, before building. Never ask what the
+  repository answers. How chats map to OpenGeni workspaces (including
+  `chats: "isolated"`) is your implementation decision: never offer it as an
+  option or mention OpenGeni workspaces in a question.
+- Decide local-development mechanics yourself (ports, local HTTPS, cookie
+  flags, seed data, test logins). When you test against a local app, OpenGeni
+  must reach its tool endpoint over public HTTPS, so open a temporary tunnel
+  (for example `cloudflared`) and tell the user you did; don't ask.
 - Do not ask about background work, schedules, session length or credential
   lifetime up front. Long agent sessions just work. Only when the requested
   feature itself is scheduled or runs in the background (for example "email me
@@ -85,8 +92,11 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
 `OpenGeniChat` (the user's chat list plus `SessionConversation`) from
-`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css`. For custom-branded
+embeds, theme with scoped `--og-*` tokens. For stock UI, use the shipped components
+and stylesheet without cosmetic host CSS or token overrides; see
+[Stock and host-branded appearance](references/product-shapes-and-ui.md#stock-and-host-branded-appearance).
+Import from `session-ui`, not the package root: the root also
 exports the workbench, whose editors, terminal and desktop viewer are optional
 peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped

@@ -63,6 +63,9 @@ export const embeddingMigrationTail = [
   "0535_slack_file_upload_operations.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
+  // Installs inventory read policies with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0547_idle_command_containment.sql",
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,
@@ -76,4 +79,6 @@ export const embeddingMigrationTail = [
   "0582_scheduled_setup_policy_identity.sql",
   // Replaces the private instruction helper from withheld 0466; replay after it.
   "0584_agent_instruction_size_parity.sql",
+  // Extends the cursor table and meaningful index withheld by these fixtures.
+  "0585_session_attention_cursor.sql",
 ];

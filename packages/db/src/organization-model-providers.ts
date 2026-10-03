@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { and, count, eq, exists, isNull, sql } from "drizzle-orm";
+import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { decryptEnvironmentValue } from "./environment-crypto";
@@ -371,6 +371,61 @@ export async function listOrganizationModelProviderCustomModelsForWorkspace(
         ),
       );
     return rows.map(mapModel);
+  });
+}
+
+/** Read provider readiness and active model definitions without credential material. */
+export async function getOrganizationModelProviderCatalogForWorkspace(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly OrganizationModelProviderKind[];
+  },
+): Promise<
+  Record<
+    OrganizationModelProviderKind,
+    { active: boolean; models: OrganizationModelProviderCustomModel[] }
+  >
+> {
+  const catalog: Record<
+    OrganizationModelProviderKind,
+    { active: boolean; models: OrganizationModelProviderCustomModel[] }
+  > = {
+    vercel_gateway: { active: false, models: [] },
+    openrouter: { active: false, models: [] },
+    anthropic: { active: false, models: [] },
+    claude_subscription: { active: false, models: [] },
+  };
+  if (input.providerKinds.length === 0) return catalog;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const connections = await scopedDb
+      .select({ providerKind: schema.organizationModelProviderConnections.providerKind })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          inArray(schema.organizationModelProviderConnections.providerKind, [
+            ...input.providerKinds,
+          ]),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      );
+    const models = await scopedDb
+      .select()
+      .from(schema.organizationModelProviderCustomModels)
+      .where(
+        and(
+          eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
+          inArray(schema.organizationModelProviderCustomModels.providerKind, [
+            ...input.providerKinds,
+          ]),
+          isNull(schema.organizationModelProviderCustomModels.retiredAt),
+        ),
+      );
+    for (const connection of connections) catalog[connection.providerKind].active = true;
+    for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
+    return catalog;
   });
 }
 

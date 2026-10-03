@@ -110,9 +110,18 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor: the worker exits,
-and normal heartbeat recovery and durable retained-process proofs govern
-admission. The deadline resets only when cleanup advances to another stage and
+A stuck writer drain is never detached to release a successor. At the deadline,
+the host stops polling and requests the ordinary graceful worker shutdown. Other
+live turns checkpoint and resume the same logical turn on a healthy worker,
+without spending their unexpected-worker-death redispatch allowance. The
+standalone host arms a 100-second exit backstop alongside Temporal's existing
+shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+retained-process proofs still govern its admission. Temporal force shutdown only
+rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
+service hosts own their fatality policy through `terminateWorker` or an equivalent
+boundary; bare activity embedders must supply `requestWorkerDrain`. Activities
+never exit the shared process. The deadline resets only when cleanup advances
+to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
@@ -120,6 +129,12 @@ processes also block admission, even when their logical outcome is `completed`.
 The work peeker exposes the existing previous-attempt wait, and the final writer's
 settlement re-arms the workflow wake. Independently adopted background commands
 retain their own lifetime and do not hold this turn-cleanup gate.
+Inference alone may resume on the same machine for a closed lease-lost attempt's
+legacy Modal home-route `execCommand` admission with unknown provider outcome
+and no retained locator. Exact actor, turn and execution generation must match.
+The admission, physical quiescence and capture/rotation fences remain unresolved;
+recovery tool results tell the model to inspect actual state before replay.
+Accepted Pause/Steer interruptions retain their independent receipt gate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
@@ -455,10 +470,15 @@ service initiator, latest connection, latest queue head, or an unrelated newer
 turn.
 
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
-model, reasoning effort, and latency mode. Explicit child values may override
-them. A Codex-subscription manager therefore keeps its external billing path for
-workers by default instead of falling back to the deployment's OpenGeni-credit
-model.
+model and reasoning effort. Explicit child values may override them. A
+Codex-subscription manager therefore keeps its external billing path for workers
+by default instead of falling back to the deployment's OpenGeni-credit model.
+Omitted latency mode instead defaults to `standard` for every fresh session;
+`fast` and `priority` require an explicit, model-supported selection. The initial
+policy records this default as `deployment`, not `continuation`. Keyed replay
+preserves the originally accepted session and turn settings. Subsequent agent
+messages do not copy the sender's latency; follow-up admission retains the
+recipient's own defaults.
 
 Session detail reads expose `dispatchWait` for active-control queued sessions
 without an active turn. It projects the existing workflow-wake ledger's pending
@@ -826,6 +846,16 @@ Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
 
+An explicitly empty effective first-party permission ceiling is zero delegated
+authority. Before eager/deferred preparation, runtime omits only remote
+OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the
+grant. Empty broad tool selection is silent; requested first-party tools and
+dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
+advisory. External-host, local-registration, connection-backed and
+already-authorized native paths retain their independent authorization.
+Automation template defaults and linked ceilings follow the same rule; see
+[automations](automations.md#empty-first-party-authority).
+
 Codemode submission compares the caller's catalog digest with the exact active
 catalog before creating its durable operation. A mismatch returns the stable
 `codemode_catalog_stale` code; the client may then refresh once, re-resolve the
@@ -924,6 +954,13 @@ snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
 storage codec before its bounded logical prefix is returned; omitted suffixes
 are disclosed and exact event bytes remain in storage.
+
+Session SSE and finite browser replay use `listSessionEventPage` byte selection.
+Interactive pages select bounded candidates, then size only the payload prefix
+needed for the page. They retain the exact full event and durable cursor; one
+oversized event is delivered alone. Explicit continuation determines completion;
+a short page never substitutes for that durable read result.
+The downstream one-frame queue cannot substitute for this upstream read bound.
 
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
@@ -1339,6 +1376,27 @@ workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
 when the write is control-aware, then the actual `workspaces` row
 `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
 turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+Child-answer read acknowledgments use the same session/cursor/turn/attempt
+prefix before updating turn metadata. The imported-archive write guard also
+locks the session on a turn update; a turn-only acknowledgment would therefore
+invert against claim, settlement, event append, or a parallel pending-result
+writer. Repeated reads remain lock-free no-ops, and a busy acknowledgment stays
+best effort without replaying the read tool or provider effects.
+Workflow-wake failure marking also owns the control/workspace/session/cursor
+prefix before its revision-conditional outbox update. The archive guard on the
+wake row locks the session; an outbox-first update would invert against a goal
+turn settlement that holds the session and enqueues its continuation wake.
+The global dispatcher uses the same tenancy/control/workspace/session prefix
+with nonblocking advisory acquisition and row `SKIP LOCKED`, then locks the
+current due outbox row. Its unlocked preview traverses workspace/session UUID
+order (not delivery priority) and does not pre-limit busy candidates; only
+actually lockable wakes count toward the bounded batch. It revalidates due
+time and undelivered revision under the locks, and retains the existing lease
+backoff and control/unquiesced-interruption projection. Migration 0587 replaces
+only the claim function, preserving its signature, owner, and app grant for old
+dispatchers during a rolling release; old failure-marker binaries remain
+outbox-first until the source rollout completes. Neither path retries delivery,
+tools, or provider effects, and the imported-archive guard remains unchanged.
 `lockWorkspaceInferenceControl` takes
 `pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
 in the same mode before the row lock. The row lock alone is unfair: PostgreSQL
@@ -2215,7 +2273,12 @@ recovery. Each ambiguous operation is invoked at most once and is never replayed
 on a replacement backend. In the winning loss transaction, every active
 retained process on that exact lease epoch/provider is marked lost, all matching
 open admissions are rejected, matching PTYs are closed, and only those process
-holders are removed before the epoch advances. Terminal processes and every
+holders are removed before the epoch advances. Each linked background command
+gets its `session.command.finished` event and typed result input in that same
+transaction; the transaction takes the session-event prefix (workspace control,
+workspace, session) before any blocker or lease row, and only when such a
+command exists; if a command was linked in the gap before the blockers were
+locked, it rolls back and retries (bounded) rather than lock a session late. Terminal processes and every
 other epoch/provider remain untouched. During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
@@ -2230,7 +2293,7 @@ observation, and every process/admission/PTY/holder/interruption identity into a
 `clrp1:` receipt. Unknown, incomplete, possible-writer, or mismatched truth
 blocks. Apply accepts only that exact reviewed receipt, re-previews before and
 under row locks, and settles the same narrow rows as the automatic loss
-transaction. It never calls a provider, changes epoch/archive/recovery truth,
+transaction, including linked command events and inputs. It never calls a provider, changes epoch/archive/recovery truth,
 writes `/workspace`, or replays an ambiguous operation. The exact runbook is in
 [`deployment.md`](deployment.md#cold-lost-provider-blocker-reconciliation).
 
@@ -2273,6 +2336,19 @@ from their 512-character preview. Clipped previews end in an ellipsis; the UI
 uses the complete text for hover and expansion. Existing rows without full text
 fall back to their saved preview. Managed exec recovery preserves the original
 command before any later read adopts the retained process.
+
+If observation fails before a legacy Modal router command receives that row,
+`recoverManagedSessionBackgroundCommand` transfers its lifetime after the exact
+owning attempt closes. The reaper holds its current claim and copied physical
+identity, then takes the canonical session/control prefix and locks the process
+before adoption. Live attempts, supervised commands and Connected Machines do
+not use this compatibility lane. Recovery preserves provider state, output
+cursors, parent admission and process holder, with an explicit unknown-outcome
+preview and no replay or invented exit. The same transaction enqueues a workflow
+wake, so unrelated later turns can proceed. Paused/cancelled control or an existing
+process cancellation request creates a stopping command; recovery never resumes
+paused work or revives a cancelled command.
+
 Both provider paths serialize session adoption with Steer, Pause, terminal
 Cancel, and session-tree deletion through the canonical workspace-control,
 workspace, session, turn, and exact-attempt fence. Managed retention and session
@@ -2335,6 +2411,13 @@ read, and live output returned to the agent is not capped.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
+Turn cleanup also checks the exact durable process UUID and copied backend route.
+If reconciliation already committed physical terminal proof, cleanup forgets its
+stale local route even when a pending output capture or old provider transport
+cannot advance. Missing rows, active rows, mismatched routes and failed reads
+never prove quiescence. This check is cleanup-only and does not accept rejected
+output into model history or replay the original command.
+
 Command reads expose `observationStatus: unavailable` when the exact retained
 process cannot be observed; session aggregates expose `unavailableCount`.
 The panel and sidebar distinguish that uncertainty from running or a requested
@@ -2370,6 +2453,9 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+Subsequent retained reads reuse the persisted completion-observation receipt
+without reacquiring session/event write locks. They still perform the same scoped
+command and output reads; the first observation retains settlement/claim locking.
 A failed or cancelled session remains terminal and
 keeps event-only command audit rather than reopening pending model input. A
 failed transaction leaves the command unsettled so the same already-checkpointed
@@ -2387,6 +2473,14 @@ Waits also recheck durable state once a second if a hint is missed. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+Session-authorized background-command GETs project stored Connected Machine
+`reconciliation` diagnostics: the last bounded outcome, attempt count, due/claim
+timestamps, and checkpointed terminal proof. Offline/error observations also
+project `observationStatus: unavailable`. These reads neither call the provider
+nor acknowledge output or model notifications. A proof can precede durable
+command settlement; `lost` may mean tracking ended, not physical process exit.
+The diagnostics expose no native final-ACK receipt or original routing locator.
 
 ### Modal retained-command observation
 
@@ -2452,6 +2546,24 @@ Start. Budget expiry and attempt cancellation abort the native RPCs; success
 requires zero exit and EOF on both streams. Definitive rejection and nonzero
 exit remain failures. This applies to both new boxes and warm reattachment.
 
+Fixed supervision-capability and materialization-visibility probes likewise
+observe their original task/exec identity after a typed lost Start acknowledgement.
+They keep their existing five-second and thirty-second budgets. Visibility
+observation can continue across multiple unavailable read windows while preserving
+its private partial output and exact cursors; contradictory identities and mixed
+no-retry failures remain authoritative. Probe continuation never repeats Start
+or the surrounding workspace mutation.
+
+For native retained stdin, a transport acknowledgement failure after reserving
+the byte range carries typed input-outcome uncertainty. The reserved range remains
+consumed and the input is never resent. The worker's retained-process tool returns
+explicit no-resend guidance and permits empty-input observation of the original
+command. Settling the rejected child RPC promise is not proof that input bytes
+were rejected; the retained parent command and holder keep their existing lifetime
+and exact terminal-proof fence. See the
+[October 2 recovery audit](design/modal-recovery-assurance-2026-10-02.md) for
+the remaining durable automatic-continuity requirements.
+
 Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
 (1–2147483647), so a setup process cannot collide with a retained command. Only
@@ -2470,38 +2582,103 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
-An idle Modal lease held only by unobservable commands can enroll their exact
-identities into the existing drain. Enrollment requires every attempt in the
-sandbox group to be quiescent beyond idle grace, no other holders, and no child
-mutation admissions. It fences new admission while preserving command records
-and holders until provider termination. Capture excludes only enrolled parent
-admissions and holders; checkpoint publication, termination, cold commit, and
-durable wake remain owned by the existing lifecycle. Unknown commands settle
-lost, never successful; a real exit arriving during drain retains its exit code.
-Failed checkpoints retain the provider and command holders for retry. Filesystem
-snapshots preserve neither running processes nor application transaction state.
+
+**Idle command containment.** A legacy retained command keeps its Modal box
+warm through a non-expiring process holder, so the zero-holder idle drain never
+runs for it and the box would stay up until the provider deadline kills it
+uncaptured. One rule contains such commands, independent of command health:
+running, still draining output, stopping, unobservable, or repeatedly failing
+observation all qualify. The reaper reads a new inventory,
+`list_command_containment_candidates(limit, idle window)` from migration 0547,
+which lists enrolled drains, rotating leases, and warm or draining Modal leases
+whose only holders are process holders of active non-supervised processes, with
+no capture or reaper hold and no open turn, turn finish, attempt close,
+holder-set change or admission in the group within the window. Exact
+enrollment then re-checks, with an unlocked screen first and then under the
+workspace control fence and the process -> admission -> lease row locks:
+
+- every active process is on the lease's current epoch, provider and home route,
+  and none is supervised;
+- no holder other than those process holders, and no unsettled admission other
+  than their parent admissions;
+- in every session of the sandbox group and every session owning a process on
+  the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
+  `waiting_capacity`, which includes a pending approval or human-input request),
+  no non-closed attempt, no pending quiescence (unsettled interruption or
+  undrained attempt writer). A `wait_for_input` that has not been superseded,
+  and unclaimed machine input that will start a turn (pending immediate system
+  updates other than command results; child lifecycle notices only with an
+  active goal), are idle-clock facts: the window runs from the wait's deadline
+  and from the input's creation. A held wait therefore keeps the command
+  running, since the agent registered it for background work it is
+  deliberately waiting on, while input or a timeout settlement that a paused
+  session can never deliver cannot pin the box until the provider deadline;
+- the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
+  (default 30 minutes; it must exceed the idle grace and, when explicit, stay
+  below the rotation lead, and it must leave the reaper period plus the drain
+  capture budget before an explicit `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS`). The
+  newest attempt close, turn finish, lease holder-set change, and admission or
+  settlement on the lease epoch must all be older than the window. Migration
+  0547 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
+  writer changes the holder counters, and gives the SECURITY DEFINER inventory
+  inventory-only read policies on the turn, attempt, admission, system-update
+  and goal tables so its screen sees them as the FORCE-RLS owner. Process age is
+  never a fact. Set `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` to explicitly
+  disable new idle-command enrollments. Configuration normalizes zero to the
+  existing absent window (deadline rule only), without deriving a replacement
+  window or passing zero to the database inventory. Unset or blank values still
+  derive the default; a derived window that cannot fit these bounds leaves idle
+  containment off rather than failing boot. Disabling this rule does not undo an
+  already enrolled drain, disable ordinary idle-lease reaping, or change provider
+  deadlines, stop grace, capture requirements, or turn/wait/holder fences.
+
+A holder or writer that committed first is seen and refuses enrollment; a later
+one observes the requested rotation and is fenced until the successor box.
+Enrollment preserves command records and holders until provider termination.
+Capture excludes only enrolled parent admissions and holders; checkpoint
+publication, termination, cold commit and durable wake remain owned by the
+existing drain, and the box is terminated immediately after capture, so the
+archive is the final state. The cold commit settles each still-active enrolled
+command `lost` with the reason recorded on the lease at enrollment
+(`idle_containment`, or `provider_deadline_containment` on a deadline rotation),
+never an exit code; a drain enrolled by a pre-0547 worker records none and
+settles as plain `provider_instance_lost`. In the same transaction it appends
+`session.command.finished`, the typed `background_command_result` input and
+`system.update.pending`, exactly as ordinary exit/loss proof does. The notice
+names the command, says nobody used the session for N minutes and nothing was
+waiting on it, says the workspace was saved, and asks the agent to restart it
+if still needed. A provider that disappeared before capture settles
+`provider_instance_lost` without a saved-workspace claim. A real exit arriving
+during the drain keeps its exit code. Failed checkpoints retain the provider and
+command holders for retry. Filesystem snapshots preserve neither running
+processes nor application transaction state.
+`opengeni_sandbox_command_containment_total{outcome}` counts inspections and
+enrolled cold commits. Pre-0547 workers keep calling the untouched legacy
+`list_unobservable_command_drain_candidates(integer)` with their narrower
+predicates during a rolling deploy; a later contract migration can drop it.
+
+Supervised commands stay excluded. Native supervision is default-off, its
+durable cancellation intent accepts only `provider_deadline` or `explicit_stop`,
+and migration 0496 forbids legacy containment from releasing a supervised
+process without its proof; an idle supervised command therefore waits for an
+explicit stop or the deadline rotation.
 
 For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner has a quiescence receipt or is normally completed and
-closed (or its direct request returned),
-and no unrelated holder or mutation admission remains. An outstanding
+exit proof when every owner attempt is closed with no pending quiescence,
+whatever its outcome (completed, cancelled, failed, superseded or awaiting
+action), or its direct request returned, and no unrelated holder or mutation
+admission remains. This backstop ignores the idle window, input waits and
+pending human requests: the box would die at the deadline anyway. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
-is captured; remaining commands settle lost. Supervised commands keep their
-separate proof gate. A prior explicit stop remains immutable; deadline intent
-starts its own grace. This path does not apply to idle or operator rotation.
-
-The same containment path covers an explicitly stopping managed command after
-at least five provider-error observations. Its cancellation request and owner
-quiescence (or normal completion and closed timestamp) must both predate idle
-grace. A failed/interrupted owner without a quiescence receipt remains blocked;
-provider errors alone never enroll a running command.
-All sandbox-group activity, other-holder and child-admission exclusions remain
-in force, and only verified provider termination settles an unknown result as
-lost. A failed checkpoint leaves the provider and holders intact for retry.
+is captured; remaining commands settle `provider_deadline_containment` with the
+same terminal event and notice. Supervised commands keep their separate proof
+gate. A prior explicit stop remains immutable; deadline intent starts its own
+grace. The two-minute grace applies only to provider-deadline rotation; any
+lease may still meet the idle rule above.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
@@ -2810,13 +2987,22 @@ rewrites. Uncoded provider failures and `provider_rate_limited` /
 `provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
 (rejected credentials, provider billing or access, a used-up daily limit, quota,
 rate limiting) with the exact recorded text behind a Details toggle. A closed
+`provider_billing_error` instead uses neutral payment-detail copy: a general
+billing refusal is not proof that credits are exhausted. Native Claude's
+legacy authored credential rejection remains classified as rejected credentials.
+A closed
 `quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
 the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
 projection carries it only as one of those four literals. Every
 billing, access, limit and quota class points at the model picker ("Choose
 another model below.") while the session still has the failed model selected. A bare leading HTTP status is
-classified only for 401, 402, 403 and 429; any other status keeps its recorded
-wording. Retry stays hidden only for rejected credentials, and only while the
+classified only for 401, 402, 403 and 429. Otherwise unknown uncoded or uncategorized preclaim failures
+show a generic unexpected-error headline with complete recorded Details;
+Modal task-router transport failures show an execution connection headline
+without claiming command failure, provider loss or safe replay. A typed Codex
+empty rejection gets a concise Codex headline; its account/plan diagnostic
+remains in Details. Structural sandbox failures retain their existing copy
+and recovery blockers. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
@@ -2827,7 +3013,8 @@ model, or picking another model, with matching links. The connect remedy names
 ChatGPT or SuperGrok only when the deployment enables that subscription, and
 otherwise reads "connect a model provider". Every other model keeps the generic
 daily-limit wording.
-Failures with any other worker code keep their authored wording.
+Failures with any other worker code keep their authored wording. This banner
+projection does not change the shared React timeline's separate presentation.
 
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and

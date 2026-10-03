@@ -5,6 +5,11 @@ serves it. This document is the canonical integration contract for model
 definitions, provider credentials, billing attribution, workspace availability,
 and per-turn execution identity.
 
+The [provider failure contract map](design/provider-failure-audit-2026-10-01.md)
+describes official error contracts, current classifiers, messages, synthetic
+fixtures and remaining model/sandbox coverage gaps. It does not certify every
+configured endpoint.
+
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
@@ -296,6 +301,18 @@ a model or changing its executable definition, drain or fence accepted queued
 and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
+
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
+`validation_failed` (`model is not available: <id>`) plus
+`details: { code: "model_unavailable", modelId }`; retrying the same request
+cannot succeed, so clients must choose another model. The web console detects
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
 
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model
@@ -710,6 +727,13 @@ credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
 
+Accepted policies also tolerate strictly additive latency-mode and input-modality
+declarations. Verification reconstructs an exact historical subset digest, keeping
+the frozen runnable mode and every retained mode declaration unchanged. It never
+rewrites the accepted policy or request tier. Removed modes/modalities, changed
+mode support or billing multipliers, and all other executable-definition drift
+remain fail-closed; this path does not compose with historical digest migrations.
+
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
@@ -1065,9 +1089,12 @@ first match wins:
    against a database catalog (edited independently of this env value), fall
    back instead: when the configured model is not selectable, the first
    selectable credits-billed model in operator catalog order is used at its own
-   default reasoning. This step is skipped when the deployment default is
-   already a selectable credits-billed model, so an operator's paid default is
-   never replaced.
+   default reasoning. When the deployment default is already a selectable
+   credits-billed model, it is never replaced: it keeps the deployment effort,
+   except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
+   `credits`) when it is the credits default model itself, so a deployment
+   whose default is `gpt-6-luna` still starts credit holders on extra high
+   reasoning.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -1361,6 +1388,16 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and OpenGeni's text compaction remain available.
 
+Native Claude HTTP and SSE errors retain status and bounded retry/request
+metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
+become terminal quota; ordinary throttling remains recoverable. General billing
+refusals remain terminal payment errors and do not imply exhausted credits. An unrecognized
+SSE error type has no synthetic HTTP status and grants no automatic recovery.
+Only the provider error envelope's type/message is retained as UTF-8-bounded
+4 KiB `turn.failed.detail`, with a bounded request ID. Outgoing requests, echoed
+request fields, arbitrary body fields and headers are excluded; generic exception
+text and serialization remain structural.
+
 Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
 the deployment default is off. Anthropic API-key connections are independent of
 this flag. When off, subscription setup endpoints and catalog/credential resolution
@@ -1394,19 +1431,33 @@ durable telemetry and UI currently show aggregate writes. Registry pricing has o
 cache-write rate, which must match its configured TTL (do not use a 5-minute write
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
 billing; OpenGeni does not debit these tokens as credits.
-Organization connections use conservative 200k context / 168k
-input / 150k compaction limits and 32k maximum output; configurable registry
-providers can declare model-specific limits. The managed connection catalog enables
-reasoning only for the captured adaptive models `claude-opus-5-5` and
-`claude-sonnet-5-5`; other model IDs
-remain available without a reasoning option. Registry providers can explicitly
-declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
+Managed Claude connections use per-model native profiles from
+`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
+expose low, medium, high, xhigh and max, with medium as the new-selection default.
+Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
+threshold and up to 128k output; the native request includes the 1M-context beta.
+Smaller models retain their own output ceiling. Unknown IDs keep conservative
+200k context / 168k input / 150k compaction / 32k output and no adaptive thinking.
+Registry providers can explicitly declare additional verified model capabilities
+and lower request defaults. Native xhigh is never silently downgraded to high;
+unsupported effort on a known adaptive model is rejected before network I/O.
+Historical models requiring fixed thinking budgets are not enabled through
+adaptive-thinking controls. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.
 HTTP error details are read for at most 5 seconds (or the shorter configured
 stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
 hide the HTTP status, request ID or Retry-After header; caller cancellation
 interrupts the read.
+
+HTTP and SSE permission failures remain access errors, separate from expired
+credentials. A provider `model_access_suspended` rejection reports the validated
+UTC suspension deadline when present and stops automatic retry; reconnecting
+does not lift a provider suspension. Native `stop_reason: "refusal"` is a terminal
+policy rejection even when HTTP is 200 and content is empty. It uses the existing
+policy-refusal presentation, never completes an empty successful response, and
+never executes tools from refused output. These failures retain the request ID
+without persisting arbitrary provider explanation text.
 
 
 ### Claude subscription request identity
@@ -1449,6 +1500,23 @@ compaction calls remain nonstreaming. The default output ceiling remains 32k,
 within the adapter's conservative context budget, rather than copying 128k from
 an unrelated request. No live subscription probe is part of these tests.
 
+Mid-conversation system blocks must follow a user and precede an assistant (or
+end the request). The adapter groups retained system inputs at that boundary
+within each assistant-delimited phase, including after portable compaction;
+canonical roles and exact content remain unchanged.
+
+Machine-only system phases after an assistant receive a request-local user-role
+transport anchor identifying machine origin and the absence of human input.
+It adds no durable history, human intent or authority; system content remains
+system-role and stays after the same assistant. Tool pairing still validates
+before projection.
+
+HTTP and SSE failures retain
+only the provider error envelope's type/message in a UTF-8-bounded 4 KiB
+`turn.failed.detail`, plus the bounded provider request ID. Malformed/non-JSON
+bodies expose status only. Outgoing requests, arbitrary body fields and headers
+are not diagnostics; generic exception text and serialization remain structural.
+
 ### Claude subscription usage
 
 Model responses, including quota errors, report observed 5-hour, weekly and optional
@@ -1479,7 +1547,10 @@ re-reads the captured generation and writes only encrypted token material. Renew
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
 dispatch, including title and compaction requests; replacement credentials are never
-lent to an older turn. Catalog loading is offline, so Claude renewal failures do not
+lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
+the previously captured token is never used as a fallback. Claude currently has
+one connection per scope and no Codex-style account pool or quota failover.
+Catalog loading is offline, so Claude renewal failures do not
 block turns using another provider. Invalid refresh grants require sign-in again;
 transient failures retain credentials and existing usage readings.
 

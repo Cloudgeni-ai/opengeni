@@ -381,6 +381,25 @@ describe("SDK retry veto", () => {
     expect(calls.count).toBe(4);
   });
 
+  test("modern OpenAI spend and credit codes veto nested SDK retries", async () => {
+    for (const code of [
+      "credit_balance_exhausted",
+      "organization_spend_limit_exceeded",
+      "project_spend_limit_exceeded",
+      "organization_usage_limit_exceeded",
+    ]) {
+      const { sdk, calls } = client(
+        { error: { code, message: "Request refused" } },
+        { "retry-after-ms": "0" },
+      );
+      const error = await sdk
+        .post("/chat/completions", { body: { model: "m", messages: [] } })
+        .catch((caught: unknown) => caught);
+      expect(calls.count).toBe(1);
+      expect(error).toMatchObject({ status: 429, code });
+    }
+  });
+
   test("a provider's own retry directive is never overridden", async () => {
     const { sdk, calls } = client(perDay, { "x-should-retry": "true", "retry-after-ms": "0" });
     await sdk

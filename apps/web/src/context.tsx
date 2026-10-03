@@ -50,6 +50,8 @@ import {
   createOpenGeniClient,
   fetchAuthSession,
   fetchClientConfig,
+  checkDeploymentRevision,
+  mountApiUpdateNotice,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -68,6 +70,7 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { readBootstrap } from "@/lib/bootstrap-read";
+import { startDeploymentRefresh } from "@/lib/deployment-refresh";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -921,6 +924,7 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
+    let stopDeploymentRefresh = () => {};
     const controller = new AbortController();
     // Let synchronous effect cleanup (including StrictMode's discarded mount)
     // cancel before starting I/O. Active requests still abort on real cleanup.
@@ -945,6 +949,7 @@ export function RootRouteComponent() {
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
         setLatencyMode("standard");
+        stopDeploymentRefresh = startDeploymentRefresh(checkDeploymentRevision);
       })
       .catch((error) => {
         if (cancelled) {
@@ -956,6 +961,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
       controller.abort();
+      stopDeploymentRefresh();
     };
   }, [configRequestVersion, isPublicDevHarness]);
 
@@ -2503,6 +2509,17 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  // Onboarding may finish in a chat it opened (developer setup); go there
+  // while access revalidates, so the app opens on that chat.
+  const completeOrganizationOnboarding = useCallback(
+    (destination?: { workspaceId: string; sessionId: string }) => {
+      if (destination) {
+        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
+      }
+      revalidatePrincipalAccess();
+    },
+    [navigate, revalidatePrincipalAccess],
+  );
   async function refreshPrincipalAccess(): Promise<boolean> {
     if (!clientConfig || !authReady) return false;
     let acceptedPrincipal = principalTransitionIdentity.current;
@@ -2824,7 +2841,7 @@ export function RootRouteComponent() {
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage>
+      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
@@ -2911,7 +2928,7 @@ export function RootRouteComponent() {
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
+        onComplete={completeOrganizationOnboarding}
       />
     ) : (
       <Suspense fallback={<LoadingPanel />}>
@@ -2931,7 +2948,7 @@ export function RootRouteComponent() {
             );
           }}
           onSignOut={handleManagedSignOut}
-          onComplete={revalidatePrincipalAccess}
+          onComplete={completeOrganizationOnboarding}
         />
       </Suspense>
     )
@@ -2990,6 +3007,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
         verificationLinkError={

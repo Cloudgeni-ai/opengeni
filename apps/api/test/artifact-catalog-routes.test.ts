@@ -62,10 +62,21 @@ function fixture(
       const compiled = new PgDialect().sqlToQuery(query);
       queries.push(compiled);
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
-      if (compiled.sql.includes("current_setting('opengeni.subject_id'"))
-        return [{ subject_id: "user:catalog" }];
-      if (compiled.sql.includes("current_setting('opengeni.account_id'"))
-        return [{ account_id: accountId, workspace_id: workspaceId }];
+      if (
+        compiled.sql.includes("current_setting('opengeni.account_id'") ||
+        compiled.sql.includes("current_setting('opengeni.subject_id'")
+      )
+        return [
+          {
+            account_id: accountId,
+            workspace_id: workspaceId,
+            subject_id: "user:catalog",
+            private_file_owner: "",
+            initiating_human_subject_id: "",
+            personal_resource_human_subject_id: "",
+            personal_resource_actor_subject_id: "",
+          },
+        ];
       if (compiled.sql.includes('session.root_session_id as "rootSessionId"')) return [];
       if (
         compiled.sql.includes("set_config") ||

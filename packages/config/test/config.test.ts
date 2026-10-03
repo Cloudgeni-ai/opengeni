@@ -451,6 +451,43 @@ describe("console documentation link configuration", () => {
   });
 });
 
+describe("legal document links", () => {
+  test("stay unset by default so self-hosted consoles show no operator policies", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.legalPrivacyPolicyUrl).toBeUndefined();
+    expect(settings.legalTermsOfServiceUrl).toBeUndefined();
+    expect(settings.supportEmail).toBeUndefined();
+  });
+
+  test("parse an operator support address and reject a value that is not one", () => {
+    expect(
+      withEnv({ OPENGENI_SUPPORT_EMAIL: " support@opengeni.ai " }, () => getSettings())
+        .supportEmail,
+    ).toBe("support@opengeni.ai");
+    for (const value of ["mailto:support@opengeni.ai", "support", "javascript:alert(1)"]) {
+      expect(() => withEnv({ OPENGENI_SUPPORT_EMAIL: value }, () => getSettings())).toThrow();
+    }
+  });
+
+  test("parse configured http(s) links and reject anything a browser should not follow", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+      },
+      () => getSettings(),
+    );
+    expect(settings.legalPrivacyPolicyUrl).toBe("https://opengeni.ai/privacy");
+    expect(settings.legalTermsOfServiceUrl).toBe("https://opengeni.ai/terms");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_PRIVACY_POLICY_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "/terms" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("remote browser placement configuration", () => {
   test("keeps provider credentials optional and parses bounded launch policy", () => {
     const defaults = withEnv({}, () => getSettings());
@@ -2635,6 +2672,130 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
       () => getSettings(),
     );
     expect(settings.sandboxRotationLeadMs).toBe(290_001);
+  });
+
+  test("idle command containment defaults to 30 minutes between idle grace and rotation lead", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.sandboxIdleCommandContainmentMs).toBe(1_800_000);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeGreaterThan(settings.sandboxIdleGraceMs);
+    expect(settings.sandboxIdleCommandContainmentMs).toBeLessThan(settings.sandboxRotationLeadMs);
+    const shortLived = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      () => getSettings(),
+    );
+    // Derived strictly between the 150s idle grace and the 250.001s lead.
+    expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+  });
+
+  test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
+    for (const environment of [
+      {},
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+      },
+    ]) {
+      const baseline = withEnv(environment, () => getSettings());
+      expect(baseline.sandboxIdleCommandContainmentMs).toBeGreaterThan(0);
+      const disabled = withEnv(
+        { ...environment, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0" },
+        () => getSettings(),
+      );
+      expect(disabled.sandboxIdleCommandContainmentMs).toBeUndefined();
+      expect(disabled).toEqual({ ...baseline, sandboxIdleCommandContainmentMs: undefined });
+    }
+  });
+
+  test("idle command containment treats blank as unset and still rejects invalid windows", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: " " }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
+    for (const value of ["-1", "0.5", "not-a-number", "Infinity"]) {
+      expect(() =>
+        withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("disabled idle command containment does not bypass provider capture or lifetime validation", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "250000" }, () => getSettings()),
+    ).toThrow(/must exceed the legacy command stop grace/i);
+    expect(() =>
+      withEnv({ ...base, OPENGENI_MODAL_TIMEOUT_SECONDS: "86401" }, () => getSettings()),
+    ).toThrow(/<=86400/i);
+  });
+
+  test("an explicit idle command containment window must exceed idle grace and precede the deadline", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "2400000" }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(2_400_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "900000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(900000\) must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS/);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "3600000" }, () => getSettings()),
+    ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
+  });
+
+  test("idle command containment must fire before an explicit Modal idle timeout", () => {
+    const modal = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+    };
+    // Default window derives below 1500s - reaper period - drain capture budget.
+    const derived = withEnv(modal, () => getSettings());
+    expect(derived.sandboxIdleCommandContainmentMs).toBeGreaterThan(derived.sandboxIdleGraceMs);
+    expect(
+      derived.sandboxLeaseReaperPeriodMs + derived.sandboxIdleCommandContainmentMs,
+    ).toBeLessThan(1_500_000);
+    expect(() =>
+      withEnv({ ...modal, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "1440000" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
+    // A derived window that cannot fit disables idle containment instead of
+    // failing boot: these idle timeouts boot exactly as before.
+    for (const seconds of ["960", "1000"]) {
+      expect(
+        withEnv({ ...modal, OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: seconds }, () => getSettings())
+          .sandboxIdleCommandContainmentMs,
+      ).toBeUndefined();
+    }
+    // Without an explicit idle timeout the hard lifetime governs and 30m fits.
+    expect(
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+        },
+        () => getSettings(),
+      ).sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
   });
 
   test("an explicit rotation lead overrides the provider-relative default", () => {

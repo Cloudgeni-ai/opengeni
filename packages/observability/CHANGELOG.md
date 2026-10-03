@@ -1,5 +1,24 @@
 # @opengeni/observability
 
+## 0.8.38
+
+### Patch Changes
+
+- 131eda2: Release unused telemetry exporter response bodies after receiving headers.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+
 ## 0.8.37
 
 ### Patch Changes

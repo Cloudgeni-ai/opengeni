@@ -27,6 +27,39 @@ A revoked or changed authority skips the run. A transient dispatch failure is re
 
 Automations cannot select `selfhosted` compute because no interactive machine owner is present. Model policy, billing admission, usage recording, session tool policy, sandbox policy, and all normal turn controls continue to apply.
 
+### Empty first-party authority
+
+Automation session templates default both `firstPartyMcpTools` and
+`firstPartyMcpPermissions` to `[]`. The resulting empty permission ceiling means
+no delegated OpenGeni tool authority, not inheritance of ordinary session
+defaults; explicitly setting both arrays to `[]` preserves that behavior.
+Keep these arrays empty for product-only jobs; do not add `sessions:read` or
+another permission just to let a turn start.
+
+This automation-template boundary differs from public `createSession`:
+the latter still rejects `firstPartyMcpPermissions: []` with 422, including
+SDK `asService` calls. Omitting that public field preserves existing default
+or inherited permissions, not zero authority; `firstPartyMcpTools: []` alone
+narrows model visibility, not the permission ceiling.
+
+With an effective permission ceiling of `[]`, tool preparation skips remote
+OpenGeni-delegated MCP servers before token signing, connection, or catalog
+discovery, including eager and deferred startup. The broad `opengeni` server
+with an empty tool selection is intentionally silent. Requested first-party
+tools, or dedicated first-party `files`/`docs` servers, remain absent from the
+executable catalog and publish the existing `insufficient_scope` auth-needed
+advisory; they do not acquire fallback authority. Delegated tokens still require
+at least one permission. Nonempty ceilings and ordinary sessions with undefined
+permissions retain their existing behavior.
+
+This skips only the existing first-party URL/id matches that use OpenGeni's
+delegated bearer. External-host MCP servers (even named `opengeni`, `files`, or
+`docs`), host-owned local registrations, independently authorized
+`connectionRef` servers, and already-authorized native runtime mechanics keep
+their own authorization paths. Empty first-party permissions do not grant or
+revoke those independent authorities. A linked-identity ceiling narrowed to
+`[]` has the same zero-authority behavior.
+
 ## Generic signed JSON adapter
 
 `signed-json.v1` accepts events without provider-specific setup. It accepts a strict JSON object with `type`, optional `id`/`occurrenceKey`/time/subject/resource, and a `data` object. Send:

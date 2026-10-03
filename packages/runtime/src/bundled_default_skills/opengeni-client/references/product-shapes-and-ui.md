@@ -10,7 +10,26 @@
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
 | Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason to replace the component. For custom-branded embeds, theme with `--og-*` tokens and density props. For stock UI, keep the shipped components and stylesheet without cosmetic host CSS or token overrides; see [Stock and host-branded appearance](#stock-and-host-branded-appearance). Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+
+## Stock and host-branded appearance
+
+For a custom-branded embed, visibly match the host's fonts, colors, spacing,
+radius and current theme using the shipped stylesheet, scoped `--og-*` tokens
+and supported theme/density/label hooks. Keep UI-owned copy free of OpenGeni
+branding; source quotations and user/assistant content are not UI labels. Verify
+the installed error-copy API separately, not just the heading/placeholder.
+
+Stock mode uses the shipped components and `compiled.css` without extra host
+cosmetic CSS. The quality target is simple, polished and smooth at desktop
+around 1440px and mobile around 390px in supported light/dark themes. Host
+placement/available height remains host-owned. A stock defect belongs in the
+package's React/CSS, not a host styling workaround or a replacement chat UI.
+Do not present this expectation as proof that a particular build passed.
+
+Preserve first-try evaluation evidence when later repairs improve the result.
+In coordinated trials, the coordinator captures the actual browser matrix;
+do not make screenshot submission a prerequisite for the coding-agent handoff.
 
 ## When deviating in React
 
@@ -203,6 +222,11 @@ view. `load(signal)` calls the host's authenticated same-origin route and passes
 the signal to `fetch`. The epoch is a presentation fence, not authorization:
 the backend must still check every request's user and session ownership. Do not
 run these browser helpers with an organization key or put that key in storage.
+
+For reopened reports, key the selected report and its authorized session together.
+Refresh request headers/mappings when that selection changes; do not keep the
+first report's session in a mounted closure. A new actor object in the same
+component still requires reset/invalidation, not only a logout-time unmount.
 
 ## Decide what the user sees
 

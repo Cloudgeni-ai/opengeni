@@ -1144,6 +1144,42 @@ describe("API helpers", () => {
     expect(params.payment_intent_data?.metadata?.opengeni_credit_coupon_v1).toBe("1");
   });
 
+  test("applies a typed promotion code up front instead of Stripe's code field", () => {
+    const params = stripeCheckoutSessionCreateParams({
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 10_000,
+      amountMicros: 100_000_000,
+      publicBaseUrl: "https://app.opengeni.ai",
+      successUrl:
+        "https://app.opengeni.ai/workspaces/w/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}",
+      idempotencyKey: "checkout:test",
+      promotionCodeId: "promo_test",
+      fullyDiscounted: true,
+    });
+
+    expect(params.discounts).toEqual([{ promotion_code: "promo_test" }]);
+    expect(params.allow_promotion_codes).toBeUndefined();
+    // A $0 checkout has nothing to tax, so Checkout asks for no billing address.
+    expect(params.automatic_tax).toEqual({ enabled: false });
+    expect(
+      stripeCheckoutSessionCreateParams({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        customerId: "cus_test",
+        amountCents: 10_000,
+        amountMicros: 100_000_000,
+        publicBaseUrl: "https://app.opengeni.ai",
+        idempotencyKey: "checkout:test",
+        promotionCodeId: "promo_half",
+        fullyDiscounted: false,
+      }).automatic_tax,
+    ).toEqual({ enabled: true });
+    expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(10_000);
+    expect(params.metadata?.opengeni_credit_micros).toBe("100000000");
+    // Stripe fills in the session id; the placeholder must survive validation.
+    expect(params.success_url).toContain("checkoutSession={CHECKOUT_SESSION_ID}");
+  });
+
   test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
@@ -2074,6 +2110,25 @@ describe("GET /v1/config/client", () => {
     expect(
       (await fetchClientConfig(testSettings({ documentationUrl: null }))).documentationUrl,
     ).toBeNull();
+  });
+
+  test("publishes legal document links only when the operator configures them", async () => {
+    const unconfigured = await fetchClientConfig(testSettings());
+    expect(unconfigured.legal).toEqual({});
+    expect(unconfigured.supportEmail).toBeUndefined();
+
+    const configured = await fetchClientConfig(
+      testSettings({
+        legalPrivacyPolicyUrl: "https://opengeni.ai/privacy",
+        legalTermsOfServiceUrl: "https://opengeni.ai/terms",
+        supportEmail: "support@opengeni.ai",
+      }),
+    );
+    expect(configured.legal).toEqual({
+      privacyPolicyUrl: "https://opengeni.ai/privacy",
+      termsOfServiceUrl: "https://opengeni.ai/terms",
+    });
+    expect(configured.supportEmail).toBe("support@opengeni.ai");
   });
 
   test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {

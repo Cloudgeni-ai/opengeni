@@ -88,6 +88,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  modelUnavailableHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -1283,6 +1284,8 @@ export function createAppComposition(deps: AppDependencies): {
         ),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
+        legal: clientLegalConfig(deps.settings),
+        ...(deps.settings.supportEmail ? { supportEmail: deps.settings.supportEmail } : {}),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
@@ -1708,6 +1711,7 @@ export function createAppComposition(deps: AppDependencies): {
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
+          modelUnavailableHttpError(rawError) ??
           (rawError instanceof UnsupportedLatencyModeError
             ? new ApiHttpError(422, {
                 code: "validation_failed",
@@ -2126,6 +2130,15 @@ function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
         ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
         : {}),
     },
+  };
+}
+
+function clientLegalConfig(settings: AppDependencies["settings"]) {
+  return {
+    ...(settings.legalPrivacyPolicyUrl ? { privacyPolicyUrl: settings.legalPrivacyPolicyUrl } : {}),
+    ...(settings.legalTermsOfServiceUrl
+      ? { termsOfServiceUrl: settings.legalTermsOfServiceUrl }
+      : {}),
   };
 }
 

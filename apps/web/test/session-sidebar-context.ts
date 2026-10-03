@@ -1,5 +1,6 @@
 // Preview-only data/context wiring. SessionList, its hooks, and its styles are real.
 import type { OpenGeniClient, SessionListPageOptions } from "@opengeni/sdk";
+import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
 import type { AppContextValue } from "../src/context";
 import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
 import type { Session } from "../src/types";
@@ -25,6 +26,7 @@ function session(
     id: `00000000-0000-4000-9000-${String(number).padStart(12, "0")}`,
     workspaceId,
     title,
+    metadata: {},
     channelId,
     parentSessionId: null,
     createdBy,
@@ -297,6 +299,15 @@ export const client = {
     return structuredClone(row);
   },
 } as unknown as OpenGeniClient;
+client.listSessionSummaryPage = async (workspace, options) => {
+  const page = await client.listSessionPage(workspace, options);
+  return {
+    ...page,
+    projection: "summary",
+    sessions: page.sessions.map(sessionListEntry),
+    pinned: page.pinned.map(sessionListEntry),
+  };
+};
 
 const invocation = { workspaceId };
 const context = {

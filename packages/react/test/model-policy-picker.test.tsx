@@ -119,6 +119,111 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test.each(["credits", "free"] as const)(
+    "stock deployment %s presentation is neutral without changing model truth",
+    async (cost) => {
+      const models: ClientModel[] = [
+        {
+          ...MODELS[0]!,
+          id: "deployment/model",
+          label: "Deployment model",
+          source: "opengeni",
+          provider: "openai",
+          cost,
+        },
+        MODELS[1]!,
+      ];
+      const before = JSON.stringify(models);
+      const container = await mount(
+        <>
+          <ModelPolicyPicker
+            models={models}
+            model="deployment/model"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />
+          <ModelPolicyPickerMenu
+            models={models}
+            model="deployment/model"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />
+        </>,
+      );
+      expect(container.querySelector('section[aria-label="Models"]')).not.toBeNull();
+      expect(
+        container.querySelector('[role="img"][aria-label="Models"] .lucide-sparkles'),
+      ).not.toBeNull();
+      expect(container.querySelector('svg[viewBox="0 0 140 133"]')).toBeNull();
+      expect(container.textContent).not.toContain("Opengeni");
+      expect(
+        container.querySelector('section[aria-label="Codex"] svg[viewBox="0 0 24 24"]'),
+      ).not.toBeNull();
+      expect(container.textContent).toContain("ChatGPT / Codex plan");
+      const choice = container.querySelector(
+        '[data-testid="model-picker-choice-deployment/model"]',
+      )!;
+      expect(choice.textContent?.includes("Free")).toBe(cost === "free");
+      expect(JSON.stringify(models)).toBe(before);
+    },
+  );
+
+  test("neutral defaults preserve external identities and caller-provided row labels", async () => {
+    const rows = projectClientModelRows([
+      { ...MODELS[0]!, id: "deployment/model", source: "opengeni", cost: "credits" },
+      { ...MODELS[0]!, id: "external/model", source: "opengeni", provider: "custom" },
+      MODELS[1]!,
+    ]).map((row) =>
+      row.id === "external/model"
+        ? { ...row, billingClass: "external" as const, billingClassLabel: "External" }
+        : row.billingClass === "opengeni_credits"
+          ? { ...row, billingClassLabel: "Host models" }
+          : row,
+    );
+    const catalogRows = rows.map((row) => ({
+      ...row,
+      catalog: {
+        ...row.catalog,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: row.selectable,
+          reason: null,
+          checkedAt: null,
+        },
+      },
+    }));
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        rows={catalogRows}
+        model="deployment/model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('section[aria-label="Host models"]')).not.toBeNull();
+    expect(
+      container.querySelector(
+        'section[aria-label="External"] [data-testid="billing-class-icon-external"] svg',
+      ),
+    ).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Codex"]')).not.toBeNull();
+  });
+
   test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
     const rows = projectClientModelRows([
       {
@@ -305,7 +410,7 @@ describe("ModelPolicyPicker", () => {
         [...container.querySelectorAll("section")].map((section) =>
           section.getAttribute("aria-label"),
         ),
-      ).toEqual(["Codex", "Opengeni"]);
+      ).toEqual(["Codex", "Models"]);
       expect(
         container.querySelector('[data-testid="model-picker-choice-free"] [aria-label="Selected"]'),
       ).toBeTruthy();
@@ -363,7 +468,7 @@ describe("ModelPolicyPicker", () => {
       [...container.querySelectorAll("section")].map((section) =>
         section.getAttribute("aria-label"),
       ),
-    ).toEqual(["Opengeni", "Codex"]);
+    ).toEqual(["Models", "Codex"]);
     expect(calls).toEqual([]);
   });
 
@@ -413,6 +518,60 @@ describe("ModelPolicyPicker", () => {
       container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
     );
     expect(calls).toEqual([["effort", "high"]]);
+  });
+
+  test("Claude Extra high and Max reuse the inline picker without changing model or closing it", async () => {
+    const model: ClientModel = {
+      ...MODELS[0]!,
+      id: "workspace-claude-subscription/claude-opus-5-5",
+      provider: "workspace-claude-subscription",
+      providerLabel: "Claude subscription",
+      source: undefined,
+      api: "anthropic-messages",
+      label: "Claude Opus 5.5",
+      capabilities: {
+        ...MODELS[0]!.capabilities!,
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
+          required: false,
+        },
+        latencyModes: [],
+      },
+    };
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(["model", id])}
+        onEffortChange={(effort) => calls.push(["effort", effort])}
+        onLatencyModeChange={() => {}}
+        onOpenChange={(open) => calls.push(["open", open])}
+      />,
+    );
+    expect(
+      [...container.querySelectorAll('[role="radio"]')].map((element) =>
+        element.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Low", "Medium", "High", "Extra high", "Max"]);
+    expect(
+      container.querySelector('[role="radio"][aria-label="Medium"]')?.getAttribute("aria-checked"),
+    ).toBe("true");
+    for (const label of ["Extra high", "Max"])
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`[role="radio"][aria-label="${label}"]`)!
+          .click(),
+      );
+    expect(calls).toEqual([
+      ["effort", "xhigh"],
+      ["effort", "max"],
+    ]);
   });
 
   test("hides thinking for models with no runnable reasoning controls", async () => {
@@ -484,7 +643,7 @@ describe("ModelPolicyPicker", () => {
         onLatencyModeChange={() => {}}
       />,
     );
-    const group = container.querySelector('section[aria-label="Opengeni"]')!;
+    const group = container.querySelector('section[aria-label="Models"]')!;
     expect(group.querySelectorAll("button").length).toBe(5);
     expect(container.querySelector('section[aria-label="External"]')).toBeNull();
     for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
@@ -1021,7 +1180,7 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
-  test("renders the OpenGeni mark for an anonymous deployment provider", async () => {
+  test("renders the neutral Models mark for an anonymous deployment provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
@@ -1045,6 +1204,7 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
     ).toBeTruthy();
+    expect(container.querySelector('[aria-label="Models"] .lucide-sparkles')).not.toBeNull();
   });
 
   test("badges only explicitly free deployment models", async () => {

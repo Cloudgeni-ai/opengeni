@@ -177,6 +177,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
         account_id uuid not null,
         workspace_id uuid not null,
         last_sequence integer not null default 0,
+        last_meaningful_sequence integer not null default 0,
         revision bigint not null default 0,
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()

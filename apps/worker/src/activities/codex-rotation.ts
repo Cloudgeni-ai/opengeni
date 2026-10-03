@@ -1,3 +1,4 @@
+import { subscriptionAccountShardIndex } from "@opengeni/config";
 // Multi-account P3 — the PURE rotation ranker. Zero I/O: no provider calls, no
 // decrypts, no db. It consumes the already-loaded, metadata-only account list
 // (cached usage columns + the exhausted_until cooldown column) and returns the
@@ -223,17 +224,6 @@ export function isCodexAccountEligible(acct: CodexRotationAccount, now: Date): b
   return isCodexCredentialEligible(acct, now);
 }
 
-/** Deterministic 32-bit FNV-1a over a UTF-16 code-unit stream. Pure, allocation-free. */
-function fnv1a32(input: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    // 32-bit FNV prime multiply via Math.imul; `>>> 0` keeps it unsigned.
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
-
 /**
  * Session-sharded HOME account (AM-6): the deterministic account a session runs on
  * under the "sharded" strategy — `stableAccountList[ hash(sessionId) % N ]` over the
@@ -263,7 +253,7 @@ export function shardCredentialForSession(args: {
   if (eligibles.length === 0) {
     return null;
   }
-  const index = fnv1a32(sessionId) % eligibles.length;
+  const index = subscriptionAccountShardIndex(sessionId, eligibles.length);
   return eligibles[index]!.id;
 }
 

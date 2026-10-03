@@ -42,6 +42,25 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+const MODEL_FACT_CAPABILITY_ROUTINES = [
+  [
+    "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+    "Insights complete usage amount projection is missing or unsafe",
+  ],
+  [
+    "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights amount fact projection is missing or unsafe",
+  ],
+  [
+    "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+    "organization model usage aggregate is missing or unsafe",
+  ],
+  [
+    "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights scoped fact projection is missing or unsafe",
+  ],
+] as const;
+
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
@@ -58,6 +77,10 @@ export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
+  "record_organization_signup_use_case(uuid, text, text)",
+] as const;
+const ORGANIZATION_SIGNUP_USE_CASES_TABLE = "organization_signup_use_cases";
 export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
@@ -1654,6 +1677,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedNoDirectDmlTables?: readonly string[];
   targetSchemaCapabilityRoutines?: readonly string[];
   targetSchemaForbiddenRoutines?: readonly string[];
+  /** Frozen binary contract; current callers require both additive Insights capabilities. */
+  modelFactCapabilityRoutines?: readonly string[];
   organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
@@ -2071,6 +2096,7 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
@@ -3858,6 +3884,49 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const signupUseCaseTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  );
+  if (signupUseCaseTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization signup use case private relation is missing or ambiguous");
+  } else {
+    const table = signupUseCaseTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("organization signup use case relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct organization signup use case authority");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("organization signup use case owner does not match session authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`organization signup use case capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
   for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
     const table = posture.privateTables.find((candidate) => candidate.name === name);
     if (!table) {
@@ -4069,6 +4138,28 @@ export function evaluateRuntimeDatabasePosture(
       aggregateRoutine.owner !== capability.owner
     ) {
       violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+  const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
+  const modelFactCapabilityRoutines = new Set(
+    options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
+  );
+  if (modelCallFactsOwner !== undefined) {
+    for (const [name, violation] of MODEL_FACT_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+      // An older binary does not require a later additive capability, but any
+      // installed capability must retain the same owner and ACL safety contract.
+      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name)) continue;
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== modelCallFactsOwner
+      ) {
+        violations.push(violation);
+      }
     }
   }
 

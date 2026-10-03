@@ -111,6 +111,7 @@ import {
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
+import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { useScheduleActions } from "./use-schedule-actions";
 import { MoreMenu } from "@/components/ui/page-actions";
@@ -917,7 +918,8 @@ function durationLabel(run: ScheduledTaskRun): string | null {
 function runOutcome(run: ScheduledTaskRun): string | undefined {
   const accessFailures = scheduledTaskAccessFailuresText(run.accessFailures);
   if (run.error?.trim()) {
-    return accessFailures ? `${run.error.trim()} ${accessFailures}` : run.error.trim();
+    const error = scheduledRunErrorText(run.error);
+    return accessFailures ? `${error} ${accessFailures}` : error;
   }
   if (accessFailures) return accessFailures;
   const summary = run.knowledgeSummary;

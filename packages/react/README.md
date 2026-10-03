@@ -605,6 +605,12 @@ explicit activation brings a tab forward. The override ends when its controller
 detaches. Native **App controls** also work in the background where supported.
 Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
 makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
+Desktop opens a whole screen by default. Multiple screens use a compact screen
+selector; app controls and window views are available from **Advanced**. Explicit
+view choices survive refreshes while the target remains available.
 
 Desktop IME candidates and their selection keys stay local; only committed text is sent.
 
@@ -782,7 +788,8 @@ state remains application-owned; durable draft and session state remain in
 
 - `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
   default, then live-streams on the SDK's exactly-once/ordered event delivery.
-  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  Initial replay reads one 1000-row raw page, with at most one extra page to
+  recover a dense turn's boundary; `loadOlder` is capped at two such pages;
   timeline group density is only an early stop. It returns the raw windowed
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
@@ -797,6 +804,8 @@ state remains application-owned; durable draft and session state remain in
   window.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  The live working set is at most 16 MiB or 20,000 events. One event larger than
+  the byte target stays complete in a window of its own.
   Live appends reuse the retained window's byte total, measuring only incoming
   and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
@@ -853,7 +862,10 @@ state remains application-owned; durable draft and session state remain in
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
-  fleet/manager views (optional polling).
+  fleet/manager views (optional polling). `useWorkspaceSessions({ projection:
+  "summary" })` returns compact list entries; omit the option for full sessions.
+  Scripted clients can omit the summary method and the hook projects full pages
+  locally while retaining cancellation and causal read revisions.
 - `useVariableSets()` — workspace variable sets with metadata-only generic
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
@@ -1264,6 +1276,11 @@ can translate its search, current-selection, empty-result, attachment-warning, a
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
 
+The stock deployment-provided group is labeled **Models**, with a generic model
+icon. It can contain both credit-backed and free models; the **Free** badge
+depends on the model's explicit cost, not its group. Genuine external-provider
+and subscription identities retain their own labels and marks.
+
 Hosts can rebrand the full picker without replacing its interaction logic:
 
 ```tsx
@@ -1291,6 +1308,29 @@ This is presentation only: model IDs, billing, ordering, availability and callba
 are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
 both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
 is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+The complete conversation uses this same neutral picker. Customize its appearance
+without replacing composer controls through `SessionConversation.modelPickerProps`,
+or through `OpenGeniChat.conversationProps`:
+
+```tsx
+<OpenGeniChat
+  client={client}
+  workspaceId={workspaceId}
+  conversationProps={{
+    modelPickerProps: {
+      groupPresentation: {
+        opengeni_credits: { label: "Acme Assist", icon: <AcmeMark aria-hidden="true" /> },
+      },
+      messages: { label: "Choose a model" },
+    },
+  }}
+/>
+```
+
+`modelPickerProps` accepts only `groupPresentation` and `messages`; it does not
+enable a hidden picker or change policy, model availability or callbacks. Keep
+model-picker visibility controlled by `modelPicker` and the client configuration.
 
 For a rendered example, open the composer-responsive demo with `?branding=host`.
 
