@@ -1,11 +1,4 @@
 mock_provider "azurerm" {
-  mock_data "azurerm_kubernetes_cluster" {
-    defaults = {
-      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
-      location = "northeurope"
-    }
-  }
-
   mock_data "azurerm_kubernetes_cluster_node_pool" {
     defaults = {
       auto_scaling_enabled = true
@@ -59,7 +52,10 @@ run "staging_adopts_only_existing_system_pool" {
       azurerm_kubernetes_cluster_node_pool.system[0].vm_size == "Standard_D4ds_v4" &&
       azurerm_kubernetes_cluster_node_pool.system[0].min_count == 4 &&
       azurerm_kubernetes_cluster_node_pool.system[0].max_count == 5 &&
-      azurerm_kubernetes_cluster_node_pool.system[0].auto_scaling_enabled
+      azurerm_kubernetes_cluster_node_pool.system[0].auto_scaling_enabled &&
+      output.capacity_contract.cluster_id == "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks" &&
+      azurerm_kubernetes_cluster_node_pool.system[0].kubernetes_cluster_id == output.capacity_contract.cluster_id &&
+      azurerm_kubernetes_cluster_node_pool.launch.kubernetes_cluster_id == output.capacity_contract.cluster_id
     )
     error_message = "Staging must preserve its system identity and tighten only its autoscaler bounds."
   }
@@ -70,14 +66,6 @@ run "production_does_not_adopt_system_pool" {
 
   variables {
     environment = "production"
-  }
-
-  override_data {
-    target = data.azurerm_kubernetes_cluster.existing
-    values = {
-      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-prod-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-prod-neu-aks"
-      location = "northeurope"
-    }
   }
 
   override_data {
@@ -103,7 +91,9 @@ run "production_does_not_adopt_system_pool" {
     condition = (
       length(azurerm_kubernetes_cluster_node_pool.system) == 0 &&
       output.capacity_contract.system.owner == "azure" &&
-      output.capacity_contract.system.max_count == 6
+      output.capacity_contract.system.max_count == 6 &&
+      output.capacity_contract.cluster_id == "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-prod-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-prod-neu-aks" &&
+      azurerm_kubernetes_cluster_node_pool.launch.kubernetes_cluster_id == output.capacity_contract.cluster_id
     )
     error_message = "Production system ownership must remain in the existing full Azure root."
   }
@@ -353,34 +343,6 @@ run "reject_system_mode_drift" {
   expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
 }
 
-run "reject_wrong_cluster_identity" {
-  command = plan
-
-  override_data {
-    target = data.azurerm_kubernetes_cluster.existing
-    values = {
-      id       = "/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
-      location = "northeurope"
-    }
-  }
-
-  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
-}
-
-run "reject_wrong_region" {
-  command = plan
-
-  override_data {
-    target = data.azurerm_kubernetes_cluster.existing
-    values = {
-      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
-      location = "westeurope"
-    }
-  }
-
-  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
-}
-
 run "reject_wrong_pool_identity" {
   command = plan
 
@@ -584,6 +546,84 @@ run "staging_already_tightened_bounds_are_admitted" {
       azurerm_kubernetes_cluster_node_pool.system[0].max_count == 5
     )
     error_message = "Already-tightened live bounds must remain admissible; this mock is not proof of an imported no-op."
+  }
+}
+
+run "reject_wrong_parent_cluster_name" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-prod-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_wrong_parent_resource_group" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-prod-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "case_insensitive_arm_identity_is_admitted" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourcegroups/RG-OPENGENI-STG-NEU/providers/microsoft.containerservice/managedclusters/OPENGENI-STG-NEU-AKS/agentpools/SYSTEM"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  assert {
+    condition     = output.capacity_contract.cluster_id == "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
+    error_message = "Provider ARM-ID casing must not change the deterministic public output contract."
   }
 }
 
