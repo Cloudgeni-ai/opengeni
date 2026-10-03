@@ -77,6 +77,12 @@ Garage is the local S3-compatible object storage default for fresh Docker Compos
 
 ## Architecture Notes
 
+Conversational schedules default to the signed calling session. Existing-session
+messages inherit the destination's execution settings at admission; account
+choices retain the schedule's captured authority. Keep message edits narrow and
+retargeting server-owned, with execution-digest checks for concurrent edits.
+See `docs/scheduled-task-access.md`.
+
 Fresh local checkouts leave Connected Machines disabled. An explicit
 `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` enables self-initializing enrollment,
 NATS auth-callout and the local relay. Its cold build completes before application

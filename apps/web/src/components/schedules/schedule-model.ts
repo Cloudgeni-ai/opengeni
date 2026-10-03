@@ -26,11 +26,6 @@ import {
 import type { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/sdk";
 import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec } from "@/types";
 
-type CreateAgentScheduledTaskRequest = Extract<
-  CreateScheduledTaskRequest,
-  { agentConfig: unknown }
->;
-
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
 export interface ScheduleLearningUpdate {
   scope: "personal" | "workspace";
@@ -336,10 +331,20 @@ export function createRequestFromDraft(
     now: Date;
     learningScope: "personal" | "workspace";
   },
-): CreateAgentScheduledTaskRequest {
+): CreateScheduledTaskRequest {
   const schedule: ScheduledTaskScheduleSpec = draft.cadence
     ? specFromCadence(draft.cadence, options.now)
     : { type: "manual" };
+  if (draft.runMode === "existing_session")
+    return {
+      name: scheduleName(draft),
+      schedule,
+      prompt: draft.prompt.trim(),
+      targetSessionId: draft.targetSessionId,
+      overlapPolicy: overlapPolicyForCreate(draft),
+      metadata: taskMetadataFromFormState(draft),
+      connectionAccounts: draft.connectionAccounts ?? [],
+    };
   return {
     ...(draft.agentLearning && Object.keys(draft.agentLearning).length
       ? { agentLearning: { scope: options.learningScope, settings: draft.agentLearning } }
@@ -347,7 +352,6 @@ export function createRequestFromDraft(
     name: scheduleName(draft),
     schedule,
     runMode: draft.runMode,
-    ...(draft.runMode === "existing_session" ? { targetSessionId: draft.targetSessionId } : {}),
     overlapPolicy: overlapPolicyForCreate(draft),
     metadata: taskMetadataFromFormState(draft),
     connectionAccounts: draft.connectionAccounts ?? [],
@@ -376,9 +380,20 @@ export function updateRequestFromDraft(
     agentLearning?: ScheduleLearningUpdate;
   },
 ): UpdateScheduledTaskRequest & { agentLearning?: ScheduleLearningUpdate } {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const targetChanged =
+    initial.runMode !== draft.runMode || initial.targetSessionId !== draft.targetSessionId;
+  const oldConfig = agentConfigFromFormState(initial, task);
+  const nextConfig = agentConfigFromFormState(draft, task);
+  const onlyPromptChanged = same({ ...oldConfig, prompt: nextConfig.prompt }, nextConfig);
+  const oldMetadata = taskMetadataFromFormState(initial, task);
+  const nextMetadata = taskMetadataFromFormState(draft, task);
   return {
-    ...(options.agentLearning ? { agentLearning: options.agentLearning } : {}),
-    name: scheduleName(draft),
+    expectedExecutionDigest: task.executionDigest,
+    ...(options.agentLearning && draft.runMode !== "existing_session"
+      ? { agentLearning: options.agentLearning }
+      : {}),
+    ...(scheduleName(initial) === scheduleName(draft) ? {} : { name: scheduleName(draft) }),
     ...(sameCadence(initial.cadence, draft.cadence)
       ? {}
       : {
@@ -386,16 +401,32 @@ export function updateRequestFromDraft(
             ? specFromCadence(draft.cadence, options.now)
             : ({ type: "manual" } as const),
         }),
-    runMode: draft.runMode,
-    targetSessionId: draft.runMode === "existing_session" ? draft.targetSessionId : null,
-    overlapPolicy: draft.overlapPolicy,
-    metadata: taskMetadataFromFormState(draft, task),
-    connectionAccounts: draft.connectionAccounts ?? [],
-    agentConfig: agentConfigFromFormState(draft, task),
-    ...(initial.variableSetId === draft.variableSetId
+    ...(targetChanged
+      ? {
+          runMode: draft.runMode,
+          targetSessionId: draft.runMode === "existing_session" ? draft.targetSessionId : null,
+        }
+      : {}),
+    ...(initial.overlapPolicy === draft.overlapPolicy
+      ? {}
+      : { overlapPolicy: draft.overlapPolicy }),
+    ...(same(oldMetadata, nextMetadata) ? {} : { metadata: nextMetadata }),
+    ...(same(initial.connectionAccounts ?? [], draft.connectionAccounts ?? [])
+      ? {}
+      : { connectionAccounts: draft.connectionAccounts ?? [] }),
+    ...(draft.runMode === "existing_session" || onlyPromptChanged
+      ? initial.prompt === draft.prompt
+        ? {}
+        : { prompt: draft.prompt.trim() }
+      : same(oldConfig, nextConfig)
+        ? {}
+        : { agentConfig: nextConfig }),
+    ...(draft.runMode === "existing_session" || initial.variableSetId === draft.variableSetId
       ? {}
       : { variableSetId: draft.variableSetId }),
-    ...(initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
+    ...(draft.runMode === "existing_session" || initial.rigId === draft.rigId
+      ? {}
+      : { rigId: draft.rigId }),
   };
 }
 

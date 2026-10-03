@@ -10085,7 +10085,8 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
       context.addIssue({
         code: "custom",
         path: ["sandboxBackend"],
-        message: "selfhosted scheduled tasks require machineTarget",
+        message:
+          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
@@ -10713,11 +10714,56 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     connectionAccounts: [],
   }));
 
+/** Schedule a message in an existing chat, whose execution settings are inherited. */
+export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
+  .object({
+    name: ScheduledTaskNameInput,
+    schedule: ScheduledTaskScheduleSpec,
+    prompt: ScheduledTaskAgentConfigInput.shape.prompt,
+    targetSessionId: z.string().uuid(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
+    runMode: z.literal("existing_session").default("existing_session"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: ScheduledTaskMetadataInput.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
+    if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
+  })
+  .transform(({ prompt, ...value }) => ({
+    ...value,
+    action: { kind: "agent_turn" as const },
+    agentConfig: {
+      prompt,
+      resources: [],
+      tools: [],
+      metadata: {},
+    } as ScheduledTaskAgentConfigInput,
+    variableSetId: undefined,
+    environmentId: undefined,
+    rigId: undefined,
+  }));
+
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/** Reviewable access consequences of moving a schedule to another chat. */
+export const ScheduledTaskTargetAccessChange = z
+  .object({
+    code: z.literal("scheduled_target_access_change"),
+    targetSessionId: z.uuid(),
+    removedVariableSetIds: z.array(z.uuid()).max(100),
+    removedVariableSetCount: z.number().int().min(0).max(100),
+    removedRigId: z.uuid().nullable(),
+    resolution: z.string().max(512),
+  })
+  .strict();
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias(
@@ -10741,17 +10787,25 @@ export const UpdateScheduledTaskRequest =
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
+      /** Compare against the reviewed execution digest; rejects concurrent edits. */
+      expectedExecutionDigest: z.string().min(1).max(128).optional(),
+      /** Accept a retarget's explicitly reported changes to attached access. */
+      adoptSessionSettings: z.literal(true).optional(),
+      /** Lossless instruction edit; all other saved fields are preserved. */
+      prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
+
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
       // Narrow, lossless update: never reconstruct agentConfig from its
       // bounded MCP projection. Full agentConfig retains replacement semantics.
       agentConfigPatch: z
         .object({
+          prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
           model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
           reasoningEffort: ReasoningEffort.optional(),
         })
         .strict()
-        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
-          message: "agentConfigPatch requires model or reasoningEffort",
+        .refine((patch) => Object.keys(patch).length > 0, {
+          message: "agentConfigPatch requires prompt, model or reasoningEffort",
         })
         .optional(),
       status: ScheduledTaskStatus.optional(),
@@ -10764,6 +10818,24 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedExecutionDigest"],
+        message:
+          "Review the current schedule and supply expectedExecutionDigest when accepting destination access changes",
+      });
+    }
+    if (
+      value.prompt !== undefined &&
+      (value.agentConfig || value.agentConfigPatch?.prompt !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["prompt"],
+        message: "Supply prompt once, without agentConfig replacement or agentConfigPatch.prompt",
+      });
+    }
     if (value.agentConfig && value.agentConfigPatch) {
       context.addIssue({
         code: "custom",

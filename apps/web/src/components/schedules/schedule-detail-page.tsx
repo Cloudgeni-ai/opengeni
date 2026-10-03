@@ -652,7 +652,7 @@ function Overview({
           </p>
         </DetailSection>
       ) : (
-        <DetailSection title="Instructions">
+        <DetailSection title="Message">
           <Instructions text={task.agentConfig.prompt} />
         </DetailSection>
       )}
@@ -803,7 +803,7 @@ function Setup({
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
       ) : null}
-      {task.variableSetId ? (
+      {task.runMode !== "existing_session" && task.variableSetId ? (
         <DetailFact label="Variable set">
           <Link
             to="/workspaces/$workspaceId/variable-sets/$variableSetId"
@@ -826,7 +826,7 @@ function Setup({
           </span>
         </DetailFact>
       ) : null}
-      {task.rigId ? (
+      {task.runMode !== "existing_session" && task.rigId ? (
         <DetailFact label="Environment">
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
@@ -837,7 +837,9 @@ function Setup({
           </Link>
         </DetailFact>
       ) : null}
-      {tools.length > 0 ? <DetailFact label="Tools">{tools.join(", ")}</DetailFact> : null}
+      {task.runMode !== "existing_session" && tools.length > 0 ? (
+        <DetailFact label="Tools">{tools.join(", ")}</DetailFact>
+      ) : null}
       {description ? <DetailFact label="Description">{description}</DetailFact> : null}
     </DetailFacts>
   );
@@ -864,7 +866,7 @@ function ScheduleAside({
   const state = scheduledTaskStateLabel(task);
   const next = nextRunOf(task, now);
   const model = useMemo(() => {
-    if (isKnowledgeSync(task)) return null;
+    if (isKnowledgeSync(task) || task.runMode === "existing_session") return null;
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
@@ -909,7 +911,11 @@ function ScheduleAside({
           {catalog.loading ? "Loading…" : model}
         </DetailAsideItem>
       ) : null}
-      {isKnowledgeSync(task) ? null : (
+      {isKnowledgeSync(task) ? null : task.runMode === "existing_session" ? (
+        <DetailAsideItem label="Settings">
+          Uses the chat’s model, tools and machine.
+        </DetailAsideItem>
+      ) : (
         <DetailAsideItem label="Where it runs" icon={<ServerIcon />}>
           {where}
         </DetailAsideItem>
@@ -1005,7 +1011,9 @@ function RunsList({
       <p className="m-0 mb-2 text-xs leading-4.5 text-fg-muted">
         {knowledge
           ? "Each run syncs the source into Knowledge."
-          : "Each run opens its own chat. Open a run to see what it did."}
+          : task.runMode === "new_session_per_run"
+            ? "Each run opens its own chat. Open a run to see what it did."
+            : "Runs continue in the same chat. Open a run to see what it did."}
       </p>
       <RowList label={`Runs of ${task.name}`} flush>
         {runs.runs.map((run) => {
@@ -1107,11 +1115,7 @@ function RenameDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <FieldStack>
-        <Field
-          label="Name"
-          error={error}
-          hint="Shown in the list and as the title of each run's chat."
-        >
+        <Field label="Name" error={error} hint="Shown in the schedules list.">
           <TextInput
             value={name}
             onChange={(event) => {

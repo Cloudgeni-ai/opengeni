@@ -319,6 +319,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
   const result = {
     id: task.id,
     name: name.value,
+    executionDigest: task.executionDigest,
     status: task.status,
     schedule: schedule.schedule,
     runMode: task.runMode,
@@ -350,9 +351,12 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     createdAt: createdAt.value,
     updatedAt: updatedAt.value,
     configuration: {
-      model: model?.value ?? null,
-      reasoningEffort: task.agentConfig.reasoningEffort ?? null,
-      sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+      source: task.runMode === "existing_session" ? "target_session" : "task_defaults",
+      model: task.runMode === "existing_session" ? null : (model?.value ?? null),
+      reasoningEffort:
+        task.runMode === "existing_session" ? null : (task.agentConfig.reasoningEffort ?? null),
+      sandboxBackend:
+        task.runMode === "existing_session" ? null : (task.agentConfig.sandboxBackend ?? null),
       hasGoal: task.agentConfig.goal !== undefined,
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,
@@ -379,6 +383,41 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     },
   );
   return result;
+}
+
+/** Exact bounded text; JSON escapes preserve even legacy lone UTF-16 units. */
+export function scheduledTaskPromptPage(
+  task: ScheduledTask,
+  offset: number,
+  expectedExecutionDigest?: string,
+) {
+  if (offset > 0 && !expectedExecutionDigest)
+    throw new Error("Continue with the executionDigest from the first prompt page");
+  if (expectedExecutionDigest !== undefined && expectedExecutionDigest !== task.executionDigest)
+    throw new Error("Scheduled task changed. Restart the prompt read at offset 0.");
+  const text = task.agentConfig.prompt;
+  if (!Number.isInteger(offset) || offset < 0 || offset > text.length)
+    throw new Error("Invalid prompt offset");
+  const splitsPair = (at: number) =>
+    at > 0 &&
+    at < text.length &&
+    /[\uD800-\uDBFF]/.test(text[at - 1]!) &&
+    /[\uDC00-\uDFFF]/.test(text[at]!);
+  if (splitsPair(offset))
+    throw new Error("Prompt offset splits a surrogate pair; use nextOffset from the previous page");
+  let end = Math.min(text.length, offset + 2048);
+  if (splitsPair(end)) end -= 1;
+  return {
+    id: task.id,
+    executionDigest: task.executionDigest,
+    prompt: {
+      text: text.slice(offset, end),
+      offset,
+      nextOffset: end < text.length ? end : null,
+      totalLength: text.length,
+      unit: "utf16" as const,
+    },
+  };
 }
 
 function buildScheduledTaskDetailMcp(

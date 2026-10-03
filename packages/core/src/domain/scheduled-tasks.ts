@@ -7,6 +7,9 @@ import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
+  scheduledOccurrencePayloadUtf8Bytes,
+  SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
+  SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
 } from "@opengeni/contracts";
 import {
   allowedFirstPartyMcpToolsForSession,
@@ -81,6 +84,9 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
+import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
+import { personalGitHubRepositoryResources } from "./resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { isDeepStrictEqual } from "node:util";
@@ -120,7 +126,6 @@ import {
 } from "./sessions";
 import {
   hasReservedOpenGeniSlackBotSessionMetadata,
-  scheduledSlackBotConnectionId,
   validateOpenGeniSlackBotConnectionSelection,
   validateScheduledTaskSlackChannel,
   type ScheduledTaskSlackChannelVerifier,
@@ -151,6 +156,23 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
     typeof agentConfig === "object" &&
     Object.prototype.hasOwnProperty.call(agentConfig, "tools"),
   );
+}
+
+/** Message data and captured account choices survive; the destination owns execution. */
+function scheduledSessionMessageConfig(config: ScheduledTaskAgentConfig): ScheduledTaskAgentConfig {
+  return {
+    prompt: config.prompt,
+    resources: config.resources,
+    tools: [],
+    metadata: config.metadata,
+    ...(config.approvalTimeoutSeconds !== undefined
+      ? { approvalTimeoutSeconds: config.approvalTimeoutSeconds }
+      : {}),
+    ...(config.connectionAccounts !== undefined
+      ? { connectionAccounts: config.connectionAccounts }
+      : {}),
+    ...(config.connectionAccountsFrozen ? { connectionAccountsFrozen: true } : {}),
+  };
 }
 
 function workspaceCustomModelCommitGuard(input: {
@@ -261,6 +283,41 @@ export async function createValidatedScheduledTask(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
+  if (input.payload.runMode === "existing_session") {
+    const target = await validateScheduledTaskTarget({
+      ...input,
+      targetSessionId: input.payload.targetSessionId,
+      runMode: "existing_session",
+      variableSetId: input.payload.variableSetId,
+      rigId: input.payload.rigId,
+      agentConfig: input.payload.agentConfig,
+    });
+    if (input.payload.agentConfig.knowledgeSource)
+      throw new HTTPException(422, {
+        message: "Source ingestion requires a separate scheduled agent",
+      });
+    if (input.payload.variableSetId && input.payload.variableSetId !== target?.variableSetId)
+      throw new HTTPException(422, {
+        message:
+          "Existing-chat schedules use the chat's Variable Sets. Change the chat's attachments separately.",
+      });
+    if (input.payload.rigId && input.payload.rigId !== target?.rigId)
+      throw new HTTPException(422, {
+        message:
+          "Existing-chat schedules use the chat's environment. Change the chat's attachments separately.",
+      });
+    if (target?.variableSetId || target?.variableSetIds?.length)
+      requirePermission(input.grant, "variable-sets:use");
+    input = {
+      ...input,
+      payload: {
+        ...input.payload,
+        agentConfig: scheduledSessionMessageConfig(input.payload.agentConfig),
+        variableSetId: null,
+        rigId: null,
+      },
+    };
+  }
   const learning = "agentLearning" in input.payload ? input.payload.agentLearning : undefined;
   const learningContext =
     learning && input.authorization
@@ -315,7 +372,6 @@ export async function createValidatedScheduledTask(input: {
     variableSetId: input.payload.variableSetId,
     rigId: input.payload.rigId,
     // An omitted Sandbox Environment adopts the target session's own one below.
-    adoptTargetRig: !knowledgeAction && input.payload.rigId === undefined,
     agentConfig,
   });
   if (
@@ -864,13 +920,10 @@ export async function validateScheduledTaskTarget(input: {
   runMode: ScheduledTask["runMode"];
   variableSetId: string | null | undefined;
   rigId: string | null | undefined;
-  /**
-   * Skip the Sandbox Environment match because the caller omitted one and
-   * will store the target session's own environment instead.
-   */
-  adoptTargetRig?: boolean;
   agentConfig: ScheduledTaskAgentConfig;
   missingTargetStatus?: 404 | 422;
+  /** Leaving a cancelled chat still requires control, but not revivability. */
+  departingTarget?: boolean;
 }): Promise<Session | null> {
   if (input.runMode !== "existing_session") {
     if (input.targetSessionId) {
@@ -922,45 +975,13 @@ export async function validateScheduledTaskTarget(input: {
   if (!session || session.accountId !== input.grant.accountId) {
     throw new HTTPException(404, { message: "target session not found" });
   }
-  if (
-    input.agentConfig.bundledSkillIds !== undefined &&
-    !isDeepStrictEqual(input.agentConfig.bundledSkillIds, session.bundledSkillIds)
-  ) {
-    throw new HTTPException(422, {
-      message: "An existing-session schedule cannot change that session's bundled Skill selection",
-    });
-  }
-  if (session.status === "cancelled") {
+  if (session.status === "cancelled" && !input.departingTarget) {
     throw new HTTPException(409, {
       message: "target session is cancelled; choose a revivable session",
     });
   }
-  if ((session.variableSetId ?? null) !== (input.variableSetId ?? null)) {
-    throw new HTTPException(422, {
-      message: "target session variableSet attachment does not match the scheduled task",
-    });
-  }
-  if (!input.adoptTargetRig && (session.rigId ?? null) !== (input.rigId ?? null)) {
-    throw new HTTPException(422, {
-      message: "target session sandbox environment does not match the scheduled task",
-    });
-  }
-  if (
-    input.agentConfig.sandboxBackend !== undefined &&
-    input.agentConfig.sandboxBackend !== session.sandboxBackend
-  ) {
-    throw new HTTPException(422, {
-      message: "target session sandbox backend does not match the scheduled task",
-    });
-  }
-  if (
-    scheduledSlackBotConnectionId(session.metadata) !==
-    (input.agentConfig.slackBotConnectionId ?? null)
-  ) {
-    throw new HTTPException(422, {
-      message: "target session OpenGeni Slack bot binding does not match the scheduled task",
-    });
-  }
+  // The target owns execution settings. Admission freezes and revalidates its
+  // current policy under the scheduled owner; duplicated task fields confer no access.
   return session;
 }
 
@@ -1177,6 +1198,139 @@ export async function validatedScheduledTaskUpdate(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<UpdateScheduledTaskInput> {
+  const retainedPrompt =
+    input.payload.agentConfig === undefined &&
+    input.payload.prompt === undefined &&
+    input.payload.agentConfigPatch?.prompt === undefined
+      ? input.existing.agentConfig.prompt
+      : undefined;
+  if (
+    input.payload.expectedExecutionDigest !== undefined &&
+    input.payload.expectedExecutionDigest !== input.existing.executionDigest
+  )
+    throw new HTTPException(409, {
+      message: "Scheduled task changed. Reload it before saving.",
+    });
+  if (input.payload.prompt !== undefined)
+    input = {
+      ...input,
+      payload: {
+        ...input.payload,
+        agentConfigPatch: {
+          ...input.payload.agentConfigPatch,
+          prompt: input.payload.prompt,
+        },
+      },
+    };
+  if (input.payload.targetSessionId && input.payload.runMode === undefined)
+    input = {
+      ...input,
+      payload: { ...input.payload, runMode: "existing_session" },
+    };
+  const requestedMode = input.payload.runMode ?? input.existing.runMode;
+  if (requestedMode === "existing_session") {
+    const config = input.payload.agentConfig ?? input.existing.agentConfig;
+    if (config.knowledgeSource)
+      throw new HTTPException(422, {
+        message: "Source ingestion requires a separate scheduled agent",
+      });
+    const target = await validateScheduledTaskTarget({
+      ...input,
+      runMode: "existing_session",
+      targetSessionId: input.payload.targetSessionId ?? input.existing.targetSessionId,
+      variableSetId: null,
+      rigId: null,
+      agentConfig: scheduledSessionMessageConfig(config),
+    });
+    if (
+      input.payload.variableSetId &&
+      ![target?.variableSetId, ...(target?.variableSetIds ?? [])].includes(
+        input.payload.variableSetId,
+      )
+    )
+      throw new HTTPException(422, {
+        message:
+          "Existing-chat schedules use the chat's Variable Sets. Change the chat's attachments separately.",
+      });
+    if (input.payload.rigId && input.payload.rigId !== target?.rigId)
+      throw new HTTPException(422, {
+        message:
+          "Existing-chat schedules use the chat's environment. Change the chat's attachments separately.",
+      });
+    const retargeting =
+      input.existing.runMode !== "existing_session" ||
+      target?.id !== input.existing.targetSessionId;
+    const previousTarget =
+      retargeting && input.existing.runMode === "existing_session" && input.existing.targetSessionId
+        ? await validateScheduledTaskTarget({
+            ...input,
+            runMode: "existing_session",
+            targetSessionId: input.existing.targetSessionId,
+            departingTarget: true,
+            variableSetId: null,
+            rigId: null,
+            agentConfig: scheduledSessionMessageConfig(input.existing.agentConfig),
+          })
+        : null;
+    const previousVariableSets = previousTarget
+      ? [
+          ...new Set(
+            [previousTarget.variableSetId, ...(previousTarget.variableSetIds ?? [])].filter(
+              (id): id is string => Boolean(id),
+            ),
+          ),
+        ]
+      : input.existing.variableSetId
+        ? [input.existing.variableSetId]
+        : [];
+    const targetVariableSets = new Set([target?.variableSetId, ...(target?.variableSetIds ?? [])]);
+    const removedVariableSetIds = retargeting
+      ? previousVariableSets.filter((id) => !targetVariableSets.has(id))
+      : [];
+    const previousRigId = previousTarget ? previousTarget.rigId : input.existing.rigId;
+    const changedRig = retargeting && previousRigId && previousRigId !== target?.rigId;
+    if ((removedVariableSetIds.length || changedRig) && !input.payload.adoptSessionSettings) {
+      const detail = {
+        code: "scheduled_target_access_change",
+        targetSessionId: target!.id,
+        removedVariableSetIds,
+        removedVariableSetCount: removedVariableSetIds.length,
+        removedRigId: changedRig ? previousRigId : null,
+        resolution:
+          "Review the destination's access, then retry with adoptSessionSettings=true and the reviewed expectedExecutionDigest to use that chat's attachments.",
+      };
+      throw new HTTPException(409, {
+        message:
+          "The destination chat has different attachments. Review the access change before moving this schedule.",
+        cause: detail,
+      });
+    }
+    if (
+      (input.payload.agentConfig || input.payload.agentConfigPatch || retargeting) &&
+      (target?.variableSetId || target?.variableSetIds?.length)
+    )
+      requirePermission(input.grant, "variable-sets:use");
+    // Server-side normalization preserves exact message fields and authority choices;
+    // callers never reconstruct an incomplete get projection to remove old settings.
+    input = {
+      ...input,
+      payload: {
+        ...input.payload,
+        ...(retargeting
+          ? {
+              agentConfig: scheduledSessionMessageConfig({
+                ...config,
+                ...input.payload.agentConfigPatch,
+                prompt: input.payload.agentConfigPatch?.prompt ?? config.prompt,
+              }),
+              agentConfigPatch: undefined,
+              variableSetId: null,
+              rigId: null,
+            }
+          : {}),
+      },
+    };
+  }
   if (input.payload.agentLearning) {
     const context = input.authorization
       ? await knowledgeContextForAccess(
@@ -1190,7 +1344,9 @@ export async function validatedScheduledTaskUpdate(input: {
         message: "Only an authenticated person can configure Agent learning",
       });
   }
-  const update: UpdateScheduledTaskInput = {};
+  const update: UpdateScheduledTaskInput = {
+    expectedExecutionDigest: input.existing.executionDigest,
+  };
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
   if (
     isRetiredNativeAtlassianTask(input.existing) &&
@@ -1252,16 +1408,6 @@ export async function validatedScheduledTaskUpdate(input: {
       : nextRunMode === "existing_session"
         ? existingTarget
         : null;
-  if (
-    input.existing.runMode === "reusable_session" &&
-    input.existing.reusableSessionId &&
-    nextRunMode === "existing_session"
-  ) {
-    throw new HTTPException(409, {
-      message:
-        "cannot target an existing session after this task created its reusable session; create a new task",
-    });
-  }
   if (input.payload.name !== undefined) {
     update.name = trimmedScheduledTaskName(input.payload.name);
   }
@@ -1286,6 +1432,7 @@ export async function validatedScheduledTaskUpdate(input: {
     if (
       (input.existing.variableSetId ?? null) !== (nextVariableSetId ?? null) &&
       input.existing.runMode === "reusable_session" &&
+      nextRunMode !== "existing_session" &&
       input.existing.reusableSessionId
     ) {
       throw new HTTPException(409, {
@@ -1294,7 +1441,7 @@ export async function validatedScheduledTaskUpdate(input: {
       });
     }
     if (nextVariableSetId === null) {
-      if (input.existing.variableSetId !== null) {
+      if (input.existing.variableSetId !== null && nextRunMode !== "existing_session") {
         // Detaching is also an attachment change: it strips the secrets a
         // task's instructions were designed around.
         requirePermission(input.grant, "variable-sets:attach");
@@ -1313,6 +1460,7 @@ export async function validatedScheduledTaskUpdate(input: {
   if (input.payload.rigId !== undefined) {
     if (
       input.existing.runMode === "reusable_session" &&
+      nextRunMode !== "existing_session" &&
       input.existing.reusableSessionId !== null &&
       input.payload.rigId !== input.existing.rigId
     ) {
@@ -1388,6 +1536,7 @@ export async function validatedScheduledTaskUpdate(input: {
     // bounded input. Legacy stored text, resources and selections stay exact.
     update.agentConfig = {
       ...input.existing.agentConfig,
+      ...(patch.prompt !== undefined ? { prompt: patch.prompt.trim() } : {}),
       ...(model !== undefined && model !== null ? { model } : {}),
       ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort } : {}),
     };
@@ -1395,6 +1544,17 @@ export async function validatedScheduledTaskUpdate(input: {
     // Reuse the locked-row CAS so that merging this snapshot cannot erase a
     // concurrent config edit. The caller receives 409, never an automatic retry.
     update.expectedExecutionDigest = input.existing.executionDigest;
+    if (patch.prompt !== undefined) {
+      if (
+        scheduledOccurrencePayloadUtf8Bytes(update.agentConfig) >
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+          SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+      )
+        throw new HTTPException(422, {
+          message:
+            "Updated scheduled message and attachments exceed the supported occurrence payload",
+        });
+    }
   }
   if (input.payload.agentConfig !== undefined) {
     const nextAgentConfig = await validateScheduledTaskAgentConfig({
@@ -1417,6 +1577,7 @@ export async function validatedScheduledTaskUpdate(input: {
     if (
       input.existing.reusableSessionId &&
       input.existing.runMode === "reusable_session" &&
+      nextRunMode !== "existing_session" &&
       (input.existing.agentConfig.slackBotConnectionId ?? null) !==
         (nextAgentConfig.slackBotConnectionId ?? null)
     ) {
@@ -1425,6 +1586,7 @@ export async function validatedScheduledTaskUpdate(input: {
           "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
       });
     }
+    if (retainedPrompt !== undefined) nextAgentConfig.prompt = retainedPrompt;
     update.agentConfig = nextAgentConfig;
   }
   if (
@@ -1437,7 +1599,9 @@ export async function validatedScheduledTaskUpdate(input: {
         input.payload.connectionAccounts ?? input.existing.agentConfig.connectionAccounts ?? [],
     };
   }
-  const nextAgentConfig = update.agentConfig ?? input.existing.agentConfig;
+  const nextAgentConfig = {
+    ...(update.agentConfig ?? input.existing.agentConfig),
+  };
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -1538,20 +1702,49 @@ export async function validatedScheduledTaskUpdate(input: {
       nextAgentConfig.tools,
       ownerSubjectId ?? undefined,
     );
+    const priorTarget =
+      input.existing.runMode === "existing_session" && input.existing.targetSessionId
+        ? await getSession(input.db, input.existing.workspaceId, input.existing.targetSessionId)
+        : null;
+    const priorConnectionTools = await scheduledConnectionTools(
+      input.db,
+      input.grant.workspaceId,
+      runtimeSettings,
+      priorTarget,
+      input.existing.agentConfig.tools,
+      ownerSubjectId ?? undefined,
+    );
     const priorMcpIds = new Set(
-      input.existing.agentConfig.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
+      [...(priorTarget?.tools ?? input.existing.agentConfig.tools), ...priorConnectionTools]
+        .filter((tool) => tool.kind === "mcp")
+        .map((tool) => tool.id),
     );
     const nextMcpIds = new Set(
       nextConnectionTools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
     );
+    const nextAccountSurfaceIds = new Set(nextMcpIds);
+    const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
+      runtimeSettings,
+      nextTarget,
+    );
+    if (nextSurfaceEligibility.googleDrivePublicationEnabled)
+      nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+    if (
+      personalGitHubRepositoryResources(nextTarget?.resources ?? nextAgentConfig.resources).length
+    )
+      nextAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+    const movingChat =
+      nextRunMode !== input.existing.runMode ||
+      nextTargetSessionId !== input.existing.targetSessionId;
     // Removing a selected tool also removes its inherited account choice.
     // Keep explicit caller selections subject to normal validation, and never
     // reset accounts for retained tools or dedicated first-party surfaces.
     const authoritySelections = (nextAgentConfig.connectionAccounts ?? []).filter(
       (selection) =>
         input.payload.connectionAccounts !== undefined ||
-        !priorMcpIds.has(selection.serverId) ||
-        nextMcpIds.has(selection.serverId),
+        (movingChat
+          ? nextAccountSurfaceIds.has(selection.serverId)
+          : !priorMcpIds.has(selection.serverId) || nextMcpIds.has(selection.serverId)),
     );
     const acceptedConnections = await freezeConnectionAccounts({
       db: input.db,
@@ -1569,7 +1762,7 @@ export async function validatedScheduledTaskUpdate(input: {
       authoritySelectionsFrozen:
         input.payload.connectionAccounts === undefined &&
         input.existing.agentConfig.connectionAccountsFrozen === true,
-      ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
+      ...nextSurfaceEligibility,
     });
     // A model-only patch still revalidates authority above, but is not an
     // access refresh. Preserve exact existing selections, including legacy
@@ -1623,6 +1816,7 @@ export async function validatedScheduledTaskUpdate(input: {
       authorizationSurface: input.authorizationSurface,
       grant: input.grant,
       targetSessionId: existingTarget,
+      departingTarget: true,
       runMode: "existing_session",
       variableSetId: input.existing.variableSetId,
       rigId: input.existing.rigId,
@@ -1982,19 +2176,32 @@ async function validateScheduledTaskAgentConfig(input: {
   workspaceId: string;
   toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
+  const existingChat = input.payload.runMode === "existing_session";
+  if (existingChat)
+    input = {
+      ...input,
+      payload: {
+        ...input.payload,
+        agentConfig: scheduledSessionMessageConfig(input.payload.agentConfig),
+      },
+      toolsProvided: true,
+    };
   const actor = scheduledTaskInitiatorForGrant(input.grant).actor;
-  const parent = actor ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
-  if (actor && (!parent || parent.accountId !== input.grant.accountId)) {
+  const parent =
+    actor && !existingChat ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
+  if (!existingChat && actor && (!parent || parent.accountId !== input.grant.accountId)) {
     throw new HTTPException(403, {
       message: "Scheduled Skill selection requires the creating agent's session",
     });
   }
   let bundledSkillIds: ScheduledTaskAgentConfig["bundledSkillIds"];
   try {
-    bundledSkillIds = resolveBundledSkillSelection(
-      input.payload.agentConfig.bundledSkillIds,
-      parent?.bundledSkillIds,
-    );
+    bundledSkillIds = existingChat
+      ? undefined
+      : resolveBundledSkillSelection(
+          input.payload.agentConfig.bundledSkillIds,
+          parent?.bundledSkillIds,
+        );
   } catch (error) {
     throw new HTTPException(422, {
       message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
@@ -2130,7 +2337,7 @@ async function validateScheduledTaskAgentConfig(input: {
     tools,
   };
   validateIncidentTelemetryPreflightSelection(input.settings, validated);
-  return validated;
+  return existingChat ? scheduledSessionMessageConfig(validated) : validated;
 }
 
 /**

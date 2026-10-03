@@ -5,13 +5,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { UpdateScheduledTaskRequest, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { updateScheduledTaskForApi, validatedScheduledTaskUpdate } from "@opengeni/core";
+import {
+  createValidatedScheduledTask,
+  updateScheduledTaskForApi,
+  validatedScheduledTaskUpdate,
+} from "@opengeni/core";
 import {
   createDb,
   createConnection,
   createOrganizationApiKey,
   createScheduledTask,
   createSession,
+  createVariableSet,
   getScheduledTask,
   getScheduledTaskCreatorPolicy,
   getSession,
@@ -27,6 +32,8 @@ import {
 import postgres from "postgres";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { CreateScheduledTaskRequest } from "@opengeni/contracts";
+import { scheduledTaskTargetAccessHttpError } from "../src/http/api-error";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -404,6 +411,293 @@ describe("lossless scheduled-task model updates", () => {
 });
 
 describe("first-party MCP scheduled task connectionAccounts", () => {
+  test.each(["legacy", "cancelled", "deleted"] as const)(
+    "moves away from a %s target without duplicating attachment permission",
+    async (state) => {
+      if (!available) throw new Error("PostgreSQL required");
+      const workspace = await workspaceFixture();
+      const grant: AccessGrant = {
+        ...grantFor(workspace),
+        permissions: ["scheduled_tasks:manage", "sessions:control", "variable-sets:use"],
+      };
+      const variables = await createVariableSet(client.db, {
+        ...workspace,
+        scope: "workspace",
+        name: "Review inputs",
+      });
+      const makeChat = () =>
+        createSession(client.db, {
+          ...workspace,
+          initialMessage: "Review",
+          resources: [],
+          metadata: {},
+          variableSetId: variables.id,
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        });
+      const [source, destination] = await Promise.all([makeChat(), makeChat()]);
+      let task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Move review",
+        status: "paused",
+        schedule: { type: "manual" },
+        temporalScheduleId: crypto.randomUUID(),
+        runMode: "existing_session",
+        targetSessionId: source.id,
+        variableSetId: state === "legacy" ? variables.id : null,
+        overlapPolicy: "buffer_one",
+        agentConfig: {
+          prompt: "Review inputs",
+          resources: [],
+          tools: [],
+          metadata: {},
+          connectionAccounts: [],
+          connectionAccountsFrozen: true,
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      if (state === "cancelled")
+        await admin`update sessions set status = 'cancelled' where id = ${source.id}`;
+      if (state === "deleted") {
+        // The session FK clears this pointer on deletion.
+        await admin`update scheduled_tasks set reusable_session_id = null where id = ${task.id}`;
+        task = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+        expect(task.targetSessionId).toBeNull();
+      }
+      const change = await validatedScheduledTaskUpdate({
+        ...deps(client.db),
+        grant,
+        existing: task,
+        payload: UpdateScheduledTaskRequest.parse({
+          targetSessionId: destination.id,
+          expectedExecutionDigest: task.executionDigest,
+        }),
+      });
+      const saved = await updateScheduledTaskForApi(client.db, grant, task.id, change);
+      expect(saved.targetSessionId).toBe(destination.id);
+      expect(saved.variableSetId).toBeNull();
+      expect(saved.agentConfig.prompt).toBe(task.agentConfig.prompt);
+    },
+    60_000,
+  );
+
+  test("minimal conversational scheduling targets the signed calling chat and inherits execution", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await workspaceFixture();
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Review activity",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const connected = await connectedClient(
+      buildOpenGeniMcpServer(deps(client.db), {
+        ...grantFor(workspace),
+        permissions: ["scheduled_tasks:manage", "sessions:control"],
+        metadata: {
+          sessionId: session.id,
+          firstPartyMcpTools: ["scheduled_tasks_create", "scheduled_tasks_get"],
+        },
+      }),
+    );
+    try {
+      const response = await connected.client.callTool({
+        name: "scheduled_tasks_create",
+        arguments: {
+          name: "Morning review",
+          schedule: { type: "interval", everySeconds: 3600 },
+          prompt: "Review new activity.",
+        },
+      });
+      expect(response.isError).not.toBe(true);
+      const receipt = JSON.parse(resultText(response));
+      const task = await getScheduledTask(client.db, workspace.workspaceId, receipt.resource.id);
+      expect(task).toMatchObject({
+        runMode: "existing_session",
+        targetSessionId: session.id,
+        variableSetId: null,
+        rigId: null,
+        overlapPolicy: "buffer_one",
+      });
+      expect(task!.agentConfig.model).toBeUndefined();
+      expect(task!.agentConfig.agent).toBeUndefined();
+      expect(task!.agentConfig.tools).toEqual([]);
+      const read = await connected.client.callTool({
+        name: "scheduled_tasks_get",
+        arguments: { id: task!.id },
+      });
+      expect(JSON.parse(resultText(read))).toMatchObject({
+        executionDigest: task!.executionDigest,
+        configuration: { source: "target_session", model: null },
+      });
+    } finally {
+      await connected.close();
+    }
+  }, 60_000);
+
+  test("moves a materialized schedule without rebuilding its message and rejects stale edits", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await workspaceFixture();
+    const grant = {
+      ...grantFor(workspace),
+      permissions: ["scheduled_tasks:manage", "sessions:control"] as const,
+    };
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const original = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Retained message",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "reusable_session",
+      reusableSessionId: session.id,
+      overlapPolicy: "buffer_one",
+      agentConfig: {
+        prompt: "  Exact message\n" + "retained content ".repeat(900) + "  ",
+        resources: [],
+        tools: [],
+        metadata: { exact: { keep: true } },
+        model: "scripted-model",
+        connectionAccounts: [],
+        connectionAccountsFrozen: true,
+      },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: { keep: true },
+    });
+    const update = await validatedScheduledTaskUpdate({
+      ...deps(client.db),
+      grant: { ...grant, permissions: [...grant.permissions] },
+      existing: original,
+      payload: UpdateScheduledTaskRequest.parse({
+        targetSessionId: session.id,
+        expectedExecutionDigest: original.executionDigest,
+      }),
+    });
+    const saved = await updateScheduledTaskForApi(
+      client.db,
+      { ...grant, permissions: [...grant.permissions] },
+      original.id,
+      update,
+    );
+    expect(saved).toMatchObject({
+      runMode: "existing_session",
+      targetSessionId: session.id,
+      status: "paused",
+      metadata: original.metadata,
+      schedule: original.schedule,
+    });
+    expect(saved.agentConfig).toEqual({
+      prompt: original.agentConfig.prompt,
+      resources: [],
+      tools: [],
+      metadata: original.agentConfig.metadata,
+      connectionAccounts: [],
+      connectionAccountsFrozen: true,
+    });
+    await expect(
+      validatedScheduledTaskUpdate({
+        ...deps(client.db),
+        grant: { ...grant, permissions: [...grant.permissions] },
+        existing: saved,
+        payload: { name: "Stale edit", expectedExecutionDigest: original.executionDigest },
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  }, 60_000);
+
+  test("moving between existing chats reports the old chat's attachments through HTTP and MCP", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await workspaceFixture();
+    const grant = {
+      ...grantFor(workspace),
+      permissions: [
+        "scheduled_tasks:manage",
+        "sessions:control",
+        "variable-sets:use",
+      ] as import("@opengeni/contracts").Permission[],
+    };
+    const variableSet = await createVariableSet(client.db, {
+      ...workspace,
+      scope: "workspace",
+      name: "Review inputs",
+    });
+    const makeChat = (variableSetId: string | null) =>
+      createSession(client.db, {
+        ...workspace,
+        initialMessage: "Review",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        variableSetId,
+      });
+    const [source, target] = await Promise.all([makeChat(variableSet.id), makeChat(null)]);
+    const task = await createValidatedScheduledTask({
+      ...deps(client.db),
+      grant,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "Review",
+        schedule: { type: "manual" },
+        prompt: "Review inputs",
+        targetSessionId: source.id,
+      }),
+    });
+    expect(task.variableSetId).toBeNull();
+    const payload = { targetSessionId: target.id, expectedExecutionDigest: task.executionDigest };
+    let conflict: unknown;
+    try {
+      await validatedScheduledTaskUpdate({ ...deps(client.db), grant, existing: task, payload });
+    } catch (error) {
+      conflict = error;
+    }
+    expect(scheduledTaskTargetAccessHttpError(conflict)?.details).toMatchObject({
+      code: "scheduled_target_access_change",
+      removedVariableSetCount: 1,
+      removedVariableSetIds: [variableSet.id],
+      targetSessionId: target.id,
+    });
+    const connected = await connectedClient(buildOpenGeniMcpServer(deps(client.db), grant));
+    try {
+      const result = await connected.client.callTool({
+        name: "scheduled_tasks_update",
+        arguments: { id: task.id, ...payload },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(resultText(result)).error.details).toMatchObject({
+        code: "scheduled_target_access_change",
+        removedVariableSetIds: [variableSet.id],
+      });
+      const saved = await connected.client.callTool({
+        name: "scheduled_tasks_update",
+        arguments: { id: task.id, ...payload, adoptSessionSettings: true },
+      });
+      expect(saved.isError).not.toBe(true);
+      expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toMatchObject({
+        targetSessionId: target.id,
+        variableSetId: null,
+      });
+    } finally {
+      await connected.close();
+    }
+  }, 60_000);
+
   test("creates an interval task through MCP using the advertised minimal agent input", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -416,6 +710,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         name: "scheduled_tasks_create",
         arguments: {
           name: "Interval monitor",
+          runMode: "new_session_per_run",
           schedule: { type: "interval", everySeconds: 7_200 },
           agentConfig: { prompt: "Report activity" },
         },
@@ -435,9 +730,17 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
     }
   });
 
-  test.each([false, true])(
-    "removing an MCP tool preserves explicit-account validation (%s)",
-    async (explicit) => {
+  test.each([
+    [false, false, "live"],
+    [true, false, "live"],
+    [false, true, "live"],
+    [true, true, "live"],
+    [false, true, "deleted"],
+    [true, true, "deleted"],
+    [false, true, "changed"],
+  ] as const)(
+    "removing an MCP tool preserves explicit-account validation (explicit=%s, existing chat=%s, source=%s)",
+    async (explicit, existingChat, sourceState) => {
       if (!available) return;
       const workspace = await workspaceFixture();
       const [sharedWorkspace] = await admin<{ id: string }[]>`
@@ -458,13 +761,32 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
       });
       const retainedTool = { kind: "mcp" as const, id: "retained-integration", optional: true };
       const retainedAccount = { serverId: retainedTool.id, connectionId: retained.id };
-      const task = await createScheduledTask(client.db, {
+      const oldTools = [
+        { kind: "mcp" as const, id: "removed-integration", optional: true },
+        retainedTool,
+      ];
+      const makeChat = (tools: typeof oldTools) =>
+        createSession(client.db, {
+          ...workspace,
+          initialMessage: "Review",
+          resources: [],
+          metadata: {},
+          tools,
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        });
+      const source = existingChat ? await makeChat(oldTools) : null;
+      const destination = existingChat ? await makeChat([retainedTool]) : null;
+      let task = await createScheduledTask(client.db, {
         ...workspace,
         name: "remove selected integration",
         status: "active",
         schedule: { type: "interval", everySeconds: 3_600 },
         temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-        runMode: "new_session_per_run",
+        runMode: existingChat ? "existing_session" : "new_session_per_run",
+        targetSessionId: source?.id ?? null,
         overlapPolicy: "allow_concurrent",
         agentConfig: {
           connectionAccounts: [
@@ -474,12 +796,19 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
           connectionAccountsFrozen: true,
           prompt: "scheduled prompt",
           resources: [],
-          tools: [{ kind: "mcp", id: "removed-integration", optional: true }, retainedTool],
+          tools: existingChat ? [] : oldTools,
           metadata: {},
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
         metadata: {},
       });
+      if (sourceState === "deleted") {
+        await admin`update scheduled_tasks set reusable_session_id = null where id = ${task.id}`;
+        task = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+      }
+      if (sourceState === "changed") {
+        await admin`update sessions set tools = '[]'::jsonb where id = ${source!.id}`;
+      }
       const dependencies = deps(client.db);
       dependencies.settings.mcpServers.push({
         id: retainedTool.id,
@@ -492,14 +821,21 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         },
       });
       const connected = await connectedClient(
-        buildOpenGeniMcpServer(dependencies, grantFor(workspace)),
+        buildOpenGeniMcpServer(dependencies, {
+          ...grantFor(workspace),
+          permissions: ["scheduled_tasks:manage", "sessions:control"],
+        }),
       );
       try {
         const result = await connected.client.callTool({
           name: "scheduled_tasks_update",
           arguments: {
             id: task.id,
-            agentConfig: { prompt: "scheduled prompt", resources: [], tools: [retainedTool] },
+            ...(destination
+              ? { targetSessionId: destination.id }
+              : {
+                  agentConfig: { prompt: "scheduled prompt", resources: [], tools: [retainedTool] },
+                }),
             ...(explicit ? { connectionAccounts: task.agentConfig.connectionAccounts } : {}),
           },
         });
@@ -515,7 +851,7 @@ describe("first-party MCP scheduled task connectionAccounts", () => {
         await connected.close();
       }
       const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
-      expect(after?.agentConfig.tools).toEqual([retainedTool]);
+      expect(after?.agentConfig.tools).toEqual(existingChat ? [] : [retainedTool]);
       expect(after?.agentConfig.connectionAccounts).toEqual([retainedAccount]);
       expect(after?.agentConfig.connectionAccountsFrozen).toBe(true);
       expect(after?.ownerSubjectId).toBe(workspace.subjectId);

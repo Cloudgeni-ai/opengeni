@@ -6018,11 +6018,29 @@ export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+/** Send a scheduled message using the destination chat’s current execution settings. */
+export type CreateSessionScheduledTaskRequest = {
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  prompt: string;
+  targetSessionId: string;
+  runMode?: "existing_session" | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+  status?: ScheduledTaskStatus | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
 export type CreateScheduledTaskRequest =
+  | CreateSessionScheduledTaskRequest
   | CreateAgentScheduledTaskRequest
   | CreateKnowledgeSourceSyncScheduledTaskRequest;
 
 export type UpdateScheduledTaskRequest = {
+  expectedExecutionDigest?: string | undefined;
+  adoptSessionSettings?: true | undefined;
+  /** Lossless message edit. All omitted configuration is preserved. */
+  prompt?: string | undefined;
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
@@ -6034,7 +6052,11 @@ export type UpdateScheduledTaskRequest = {
   /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
    * Existing target/reusable sessions retain their own model and reasoning. */
   agentConfigPatch?:
-    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | {
+        prompt?: string | undefined;
+        model?: string | undefined;
+        reasoningEffort?: ReasoningEffort | undefined;
+      }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;

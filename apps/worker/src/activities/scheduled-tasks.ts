@@ -581,36 +581,41 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // accepted execution so retries and recovery never resolve again.
       let resolvedAgentConfig: ResolvedAgentConfig | null = null;
       let resolvedAgentInstructions: string | undefined;
-      try {
-        const agentResolution = resolveSessionAgentConfigForCreate({
-          settings,
-          creator: "scheduled",
-          request: task.agentConfig.agent,
-          instructions: undefined,
-          workspaceSettings: (await requireWorkspace(db, task.workspaceId)).settings,
-          parent: null,
-          goal: task.agentConfig.goal !== undefined,
-        });
-        resolvedAgentConfig = agentResolution.config;
-        resolvedAgentInstructions = agentResolution.instructions;
-        const written = applySessionAgentConfigWriteThrough({
-          config: resolvedAgentConfig,
-          firstPartyMcpTools,
-          tools: taskTools,
-          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-          productServerIds: task.agentConfig.tools.map((tool) => tool.id),
-        });
-        firstPartyMcpTools = written.firstPartyMcpTools;
-        taskTools = written.tools;
-      } catch (error) {
-        const status =
-          error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
-        if (!(error instanceof Error) || status !== 422) throw error;
-        return await refuseAdmission(
-          "scheduled_authority_unavailable",
-          false,
-          `scheduled agent configuration is not admissible: ${error.message}`,
-        );
+      const generatedTarget =
+        task.runMode === "new_session_per_run" ||
+        (task.runMode === "reusable_session" && task.reusableSessionId === null);
+      if (generatedTarget) {
+        try {
+          const agentResolution = resolveSessionAgentConfigForCreate({
+            settings,
+            creator: "scheduled",
+            request: task.agentConfig.agent,
+            instructions: undefined,
+            workspaceSettings: (await requireWorkspace(db, task.workspaceId)).settings,
+            parent: null,
+            goal: task.agentConfig.goal !== undefined,
+          });
+          resolvedAgentConfig = agentResolution.config;
+          resolvedAgentInstructions = agentResolution.instructions;
+          const written = applySessionAgentConfigWriteThrough({
+            config: resolvedAgentConfig,
+            firstPartyMcpTools,
+            tools: taskTools,
+            toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+            productServerIds: task.agentConfig.tools.map((tool) => tool.id),
+          });
+          firstPartyMcpTools = written.firstPartyMcpTools;
+          taskTools = written.tools;
+        } catch (error) {
+          const status =
+            error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
+          if (!(error instanceof Error) || status !== 422) throw error;
+          return await refuseAdmission(
+            "scheduled_authority_unavailable",
+            false,
+            `scheduled agent configuration is not admissible: ${error.message}`,
+          );
+        }
       }
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
@@ -686,9 +691,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
         creatorPolicy?.sessionPolicy ?? null,
       );
-      const generatedTarget =
-        task.runMode === "new_session_per_run" ||
-        (task.runMode === "reusable_session" && task.reusableSessionId === null);
       if (generatedTarget && task.agentConfig.machineTarget) {
         const access = {
           accountId: task.accountId,
@@ -2024,15 +2026,18 @@ class IncidentTelemetryPreflightBlockedError extends Error {
 }
 
 /**
- * Defensive backstop for the API-level 409: a reusable/existing target session
+ * Defensive backstop for the API-level 409: a generated reusable session
  * keeps its creation-time attachment, so a diverged task attachment or Slack
  * bot binding must settle the run terminally instead of silently running with
  * the wrong secrets - on the first attempt and on every recovery attempt.
  */
 function assertReusableSessionBindingMatches(
   session: { variableSetId: string | null; metadata: Record<string, unknown> },
-  task: Pick<ScheduledTask, "variableSetId" | "agentConfig">,
+  task: Pick<ScheduledTask, "runMode" | "variableSetId" | "agentConfig">,
 ): void {
+  // Existing-chat messages use the target policy frozen at admission. Task
+  // creation defaults are not an additional authority or binding constraint.
+  if (task.runMode === "existing_session") return;
   if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
     throw new ScheduledRunTerminalAuthorityError(
       "scheduled_reusable_binding_changed",

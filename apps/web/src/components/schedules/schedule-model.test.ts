@@ -131,6 +131,7 @@ describe("schedule requests", () => {
       { now: NOW, learningScope: "workspace" },
     );
     expect(request.overlapPolicy).toBe("allow_concurrent");
+    if (!("agentConfig" in request)) throw new Error("Expected a separate agent");
     expect(request.variableSetId).toBe("vs-1");
     expect(request.rigId).toBe("rig-1");
     expect(request.name).toBe("Summarize open incidents");
@@ -143,6 +144,49 @@ describe("schedule requests", () => {
       { now: NOW, learningScope: "workspace" },
     );
     expect(request.overlapPolicy).toBe("skip");
+  });
+
+  test("an existing-chat message carries no copied execution settings", () => {
+    const request = createRequestFromDraft(
+      {
+        ...base(),
+        runMode: "existing_session",
+        targetSessionId: "00000000-0000-4000-8000-000000000099",
+        variableSetId: "stale-set",
+        rigId: "stale-environment",
+      },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(request).toMatchObject({
+      targetSessionId: "00000000-0000-4000-8000-000000000099",
+      prompt: "Summarize open incidents.",
+    });
+    expect("agentConfig" in request).toBe(false);
+    expect("variableSetId" in request).toBe(false);
+    expect("rigId" in request).toBe(false);
+  });
+
+  test("moving a schedule sends only its new destination and changed message", () => {
+    const initial = base();
+    const stored = task();
+    const request = updateRequestFromDraft(
+      stored,
+      initial,
+      {
+        ...initial,
+        runMode: "existing_session",
+        targetSessionId: "destination",
+        prompt: "Review urgent incidents.",
+      },
+      { now: NOW },
+    );
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+      runMode: "existing_session",
+      targetSessionId: "destination",
+      prompt: "Review urgent incidents.",
+      name: "Review urgent incidents",
+    });
   });
 
   test("an edit sends the schedule and attachments only when they changed", () => {
@@ -180,7 +224,38 @@ describe("schedule requests", () => {
     const stored = task({ metadata: { scheduleDescription: "Old summary", other: 1 } });
     const initial: ScheduleDraft = { ...base(), description: "Old summary" };
     const request = updateRequestFromDraft(stored, initial, initial, { now: NOW });
-    expect(request.metadata).toEqual({ scheduleDescription: "Old summary", other: 1 });
+    expect(request.metadata).toBeUndefined();
+    expect(request).toEqual({ expectedExecutionDigest: stored.executionDigest });
+  });
+
+  test("separate-agent message edits preserve hidden settings through a narrow patch", () => {
+    const stored = task();
+    stored.agentConfig.approvalTimeoutSeconds = 300;
+    stored.agentConfig.maxNestedAgentDepth = 0;
+    stored.agentConfig.bundledSkillIds = [];
+    const initial = { ...base(), name: stored.name };
+    const request = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, prompt: "New message" },
+      { now: NOW },
+    );
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+      prompt: "New message",
+    });
+    const changedTools = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, includeOpenGeniTool: true },
+      { now: NOW },
+    );
+    expect(changedTools.agentConfig).toMatchObject({
+      approvalTimeoutSeconds: 300,
+      maxNestedAgentDepth: 0,
+      bundledSkillIds: [],
+    });
+    expect(changedTools.agentConfig).not.toHaveProperty("connectionAccountsFrozen");
   });
 });
 

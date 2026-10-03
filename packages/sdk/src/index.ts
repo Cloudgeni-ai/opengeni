@@ -873,6 +873,7 @@ export type {
   CreateKnowledgeDropRequest,
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,
