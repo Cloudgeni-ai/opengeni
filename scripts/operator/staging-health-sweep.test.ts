@@ -179,6 +179,10 @@ describe("staging health sweep", () => {
     expect(q.recovering).toContain("missingStatusTimestamp");
     expect(q.queued).not.toContain("OR finished_at");
     expect(q.recovering).not.toContain("OR finished_at");
+    expect(q.recovering).not.toContain("status IN ('queued','recovering')");
+    expect(q.recovering).toContain(
+      "SELECT id,workspace_id FROM sessions WHERE status='recovering'",
+    );
   });
   test("unavailable sources remain explicit gaps without leaking errors", async () => {
     const result = await sweep(parseArgs([]), async () => {

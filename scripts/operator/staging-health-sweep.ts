@@ -204,7 +204,7 @@ export function databaseQueries(
     ) SELECT jsonb_build_object('total',count(*),'checkedAt',$1::timestamptz,'pageOffset',${inventoryOffset},
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM unknown_age ORDER BY workspace_id,session_id
         LIMIT ${OWNER_PAGE_SIZE} OFFSET ${inventoryOffset}) x),'[]')) facts FROM unknown_age`,
-    recovering: `${controlCte(false, false)}, recoveries AS (
+    recovering: `${controlCte(false, false, "SELECT id,workspace_id FROM sessions WHERE status='recovering'")}, recoveries AS (
       SELECT s.id session_id,s.workspace_id,r.since,c.paused,c.valid FROM candidates s
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT e.created_at since FROM session_events e WHERE e.session_id=s.id AND e.workspace_id=s.workspace_id
