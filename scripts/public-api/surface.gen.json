@@ -12415,7 +12415,7 @@
         "input"
       ],
       "shape": {
-        "$": "union=[\"0\",\"1\"]",
+        "$": "union=[\"0\",\"1\",\"runMode=existing_session\"]",
         "$|0": "object",
         "$|0.action": "ref(KnowledgeSourceSyncAction)!",
         "$|0.metadata": "object?",
@@ -12444,7 +12444,8 @@
         "$|1.schedule": "ref(ScheduledTaskScheduleSpec)!",
         "$|1.status": "enum?=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]",
         "$|1.targetSessionId": "string? null",
-        "$|1.variableSetId": "string? null"
+        "$|1.variableSetId": "string? null",
+        "$|runMode=existing_session": "ref(CreateSessionScheduledTaskRequest)"
       }
     },
     "CreateSessionRequest": {
@@ -12643,6 +12644,25 @@
         "$.variableSetIds[]": "string",
         "$.workingDir": "string! null",
         "$.workspaceId": "string!"
+      }
+    },
+    "CreateSessionScheduledTaskRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connectionAccounts": "array?",
+        "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
+        "$.metadata": "object?",
+        "$.metadata{}": "unknown",
+        "$.name": "string!",
+        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$.prompt": "string!",
+        "$.runMode": "const?=[\"\\\"existing_session\\\"\"]",
+        "$.schedule": "ref(ScheduledTaskScheduleSpec)!",
+        "$.status": "enum?=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]",
+        "$.targetSessionId": "string!"
       }
     },
     "CreateSiteAuthConnectionRequest": {
@@ -23207,9 +23227,11 @@
       "shape": {
         "$": "object",
         "$.action": "ref(ScheduledTaskAction)?",
+        "$.adoptSessionSettings": "const?=[\"true\"]",
         "$.agentConfig": "ref(ScheduledTaskAgentConfigInput)?",
         "$.agentConfigPatch": "object?",
         "$.agentConfigPatch.model": "string?",
+        "$.agentConfigPatch.prompt": "string?",
         "$.agentConfigPatch.reasoningEffort": "ref(ReasoningEffort)?",
         "$.agentLearning": "object?",
         "$.agentLearning.baselineScope": "ref(ConnectionOwnership)?",
@@ -23221,10 +23243,12 @@
         "$.connectionAccounts[]": "ref(McpConnectionAccountSelection)",
         "$.connectionAuthorities": "unknown?",
         "$.environmentId": "string? null",
+        "$.expectedExecutionDigest": "string?",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.name": "string?",
         "$.overlapPolicy": "ref(ScheduledTaskOverlapPolicy)?",
+        "$.prompt": "string?",
         "$.rigId": "string? null",
         "$.runMode": "ref(ScheduledTaskRunMode)?",
         "$.schedule": "ref(ScheduledTaskScheduleSpec)?",
@@ -25853,6 +25877,7 @@
       "CreateScheduledTaskRequest": "type",
       "createSessionProxyHandler": "value",
       "CreateSessionRequest": "type",
+      "CreateSessionScheduledTaskRequest": "type",
       "CreateSiteAuthConnectionRequest": "type",
       "createSiteToolBridge": "value",
       "CreateSiteToolBridgeOptions": "type",

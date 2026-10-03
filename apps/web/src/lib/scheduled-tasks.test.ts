@@ -464,7 +464,7 @@ describe("scheduled task form projection", () => {
     const form = recurringSessionTaskFormState(targetSessionId, true);
 
     expect(form).toMatchObject({
-      name: "Recurring Slack task",
+      name: "",
       scheduleType: "interval",
       intervalMinutes: 60,
       runMode: "existing_session",

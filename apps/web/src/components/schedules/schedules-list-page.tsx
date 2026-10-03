@@ -4,6 +4,7 @@
  * A row opens the schedule's own page; New schedule opens the form page.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   CalendarClockIcon,
   GitPullRequestIcon,
@@ -23,6 +24,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import { scheduledTaskDriftDismissal } from "@/lib/scheduled-task-drift-dismissals";
 import {
   loadSessionSchedules,
@@ -148,7 +150,24 @@ export function SchedulesListPage({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [clock, setClock] = useState(() => new Date());
+  const [filteredChat, setFilteredChat] = useState<{ id: string; title: string } | null>(null);
   const viewState = listViewState({ loading, error: loadError, count: list.tasks.length });
+
+  useEffect(() => {
+    let cancelled = false;
+    setFilteredChat(null);
+    if (targetSessionId) {
+      client.getSession(workspaceId, targetSessionId).then(
+        (session) => {
+          if (!cancelled) setFilteredChat({ id: session.id, title: sessionDisplayTitle(session) });
+        },
+        () => undefined,
+      );
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId, targetSessionId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 60_000);
@@ -262,8 +281,14 @@ export function SchedulesListPage({
         actions={
           canCreate && !empty && viewState !== "loading" ? (
             <>
-              {canAsk ? <CreateWithOpenGeniButton onClick={ask.open} /> : null}
-              <Button type="button" onClick={() => go.create()} className="pointer-coarse:h-11">
+              {canAsk && !targetSessionId ? <CreateWithOpenGeniButton onClick={ask.open} /> : null}
+              <Button
+                type="button"
+                onClick={() =>
+                  go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
+                }
+                className="pointer-coarse:h-11"
+              >
                 <PlusIcon aria-hidden="true" />
                 New schedule
               </Button>
@@ -287,7 +312,15 @@ export function SchedulesListPage({
             </Button>
           }
         >
-          Showing the schedules that post into one chat.
+          Schedules for{" "}
+          <Link
+            to="/workspaces/$workspaceId/sessions/$sessionId"
+            params={{ workspaceId, sessionId: targetSessionId }}
+            className="break-words underline underline-offset-2"
+          >
+            {filteredChat?.id === targetSessionId ? filteredChat.title : "the selected chat"}
+          </Link>
+          .
         </Notice>
       ) : null}
       <div className="mt-6 min-w-0">
@@ -319,7 +352,9 @@ export function SchedulesListPage({
             canCreate={canCreate}
             filtered={Boolean(targetSessionId)}
             now={clock}
-            onNew={() => go.create()}
+            onNew={() =>
+              go.create(targetSessionId ? { sourceSessionId: targetSessionId } : undefined)
+            }
             onAsk={canAsk ? ask.open : undefined}
             onTemplate={(template) => go.create({ template })}
           />
@@ -458,8 +493,15 @@ function SchedulesEmpty({
     return (
       <EmptyState
         variant="inline"
-        title="No schedules post into this chat."
-        description="It may have been deleted or moved to a new chat."
+        title="No schedules for this chat"
+        description="Schedule a message to continue the conversation later."
+        action={
+          canCreate ? (
+            <Button type="button" onClick={onNew}>
+              New schedule
+            </Button>
+          ) : undefined
+        }
       />
     );
   }

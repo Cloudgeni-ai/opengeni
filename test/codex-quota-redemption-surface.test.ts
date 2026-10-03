@@ -5,7 +5,7 @@ import { join } from "node:path";
 const repo = join(import.meta.dir, "..");
 
 // The organization MCP catalog lists every route an agent acting as a person
-// may call, including this one: an owner decision (OPE-647) allows reset
+// may call, including this one: the owner policy allows reset
 // credits under Full access. The route still requires the person, in their
 // browser or through a verified agent acting as them; nothing else may name it.
 const ORGANIZATION_MCP_CATALOG = "apps/api/src/mcp/action-catalog.gen.ts";

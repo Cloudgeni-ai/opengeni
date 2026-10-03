@@ -3,10 +3,17 @@ import { resolveSessionEventTypeFilters, type SessionEvent } from "@opengeni/con
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 type ListSessionEventPageOptions = import("./index").ListSessionEventPageOptions;
 type SessionEventPage = import("./index").SessionEventPage;
-import { fromPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "./lossless-json";
+import {
+  fromPostgresLosslessJson,
+  toPostgresLosslessJson,
+  LOSSLESS_JSON_STRING_PREFIX,
+} from "./lossless-json";
 import * as schema from "./schema";
 
 export type SessionEventSliceOptions = ListSessionEventPageOptions & {
+  /** Exact call filters applied before loading value slices. */
+  toolName?: string;
+  callId?: string;
   sourceSequence?: number;
   sourceOffset?: number;
   view?: "conversation" | "results" | "tools";
@@ -123,6 +130,20 @@ async function listSessionEventSlicesInternal(
     predicates.push(inArray(schema.sessionEvents.type, filters.includeTypes));
   if (filters.excludeTypes.length)
     predicates.push(notInArray(schema.sessionEvents.type, filters.excludeTypes));
+  // Losslessly encoded strings are decoded by the bounded view reader. An
+  // ordinary JSON text predicate cannot match those stored representations.
+  if (
+    options.toolName !== undefined &&
+    toPostgresLosslessJson(options.toolName) === options.toolName
+  )
+    predicates.push(
+      eq(schema.sessionEvents.type, "agent.toolCall.created"),
+      sql`${schema.sessionEvents.payload}->>'name' = ${options.toolName}`,
+    );
+  if (options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId)
+    predicates.push(
+      sql`coalesce(${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`,
+    );
   // Unlike audit `none` mode, this identity query does not compute a payload
   // projection merely to report its size. Only the selected scalar is extracted.
   const identities = selectedIdentity

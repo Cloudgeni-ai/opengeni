@@ -38,6 +38,51 @@ function bounded(page: unknown) {
 }
 
 describe("session event content views", () => {
+  test("cursor-only paging retains the requested size and oversized requests fail explicitly", async () => {
+    const rows = Array.from({ length: 13 }, (_, n) =>
+      event(n + 1, "agent.message.completed", { text: `Message ${n}` }),
+    );
+    const first = await readSessionEventView({ sessionId, limit: 4 }, reader(rows));
+    const second = await readSessionEventView(
+      { sessionId, cursor: first.nextCursor! },
+      reader(rows),
+    );
+    expect(second.effectiveLimit).toBe(4);
+    expect(second.events).toHaveLength(4);
+    expect(second.events.map((item) => item.sequence)).toEqual([6, 7, 8, 9]);
+    await expect(readSessionEventView({ sessionId, limit: 200 }, reader(rows))).rejects.toThrow();
+  });
+
+  test("exact named calls bypass unrelated history and continue to result by call ID", async () => {
+    const rows = [
+      event(1, "agent.toolCall.created", {
+        callId: "create",
+        name: "scheduled_tasks_create",
+        arguments: { prompt: "Review" },
+      }),
+      event(2, "agent.toolCall.output", { callId: "create", output: "Created" }),
+      event(3, "agent.toolCall.created", { callId: "list", name: "scheduled_tasks_list" }),
+    ];
+    const calls = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeArguments: true },
+      reader(rows),
+    );
+    expect(calls.events).toMatchObject([
+      { sequence: 1, name: "scheduled_tasks_create", callId: "create" },
+    ]);
+    const result = await readSessionEventView(
+      { sessionId, view: "tools", callId: "create", includeOutput: true },
+      reader(rows),
+    );
+    expect(result.events.find((item) => item.kind === "result")?.text).toBe("Created");
+    await expect(
+      readSessionEventView(
+        { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeOutput: true },
+        reader(rows),
+      ),
+    ).rejects.toThrow("callId");
+  });
+
   for (const direction of ["after", "before"] as const) {
     test(`whole-message continuation visits every event once (${direction})`, async () => {
       const rows = Array.from({ length: 25 }, (_, n) =>

@@ -7,6 +7,7 @@ import {
   SCHEDULED_TASK_MCP_MAX_BYTES,
   SCHEDULED_TASK_SCHEDULE_FIELD_MAX_BYTES,
   scheduledTaskMcpSummary,
+  scheduledTaskPromptPage,
 } from "../src/mcp/scheduled-task-view";
 
 function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
@@ -47,6 +48,33 @@ function expectNoInvalidUtf8(value: unknown): void {
 }
 
 describe("scheduled-task MCP views", () => {
+  test("complete prompt paging preserves whitespace, escapes and UTF-16 without oversized responses", () => {
+    const source = task({
+      executionDigest: "a".repeat(64),
+      agentConfig: {
+        prompt: "  " + '🙂\u0000\ud800\n"'.repeat(6000) + "  ",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+    });
+    let offset = 0;
+    let actual = "";
+    for (;;) {
+      const page = scheduledTaskPromptPage(source, offset, source.executionDigest);
+      expect(prettyBytes(page)).toBeLessThanOrEqual(SCHEDULED_TASK_MCP_MAX_BYTES);
+      actual += page.prompt.text;
+      if (page.prompt.nextOffset === null) break;
+      offset = page.prompt.nextOffset;
+    }
+    expect(actual).toBe(source.agentConfig.prompt);
+    expect(() => scheduledTaskPromptPage(source, 2)).toThrow("executionDigest");
+    expect(() => scheduledTaskPromptPage(source, 2, "stale")).toThrow("changed");
+    expect(() => scheduledTaskPromptPage(source, 3, source.executionDigest)).toThrow(
+      "surrogate pair",
+    );
+  });
+
   test("summaries replace prompts and metadata values with exact byte/count facts", () => {
     const secretMarker = `must-not-echo-${crypto.randomUUID()}`;
     const source = task({

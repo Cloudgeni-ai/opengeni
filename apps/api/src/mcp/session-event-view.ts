@@ -23,6 +23,17 @@ const selectionSchema = z.object({
       "callId exceeds the encoded cursor budget",
     )
     .nullable(),
+  toolName: z
+    .string()
+    .min(1)
+    .max(256)
+    .refine(
+      (value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= 512,
+      "toolName exceeds the encoded cursor budget",
+    )
+    .nullable()
+    .default(null),
+  limit: z.number().int().min(1).max(50).optional(),
   direction: z.enum(["before", "after"]),
   after: z.number().int().nonnegative(),
   before: z.number().int().positive().nullable(),
@@ -43,6 +54,7 @@ export type SessionEventViewInput = {
   limit?: number | undefined;
   cursor?: string | undefined;
   callId?: string | undefined;
+  toolName?: string | undefined;
   includeArguments?: boolean | undefined;
   includeOutput?: boolean | undefined;
 };
@@ -85,6 +97,7 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       "includeArguments",
       "includeOutput",
       "callId",
+      "toolName",
       "direction",
       "after",
       "before",
@@ -102,17 +115,31 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
       includeArguments: input.includeArguments ?? false,
       includeOutput: input.includeOutput ?? false,
       callId: input.callId ?? null,
+      toolName: input.toolName ?? null,
       direction:
         input.direction ??
         (input.before !== undefined || input.after === undefined ? "before" : "after"),
       after: input.after ?? 0,
       before: input.before ?? null,
     });
+  selection.limit = z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .parse(input.limit ?? selection.limit ?? 10);
+  if (selection.toolName && selection.includeOutput)
+    throw new Error(
+      "toolName selects named calls. Read a result with its callId and includeOutput=true.",
+    );
   if (
     selection.view !== "tools" &&
-    (selection.callId || selection.includeArguments || selection.includeOutput)
+    (selection.callId ||
+      selection.toolName ||
+      selection.includeArguments ||
+      selection.includeOutput)
   ) {
-    throw new Error("callId/includeArguments/includeOutput require view=tools");
+    throw new Error("callId/toolName/includeArguments/includeOutput require view=tools");
   }
   if (
     continuation &&
@@ -153,6 +180,11 @@ function project(event: SessionEvent, selection: Selection): Item | null {
       text: typeof value === "string" ? value : JSON.stringify(value),
     };
   }
+  if (
+    selection.toolName &&
+    (event.type !== "agent.toolCall.created" || p.name !== selection.toolName)
+  )
+    return null;
   const callId = p.callId ?? p.call_id ?? p.id;
   if (selection.callId !== null && selection.callId !== callId) return null;
   const output = event.type === "agent.toolCall.output";
@@ -177,7 +209,7 @@ function project(event: SessionEvent, selection: Selection): Item | null {
 /** Read-only projection over the existing RLS/audit query. No command observations. */
 export async function readSessionEventView(input: SessionEventViewInput, read: ReadPage) {
   const { selection, continuation } = resolveSessionEventView(input);
-  const limit = Math.max(1, Math.min(50, input.limit ?? 10));
+  const limit = selection.limit!;
   let after =
     continuation?.sequence && selection.direction === "after"
       ? continuation.sequence - 1
@@ -194,6 +226,7 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
   let legacyActive = continuation?.v === 1 && continuation.sequence !== null;
   const page = () => ({
     view: selection.view,
+    effectiveLimit: limit,
     direction: selection.direction,
     events,
     nextAfter: selection.direction === "after" ? (edge ?? selection.after) : null,
@@ -230,7 +263,9 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
       ...(before === null ? {} : { before }),
       direction: selection.direction,
       limit: 8,
-      includeTypes: types[selection.view],
+      includeTypes: selection.toolName ? ["agent.toolCall.created"] : types[selection.view],
+      ...(selection.toolName ? { toolName: selection.toolName } : {}),
+      ...(selection.callId ? { callId: selection.callId } : {}),
       payloadMode: "full",
       excludeUnclaimedHumanPrompts: true,
       maxBytes: 1024 * 1024,

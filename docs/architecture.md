@@ -860,6 +860,13 @@ All producers use the ordinary session/turn runtime:
 
 Schedule indicators include authorized reusable-session targets and paused schedules; the API filters by `sessionId`.
 
+Conversational schedules default to the signed calling session. Existing-session
+messages inherit the destination's execution settings at admission, while account
+choices retain the schedule's own captured authority. Separate-agent modes are
+explicit. Narrow message edits and server-owned retargeting preserve omitted data;
+execution-digest comparisons guard concurrent edits. See
+[scheduling messages and editing destinations](scheduled-task-access.md#scheduling-a-message-in-a-chat).
+
 Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; see [runs waiting on a person](scheduled-task-access.md#runs-waiting-on-a-person).
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;

@@ -118,15 +118,6 @@ config:
   # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
   # rollback.
   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
-  # Explicit host-owned MCP connection refs use rolling protocol admission.
-  # Keep false for the image rollout, then flip true only after API, worker, and
-  # web replicas all understand the host authority discriminator.
-  OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
-  # Agent configuration (sessions.agent_config, migration 0559). Readers first:
-  # roll every worker onto the 0559-aware image with both switches off, then
-  # set ADMISSION to "true" so the API accepts `agent` inputs (and PUT
-  # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
-  # new top-level sessions that omit `agent` resolve { capabilities: "all" }.
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.

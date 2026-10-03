@@ -206,7 +206,7 @@ export function recurringSessionTaskFormState(
 ): ScheduledTaskFormState {
   return {
     ...newScheduledTaskFormState(includeOpenGeniTool, [], defaults),
-    name: "Recurring Slack task",
+    name: "",
     prompt: "Continue this task using the current session context and report the result.",
     scheduleType: "interval",
     intervalMinutes: 60,
@@ -394,6 +394,20 @@ export function agentConfigFromFormState(
   }
   // Keep what the form doesn't edit (identity, renderer, instructions) as saved.
   const { capabilities: _savedCapabilities, ...savedAgent } = existingTask?.agentConfig.agent ?? {};
+  // Preserve fields this editor does not expose. Editable optional fields are
+  // removed first so clearing a model/machine/Slack selection still works.
+  const {
+    model: _model,
+    reasoningEffort: _effort,
+    machineTarget: _machine,
+    sandboxBackend: _backend,
+    slackBotConnectionId: _bot,
+    slackBotChannelId: _channel,
+    agent: _agent,
+    connectionAccounts: _accounts,
+    connectionAccountsFrozen: _frozen,
+    ...retainedConfig
+  } = { connectionAccountsFrozen: undefined, ...existingTask?.agentConfig };
   const agent =
     form.runMode === "existing_session"
       ? undefined
@@ -402,6 +416,7 @@ export function agentConfigFromFormState(
           ...(form.agentCapabilities !== undefined ? { capabilities: form.agentCapabilities } : {}),
         };
   return {
+    ...retainedConfig,
     prompt: form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     ...(existingTask?.agentConfig.knowledgeSource

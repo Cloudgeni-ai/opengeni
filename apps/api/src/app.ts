@@ -90,6 +90,7 @@ import {
   agentConfigHttpError,
   allowanceExhaustedHttpError,
   modelUnavailableHttpError,
+  scheduledTaskTargetAccessHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -1787,6 +1788,7 @@ export function createAppComposition(deps: AppDependencies): {
         ? new HTTPException(403, { message: rawError.message })
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
+          scheduledTaskTargetAccessHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
           modelUnavailableHttpError(rawError) ??
           (rawError instanceof UnsupportedLatencyModeError

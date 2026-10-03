@@ -142,7 +142,13 @@ describe("scheduled existing-session authorization", () => {
       }),
     ).rejects.toMatchObject({ status: 409 });
 
-    lookup.mockResolvedValue({ ...baseSession, variableSetId: crypto.randomUUID() });
+    const attachedSession = {
+      ...baseSession,
+      variableSetId: crypto.randomUUID(),
+      sandboxBackend: "selfhosted" as const,
+      rigId: crypto.randomUUID(),
+    };
+    lookup.mockResolvedValue(attachedSession);
     await expect(
       validateScheduledTaskTarget({
         db: {} as never,
@@ -153,7 +159,7 @@ describe("scheduled existing-session authorization", () => {
         rigId: null,
         agentConfig: baseConfig,
       }),
-    ).rejects.toMatchObject({ status: 422 });
+    ).resolves.toEqual(attachedSession);
   });
 
   test("rejects goal replacement and orphaned trigger targets", async () => {

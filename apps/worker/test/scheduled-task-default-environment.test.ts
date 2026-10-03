@@ -12,6 +12,8 @@ import {
   createSession,
   createVariableSet,
   getScheduledTask,
+  getScheduledTaskRunAcceptedExecution,
+  listScheduledTaskRuns,
   requireSession,
   setWorkspaceDefaultRig,
   type DbClient,
@@ -261,21 +263,31 @@ describe("scheduled task default Sandbox Environment", () => {
       runMode: "existing_session",
       targetSessionId: target.id,
     });
-    expect(adopted.rigId).toBe(withSecrets.id);
+    expect(adopted.rigId).toBeNull();
     await expect(
-      update(adopted, { runMode: "new_session_per_run", targetSessionId: null }, manageOnly),
+      update(
+        adopted,
+        { runMode: "new_session_per_run", targetSessionId: null, rigId: withSecrets.id },
+        manageOnly,
+      ),
     ).rejects.toMatchObject({ status: 403 });
   }, 60_000);
 
-  test("an existing-session task adopts its target session's own environment", async () => {
+  test("an existing-session task inherits its target environment without duplicating its binding", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const workspaceDefault = await seedRig(workspace, "default");
     const targetEnvironment = await seedRig(workspace, "target");
+    const credentials = await createVariableSet(client.db, {
+      ...workspace,
+      scope: "workspace",
+      name: "target credentials",
+    });
     await setWorkspaceDefaultRig(client.db, workspace.workspaceId, workspaceDefault.id);
     const target = await createSession(client.db, {
       ...workspace,
       initialMessage: "long-running target",
+      variableSetId: credentials.id,
       resources: [],
       metadata: {},
       model: "scripted-model",
@@ -290,7 +302,38 @@ describe("scheduled task default Sandbox Environment", () => {
       runMode: "existing_session",
       targetSessionId: target.id,
     });
-    expect(task.rigId).toBe(targetEnvironment.id);
+    expect(task.rigId).toBeNull();
+    expect(task.variableSetId).toBeNull();
+    const producerKey = `existing-message-${crypto.randomUUID()}`;
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey,
+    };
+    const dispatched = await activities().dispatchScheduledTaskRun(input);
+    expect(dispatched.action).toBe("signal");
+    if (dispatched.action !== "signal") throw new Error("Existing-chat dispatch refused");
+    expect(dispatched.sessionId).toBe(target.id);
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run!.id,
+    });
+    expect(accepted?.targetSessionExecution?.model).toBe(target.model);
+    expect(accepted?.targetSessionExecution?.variableSets.map((set) => set.id)).toContain(
+      credentials.id,
+    );
+    expect((await requireSession(client.db, workspace.workspaceId, target.id)).rigId).toBe(
+      targetEnvironment.id,
+    );
+    // Redelivery recovers the same occurrence without comparing the target's
+    // attachments to the intentionally empty task defaults.
+    const recovered = await activities().dispatchScheduledTaskRun(input);
+    expect(["signal", "already_dispatched"]).toContain(recovered.action);
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      1,
+    );
     // An explicit mismatch is still refused.
     await expect(
       createTask(workspace, {

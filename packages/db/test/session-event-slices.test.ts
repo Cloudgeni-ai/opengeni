@@ -71,6 +71,56 @@ const read = async (options: Parameters<typeof listSessionEventSlices>[3]) => {
   return page;
 };
 
+test("tool filters return scoped calls and exact results, including codec identities", async () => {
+  for (const callId of [
+    "ordinary",
+    "nul\u0000identity",
+    "\ud800identity",
+    `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+  ]) {
+    const sequence =
+      callId === "ordinary"
+        ? 1
+        : 3 +
+          ["nul\u0000identity", "\ud800identity", `${LOSSLESS_JSON_STRING_PREFIX}literal`].indexOf(
+            callId,
+          ) *
+            2;
+    await insert(
+      sequence,
+      "agent.toolCall.created",
+      toPostgresLosslessJson({
+        callId,
+        name: "scheduled_tasks_create",
+        arguments: { prompt: "Review" },
+      }),
+      1,
+    );
+    await insert(
+      sequence + 1,
+      "agent.toolCall.output",
+      toPostgresLosslessJson({ callId, output: "Created" }),
+      1,
+    );
+    const result = await readSessionEventView(
+      { sessionId, view: "tools", callId, includeOutput: true },
+      read,
+    );
+    expect(result.events).toHaveLength(2);
+    expect(result.events.find((item) => item.kind === "result")?.text).toBe("Created");
+  }
+  const calls = await readSessionEventView(
+    { sessionId, view: "tools", toolName: "scheduled_tasks_create", limit: 2 },
+    read,
+  );
+  expect(calls.events).toHaveLength(2);
+  expect(calls.events.every((item) => item.kind === "call")).toBe(true);
+  const rest = await readSessionEventView({ sessionId, cursor: calls.nextCursor! }, read);
+  expect(rest.effectiveLimit).toBe(2);
+  expect(rest.events).toHaveLength(2);
+  expect(rest.hasMore).toBe(false);
+}, 60_000);
+
 for (const direction of ["after", "before"] as const) {
   test(`real PostgreSQL reconstructs >1MiB legacy and canonical scalar text (${direction})`, async () => {
     const sequence = 1;

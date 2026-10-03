@@ -1433,20 +1433,10 @@ deployment keeps the legacy workspace-owned lane and an image rollback stays an
 ordinary deployment decision. Every rolling tenancy migration still applies
 normally with the switch off.
 
-Explicit embedding-host MCP connection authority has an independent rolling
-admission switch: `OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED`
-defaults to `false` in config and Helm. Deploy the new API, control worker, turn
-worker, and web image everywhere with the switch false. Only after the complete
-fleet has converged should a second rollout set it true and begin admitting
-`authoritySource: "host"` connection refs. This prevents a new API from
-persisting a discriminator that an old turn worker could reinterpret as native
-connection authority. Host auth-needed events remain safe for cached old web
-bundles: their legacy reason is unavailable/non-actionable, while new bundles
-read the exact `hostReason` and host authorization URL. After marked refs
-exist, never restart a pre-contract image; turning the switch off does not
-remove, drain, or disable those durable refs. Upgraded readers, child
-inheritance, and workers consume them regardless of their local switch value;
-the switch gates only new external admission and static configuration.
+Connection-backed MCP servers use ordinary native connections. Host-provenance
+connection refs and the former host credential callback are retired. Integrating
+backends provision connections through the normal connection APIs under the
+canonical actor; see [MCP connection cutover](remote-mcp-credentials.md).
 
 Agent configuration (`sessions.agent_config`, migration
 `0559_session_agent_config.sql`) is always on; it has no deployment switch.

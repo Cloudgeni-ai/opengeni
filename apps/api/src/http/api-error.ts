@@ -2,6 +2,7 @@ import {
   AgentConfigError,
   AllowanceExhaustedRefusal,
   ModelUnavailableError,
+  ScheduledTaskTargetAccessChange,
   type ErrorCode,
 } from "@opengeni/contracts";
 import { WorkspaceControlBusyError } from "@opengeni/db";
@@ -31,6 +32,20 @@ export class ApiHttpError extends HTTPException {
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
+}
+
+export function scheduledTaskTargetAccessHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof HTTPException) || error.status !== 409) return null;
+  const result = ScheduledTaskTargetAccessChange.safeParse(error.cause);
+  return result.success
+    ? new ApiHttpError(409, {
+        code: "conflict",
+        message: error.message,
+        retryable: false,
+        outcomeUnknown: false,
+        details: result.data,
+      })
+    : null;
 }
 
 /** Preserve typed admission details through the common public error envelope. */

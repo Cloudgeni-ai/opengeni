@@ -133,7 +133,7 @@ export function ScheduleSlackPosting(props: {
       ? `Couldn't load Slack connections. ${botsError}`
       : bots !== null && botOptions.length === 0 && !props.connectionId
         ? "No Opengeni Slack bot is installed in this workspace. A task can post only through a " +
-          "bot installed in its own workspace, from Plugins."
+          "bot installed in its own workspace, from Capabilities."
         : null;
   if (blocked) {
     return (

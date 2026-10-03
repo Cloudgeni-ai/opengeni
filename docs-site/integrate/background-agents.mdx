@@ -28,6 +28,26 @@ Always set an explicit schedule and time zone. `runMode` chooses a new session p
 
 Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
 
+To continue an existing conversation, schedule a message for that session:
+
+```ts
+const task = await og.createScheduledTask(workspaceId, {
+  name: "Daily follow-up",
+  schedule: { type: "calendar", hour: 9, minute: 0, timeZone: "Europe/Oslo" },
+  targetSessionId: session.id,
+  prompt: "Review new tickets and report any that need attention.",
+});
+
+await og.updateScheduledTask(workspaceId, task.id, {
+  prompt: "Review urgent tickets and report any that need attention.",
+  expectedExecutionDigest: task.executionDigest,
+});
+```
+
+An existing-session schedule uses that chat's model, tools, machine, and attachments at each new run. It does not need a second agent configuration. The message enters as a scheduled user turn, under the schedule owner's authority; accepted runs retain their settings during retries. When an agent creates a schedule from a chat without choosing a run mode, that chat is the default destination. Creating a separate chat requires an explicit choice.
+
+Updates preserve fields you omit. Use `expectedExecutionDigest` from the latest task read to reject a conflicting edit. Changing `targetSessionId` moves future runs; if the destination would lose Variable Sets or a Sandbox Environment, the API returns a conflict describing the change. Review it, then repeat with the same digest and `adoptSessionSettings: true` to accept the destination's settings.
+
 ## From your product's events
 
 An inbound automation turns a signed HTTP event from your product into an agent session. Create a **source** (it has a public webhook endpoint and a signing secret) and a **trigger** (which events match and the session to start), with `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`. Your product then posts JSON events:

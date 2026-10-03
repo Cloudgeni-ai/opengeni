@@ -5,7 +5,7 @@ import { Link } from "@tanstack/react-router";
  * cadence sentence and its next runs) -> an optional Name -> one closed
  * Advanced section. Knowledge source syncs keep a small editor of their own.
  */
-import { Suspense, lazy, useEffect, useId, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LaptopIcon, ServerIcon } from "lucide-react";
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { CadencePicker } from "@/components/ui/cadence-picker";
 import { Disclosure } from "@/components/ui/disclosure";
 import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
+import { CheckboxField, Field, FieldStack, TextInput, useField } from "@/components/ui/field";
 import { FormPage } from "@/components/ui/form-dialog";
 import { HelpLink } from "@/components/ui/inline-help";
 import { Notice } from "@/components/ui/notice";
@@ -29,6 +29,7 @@ import {
   apiErrorAdvice,
   apiErrorDetails,
   apiErrorFacts,
+  isApiError,
   isPermissionDenied,
   userErrorText,
 } from "@/lib/api-error";
@@ -244,13 +245,6 @@ function FieldSegmented<Value extends string>(
 
 type EachRun = "new_session_per_run" | "reusable_session" | "existing_session";
 
-const EACH_RUN_HINT: Record<EachRun, string> = {
-  new_session_per_run: "Every run starts a fresh chat, named after the schedule.",
-  reusable_session:
-    "Every run posts into the same chat, so the agent sees what it found last time.",
-  existing_session: "Every run posts into the chat you pick, with that chat's tools.",
-};
-
 type IfStillRunning = "queue" | "skip";
 
 const IF_STILL_RUNNING_HINT: Record<IfStillRunning, string> = {
@@ -363,10 +357,35 @@ function AgentScheduleForm({
       [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni"),
   }));
   const [errors, setErrors] = useState<FormErrors>({});
-  const [advancedOpen, setAdvancedOpen] = useState(() => initial.runMode === "existing_session");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [accessChange, setAccessChange] = useState<{
+    variableSets: boolean;
+    environment: boolean;
+  } | null>(null);
+  const [adoptSessionSettings, setAdoptSessionSettings] = useState(false);
+  const [accountsChanged, setAccountsChanged] = useState(false);
+  const accessReview = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (accessChange) {
+      accessReview.current?.focus();
+      accessReview.current?.scrollIntoView({ block: "nearest" });
+    }
+  }, [accessChange]);
+  const preserveAccounts =
+    editing &&
+    !accountsChanged &&
+    draft.runMode === initial.runMode &&
+    draft.targetSessionId === initial.targetSessionId &&
+    draft.includeOpenGeniTool === initial.includeOpenGeniTool &&
+    JSON.stringify(draft.mcpServerIds) === JSON.stringify(initial.mcpServerIds) &&
+    JSON.stringify(draft.agentCapabilities) === JSON.stringify(initial.agentCapabilities);
   const now = useMemo(() => new Date(), []);
 
   const update = (patch: Partial<ScheduleDraft>) => {
+    if (patch.targetSessionId !== undefined || patch.runMode !== undefined) {
+      setAccessChange(null);
+      setAdoptSessionSettings(false);
+    }
     setDraft((current) => ({ ...current, ...patch }));
     setErrors((current) => ({
       ...current,
@@ -416,30 +435,52 @@ function AgentScheduleForm({
     }
   }, [draft.executionTarget, draft.machineSandboxId, draft.runMode, scheduledMachines]);
 
-  /* ----- chats a run can post into */
+  /* ----- destination chats */
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState<unknown>(null);
+  const [sessionsRetry, setSessionsRetry] = useState(0);
   const needsSessions = draft.runMode === "existing_session" && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
+  const targetSessionId = draft.targetSessionId;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
-    void Promise.all([
-      client.listSessions(workspaceId, { limit: 100 }).catch(() => [] as Session[]),
-      sourceSessionId
-        ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
+    setSessionsLoading(true);
+    setSessionsError(null);
+    void Promise.allSettled([
+      client.listSessions(workspaceId, { limit: 100 }),
+      targetSessionId
+        ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
-    ]).then(([list, exact]) => {
+    ]).then(([listResult, exactResult]) => {
       if (!live) return;
+      const list = listResult.status === "fulfilled" ? listResult.value : [];
+      const exact = exactResult.status === "fulfilled" ? exactResult.value : null;
+      // Fetch the chosen chat independently: it may be older than the recent list.
       setSessions(
-        [...(exact ? [exact] : []), ...list.filter((session) => session.id !== exact?.id)].filter(
-          (session) => session.status !== "cancelled",
-        ),
+        [
+          ...(exact ? [exact] : []),
+          ...list.filter(
+            (session) =>
+              session.id !== exact?.id &&
+              (exactResult.status === "fulfilled" || session.id !== targetSessionId),
+          ),
+        ].filter((session) => session.status !== "cancelled"),
       );
+      setSessionsError(
+        exactResult.status === "rejected"
+          ? exactResult.reason
+          : listResult.status === "rejected"
+            ? listResult.reason
+            : null,
+      );
+      setSessionsLoading(false);
     });
     return () => {
       live = false;
     };
-  }, [client, needsSessions, sourceSessionId, workspaceId]);
+  }, [client, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
 
   /* ----- connected accounts for the chosen tools */
   const selectedIds =
@@ -562,18 +603,15 @@ function AgentScheduleForm({
   const ifStillRunning: IfStillRunning = draft.overlapPolicy === "skip" ? "skip" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
   const advancedSummary = [
-    eachRun === "new_session_per_run"
-      ? "New chat each run"
-      : eachRun === "reusable_session"
-        ? "One ongoing chat"
-        : "An existing chat",
     ...(eachRun === "new_session_per_run"
       ? []
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(eachRun === "existing_session" ? [] : [whereLabel]),
     // A task that continues an existing chat never posts on its own.
     ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
-    learningCustom ? "Custom agent learning" : "Workspace learning defaults",
+    ...(eachRun === "existing_session"
+      ? []
+      : [learningCustom ? "Custom agent learning" : "Workspace learning defaults"]),
   ].join(" · ");
 
   const derivedName = deriveScheduleName(draft.prompt);
@@ -614,7 +652,9 @@ function AgentScheduleForm({
     if (Object.values(next).some(Boolean) || cadenceProblem) return false;
     const submitted: ScheduleDraft = {
       ...draft,
-      connectionAccounts: connectionAccounts.selections,
+      connectionAccounts: preserveAccounts
+        ? initial.connectionAccounts
+        : connectionAccounts.selections,
     };
     const submitNow = new Date();
     if (editing && task) {
@@ -624,22 +664,34 @@ function AgentScheduleForm({
           submitted.agentLearningDestinationKey !== scheduledLearningDestinationKey(submitted));
       await withFriendlyError(
         "Couldn't save your changes.",
-        client.updateScheduledTask(
-          workspaceId,
-          task.id,
-          updateRequestFromDraft(task, initial, submitted, {
-            now: submitNow,
-            agentLearning: learningChanged
-              ? {
-                  scope: scheduledLearningScope(submitted, sessions, personal),
-                  baselineScope: submitted.agentLearningBaselineScope,
-                  operationId: crypto.randomUUID(),
-                  expectedVersion: submitted.agentLearningVersion!,
-                  settings: submitted.agentLearning ?? {},
-                }
-              : undefined,
+        client
+          .updateScheduledTask(workspaceId, task.id, {
+            ...updateRequestFromDraft(task, initial, submitted, {
+              now: submitNow,
+              agentLearning: learningChanged
+                ? {
+                    scope: scheduledLearningScope(submitted, sessions, personal),
+                    baselineScope: submitted.agentLearningBaselineScope,
+                    operationId: crypto.randomUUID(),
+                    expectedVersion: submitted.agentLearningVersion!,
+                    settings: submitted.agentLearning ?? {},
+                  }
+                : undefined,
+            }),
+            ...(adoptSessionSettings ? { adoptSessionSettings: true as const } : {}),
+          })
+          .catch((error: unknown) => {
+            const details = (error as { details?: Record<string, unknown> }).details;
+            if (details?.code === "scheduled_target_access_change") {
+              setAccessChange({
+                variableSets:
+                  typeof details?.removedVariableSetCount === "number" &&
+                  details.removedVariableSetCount > 0,
+                environment: Boolean(details?.removedRigId),
+              });
+            }
+            throw error;
           }),
-        ),
       );
       toast.success("Changes saved", { description: scheduleName(submitted) });
       go.detail(task.id, { replace: true });
@@ -688,25 +740,35 @@ function AgentScheduleForm({
   const submitBlocked =
     noAccess ||
     (cantRunHere && computeChanged) ||
-    learningLoading ||
-    connectionAccounts.loading ||
-    Boolean(connectionAccounts.error) ||
-    connectionAccounts.requiresAccountChoice;
+    (draft.runMode !== "existing_session" && learningLoading) ||
+    (draft.runMode === "existing_session" &&
+      (!sessions.some((session) => session.id === draft.targetSessionId) ||
+        (accessChange && !adoptSessionSettings))) ||
+    (!preserveAccounts &&
+      (connectionAccounts.loading ||
+        Boolean(connectionAccounts.error) ||
+        connectionAccounts.requiresAccountChoice));
   const blockedReason = noAccess
     ? editing && task && !ownsSchedule(task, access.viewerSubjectId)
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
     : cantRunHere && computeChanged
       ? "Connect a machine first. This Opengeni server can't run schedules without one."
-      : connectionAccounts.requiresAccountChoice
+      : !preserveAccounts && connectionAccounts.requiresAccountChoice
         ? (connectionAccounts.accountChoiceMessage ?? "Pick an account for each tool.")
-        : learningLoading || connectionAccounts.loading
+        : (draft.runMode !== "existing_session" && learningLoading) ||
+            (!preserveAccounts && connectionAccounts.loading)
           ? "Loading this schedule's settings…"
-          : connectionAccounts.error
+          : !preserveAccounts && connectionAccounts.error
             ? connectionAccounts.accessDenied
               ? "You can't see this workspace's connected accounts. Ask a workspace admin."
               : "Connected accounts couldn't load. Try again."
-            : undefined;
+            : draft.runMode === "existing_session" &&
+                !sessions.some((session) => session.id === draft.targetSessionId)
+              ? "Choose an available chat."
+              : accessChange && !adoptSessionSettings
+                ? "Review the destination chat’s attachments before saving."
+                : undefined;
 
   const selectedSession = sessions.find((session) => session.id === draft.targetSessionId);
   const sessionOptions: SelectOption[] = [
@@ -714,7 +776,11 @@ function AgentScheduleForm({
       ? [
           {
             value: draft.targetSessionId,
-            label: sessions.length ? "The chosen chat is unavailable" : "Loading chats…",
+            label: sessionsLoading
+              ? "Loading chat…"
+              : sessionsError
+                ? "Chat couldn’t load"
+                : "The chosen chat is unavailable",
             disabled: true,
           },
         ]
@@ -771,16 +837,114 @@ function AgentScheduleForm({
               connected to this workspace yet.
             </Notice>
           ) : null}
-          {sourceSessionId ? (
-            <Notice>
-              Each run continues the chat you came from. Check the instructions and when it runs;
-              nothing repeats until you create the schedule.
-            </Notice>
+          <Field label="Chat">
+            <SelectMenu
+              value={eachRun}
+              onValueChange={(runMode) => update({ runMode: runMode as EachRun })}
+              options={[
+                {
+                  value: "existing_session",
+                  label: "Use an existing chat",
+                  description: "Continue a conversation with its current settings.",
+                  disabled: !access.canTargetSessions,
+                  disabledReason: "You need permission to open chats in this workspace.",
+                },
+                {
+                  value: "reusable_session",
+                  label: "Create a chat for this schedule",
+                  description: "Keep the results together in one conversation.",
+                },
+                {
+                  value: "new_session_per_run",
+                  label: "Create a chat each run",
+                  description: "Start each run with a fresh conversation.",
+                },
+              ]}
+              className="max-w-full"
+            />
+          </Field>
+          {eachRun === "existing_session" ? (
+            <Field label="Send to" error={errors.target}>
+              <SelectMenu
+                variant={sessionOptions.length > 8 ? "combobox" : "menu"}
+                options={sessionOptions}
+                value={draft.targetSessionId || null}
+                onValueChange={(sessionId) => update({ targetSessionId: sessionId })}
+                placeholder={
+                  sessionsLoading
+                    ? "Loading chats…"
+                    : sessions.length
+                      ? "Choose a chat"
+                      : "No chats available"
+                }
+                searchPlaceholder="Search recent chats"
+                loading={sessionsLoading && sessions.length === 0}
+                disabled={!access.canTargetSessions}
+                disabledReason="You need permission to open chats in this workspace."
+                invalid={Boolean(errors.target)}
+                className="max-w-full"
+              />
+              {sessionsError && isPermissionDenied(sessionsError) ? (
+                <p className="m-0 text-sm text-fg-muted">
+                  You need permission to open chats in this workspace. Ask a workspace admin.
+                </p>
+              ) : sessionsError ? (
+                <ErrorMessage
+                  variant="inline"
+                  title="Chats couldn't load"
+                  {...apiErrorDetails(sessionsError)}
+                  action={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSessionsRetry((value) => value + 1)}
+                    >
+                      Try again
+                    </Button>
+                  }
+                />
+              ) : null}
+              {accessChange ? (
+                <div
+                  ref={accessReview}
+                  tabIndex={-1}
+                  role="group"
+                  aria-label="Review destination attachments"
+                  className="outline-none"
+                >
+                  <CheckboxField
+                    label="Use this chat's attachments"
+                    description={
+                      <>
+                        {accessChange.variableSets && accessChange.environment
+                          ? "The previous Variable Sets and environment will no longer apply."
+                          : accessChange.variableSets
+                            ? "The previous Variable Sets will no longer apply."
+                            : "The previous environment will no longer apply."}{" "}
+                        <Link
+                          className="underline underline-offset-2"
+                          to="/workspaces/$workspaceId/sessions/$sessionId"
+                          target="_blank"
+                          rel="noreferrer"
+                          params={{ workspaceId, sessionId: draft.targetSessionId }}
+                        >
+                          Open the destination chat
+                        </Link>{" "}
+                        to review its attachments.
+                      </>
+                    }
+                    checked={adoptSessionSettings}
+                    onCheckedChange={setAdoptSessionSettings}
+                  />
+                </div>
+              ) : null}
+            </Field>
           ) : null}
           <Field
-            label="What should the agent do?"
+            label="Message"
             error={errors.prompt}
-            hint="Write it like a message to the agent. Every run starts from these instructions."
+            hint="Sent to the agent each time the schedule runs."
           >
             <ComposerField
               workspaceId={workspaceId}
@@ -799,7 +963,10 @@ function AgentScheduleForm({
               <ConnectionAccountPicker
                 groups={connectionAccounts.accountGroups}
                 choices={connectionAccounts.accountChoices}
-                onChoose={connectionAccounts.selectAccount}
+                onChoose={(serverId, ids) => {
+                  setAccountsChanged(true);
+                  connectionAccounts.selectAccount(serverId, ids);
+                }}
               />
               {connectionAccounts.error ? (
                 <Notice
@@ -852,12 +1019,7 @@ function AgentScheduleForm({
               </div>
             )}
           </div>
-          <Field
-            label="Name"
-            optional
-            error={errors.name}
-            hint="Shown in the list and as the title of each run's chat."
-          >
+          <Field label="Name" optional error={errors.name} hint="Shown in the schedules list.">
             <TextInput
               value={draft.name}
               onChange={(event) => update({ name: event.target.value })}
@@ -886,35 +1048,6 @@ function AgentScheduleForm({
             onOpenChange={setAdvancedOpen}
           >
             <FieldStack>
-              <Field label="Each run" hint={EACH_RUN_HINT[eachRun]}>
-                <FieldSegmented<EachRun>
-                  value={eachRun}
-                  onValueChange={(runMode) => update({ runMode })}
-                  options={[
-                    { value: "new_session_per_run", label: "New chat" },
-                    { value: "reusable_session", label: "One ongoing chat" },
-                    ...(initial.runMode === "existing_session" || eachRun === "existing_session"
-                      ? [{ value: "existing_session" as const, label: "An existing chat" }]
-                      : []),
-                  ]}
-                />
-              </Field>
-              {eachRun === "existing_session" ? (
-                <Field label="Chat" error={errors.target}>
-                  <SelectMenu
-                    variant={sessionOptions.length > 8 ? "combobox" : "menu"}
-                    options={sessionOptions}
-                    value={draft.targetSessionId || null}
-                    onValueChange={(targetSessionId) => update({ targetSessionId })}
-                    placeholder="Pick a chat"
-                    searchPlaceholder="Search chats"
-                    disabled={!access.canTargetSessions}
-                    disabledReason="You need permission to open chats in this workspace."
-                    invalid={Boolean(errors.target)}
-                    className="max-w-[420px]"
-                  />
-                </Field>
-              ) : null}
               {eachRun !== "new_session_per_run" ? (
                 <Field
                   label="If the previous run is still working"
@@ -984,7 +1117,7 @@ function AgentScheduleForm({
                   />
                 </Suspense>
               ) : null}
-              {learningLoading ? (
+              {eachRun === "existing_session" ? null : learningLoading ? (
                 <p role="status" className="m-0 text-sm text-fg-muted">
                   Loading this schedule's agent learning settings…
                 </p>
@@ -1040,6 +1173,9 @@ async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<
   try {
     return await request;
   } catch (error) {
+    // FormPage separates API advice from its technical details. Keep the
+    // structured error intact so request IDs never enter the main message.
+    if (isApiError(error)) throw error;
     throw new Error(`${lead} ${userErrorText(error)}`, { cause: error });
   }
 }

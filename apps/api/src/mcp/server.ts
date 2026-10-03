@@ -173,7 +173,13 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
+import {
+  resolveScheduledTaskCreateInput,
+  scheduledTaskCreateToolInput,
+  scheduledTaskCreateToolValidation,
+} from "./scheduled-task-input";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
@@ -324,6 +330,7 @@ import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
   scheduledTaskMcpSummary,
+  scheduledTaskPromptPage,
 } from "./scheduled-task-view";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import {
@@ -1472,17 +1479,21 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_get",
       {
         description:
-          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values.",
+          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values. For exact complete message text, pass promptOffset=0, then follow prompt.nextOffset with expectedExecutionDigest from the first page. This returns only the prompt page and preserves every character.",
         inputSchema: {
           id: z4.string().uuid(),
           includeEntity: z4.boolean().optional(),
+          promptOffset: z4.number().int().nonnegative().max(2_147_483_647).optional(),
+          expectedExecutionDigest: z4.string().min(1).max(128).optional(),
         },
       },
-      async ({ id, includeEntity }) => {
+      async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
         const task = scheduledTaskForGrant(
           await requireScheduledTask(deps.db, grant.workspaceId, id),
           grant,
         );
+        if (promptOffset !== undefined)
+          return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
           includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
         );
@@ -1493,23 +1504,14 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. To have runs post to Slack as the OpenGeni bot, a person must choose the channel in the schedule editor; you cannot set agentConfig.slackBotChannelId.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent. Runs retain the schedule owner’s captured account choices and revalidate access; they do not acquire another chat owner’s credentials.",
         inputSchema: contractToolInput(
-          z4
-            .object({
-              ...CreateScheduledTaskRequest.options[1].out.shape,
-              agentConfig: z4
-                .object(ScheduledTaskAgentConfigInput.shape)
-                .omit({ slackBotChannelId: true })
-                .strict(),
-            })
-            .omit({ agentLearning: true, connectionAuthorities: true })
-            .strict(),
-          CreateScheduledTaskRequest.options[1],
+          scheduledTaskCreateToolInput(),
+          scheduledTaskCreateToolValidation(sessionId),
         ),
       },
       async (args) => {
-        const payload = CreateScheduledTaskRequest.parse(args);
+        const payload = resolveScheduledTaskCreateInput(args, sessionId);
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1554,7 +1556,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a scheduled task. For model/reasoning-only edits use agentConfigPatch: { model?, reasoningEffort? }; all omitted configuration is preserved. agentConfig is a complete replacement, and scheduled_tasks_get is a bounded projection, not replacement input. Task model settings apply to newly created sessions; existing-session targets and already-created reusable sessions keep their own model/reasoning.",
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input.",
         inputSchema: contractToolInput(
           z4
             .object({
@@ -1577,14 +1579,15 @@ export function buildOpenGeniMcpServer(
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         const patchWarnings = (task: ScheduledTask) =>
-          payload.agentConfigPatch &&
+          (payload.agentConfigPatch?.model !== undefined ||
+            payload.agentConfigPatch?.reasoningEffort !== undefined) &&
           (task.runMode === "existing_session" || task.reusableSessionId)
             ? [
                 "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
               ]
             : [];
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
-        const update = await validatedScheduledTaskUpdate({
+        const updateOrError = await validatedScheduledTaskUpdate({
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -1594,7 +1597,24 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+        }).catch((error: unknown) => {
+          const conflict = scheduledTaskTargetAccessHttpError(error);
+          if (conflict) return conflict;
+          throw error;
         });
+        if (updateOrError instanceof ApiHttpError) {
+          return {
+            isError: true,
+            ...json({
+              error: {
+                code: updateOrError.code,
+                message: updateOrError.message,
+                details: updateOrError.details,
+              },
+            }),
+          };
+        }
+        const update = updateOrError;
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(
             scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
@@ -2960,7 +2980,10 @@ function registerWorkspaceArtifactTools(
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
     html: string | undefined,
-    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    source?: {
+      entrypoint: string;
+      files: Array<{ path: string; content: string }>;
+    },
     requestedTools?: Array<{ serverId: string; toolName: string }>,
     uploadId?: string,
   ) => {
@@ -4633,17 +4656,30 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it binds the view, detail and direction. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history, then use a returned callId to read its result. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
           cursor: z4.string().max(4096).optional(),
           callId: z4.string().max(512).optional(),
+          toolName: z4
+            .string()
+            .min(1)
+            .max(256)
+            .optional()
+            .describe(
+              "Exact tool name; selects calls in view=tools. Use a returned callId for its result.",
+            ),
           includeArguments: z4.boolean().optional(),
           includeOutput: z4.boolean().optional(),
           after: z4.number().int().nonnegative().optional(),
           before: z4.number().int().positive().optional(),
-          limit: z4.number().int().positive().optional(),
+          limit: z4
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Page size, 1–50 for conversation/results/tools. Continuations preserve it."),
           direction: z4.enum(SessionEventReadDirection.options).optional(),
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
@@ -4693,6 +4729,7 @@ function registerWorkspaceOrchestrationTools(
           view,
           cursor,
           callId,
+          toolName,
           includeArguments,
           includeOutput,
           after,
@@ -4745,6 +4782,7 @@ function registerWorkspaceOrchestrationTools(
               view,
               cursor,
               callId,
+              toolName,
               includeArguments,
               includeOutput,
               after,
@@ -4770,10 +4808,13 @@ function registerWorkspaceOrchestrationTools(
         if (
           cursor !== undefined ||
           callId !== undefined ||
+          toolName !== undefined ||
           includeArguments !== undefined ||
           includeOutput !== undefined
         ) {
-          throw new Error("cursor/callId/includeArguments/includeOutput require a non-debug view");
+          throw new Error(
+            "cursor/callId/toolName/includeArguments/includeOutput require a non-debug view",
+          );
         }
         if (
           latest &&

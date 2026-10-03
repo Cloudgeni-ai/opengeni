@@ -764,100 +764,19 @@ not require an extra package. A host targeting a non-POSIX command surface (for
 example native Windows without a compatible shell/toolset) must return
 `not_applicable` for that attempt.
 
-`mcpCredentials` is the request-time credential seam for connection-backed MCP
-servers. Bind the same port through `activityDependencies` on the worker service
-and `createApp(deps)`. The worker uses it for ordinary model-visible MCP calls;
-the API router uses it for Codemode/Code Mode. When the leg is absent, both
-surfaces use OpenGeni's standalone encrypted connection store and refresh broker.
-When it is present, the host is the sole credential source: OpenGeni does not
-create or require a duplicate provider connection.
+Connection-backed MCP servers use ordinary native connections for both
+model-visible tools and Codemode. Integrating backends provision connections
+through the normal connection APIs under the canonical actor, then select the
+resulting connection IDs. Personal selections remain bound to the named user
+captured by accepted work and are revalidated at provider use.
 
-Every request includes account/workspace scope, the immediate session and its
-workspace-scoped `rootSessionId`, the exact durable turn and execution
-generation, the immutable `TurnInitiator`, the non-authoritative technical
-caller, the MCP server/tool, the opaque `connectionRef`, and whether a 401
-forced a refresh. The same lineage is resolved for ordinary model tools and
-Codemode, so a host can authorize a child through one durable root binding
-without mirroring every child row. The frozen initiator—not `sandbox:<runId>`,
-the session creator, or a synthetic worker subject—is the authorization
-principal.
+The former host-specific MCP credential callback and host-provenance connection
+refs are retired. Opaque host IDs must not be copied into native connection
+references. See [MCP connection cutover](remote-mcp-credentials.md) for account
+selection, refresh, and migration behavior.
 
-For provider-native developer tooling, `connectionRef.provider` identifies the
-provider family, `providerDomain` identifies its host/tenant, `connectionId` is
-the host's opaque binding identity, and `selectedResources` freezes the exact
-repository ids the server may access. Multiple server entries may bind different
-accounts for one provider or different providers in the same session. The
-singular `resource` field remains the OAuth resource indicator; it is not a
-repository selector.
-
-OpenGeni-owned Connection refs omit `authoritySource` and remain subject to the
-accepted-use snapshot and per-provider-request audit fence. An embedding host
-that does not mirror its provider connection into OpenGeni sets
-`authoritySource: "host"` beside its opaque `connectionId`; the id may use any
-non-empty shape, including a UUID. With `mcpCredentials` bound, that explicit
-provenance routes directly to the host resolver with the immutable turn lineage.
-Without the host credential port, a host-owned ref fails closed as
-`unsupported_auth` rather than falling through to OpenGeni's connection store.
-For rolling upgrade compatibility, a bound host resolver also accepts legacy
-refs that omit `authoritySource` only when their connection id is unambiguously
-non-UUID. New host refs must set the marker, and UUID-shaped host ids require it.
-
-Admission of explicit host authority is also behind
-`OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` (default `false`). Roll it out
-in two phases: first deploy the supporting API, control worker, turn worker, and
-web bundle everywhere with the flag false; after proving the old generation is
-gone, set the flag true in a second rollout and only then admit or configure
-`authoritySource: "host"` refs. The API rejects new explicit session/capability
-refs while the flag is false and configured refs fail startup validation. Every
-upgraded reader, inheritance path, and worker continues to preserve and execute
-an already-stored marked ref regardless of its local flag value; the flag is not
-an execution kill switch. The markerless non-UUID compatibility lane remains
-available for pre-existing embedded sessions during phase one.
-
-Once a marked ref has been persisted, do not restart an image from before this
-contract. Setting the flag false stops new external marked writes but does not
-rewrite, drain, or disable durable session/capability refs that already exist.
-Remove those refs through ordinary forward operations before attempting any
-pre-contract image rollback.
-
-Successful results must echo account/workspace/immediate-session plus the exact
-provider, provider domain, requested connection id, OAuth scopes/resource, and
-selected-resource set. OpenGeni rejects a mismatched echo before any returned
-header can reach the provider. Credential values never enter session events;
-`auth_needed` carries only bounded connection metadata. A host that cannot
-satisfy the configured endpoint's auth model returns `unsupported_auth`; one
-that cannot enforce the selected repository set returns
-`resource_scope_unavailable`. These reasons render as unavailable, not as a
-duplicate OpenGeni reconnect flow, and a connection-backed optional MCP server
-still degrades without breaking unrelated session tools.
-
-Host-owned `tool.auth_needed` events use a rolling-safe public representation:
-the legacy `reason` is pinned to `unsupported_auth`, while `hostReason`
-retains the exact host result and `authorizationUrl` remains the host-minted
-recovery target. A pre-contract browser therefore renders the notice as
-unavailable and cannot send the opaque id into OpenGeni OAuth; an upgraded
-browser reads `hostReason` and offers only the host URL. Successful host
-credential results retain `authoritySource: "host"` through later provider 401,
-403 `insufficient_scope`, and accepted-use revalidation failures so those
-synthesized notices cannot lose provenance.
-
-The standalone generic connection broker intentionally rejects a
-`selectedResources` binding with `resource_scope_unavailable`: it can refresh a
-connection token, but it has no provider-specific proof that the token or
-adapter enforces those repositories. A standalone provider adapter must add that
-proof before it may resolve the scoped binding.
-
-The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
-Azure DevOps, or other connection from the opaque reference, and can return a
-provider-supported token or a short-lived capability bearer for a compatible
-host-owned adapter. OpenGeni does not imply that one provider's bearer works at
-another provider's hosted MCP endpoint. Normal MCP and Codemode deliberately
-share this resolver, so Code Mode is additive rather than a second connection or
-authorization system.
-
-Unset legs fall back independently to standalone self-mint/decrypt. `runCredentials`
-has no standalone fallback because ordinary standalone sandbox credentials
-continue to come from variable sets and existing lifecycle hooks. This port does
+`runCredentials` has no standalone fallback because ordinary standalone sandbox
+credentials continue to come from variable sets and existing lifecycle hooks. This port does
 **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in
 `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with
 `signDelegatedAccessToken(settings.delegationSecret, ...)`.
