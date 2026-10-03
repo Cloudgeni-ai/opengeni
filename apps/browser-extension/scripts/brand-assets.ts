@@ -20,15 +20,24 @@ await Bun.write(
 );
 // Transparent padding around a neutral tile keeps the filled mark legible
 // on both light and dark Chrome toolbars.
-const icon = svg(128, 128,
-  `<rect x="16" y="16" width="96" height="96" rx="16" fill="#202020"/><g transform="translate(28 35.6234) scale(${72 / 176})" fill="#ffffff">${mark}</g>`);
+const icon = svg(
+  128,
+  128,
+  `<rect x="16" y="16" width="96" height="96" rx="16" fill="#202020"/><g transform="translate(28 35.6234) scale(${72 / 176})" fill="#ffffff">${mark}</g>`,
+);
 for (const size of [16, 32, 48, 128]) {
-  await sharp(Buffer.from(icon)).resize(size, size).png().toFile(resolve(root, `icons/icon-${size}.png`));
+  await sharp(Buffer.from(icon))
+    .resize(size, size)
+    .png()
+    .toFile(resolve(root, `icons/icon-${size}.png`));
 }
 
 await mkdir(resolve(root, "fonts"), { recursive: true });
 const fontPackage = dirname(Bun.resolveSync("@fontsource-variable/dm-sans/package.json", root));
-await cp(resolve(fontPackage, "files/dm-sans-latin-wght-normal.woff2"), resolve(root, "fonts/dm-sans-latin-wght-normal.woff2"));
+await cp(
+  resolve(fontPackage, "files/dm-sans-latin-wght-normal.woff2"),
+  resolve(root, "fonts/dm-sans-latin-wght-normal.woff2"),
+);
 await cp(resolve(fontPackage, "LICENSE"), resolve(root, "fonts/OFL.txt"));
 
 // Store-only marketing assets never enter the extension package.
@@ -40,6 +49,13 @@ for (const [name, width, height, markWidth] of [
   const scale = markWidth / 176;
   const x = (width - markWidth) / 2;
   const y = (height - 138.73 * scale) / 2;
-  const promo = svg(width, height, `<rect width="${width}" height="${height}" fill="#202020"/><g transform="translate(${x} ${y}) scale(${scale})" fill="#ffffff">${mark}</g>`);
-  await sharp(Buffer.from(promo)).removeAlpha().png().toFile(resolve(root, `store/${name}`));
+  const promo = svg(
+    width,
+    height,
+    `<rect width="${width}" height="${height}" fill="#202020"/><g transform="translate(${x} ${y}) scale(${scale})" fill="#ffffff">${mark}</g>`,
+  );
+  await sharp(Buffer.from(promo))
+    .removeAlpha()
+    .png()
+    .toFile(resolve(root, `store/${name}`));
 }
