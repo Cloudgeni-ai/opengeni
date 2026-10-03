@@ -133,7 +133,9 @@ function withoutOrganizationMcpEndpoint(file: string, text: string): string {
   if (!organizationMcpSurfaceFiles.has(file.replace(/\\/g, "/"))) {
     return text;
   }
-  return text.replace(/\/v1\/mcp(?=["'`\s)\\\]]|$)/g, "");
+  // Generated distributions can escape a closing quote, but a backslash
+  // before a path separator still leads to a forbidden workspace child path.
+  return text.replace(/\/v1\/mcp(?=["'`\s)\]]|\\["'`]|$)/g, "");
 }
 
 export function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {

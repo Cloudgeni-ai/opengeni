@@ -132,6 +132,23 @@ describe("workspace and organization MCP route guard", () => {
       expect(routeFindings(file, `// Organization server (\`${organizationMcpPath}\`).`)).toEqual(
         [],
       );
+      expect(
+        routeFindings(file, JSON.stringify(`const resource = "${organizationMcpPath}";`)),
+      ).toEqual([]);
+    },
+  );
+
+  test.each(organizationSurfaces)(
+    "still rejects escaped workspace MCP child separators in %s",
+    (file) => {
+      for (const child of ["docs", "files", "tools"]) {
+        const escapedPath = String.raw`${organizationMcpPath}\/${child}`;
+        for (const path of [escapedPath, `https://opengeni.example${escapedPath}`]) {
+          const source = `const resource = "${path}";`;
+          expect(routeFindings(file, source)).toHaveLength(1);
+          expect(routeFindings(file, JSON.stringify(source))).toHaveLength(1);
+        }
+      }
     },
   );
 
