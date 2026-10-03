@@ -215,6 +215,38 @@ function goal(overrides: Partial<UseGoalResult["goal"]> = {}): UseGoalResult {
 }
 
 describe("sessionChromeGoalPillState", () => {
+  test("waits for other session work while preserving goal and session blockers", () => {
+    const continuation = {
+      state: "blocked" as const,
+      reason: "system_work_pending" as const,
+      wakeRevision: 2,
+      observedRevision: 1,
+      nextAttemptAt: null,
+      lastError: null,
+    };
+    expect(sessionChromeGoalPillState("active", continuation, "running")).toBe("waiting");
+    expect(sessionChromeGoalPillState("active", { ...continuation, state: "scheduled" })).toBe(
+      "scheduled",
+    );
+    expect(sessionChromeGoalPillState("completed", continuation, "running")).toBe("completed");
+    expect(sessionChromeGoalPillState("paused", continuation, "running")).toBe("paused");
+    expect(sessionChromeGoalPillState("active", continuation, "failed")).toBe("session_failed");
+    for (const reason of [
+      "approval_required",
+      "provider_backpressure",
+      "session_cancelled",
+    ] as const) {
+      expect(sessionChromeGoalPillState("active", { ...continuation, reason })).toBe("blocked");
+    }
+    expect(
+      sessionChromeGoalPillState("active", {
+        ...continuation,
+        state: "invariant_broken",
+        reason: "missing_obligation",
+      }),
+    ).toBe("invariant_broken");
+  });
+
   test("maps continuation projection to pill states", () => {
     expect(sessionChromeGoalPillState("completed", null)).toBe("completed");
     expect(sessionChromeGoalPillState("paused", null)).toBe("paused");
@@ -1096,6 +1128,43 @@ describe("SessionChrome goal pill reasons", () => {
         lastError: null,
       },
     });
+
+  test("renders waiting for other session work without changing the active goal", async () => {
+    const value = goal({
+      continuation: {
+        state: "blocked",
+        reason: "system_work_pending",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: null,
+        lastError: null,
+      },
+    });
+    const originalGoal = structuredClone(value.goal);
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer()}
+        goal={value}
+        sessionStatus="running"
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toContain("Waiting");
+    expect(chip?.textContent).not.toContain("Blocked");
+    const explanation =
+      "Waiting for other session work to finish before the goal continues automatically.";
+    expect(chip?.getAttribute("title")).toBe(explanation);
+    await act(async () => chip?.click());
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="goal"]');
+    expect(panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent).toBe(
+      explanation,
+    );
+    expect(panel?.textContent).toContain("Pause");
+    expect(value.goal).toEqual(originalGoal);
+  });
 
   test("spells out why a goal is paused", () => {
     expect(sessionChromeGoalPillLabel("paused", paused("max_auto_continuations").goal)).toBe(
