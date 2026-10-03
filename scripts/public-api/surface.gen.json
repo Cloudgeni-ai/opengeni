@@ -26390,6 +26390,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
+      "SessionProxyToolServer": "type",
       "SessionQueueMutationResponse": "type",
       "SessionQueueSnapshot": "type",
       "SessionRealtimeEndReason": "type",
@@ -26523,6 +26524,9 @@
       "ToolGatewayIdentity": "type",
       "ToolGatewayResult": "type",
       "ToolRef": "type",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
       "TranscribeAudioInput": "type",
       "TranscribeAudioResponse": "type",
       "TranscriptionAdapter": "type",
@@ -26625,6 +26629,8 @@
       "VerifyPersonalGitHubRepositorySelectionsRequest": "type",
       "VerifyPublicGitHubRepositoryRefRequest": "type",
       "VerifyPublicGitHubRepositoryRefResponse": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type",
       "verifyWebhookEvent": "value",
       "VideoArtifactPlaybackSource": "type",
       "VideoGenerationAspectRatio": "type",
@@ -27597,7 +27603,8 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
-      "SessionProxySiteHtmlTooLargeError": "value"
+      "SessionProxySiteHtmlTooLargeError": "value",
+      "SessionProxyToolServer": "type"
     },
     "@opengeni/sdk/site": {
       "createOpenGeniSiteClient": "value",
@@ -27645,6 +27652,18 @@
       "WorkspaceIdOptions": "type",
       "WorkspaceIdResolverOptions": "type",
       "WorkspaceIdTarget": "type"
+    },
+    "@opengeni/sdk/tool-auth": {
+      "mintToolToken": "value",
+      "resolveToolTokenSecret": "value",
+      "TOOL_TOKEN_DEFAULT_TTL_SECONDS": "value",
+      "TOOL_TOKEN_ISSUER": "value",
+      "TOOL_TOKEN_KEY_LABEL": "value",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type"
     },
     "@opengeni/sdk/usage-allowances": {
       "AllowanceExhaustedRefusal": "type",
@@ -30196,6 +30215,10 @@
     "SiteAuthConnectionResource": [
       "get",
       "update"
+    ],
+    "ToolRequestError": [
+      "status",
+      "toResponse"
     ]
   }
 }
