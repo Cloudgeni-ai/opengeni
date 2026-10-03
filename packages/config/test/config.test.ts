@@ -731,6 +731,23 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("managed auth new account sign-up switch", () => {
+  test("defaults open and accepts an explicit pause", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthNewSignupsEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "false" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "true" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(true);
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "paused" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("managed auth browser session-set rollout", () => {
   test("remains default-off and accepts only the rolling compatibility modes", () => {
     expect(withEnv({}, () => getSettings()).managedAuthSessionSetMode).toBe("legacy");

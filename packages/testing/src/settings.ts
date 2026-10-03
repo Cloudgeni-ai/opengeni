@@ -65,6 +65,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentBetaVersion: undefined,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
+    managedAuthNewSignupsEnabled: true,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     organizationTenancyCanonicalActivationEnabled: false,

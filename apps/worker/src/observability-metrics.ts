@@ -1195,6 +1195,24 @@ export function recordVerifiedSignupTrialSwitchGauge(
 }
 
 /**
+ * The deployment-level runtime switch for new managed account sign-ups
+ * (migration 0585): 1 while it allows new accounts (also when no revision
+ * exists), 0 when an operator has paused them. The API additionally honours
+ * its OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED ceiling, which this gauge does
+ * not see; `GET /v1/config/client` reports the combined decision.
+ */
+export function recordManagedAuthNewSignupsSwitchGauge(
+  observability: Observability,
+  signupsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_managed_auth_new_signups_runtime_enabled",
+    help: "Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    value: signupsEnabled ? 1 : 0,
+  });
+}
+
+/**
  * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
  * worker's configuration sees it. The API reads the same shared setting; new
  * grants happen only while this gauge and the runtime switch gauge are both 1.

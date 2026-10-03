@@ -346,7 +346,7 @@ request authorization remain required before provider dispatch.
 
 Arbitrary runtime-role SQL could read or alter these opaque cooldowns, affecting
 availability, but cannot obtain a credential or authorize a Slack request from
-this table. Migration `0586_slack_api_rate_limits.sql` revokes public access;
+this table. Migration `0597_slack_api_rate_limits.sql` revokes public access;
 role provisioning grants the matching runtime role direct DML. This global
 operational exemption is pinned in `NON_RLS_RUNTIME_TABLES` and
 `packages/db/test/non-rls-authority-tables.test.ts`, with shared atomic admission
