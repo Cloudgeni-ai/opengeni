@@ -435,7 +435,8 @@ export const InsightsUsageFacets = z
     payers: z.array(OpaqueKey),
     /** Recorded opaque plan keys, with unknown for absent snapshots. */
     plans: z.array(OpaqueKey).default([]),
-    sources: z.array(InsightsUsageSource).default([]),
+    /** Capability marker: omit until source/custom support is actually implemented. */
+    sources: z.array(InsightsUsageSource).optional(),
     projects: z.array(z.object({ id: Identifier, name: z.string() }).strict()),
     people: z.array(
       z.object({ key: OpaqueKey, name: z.string().nullable(), you: z.boolean() }).strict(),
