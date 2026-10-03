@@ -992,7 +992,7 @@ export type GenerateSessionTitleOptions = {
    */
   reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
-  onModelCallAdmission?: () => Promise<{ maxOutputTokens: number }>;
+  onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
   onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
 };
 
@@ -1103,20 +1103,22 @@ export async function generateSessionTitle(
       grant.maxOutputTokens,
     );
   }
-  const response = await withModelCallOutputBound({ maxTokens: grant?.maxOutputTokens }, () =>
-    binding?.provider.api === "anthropic-messages"
-      ? new AnthropicMessagesModel(
-          binding.provider,
-          binding.modelId,
-          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
-        ).getResponse(request)
-      : binding
-        ? new CompactionResponsesModel(
-            binding.client,
-            binding.modelId,
+  const response = await withModelCallOutputBound(
+    { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+    () =>
+      binding?.provider.api === "anthropic-messages"
+        ? new AnthropicMessagesModel(
             binding.provider,
-          ).fetchResponse(request)
-        : options.model!.getResponse(request),
+            binding.modelId,
+            instrumentedModelFetch(binding.provider.id, globalThis.fetch),
+          ).getResponse(request)
+        : binding
+          ? new CompactionResponsesModel(
+              binding.client,
+              binding.modelId,
+              binding.provider,
+            ).fetchResponse(request)
+          : options.model!.getResponse(request),
   );
   const usage = modelResponseUsageFromResponse(response);
   if (usage) await options.onUsage?.(usage);
@@ -1158,7 +1160,7 @@ async function generateChatSessionTitle(
     } as any,
     {
       ...(options.signal ? { signal: options.signal } : {}),
-      ...(grant ? { maxRetries: 0 } : {}),
+      ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
     },
   );
   const usage = modelResponseUsageFromResponse(completion);
@@ -1253,7 +1255,7 @@ export async function summarizeForCompaction(
     systemInstructions?: string;
     preparedRequest?: Omit<ModelRequest, "input">;
     signal?: AbortSignal;
-    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number }>;
+    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -1284,7 +1286,7 @@ export async function summarizeForCompaction(
         } as any,
         {
           ...(options.signal ? { signal: options.signal } : {}),
-          ...(grant ? { maxRetries: 0 } : {}),
+          ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
         },
       );
     } catch (error) {
@@ -1374,14 +1376,16 @@ export async function summarizeForCompaction(
   }
   let response: unknown;
   try {
-    response = await withModelCallOutputBound({ maxTokens: grant?.maxOutputTokens }, () =>
-      provider.api === "anthropic-messages"
-        ? new AnthropicMessagesModel(
-            provider,
-            model,
-            instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(request)
-        : new CompactionResponsesModel(client, model, provider).fetchResponse(request),
+    response = await withModelCallOutputBound(
+      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      () =>
+        provider.api === "anthropic-messages"
+          ? new AnthropicMessagesModel(
+              provider,
+              model,
+              instrumentedModelFetch(provider.id, globalThis.fetch),
+            ).getResponse(request)
+          : new CompactionResponsesModel(client, model, provider).fetchResponse(request),
     );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
@@ -1590,7 +1594,7 @@ export async function requestRemoteCompactionV2(
     preparedRequest: Omit<ModelRequest, "input">;
     captureAgent?: object;
     signal?: AbortSignal | undefined;
-    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number }>;
+    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
@@ -1620,18 +1624,20 @@ export async function requestRemoteCompactionV2(
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await withModelCallOutputBound({ maxTokens: grant?.maxOutputTokens }, () =>
-      withModelRequestCapture(
-        options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
-        async () => {
-          void notifyModelRequestCapture(request);
-          return new CompactionResponsesModel(
-            options.client,
-            options.model,
-            provider,
-          ).fetchResponse(request);
-        },
-      ),
+    response = await withModelCallOutputBound(
+      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      () =>
+        withModelRequestCapture(
+          options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
+          async () => {
+            void notifyModelRequestCapture(request);
+            return new CompactionResponsesModel(
+              options.client,
+              options.model,
+              provider,
+            ).fetchResponse(request);
+          },
+        ),
     );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);

@@ -297,7 +297,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         if (reservation.held) {
           billingState.pendingUsageReservations.set(reservation.callId, reservation.held);
         }
-        return { maxOutputTokens: reservation.maxOutputTokens };
+        return {
+          maxOutputTokens: reservation.maxOutputTokens,
+          budgetReserved: Boolean(reservation.held),
+        };
       },
       onUsage: (usage: ModelResponseUsage) => recordCompactionUsage(usage, reservation),
     };

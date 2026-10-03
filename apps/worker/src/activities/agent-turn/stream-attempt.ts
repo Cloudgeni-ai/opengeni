@@ -2073,7 +2073,10 @@ export async function runTurnStreamAttempt(
                   sessionTitleGrant.callId,
                   sessionTitleGrant.held,
                 );
-              return { maxOutputTokens: sessionTitleGrant.maxOutputTokens };
+              return {
+                maxOutputTokens: sessionTitleGrant.maxOutputTokens,
+                budgetReserved: Boolean(sessionTitleGrant.held),
+              };
             },
             onUsage: settleSessionTitleUsage,
           }),

@@ -206,6 +206,89 @@ test("uncapped standalone summaries preserve configured SDK retries", async () =
   expect(providerCalls).toBe(2);
 });
 
+for (const api of ["chat", "responses", "remote", "title-chat", "title-responses"] as const) {
+  test(`${api} admission without a financial reservation preserves configured SDK retries`, async () => {
+    let providerCalls = 0;
+    let admissionCalls = 0;
+    const settings = testSettings();
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "test-key",
+      baseURL: "http://compaction.test/v1",
+      maxRetries: 2,
+      fetch: async () => {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          return Response.json(
+            { error: { message: "Synthetic transient server failure" } },
+            { status: 500, headers: { "retry-after-ms": "1" } },
+          );
+        }
+        return Response.json(
+          api === "chat" || api === "title-chat"
+            ? {
+                id: "uncapped",
+                choices: [{ finish_reason: "stop", message: { content: "Accepted task summary" } }],
+                usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 },
+              }
+            : {
+                id: "uncapped",
+                status: "completed",
+                output:
+                  api === "remote"
+                    ? [{ type: "compaction", encrypted_content: "opaque" }]
+                    : [
+                        {
+                          type: "message",
+                          role: "assistant",
+                          status: "completed",
+                          content: [{ type: "output_text", text: "Accepted task summary" }],
+                        },
+                      ],
+                usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 },
+              },
+        );
+      },
+    });
+    const accounting = {
+      onModelCallAdmission: async () => {
+        admissionCalls += 1;
+        return { maxOutputTokens: 7, budgetReserved: false };
+      },
+    };
+    if (api === "remote") {
+      const result = await requestRemoteCompactionV2(settings, history, {
+        client,
+        model: "gpt-6-astra",
+        preparedRequest: {
+          systemInstructions: "Keep the accepted task",
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          modelSettings: {},
+          tracing: false,
+        },
+        ...accounting,
+      });
+      expect(result).not.toBeNull();
+    } else if (api === "title-chat" || api === "title-responses") {
+      const provider = configuredProviders(settings)[0];
+      if (!provider) throw new Error("Expected configured test provider");
+      const result = await generateSessionTitle(settings, "Accepted task", {
+        client,
+        provider: { ...provider, api: api === "title-chat" ? "chat" : "responses" },
+        ...accounting,
+      });
+      expect(result.title).toBe("Accepted task summary");
+    } else {
+      expect(await summarizeForCompaction(settings, history, { client, api, ...accounting })).toBe(
+        "Accepted task summary",
+      );
+    }
+    expect(providerCalls).toBe(2);
+    expect(admissionCalls).toBe(1);
+  });
+}
+
 for (const api of ["chat", "responses"] as const) {
   test(`${api} title inference reserves before dispatch and settles usage even without a usable title`, async () => {
     const settings = testSettings();
