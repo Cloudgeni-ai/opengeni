@@ -1,11 +1,7 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
-import {
-  parseSandboxFileArtifactReceipt,
-  type GitFileDiff,
-  type RetainedArtifactReference,
-} from "@opengeni/sdk";
+import { parseSandboxFileArtifactReceipt, type RetainedArtifactReference } from "@opengeni/sdk";
 import {
   BoxIcon,
   BrainCircuitIcon,
@@ -36,28 +32,18 @@ import {
   TerminalIcon,
   VideoIcon,
   WrenchIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { useContext, useState, type ReactNode } from "react";
-import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
+import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
-  applyPatchOpsFromToolItem,
-  controlCaret,
-  execTruncated,
   generatedImageReceipt,
-  isExecSessionLostBanner,
-  looksBinary,
   mediaPreviewFact,
-  parseExecBannerSessionId,
   parseToolArgs,
   retainedScreenshotMetadata,
-  sandboxCommandExitCode,
-  stripExecBanner,
-  tailPeek,
   unwrapMcpOutput,
-  v4aToGitFileDiff,
   screenshotDataUrl,
-  type ApplyPatchOperation,
 } from "./parsers";
 import {
   createToolRegistry,
@@ -75,19 +61,33 @@ import {
   Thumbnail,
   ActivityDisclosure,
   CompactActivityContext,
-  type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
+import {
+  applyPatchPresentation,
+  askPresentation,
+  execPresentation,
+  genericToolPresentation,
+  pathBasename,
+  pathDirname,
+  runOnPresentation,
+  truncatePreview,
+  webSearchPresentation,
+  writeStdinPresentation,
+  type ToolBody,
+  type ToolIconKind,
+  type ToolPreview,
+  type ToolRowPresentation,
+  type WebSearchResult,
+} from "./tool-presentation";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
-
    Each renderer takes one projected `ToolCallItem` and returns an `ActivityDisclosure`
    tuned for that tool's real wire shape. The defaults below populate the
    registry; the mapping is registered at the bottom of the file.
-
    Restraint is the rule: compact title + one quiet preview, secondary detail
    only on expand. No loud right-side badges — at most a single settle chip.
    -------------------------------------------------------------------------- */
@@ -112,218 +112,6 @@ function RunningPreview({ children }: { children: ReactNode }) {
   );
 }
 
-/** Prefix a collapsed preview with the host-supplied active compute label. */
-function withComputePreview(label: string | null, preview: string): string {
-  if (!label) {
-    return preview;
-  }
-  return `on ${label} · ${preview}`;
-}
-
-/* ---- exec_command ---------------------------------------------------------- */
-
-function ExecRenderer({ item }: ToolRendererProps) {
-  const args = parseToolArgs(item.arguments);
-  const cmd = typeof args.cmd === "string" ? args.cmd : "";
-  const workdir = typeof args.workdir === "string" ? args.workdir : null;
-  const running = item.status === "running";
-  const out = item.output;
-  const title = `$ ${cmd}`;
-  const computeLabel = useTimelineComputeLabel();
-
-  // No output event ever arrived (item.output stays undefined from creation):
-  // the turn failed before the output insert — most likely a NUL byte in the
-  // command output prevented storage. Surface the specific explanation.
-  // (Cancelled items bypass this: a cancellation is not a NUL-storage failure.)
-  if (item.status === "failed" && out === undefined) {
-    return (
-      <ActivityDisclosure
-        icon={<TerminalIcon className={ICON_SIZE} />}
-        iconTone="failed"
-        title={title}
-        titleMono
-        chip={{ tone: "bad", text: "failed" }}
-        preview={withComputePreview(computeLabel, "output lost — NUL byte could not be stored")}
-      >
-        <BodyNote tone="error">
-          output contained a NUL byte and could not be stored; the turn failed on this tool&apos;s
-          output insert — no output event ever arrived.
-        </BodyNote>
-      </ActivityDisclosure>
-    );
-  }
-
-  // An output event arrived but the tool still failed (error:true / MCP isError)
-  // and the output is empty — show a generic failure rather than claiming NUL.
-  // (Cancelled items bypass this: a cancellation is not a tool-call failure.)
-  if (item.status === "failed" && (out == null || out === "")) {
-    return (
-      <ActivityDisclosure
-        icon={<TerminalIcon className={ICON_SIZE} />}
-        iconTone="failed"
-        title={title}
-        titleMono
-        chip={{ tone: "bad", text: "failed" }}
-        preview={withComputePreview(computeLabel, "tool call failed")}
-      >
-        <BodyNote tone="error">the tool call failed with no output.</BodyNote>
-      </ActivityDisclosure>
-    );
-  }
-
-  if (running) {
-    const streamed = typeof out === "string" ? stripExecBanner(out) : "";
-    const runningPreview = streamed ? `${streamed.split("\n").length} lines` : "running…";
-    return (
-      <ActivityDisclosure
-        icon={<TerminalIcon className={ICON_SIZE} />}
-        iconTone="running"
-        title={title}
-        titleMono
-        running
-        preview={
-          <RunningPreview>{withComputePreview(computeLabel, runningPreview)}</RunningPreview>
-        }
-      >
-        {/* The row title is already `$ ${cmd}`; the TermBlock header drops the
-            command (command={null}) so it never repeats above the output. */}
-        <TermBlock command={null} workdir={workdir} output={streamed} live />
-      </ActivityDisclosure>
-    );
-  }
-
-  const text = typeof out === "string" ? out : stringifyPayload(out);
-  const stripped = stripExecBanner(text);
-  const bgSession = parseExecBannerSessionId(text);
-  const exitCode = sandboxCommandExitCode(text);
-  const binary = looksBinary(stripped);
-
-  // Color is spent on the exception only: a clean exit (0) earns NO chip — the
-  // absence of a red token is the success signal. Background sessions surface a
-  // muted id; a non-zero exit is the one red token.
-  let chip: DisclosureChip | undefined;
-  let iconTone: "accent" | "failed" | "muted" = "muted";
-  if (bgSession != null) {
-    chip = { tone: "muted", text: `session ${bgSession}` };
-  } else if (exitCode != null && exitCode !== 0) {
-    chip = { tone: "bad", text: `exit ${exitCode}` };
-    iconTone = "failed";
-  }
-
-  const peek = binary ? "binary output" : tailPeek(stripped) || "(no output)";
-  const truncated = execTruncated(text);
-  const preview = withComputePreview(computeLabel, truncated ? `⋯ truncated · ${peek}` : peek);
-  // Hand TermBlock the FULL stripped output; it owns the tail/show-more slicing.
-  const body = binary ? "(binary output suppressed)" : stripped;
-
-  return (
-    <ActivityDisclosure
-      icon={<TerminalIcon className={ICON_SIZE} />}
-      iconTone={iconTone}
-      title={title}
-      titleMono
-      {...(chip ? { chip } : {})}
-      failed={item.status === "failed"}
-      cancelled={item.status === "cancelled"}
-      preview={preview}
-    >
-      <TermBlock
-        command={null}
-        workdir={workdir}
-        output={body}
-        failed={item.status === "failed" || (exitCode != null && exitCode !== 0)}
-      />
-      {bgSession != null ? (
-        <BodyNote>↳ session {bgSession} — a later write_stdin can target this PTY.</BodyNote>
-      ) : null}
-    </ActivityDisclosure>
-  );
-}
-
-/* ---- write_stdin ----------------------------------------------------------- */
-
-function WriteStdinRenderer({ item }: ToolRendererProps) {
-  const args = parseToolArgs(item.arguments);
-  const sessionId =
-    typeof args.session_id === "string" || typeof args.session_id === "number"
-      ? args.session_id
-      : undefined;
-  const running = item.status === "running";
-  const text = typeof item.output === "string" ? item.output : stringifyPayload(item.output);
-  const lost = isExecSessionLostBanner(text);
-  const keys = controlCaret(typeof args.chars === "string" ? args.chars : "");
-  const exitCode = sandboxCommandExitCode(text);
-  const stripped = stripExecBanner(text);
-
-  if (running) {
-    return (
-      <ActivityDisclosure
-        icon={<KeyboardIcon className={ICON_SIZE} />}
-        iconTone="running"
-        title={`session ${sessionId} ← ${keys || "∅"}`}
-        titleMono
-        running
-        preview={<RunningPreview>sending…</RunningPreview>}
-      >
-        <BodyNote>sending input to session {sessionId}…</BodyNote>
-      </ActivityDisclosure>
-    );
-  }
-
-  // Success (exit 0 or a quiet ack) earns no chip; only a lost PTY / non-zero
-  // exit gets the one red token.
-  let chip: DisclosureChip | undefined;
-  if (lost) {
-    chip = { tone: "bad", text: "lost" };
-  } else if (exitCode != null && exitCode !== 0) {
-    chip = { tone: "bad", text: `exit ${exitCode}` };
-  }
-
-  return (
-    <ActivityDisclosure
-      icon={<KeyboardIcon className={ICON_SIZE} />}
-      iconTone={lost ? "failed" : "muted"}
-      title={`session ${sessionId} ← ${keys || "∅"}`}
-      titleMono
-      {...(chip ? { chip } : {})}
-      failed={item.status === "failed"}
-      cancelled={item.status === "cancelled"}
-      preview={lost ? `session ${sessionId} PTY vanished` : tailPeek(stripped) || "sent"}
-    >
-      {lost ? (
-        <BodyNote tone="error">{stripped || text}</BodyNote>
-      ) : (
-        <TermBlock command={`write_stdin → session ${sessionId}`} output={stripped} />
-      )}
-    </ActivityDisclosure>
-  );
-}
-
-/* ---- apply_patch ----------------------------------------------------------- */
-
-function verbForOp(op: ApplyPatchOperation | undefined): string {
-  if (!op) {
-    return "Edited";
-  }
-  return op.type === "create_file"
-    ? "Created"
-    : op.type === "delete_file"
-      ? "Deleted"
-      : op.moveTo
-        ? "Renamed"
-        : "Edited";
-}
-
-function basename(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts.length ? parts[parts.length - 1]! : path;
-}
-
-function dirname(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx >= 0 ? path.slice(0, idx + 1) : "";
-}
-
 /**
  * The collapsed-row path preview. Diff magnitude is rendered as a SINGLE muted
  * "+N −M" glyph pair — the saturated add/del green/red is reserved exclusively
@@ -342,8 +130,8 @@ function PathPreview({
   return (
     <span className="inline-flex items-center gap-2 truncate font-og-mono">
       <span className="truncate">
-        <span className="text-og-fg-subtle">{dirname(path)}</span>
-        <span className="text-og-fg-muted">{basename(path)}</span>
+        <span className="text-og-fg-subtle">{pathDirname(path)}</span>
+        <span className="text-og-fg-muted">{pathBasename(path)}</span>
       </span>
       {add != null || del != null ? (
         <span className="shrink-0 text-og-fg-subtle">
@@ -356,162 +144,203 @@ function PathPreview({
   );
 }
 
-function ApplyPatchRenderer({ item }: ToolRendererProps) {
-  const ops = applyPatchOpsFromToolItem(item);
-  const failed = item.status === "failed";
-  const cancelled = item.status === "cancelled";
-  const running = item.status === "running";
-  const firstOp = ops[0];
+/* ---- shared-model rows ------------------------------------------------------
+   exec_command, write_stdin, apply_patch, web search, request_human_input,
+   run_on and the generic fallback draw their row from the renderer-neutral
+   presentation model in ./tool-presentation, which non-DOM renderers share.
+   -------------------------------------------------------------------------- */
 
-  if (running) {
-    // Show the patch structure from the arguments (available immediately on
-    // creation), but mark the row clearly as in-progress — not applied yet.
-    const fileCount = ops.length;
-    const titleVerb = firstOp ? `Applying ${basename(firstOp.path)}` : "Applying patch";
-    return (
-      <ActivityDisclosure
-        icon={<FileDiffIcon className={ICON_SIZE} />}
-        iconTone="running"
-        title={fileCount > 1 ? `Applying ${fileCount} files` : titleVerb}
-        running
-        preview={
-          <RunningPreview>
-            {fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…"}
-          </RunningPreview>
-        }
-      >
-        {ops.map((op, index) => {
-          const file = safeParseOp(op);
-          const key = `${op.type}:${op.path}:${index}`;
-          return file ? (
-            <ToolDiff key={key} files={[file]} />
-          ) : (
-            <div key={key}>
-              <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
-              <RawPatch diff={op.diff ?? ""} />
-            </div>
-          );
-        })}
-      </ActivityDisclosure>
-    );
-  }
+const TOOL_ICONS: Record<ToolIconKind, LucideIcon> = {
+  terminal: TerminalIcon,
+  keyboard: KeyboardIcon,
+  "file-diff": FileDiffIcon,
+  search: SearchIcon,
+  question: MessageCircleQuestionIcon,
+  target: TargetIcon,
+  brain: BrainCircuitIcon,
+  sessions: MessagesSquareIcon,
+  server: ServerIcon,
+  "server-cog": ServerCogIcon,
+  calendar: CalendarClockIcon,
+  panels: PanelsTopLeftIcon,
+  share: Share2Icon,
+  message: MessageSquareIcon,
+  git: FolderGitIcon,
+  box: BoxIcon,
+  key: KeyRoundIcon,
+  "file-search": FileSearchIcon,
+  "package-search": PackageSearchIcon,
+  plug: PlugIcon,
+  wrench: WrenchIcon,
+};
 
-  if (failed) {
-    return (
-      <ActivityDisclosure
-        icon={<FileDiffIcon className={ICON_SIZE} />}
-        iconTone="failed"
-        title={firstOp ? `${verbForOp(firstOp)} ${basename(firstOp.path)}` : "apply_patch"}
-        chip={{ tone: "bad", text: "failed" }}
-        preview={typeof item.output === "string" ? item.output : "patch failed"}
-      >
-        <PayloadBlock label="Error" value={item.output} failed />
-      </ActivityDisclosure>
-    );
-  }
-
-  // multi-file edit — magnitude stays a single muted glyph; the per-file
-  // green/red lives only inside the expanded DiffView gutter.
-  if (ops.length > 1) {
-    // Parse every op: successfully parsed ones go into ToolDiff; malformed ops
-    // fall back to a RawPatch display (mirroring the single-op fallback path).
-    // The count in the title/preview equals ops.length so it is always truthful
-    // regardless of how many ops parsed successfully.
-    const parsed = ops.map((op) => safeParseOp(op));
-    const goodFiles = parsed.filter((f): f is GitFileDiff => f !== null);
-    const add = goodFiles.reduce((n, f) => n + f.additions, 0);
-    const del = goodFiles.reduce((n, f) => n + f.deletions, 0);
-    return (
-      <ActivityDisclosure
-        icon={<FileDiffIcon className={ICON_SIZE} />}
-        iconTone="accent"
-        title={`Edited ${ops.length} files`}
-        cancelled={cancelled}
-        preview={
-          <span className="inline-flex items-center gap-2 font-og-mono">
-            <span className="text-og-fg-muted">{ops.length} files</span>
-            <span className="text-og-fg-subtle">
-              +{add} −{del}
-            </span>
+function presentedPreviewNode(preview: ToolPreview): ReactNode {
+  switch (preview.kind) {
+    case "text":
+      return preview.running ? <RunningPreview>{preview.text}</RunningPreview> : preview.text;
+    case "path":
+      return <PathPreview path={preview.path} add={preview.add} del={preview.del} />;
+    case "files":
+      return (
+        <span className="inline-flex items-center gap-2 font-og-mono">
+          <span className="text-og-fg-muted">{preview.count} files</span>
+          <span className="text-og-fg-subtle">
+            +{preview.add} −{preview.del}
           </span>
-        }
-      >
-        {ops.map((op, index) => {
-          const file = parsed[index];
-          const key = `${op.type}:${op.path}:${index}`;
-          return file ? (
-            <ToolDiff key={key} files={[file]} />
-          ) : (
-            <div key={key}>
-              <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
-              <RawPatch diff={op.diff ?? ""} />
-            </div>
-          );
-        })}
-      </ActivityDisclosure>
-    );
+        </span>
+      );
+    case "malformed":
+      return (
+        <span className="inline-flex items-center gap-2 font-og-mono">
+          <span className="text-og-fg-muted">{preview.name}</span>
+          <span className="text-og-fg-subtle">malformed V4A</span>
+        </span>
+      );
   }
+}
 
-  // single op
-  if (!firstOp) {
-    return <GenericRenderer item={item} />;
+function PresentedBody({ body }: { body: ToolBody }) {
+  switch (body.kind) {
+    case "term":
+      return (
+        <>
+          {/* Exec rows pass command={null}: the row title already carries `$ cmd`. */}
+          <TermBlock
+            command={body.command}
+            {...(body.workdir !== null || body.command === null ? { workdir: body.workdir } : {})}
+            output={body.output}
+            {...(body.live ? { live: true } : {})}
+            {...(body.failed !== undefined ? { failed: body.failed } : {})}
+          />
+          {body.note ? <BodyNote>{body.note}</BodyNote> : null}
+        </>
+      );
+    case "note":
+      return body.tone ? (
+        <BodyNote tone={body.tone}>{body.text}</BodyNote>
+      ) : (
+        <BodyNote>{body.text}</BodyNote>
+      );
+    case "payloads":
+      return (
+        <>
+          {body.blocks.map((block) =>
+            block.failed ? (
+              <PayloadBlock key={block.label} label={block.label} value={block.value} failed />
+            ) : (
+              <PayloadBlock key={block.label} label={block.label} value={block.value} />
+            ),
+          )}
+        </>
+      );
+    case "patch":
+      if (body.bare) {
+        return <RawPatch diff={body.files[0]?.diff ?? ""} />;
+      }
+      return (
+        <>
+          {body.files.map((entry) =>
+            entry.file ? (
+              <ToolDiff key={entry.key} files={[entry.file]} />
+            ) : (
+              <div key={entry.key}>
+                <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{entry.path}</p>
+                <RawPatch diff={entry.diff} />
+              </div>
+            ),
+          )}
+        </>
+      );
+    case "web-results":
+      return <WebSearchResults results={body.results} />;
   }
-  if (firstOp.type === "delete_file") {
-    return (
-      <ActivityDisclosure
-        icon={<FileDiffIcon className={ICON_SIZE} />}
-        iconTone="failed"
-        title={`Deleted ${basename(firstOp.path)}`}
-        cancelled={cancelled}
-        preview={<PathPreview path={firstOp.path} />}
-      >
-        <BodyNote>File deleted — no diff to show.</BodyNote>
-      </ActivityDisclosure>
-    );
-  }
+}
 
-  const file = safeParseOp(firstOp);
-  if (!file) {
-    return (
-      <ActivityDisclosure
-        icon={<FileDiffIcon className={ICON_SIZE} />}
-        iconTone="accent"
-        title={`${verbForOp(firstOp)} ${basename(firstOp.path)}`}
-        cancelled={cancelled}
-        preview={
-          <span className="inline-flex items-center gap-2 font-og-mono">
-            <span className="text-og-fg-muted">{basename(firstOp.path)}</span>
-            <span className="text-og-fg-subtle">malformed V4A</span>
-          </span>
-        }
-      >
-        <RawPatch diff={firstOp.diff ?? ""} />
-      </ActivityDisclosure>
-    );
+function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
+  const resultOccurrences = new Map<string, number>();
+  const keyedResults = results?.map((result) => {
+    const contentKey = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
+    const occurrence = (resultOccurrences.get(contentKey) ?? 0) + 1;
+    resultOccurrences.set(contentKey, occurrence);
+    return { key: `${contentKey}\u0000${occurrence}`, result };
+  });
+  if (!keyedResults || !keyedResults.length) {
+    return <BodyNote>results folded into model context — no list available.</BodyNote>;
   }
+  return (
+    <ul className="flex flex-col gap-2">
+      {keyedResults.map(({ key, result }) => (
+        <li key={key} className="flex gap-2.5">
+          <GlobeIcon className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle" />
+          <div className="min-w-0">
+            <p className="truncate text-og-base text-og-fg">
+              {result.title} <span className="text-og-fg-subtle">{result.domain}</span>
+            </p>
+            <p className="text-og-sm leading-5 text-og-fg-muted">{result.snippet}</p>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
-  // The collapsed row shows verb + basename (title) and a muted "+N −M"
-  // (preview); on expand the preview is hidden and the DiffView header carries
-  // the path + churn — so the filename/stat never appears twice at once.
+/** Draw one shared-model row with the web disclosure primitives. */
+function PresentedToolRow({ presentation: p }: { presentation: ToolRowPresentation }) {
+  const Icon = TOOL_ICONS[p.icon];
   return (
     <ActivityDisclosure
-      icon={<FileDiffIcon className={ICON_SIZE} />}
-      iconTone="accent"
-      title={`${verbForOp(firstOp)} ${basename(file.path)}`}
-      cancelled={cancelled}
-      preview={<PathPreview path={file.path} add={file.additions} del={file.deletions} />}
+      icon={<Icon className={ICON_SIZE} />}
+      iconTone={p.iconTone}
+      title={p.title}
+      {...(p.titleMono ? { titleMono: true } : {})}
+      {...(p.running ? { running: true } : {})}
+      {...(p.chip ? { chip: p.chip } : {})}
+      {...(p.failed !== undefined ? { failed: p.failed } : {})}
+      {...(p.cancelled !== undefined ? { cancelled: p.cancelled } : {})}
+      preview={p.preview ? presentedPreviewNode(p.preview) : undefined}
     >
-      <ToolDiff files={[file]} />
+      <PresentedBody body={p.body} />
     </ActivityDisclosure>
   );
 }
 
-function safeParseOp(op: ApplyPatchOperation): GitFileDiff | null {
-  try {
-    return v4aToGitFileDiff(op);
-  } catch {
-    return null;
-  }
+function ExecRenderer({ item }: ToolRendererProps) {
+  const computeLabel = useTimelineComputeLabel();
+  return <PresentedToolRow presentation={execPresentation(item, { computeLabel })} />;
+}
+
+function WriteStdinRenderer({ item }: ToolRendererProps) {
+  return <PresentedToolRow presentation={writeStdinPresentation(item)} />;
+}
+
+function ApplyPatchRenderer({ item }: ToolRendererProps) {
+  const presentation = applyPatchPresentation(item);
+  return presentation ? (
+    <PresentedToolRow presentation={presentation} />
+  ) : (
+    <GenericRenderer item={item} />
+  );
+}
+
+function WebSearchRenderer({ item }: ToolRendererProps) {
+  return <PresentedToolRow presentation={webSearchPresentation(item)} />;
+}
+
+function AskRenderer({ item }: ToolRendererProps) {
+  return <PresentedToolRow presentation={askPresentation(item)} />;
+}
+
+function RunOnRenderer({ item }: ToolRendererProps) {
+  return <PresentedToolRow presentation={runOnPresentation(item)} />;
+}
+
+/**
+ * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
+ * status preview (Running… / Done / error snippet). No argument-field sniffing —
+ * JSON stays in the expandable body only.
+ */
+function GenericRenderer({ item }: ToolRendererProps) {
+  return <PresentedToolRow presentation={genericToolPresentation(item)} />;
 }
 
 /* ---- computer_call --------------------------------------------------------- */
@@ -587,7 +416,10 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
   // every transport.
   const functionAction: ComputerAction | undefined =
     !raw.action && item.name.startsWith("computer_") && item.name !== "computer_call"
-      ? { type: item.name.slice("computer_".length), ...asComputerArgs(item.arguments) }
+      ? {
+          type: item.name.slice("computer_".length),
+          ...asComputerArgs(item.arguments),
+        }
       : undefined;
   const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
@@ -1364,145 +1196,6 @@ function retainedImageFilename(artifact: RetainedArtifactReference): string {
 
 /* ---- web_search ------------------------------------------------------------ */
 
-type WebSearchResult = { title: string; domain: string; snippet: string };
-
-/** Pull a search string from tool-call arguments when providerData.action is sparse. */
-function webSearchQueryFromArguments(args: unknown): string | null {
-  if (typeof args === "string") {
-    const trimmed = args.trim();
-    if (!trimmed) {
-      return null;
-    }
-    try {
-      return webSearchQueryFromArguments(JSON.parse(trimmed));
-    } catch {
-      return trimmed;
-    }
-  }
-  if (!args || typeof args !== "object") {
-    return null;
-  }
-  const record = args as Record<string, unknown>;
-  if (typeof record.query === "string" && record.query.trim().length > 0) {
-    return record.query;
-  }
-  if (Array.isArray(record.queries)) {
-    const first = record.queries.find(
-      (value): value is string => typeof value === "string" && value.trim().length > 0,
-    );
-    if (first) {
-      return first;
-    }
-  }
-  return null;
-}
-
-function WebSearchRenderer({ item }: ToolRendererProps) {
-  const raw = (item.raw ?? {}) as {
-    providerData?: {
-      action?: {
-        type?: string;
-        query?: string;
-        queries?: string[];
-        url?: string;
-        pattern?: string;
-      };
-    };
-  };
-  const action = raw.providerData?.action ?? {};
-  const actionType = action.type ?? "search";
-  // Responses API deprecated singular `query` in favor of `queries[]`.
-  // Codex/current OpenAI often only populate the array.
-  const queries = (action.queries ?? []).filter(
-    (value): value is string => typeof value === "string" && value.trim().length > 0,
-  );
-  const searchQuery =
-    (typeof action.query === "string" && action.query.trim().length > 0 ? action.query : null) ??
-    queries[0] ??
-    webSearchQueryFromArguments(item.arguments);
-  const running = item.status === "running";
-  const query =
-    actionType === "open_page"
-      ? (action.url ?? "(page unavailable)")
-      : actionType === "find_in_page"
-        ? action.pattern && action.url
-          ? `"${action.pattern}" in ${action.url}`
-          : (action.pattern ?? action.url ?? "(page unavailable)")
-        : // Codex often emits the live card before action.query/queries land;
-          // don't flash the scary unavailable copy while still searching.
-          (searchQuery ?? (running ? "…" : "(query unavailable)"));
-  const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
-  const runningTitle =
-    actionType === "open_page"
-      ? "Opening web page"
-      : actionType === "find_in_page"
-        ? "Searching within page"
-        : "Searching the web";
-  const completedTitle =
-    actionType === "open_page"
-      ? "Opened web page"
-      : actionType === "find_in_page"
-        ? "Searched within page"
-        : "Searched the web";
-  // web_search may surface a results array on the output when the host enriches it.
-  // Filter out null/undefined/non-object entries before casting: host-provided
-  // data is untrusted and a null element would throw on result.title access.
-  const rawResults = (item.output as { results?: unknown } | undefined)?.results;
-  const results = Array.isArray(rawResults)
-    ? (rawResults as unknown[]).filter((r): r is WebSearchResult => !!r && typeof r === "object")
-    : undefined;
-  const resultOccurrences = new Map<string, number>();
-  const keyedResults = results?.map((result) => {
-    const contentKey = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
-    const occurrence = (resultOccurrences.get(contentKey) ?? 0) + 1;
-    resultOccurrences.set(contentKey, occurrence);
-    return { key: `${contentKey}\u0000${occurrence}`, result };
-  });
-
-  if (running) {
-    return (
-      <ActivityDisclosure
-        icon={<SearchIcon className={ICON_SIZE} />}
-        iconTone="running"
-        title={runningTitle}
-        running
-        preview={<RunningPreview>{`${query}${variants}`}</RunningPreview>}
-      >
-        <BodyNote>searching… results fold into the model context (no output event).</BodyNote>
-      </ActivityDisclosure>
-    );
-  }
-
-  return (
-    <ActivityDisclosure
-      icon={<SearchIcon className={ICON_SIZE} />}
-      iconTone="muted"
-      title={completedTitle}
-      preview={`${query}${variants}`}
-      failed={item.status === "failed"}
-      cancelled={item.status === "cancelled"}
-    >
-      {keyedResults && keyedResults.length ? (
-        <ul className="flex flex-col gap-2">
-          {keyedResults.map(({ key, result }) => (
-            <li key={key} className="flex gap-2.5">
-              <GlobeIcon className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle" />
-              <div className="min-w-0">
-                <p className="truncate text-og-base text-og-fg">
-                  {result.title} <span className="text-og-fg-subtle">{result.domain}</span>
-                </p>
-                <p className="text-og-sm leading-5 text-og-fg-muted">{result.snippet}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <BodyNote>results folded into model context — no list available.</BodyNote>
-      )}
-    </ActivityDisclosure>
-  );
-}
-
 /* ---- view_image ------------------------------------------------------------ */
 
 const VIEW_IMAGE_ERRORS = [
@@ -1526,7 +1219,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone="running"
-        title={`View ${basename(path)}`}
+        title={`View ${pathBasename(path)}`}
         running
         preview={<RunningPreview>reading…</RunningPreview>}
         media={<MediaSkeleton />}
@@ -1540,7 +1233,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
   const viewCancelled = item.status === "cancelled";
 
   if (retained) {
-    const title = `Viewed ${basename(path)}`;
+    const title = `Viewed ${pathBasename(path)}`;
     if (!retained.available) {
       const state =
         retained.reason === "expired" || retained.reason === "deleted"
@@ -1585,7 +1278,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone="failed"
-        title={`View ${basename(path)}`}
+        title={`View ${pathBasename(path)}`}
         chip={{ tone: "bad", text: tooBig ? "too large" : "error" }}
         preview={text}
       >
@@ -1598,7 +1291,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${basename(path)}`}
+        title={`Viewed ${pathBasename(path)}`}
         failed={viewFailed}
         cancelled={viewCancelled}
         preview={path}
@@ -1612,7 +1305,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${basename(path)} · image omitted · not retained`}
+        title={`Viewed ${pathBasename(path)} · image omitted · not retained`}
         failed={viewFailed}
         cancelled={viewCancelled}
         preview="inline image omitted · not retained"
@@ -1630,7 +1323,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${basename(path)}`}
+        title={`Viewed ${pathBasename(path)}`}
         failed={viewFailed}
         cancelled={viewCancelled}
         preview="(no image)"
@@ -1650,7 +1343,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "accent"}
-        title={`Viewed ${basename(path)}`}
+        title={`Viewed ${pathBasename(path)}`}
         failed={viewFailed}
         cancelled={viewCancelled}
         media={<Thumbnail src={text} caption={path} alt={path} />}
@@ -2154,324 +1847,9 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
 
 /* ---- request_human_input --------------------------------------------------- */
 
-function askToolPreview(args: unknown): string | null {
-  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
-  const questions = Array.isArray(record?.questions) ? record.questions : null;
-  if (!questions || questions.length === 0) {
-    return null;
-  }
-  const first = questions[0];
-  if (!first || typeof first !== "object") {
-    return null;
-  }
-  const q = first as Record<string, unknown>;
-  const text =
-    typeof q.label === "string" && q.label.trim()
-      ? q.label.trim()
-      : typeof q.prompt === "string" && q.prompt.trim()
-        ? q.prompt.trim()
-        : null;
-  if (!text) {
-    return null;
-  }
-  const preview = truncatePreview(text, 90);
-  return questions.length > 1 ? `${preview} · ${questions.length} questions` : preview;
-}
-
-function AskRenderer({ item }: ToolRendererProps) {
-  const args = parseToolArgs(item.arguments);
-  const preview = askToolPreview(args);
-  const icon = <MessageCircleQuestionIcon className={ICON_SIZE} />;
-  const title = "Ask";
-
-  if (item.status === "running") {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="running"
-        title={title}
-        running
-        preview={
-          preview ? (
-            <RunningPreview>{preview}</RunningPreview>
-          ) : (
-            <RunningPreview>Waiting…</RunningPreview>
-          )
-        }
-      >
-        <PayloadBlock label="Arguments" value={args} />
-      </ActivityDisclosure>
-    );
-  }
-
-  const { text: outText, isError } = unwrapMcpOutput(item.output);
-  if ((isError || item.status === "failed") && item.status !== "cancelled") {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="failed"
-        title={title}
-        chip={{ tone: "bad", text: "error" }}
-        preview={truncatePreview(outText, 80) || preview || "Error"}
-      >
-        <PayloadBlock label="Arguments" value={args} />
-        <PayloadBlock label="Error" value={outText} failed />
-      </ActivityDisclosure>
-    );
-  }
-
-  return (
-    <ActivityDisclosure
-      icon={icon}
-      iconTone="muted"
-      title={title}
-      cancelled={item.status === "cancelled"}
-      preview={item.status === "cancelled" ? undefined : (preview ?? undefined)}
-    >
-      <PayloadBlock label="Arguments" value={args} />
-      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
-    </ActivityDisclosure>
-  );
-}
-
 /* ---- run_on ---------------------------------------------------------------- */
 
-function runOnTargetName(output: unknown): string | null {
-  const { text } = unwrapMcpOutput(output);
-  const parsed = tryParseJson(text);
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const name = (parsed as { targetName?: unknown }).targetName;
-    if (typeof name === "string" && name.trim()) {
-      return name.trim();
-    }
-  }
-  return null;
-}
-
-function runOnOpPreview(args: Record<string, unknown>): string | null {
-  const op = args.op;
-  if (!op || typeof op !== "object" || Array.isArray(op)) {
-    return null;
-  }
-  const record = op as Record<string, unknown>;
-  if (record.kind === "exec" && typeof record.cmd === "string" && record.cmd.trim()) {
-    return `$ ${record.cmd.trim()}`;
-  }
-  if (
-    (record.kind === "read" || record.kind === "write") &&
-    typeof record.path === "string" &&
-    record.path.trim()
-  ) {
-    return truncatePreview(record.path.trim(), 72);
-  }
-  return null;
-}
-
-function RunOnRenderer({ item }: ToolRendererProps) {
-  const parsedArgs = parseToolArgs(item.arguments);
-  const args = parsedArgs;
-  const targetName = runOnTargetName(item.output);
-  const title = targetName ? `Run on ${targetName}` : "Run on";
-  const opPreview = runOnOpPreview(parsedArgs);
-  const icon = <ServerIcon className={ICON_SIZE} />;
-
-  if (item.status === "running") {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="running"
-        title={title}
-        running
-        preview={
-          opPreview ? (
-            <RunningPreview>{opPreview}</RunningPreview>
-          ) : (
-            <RunningPreview>Running…</RunningPreview>
-          )
-        }
-      >
-        <PayloadBlock label="Arguments" value={args} />
-      </ActivityDisclosure>
-    );
-  }
-
-  const { text: outText, isError } = unwrapMcpOutput(item.output);
-  if ((isError || item.status === "failed") && item.status !== "cancelled") {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="failed"
-        title={title}
-        chip={{ tone: "bad", text: "error" }}
-        preview={truncatePreview(outText, 80) || opPreview || "Error"}
-      >
-        <PayloadBlock label="Arguments" value={args} />
-        <PayloadBlock label="Error" value={outText} failed />
-      </ActivityDisclosure>
-    );
-  }
-
-  return (
-    <ActivityDisclosure
-      icon={icon}
-      iconTone="muted"
-      title={title}
-      cancelled={item.status === "cancelled"}
-      preview={item.status === "cancelled" ? undefined : (opPreview ?? undefined)}
-    >
-      <PayloadBlock label="Arguments" value={args} />
-      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
-    </ActivityDisclosure>
-  );
-}
-
 /* ---- generic fallback (first-party MCP, external MCP, unknown) ------------- */
-
-/**
- * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
- * status preview (Running… / Done / error snippet). No argument-field sniffing —
- * JSON stays in the expandable body only.
- */
-function GenericRenderer({ item }: ToolRendererProps) {
-  const running = item.status === "running";
-  const args = parseToolArgs(item.arguments);
-  const display = toolDisplayName(item.name, item.display);
-  const icon = <GenericToolIcon name={item.name} />;
-  // Goal tools: surface the objective text on the collapsed row so the in-cluster
-  // tool replaces the old breakaway GoalRow pill without losing the gist.
-  const goalPreview = goalToolPreview(item.name, args);
-
-  if (running) {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="running"
-        title={display}
-        running
-        preview={goalPreview ?? <RunningPreview>Running…</RunningPreview>}
-      >
-        <PayloadBlock label="Arguments" value={args} />
-      </ActivityDisclosure>
-    );
-  }
-
-  const { text: outText, isError } = unwrapMcpOutput(item.output);
-  // Cancelled is NOT an error — a user-cancelled tool should not surface the red
-  // error chip even if the output payload carries an isError flag (the error may be
-  // a consequence of the cancellation, not the tool's own failure).
-  if ((isError || item.status === "failed") && item.status !== "cancelled") {
-    return (
-      <ActivityDisclosure
-        icon={icon}
-        iconTone="failed"
-        title={display}
-        chip={{ tone: "bad", text: "error" }}
-        preview={truncatePreview(outText, 80) || "Error"}
-      >
-        <PayloadBlock label="Arguments" value={args} />
-        <PayloadBlock label="Error" value={outText} failed />
-      </ActivityDisclosure>
-    );
-  }
-
-  return (
-    <ActivityDisclosure
-      icon={icon}
-      iconTone="muted"
-      title={display}
-      cancelled={item.status === "cancelled"}
-      preview={item.status === "cancelled" ? undefined : (goalPreview ?? "Done")}
-    >
-      <PayloadBlock label="Arguments" value={args} />
-      <PayloadBlock label="Result" value={outText} />
-    </ActivityDisclosure>
-  );
-}
-
-function goalToolPreview(name: string, args: unknown): string | null {
-  const leaf = mcpToolLeaf(name);
-  if (
-    leaf !== "goal_set" &&
-    leaf !== "goal_update" &&
-    leaf !== "goal_complete" &&
-    leaf !== "goal_pause" &&
-    leaf !== "wait_for_input"
-  ) {
-    return null;
-  }
-  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
-  if (!record) {
-    return null;
-  }
-  const text =
-    typeof record.text === "string"
-      ? record.text
-      : typeof record.evidence === "string"
-        ? record.evidence
-        : typeof record.rationale === "string"
-          ? record.rationale
-          : typeof record.reason === "string"
-            ? record.reason
-            : typeof record.progressNote === "string"
-              ? record.progressNote
-              : null;
-  return text ? truncatePreview(text, 90) : null;
-}
-
-function truncatePreview(text: string, max: number): string {
-  const cleaned = text.replace(/\s+/g, " ").trim();
-  if (!cleaned) {
-    return "";
-  }
-  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
-}
-
-/** Explicit first-party leaf/prefix → canonical product icons (match nav/pages). */
-function GenericToolIcon({ name }: { name: string }) {
-  const leaf = mcpToolLeaf(name);
-  const Icon =
-    leaf === "request_human_input"
-      ? MessageCircleQuestionIcon
-      : leaf.startsWith("goal_")
-        ? TargetIcon
-        : leaf.startsWith("memory_") ||
-            leaf === "preference_registry_summary" ||
-            leaf === "preference_registry_get"
-          ? BrainCircuitIcon
-          : leaf.startsWith("session_") ||
-              leaf === "sessions_list" ||
-              leaf === "set_session_title" ||
-              leaf === "set_other_session_title"
-            ? MessagesSquareIcon
-            : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
-              ? ServerIcon
-              : leaf.startsWith("rig_")
-                ? ServerCogIcon
-                : leaf.startsWith("scheduled_")
-                  ? CalendarClockIcon
-                  : leaf.startsWith("artifacts_")
-                    ? PanelsTopLeftIcon
-                    : leaf.startsWith("social_")
-                      ? Share2Icon
-                      : leaf.startsWith("slack_")
-                        ? MessageSquareIcon
-                        : leaf.startsWith("github_")
-                          ? FolderGitIcon
-                          : leaf.startsWith("variable_")
-                            ? BoxIcon
-                            : leaf.startsWith("environment_")
-                              ? KeyRoundIcon
-                              : leaf.includes("document") ||
-                                  leaf.includes("knowledge") ||
-                                  leaf === "list_document_bases"
-                                ? FileSearchIcon
-                                : leaf === "tool_search"
-                                  ? PackageSearchIcon
-                                  : leaf.startsWith("skill_")
-                                    ? PlugIcon
-                                    : WrenchIcon;
-  return <Icon className={ICON_SIZE} />;
-}
 
 /* ---- the default registry -------------------------------------------------- */
 
@@ -2536,25 +1914,41 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },
   { match: "name", name: "computer_call", render: ComputerCallRenderer },
-  { match: "name", name: "browser_screenshot", render: BrowserScreenshotRenderer },
+  {
+    match: "name",
+    name: "browser_screenshot",
+    render: BrowserScreenshotRenderer,
+  },
   { match: "name", name: "browser_observe", render: BrowserScreenshotRenderer },
   { match: "name", name: "browser_act", render: BrowserScreenshotRenderer },
   // Function-mode computer tools (codex / chat-wire transports).
   { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
   { match: "name", name: "computer_click", render: ComputerCallRenderer },
-  { match: "name", name: "computer_double_click", render: ComputerCallRenderer },
+  {
+    match: "name",
+    name: "computer_double_click",
+    render: ComputerCallRenderer,
+  },
   { match: "name", name: "computer_move", render: ComputerCallRenderer },
   { match: "name", name: "computer_scroll", render: ComputerCallRenderer },
   { match: "name", name: "computer_type", render: ComputerCallRenderer },
   { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
-  { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
+  {
+    match: "name",
+    name: "image_generation_call",
+    render: GeneratedImageRenderer,
+  },
   { match: "name", name: "generate_image", render: GeneratedImageRenderer },
   { match: "name", name: "generate_video", render: GeneratedVideoRenderer },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
-  { match: "name", name: "sandbox_file_publish", render: SandboxFilePublishRenderer },
+  {
+    match: "name",
+    name: "sandbox_file_publish",
+    render: SandboxFilePublishRenderer,
+  },
   {
     match: "name",
     name: "artifacts_create",
@@ -2579,13 +1973,25 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     render: SiteArtifactRenderer,
     matchPrefixedLeaf: false,
   },
-  { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
-  { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },
+  {
+    match: "name",
+    name: "environment_set_variable",
+    render: SecretSetRenderer,
+  },
+  {
+    match: "name",
+    name: "variable_set_set_variable",
+    render: SecretSetRenderer,
+  },
   { match: "name", name: "search_documents", render: DocsSearchRenderer },
   { match: "name", name: "knowledge_search", render: DocsSearchRenderer },
   { match: "name", name: "memory_propose", render: MemoryProposeRenderer },
   { match: "name", name: "set_session_title", render: SetSessionTitleRenderer },
-  { match: "name", name: "set_other_session_title", render: SetSessionTitleRenderer },
+  {
+    match: "name",
+    name: "set_other_session_title",
+    render: SetSessionTitleRenderer,
+  },
 ];
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */

@@ -43,3 +43,31 @@ export {
   unwrapMcpOutput,
 } from "./timeline/parsers";
 export { formatClockTime } from "./lib/format";
+export {
+  applyPatchPresentation,
+  askPresentation,
+  execPresentation,
+  genericToolIconKind,
+  genericToolPresentation,
+  pathBasename,
+  pathDirname,
+  presentedToolKind,
+  runOnPresentation,
+  toolRowPresentation,
+  truncatePreview,
+  webSearchPresentation,
+  withComputePreview,
+  writeStdinPresentation,
+} from "./timeline/tool-presentation";
+export type {
+  PresentedToolKind,
+  ToolBody,
+  ToolChip,
+  ToolIconKind,
+  ToolIconTone,
+  ToolPatchFile,
+  ToolPresentationContext,
+  ToolPreview,
+  ToolRowPresentation,
+  WebSearchResult,
+} from "./timeline/tool-presentation";
