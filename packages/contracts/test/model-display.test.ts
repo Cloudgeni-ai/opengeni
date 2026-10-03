@@ -55,6 +55,12 @@ describe("modelDisplayName", () => {
     expect(
       modelDisplayName({
         id: "workspace-gateway/anthropic/claude-sonnet-4.6",
+        label: "team-sonnet",
+      }),
+    ).toBe("team-sonnet");
+    expect(
+      modelDisplayName({
+        id: "workspace-gateway/anthropic/claude-sonnet-4.6",
         label: "Sonnet (team)",
       }),
     ).toBe("Sonnet (team)");
@@ -70,12 +76,20 @@ describe("modelDisplayName", () => {
     expect(humanizeModelSlug("grok-code-fast-1")).toBe("Grok Code Fast 1");
   });
 
-  test("detects raw labels", () => {
-    expect(isRawModelLabel("claude-opus-4-8")).toBe(true);
-    expect(isRawModelLabel("anthropic/claude-sonnet-4.6")).toBe(true);
-    expect(isRawModelLabel("GPT-6.1 Sol")).toBe(false);
-    expect(isRawModelLabel("GPT-5.6")).toBe(false);
-    expect(isRawModelLabel("opus", ["opus"])).toBe(true);
+  test("a label is raw only when it is the id, upstream id or their slug", () => {
+    const id = "workspace-openrouter/anthropic/claude-sonnet-4.6";
+    expect(isRawModelLabel("anthropic/claude-sonnet-4.6", [id])).toBe(true);
+    expect(isRawModelLabel("claude-sonnet-4.6", [id])).toBe(true);
+    expect(isRawModelLabel("claude-opus-4-8", [null, "claude-opus-4-8"])).toBe(true);
+    expect(isRawModelLabel("", [id])).toBe(true);
+    // Custom labels win even when they look like slugs.
+    expect(isRawModelLabel("team-sonnet", [id])).toBe(false);
+    expect(isRawModelLabel("GPT-6.1 Sol", ["codex/gpt-6.1-sol"])).toBe(false);
+  });
+
+  test("snapshot numbers are not minor versions", () => {
+    expect(humanizeModelSlug("gpt-4-1106-preview")).toBe("GPT-4 1106 Preview");
+    expect(humanizeModelSlug("gpt-4o-2024-08-06")).toBe("GPT-4o");
   });
 });
 

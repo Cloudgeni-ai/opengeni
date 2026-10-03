@@ -84,11 +84,12 @@ export function humanizeModelSlug(value: string): string {
     .replace(/[-_]latest$/i, "");
   const raw = slug.split(/[-_\s]+/).filter(Boolean);
   if (raw.length === 0) return value.trim() || value;
-  // Consecutive bare numbers are one version: 5-5 → 5.5, 3-5 → 3.5.
+  // Consecutive short numbers are one version: 5-5 → 5.5, 3-5 → 3.5. Longer
+  // numbers are snapshots (gpt-4-1106-preview), never a minor version.
   const tokens: string[] = [];
   for (const token of raw) {
     const previous = tokens.at(-1);
-    if (previous !== undefined && /^\d+$/.test(token) && /^\d+$/.test(previous)) {
+    if (previous !== undefined && /^\d{1,2}$/.test(token) && /^\d{1,2}$/.test(previous)) {
       tokens[tokens.length - 1] = `${previous}.${token}`;
       continue;
     }
@@ -103,8 +104,9 @@ export function humanizeModelSlug(value: string): string {
 }
 
 /**
- * True when a catalog label is only an identifier (`claude-opus-4-8`,
- * `anthropic/claude-sonnet-4.6`) rather than a curated name.
+ * True when a catalog label is only the model's identifier: empty, or exactly
+ * its id, upstream id, or any trailing path of them (`claude-opus-4-8`,
+ * `anthropic/claude-sonnet-4.6`). Any other label is a curated name and wins.
  */
 export function isRawModelLabel(
   label: string,
@@ -112,10 +114,14 @@ export function isRawModelLabel(
 ): boolean {
   const text = label.trim();
   if (!text) return true;
-  if (ids.some((id) => id === text)) return true;
-  if (/\s/.test(text)) return false;
-  if (text.includes("/")) return true;
-  return text === text.toLowerCase() && /[-_:]/.test(text);
+  return ids.some((id) => {
+    if (!id) return false;
+    const segments = id.trim().split("/").filter(Boolean);
+    return segments.some((_, index) => {
+      const tail = segments.slice(index).join("/");
+      return tail === text || modelSlug(tail) === text;
+    });
+  });
 }
 
 /**
@@ -125,8 +131,8 @@ export function isRawModelLabel(
  */
 export function modelDisplayName(input: ModelDisplayInput): string {
   if (typeof input === "string") {
-    // Already a name ("Workspace default", "GPT-6 Sol"), not an identifier.
-    return isRawModelLabel(input) || !/\s/.test(input.trim()) ? humanizeModelSlug(input) : input;
+    // A bare id is humanized; text with spaces is already a name ("Workspace default").
+    return input.trim() && !/\s/.test(input.trim()) ? humanizeModelSlug(input) : input;
   }
   const upstream = upstreamOf(input);
   const label = input.label?.trim();

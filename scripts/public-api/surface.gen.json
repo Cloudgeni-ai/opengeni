@@ -27715,6 +27715,7 @@
       "MetricWindow": "type",
       "ModelDisplayInput": "type",
       "modelDisplayName": "value",
+      "modelHasMark": "value",
       "ModelMark": "value",
       "ModelName": "value",
       "ModelPicker": "value",
@@ -28645,6 +28646,7 @@
       "projectClientModelRows": "value",
       "projectPickerRows": "value",
       "runnableLatencyModesForModel": "value",
+      "scopedBillingClassLabel": "value",
       "sortPickerRows": "value"
     },
     "@opengeni/react/realtime": {

@@ -542,7 +542,7 @@ export type {
   PickerBillingClass,
   PickerModelRow,
 } from "./model-policy";
-export { ChatGptMark, ModelMark, ModelName } from "./components/model-mark";
+export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
 export {
   humanizeModelSlug,
   isRawModelLabel,

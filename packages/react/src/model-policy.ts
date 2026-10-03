@@ -36,6 +36,13 @@ const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   organization_byok: "API keys",
 };
 
+/** Models settings keeps naming who connected the key. */
+const SCOPED_BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
+  ...BILLING_CLASS_LABELS,
+  byok: "Workspace providers",
+  organization_byok: "Organization providers",
+};
+
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
   missing_credential: "Credentials required",
   needs_reauth: "Reconnect required",
@@ -63,6 +70,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
 
 export function billingClassLabel(billingClass: PickerBillingClass): string {
   return BILLING_CLASS_LABELS[billingClass];
+}
+
+/** The group label that names the connection scope, for Models settings only. */
+export function scopedBillingClassLabel(billingClass: PickerBillingClass): string {
+  return SCOPED_BILLING_CLASS_LABELS[billingClass];
 }
 
 export function availabilityReasonLabel(
@@ -206,30 +218,30 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 
 function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
-    return "Billed to the connected Anthropic API account";
+    return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the connected Claude plan · no Opengeni credits";
+    return "Uses the workspace Claude subscription · no OpenGeni credits";
   if (model.provider === "workspace-openrouter") {
-    return "Billed to the connected OpenRouter account";
+    return "Billed to the workspace OpenRouter account";
   }
   if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
-    return "Billed to the connected Vercel account";
+    return "Billed to the workspace Vercel account";
   }
-  return "Billed to the connected provider account";
+  return "Billed to the workspace provider account";
 }
 
 function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
-    return "Billed to the connected Anthropic API account";
+    return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude plan · no Opengeni credits";
+    return "Uses the connected Claude subscription · no OpenGeni credits";
   if (model.provider === "organization-openrouter") {
-    return "Billed to the connected OpenRouter account";
+    return "Billed to the organization OpenRouter account";
   }
   if (model.provider === "organization-gateway") {
-    return "Billed to the connected Vercel account";
+    return "Billed to the organization Vercel account";
   }
-  return "Billed to the connected provider account";
+  return "Billed to the organization provider account";
 }
 
 /**
@@ -298,6 +310,11 @@ export function findPickerRow<TCatalog extends ClientModel>(
 
 export type GroupPickerRowsOptions = {
   codexOnly?: boolean;
+  /**
+   * Default true: organization- and workspace-connected keys share one group
+   * and identical copies show once. Models settings passes false.
+   */
+  collapseScopes?: boolean | undefined;
   /** Kept visible when it has an identical twin (see below). */
   selectedId?: string | undefined;
 };
@@ -310,12 +327,24 @@ function displayGroupFor(billingClass: PickerBillingClass): PickerBillingClass {
   return billingClass === "organization_byok" ? "byok" : billingClass;
 }
 
-/** Groups whose connections can exist at both organization and workspace scope. */
-const TWIN_GROUPS: ReadonlySet<PickerBillingClass> = new Set(["byok", "claude_subscription"]);
+/**
+ * The same model through the same provider kind, whichever scope connected it:
+ * `organization-anthropic/claude-opus-5-5` and `workspace-anthropic/claude-opus-5-5`
+ * share a key, while OpenRouter and the Anthropic API never do (different
+ * accounts and bills).
+ */
+function scopeFreeIdentity(row: PickerModelRow<ClientModel>): string | null {
+  const provider = row.provider.replace(/^(?:organization|workspace)-/, "");
+  if (provider === row.provider) return null;
+  const upstream =
+    row.catalog.deployment?.upstreamModelId ??
+    (row.id.startsWith(`${row.provider}/`) ? row.id.slice(row.provider.length + 1) : row.id);
+  return `${provider}\u0000${upstream}`;
+}
 
 /**
- * Two rows in one connection group with the same display name (the same model
- * connected by the organization and by the workspace) are one choice: show one. Keep the
+ * Two rows that are the same model through the same provider kind, connected
+ * by the organization and by the workspace, are one choice: show one. Keep the
  * current selection, else a selectable row, else the first in picker order.
  */
 function prefersTwin<TCatalog extends ClientModel>(
@@ -355,12 +384,15 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
     rows: PickerModelRow<TCatalog>[];
   }> = [];
   for (const row of sorted) {
-    const billingClass = displayGroupFor(row.billingClass);
+    const collapse = options?.collapseScopes !== false;
+    const billingClass = collapse ? displayGroupFor(row.billingClass) : row.billingClass;
     const existing = groups.find((group) => group.billingClass === billingClass);
     if (existing) {
-      const twin = TWIN_GROUPS.has(billingClass)
-        ? existing.rows.findIndex((candidate) => candidate.label === row.label)
-        : -1;
+      const identity = collapse ? scopeFreeIdentity(row) : null;
+      const twin =
+        identity === null
+          ? -1
+          : existing.rows.findIndex((candidate) => scopeFreeIdentity(candidate) === identity);
       if (twin < 0) {
         existing.rows.push(row);
       } else if (prefersTwin(row, existing.rows[twin]!, options?.selectedId)) {

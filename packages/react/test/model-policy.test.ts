@@ -179,12 +179,12 @@ describe("model-policy", () => {
     });
     expect(billingClassForModel(model)).toBe("organization_byok");
     expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("API keys");
-    expect(payerSummaryForModel(model)).toBe("Billed to the connected OpenRouter account");
+    expect(payerSummaryForModel(model)).toBe("Billed to the organization OpenRouter account");
     expect(payerSummaryForModel({ ...model, cost: undefined })).toBe(
-      "Billed to the connected OpenRouter account",
+      "Billed to the organization OpenRouter account",
     );
     expect(payerSummaryForModel({ ...model, provider: "organization-gateway" })).toBe(
-      "Billed to the connected Vercel account",
+      "Billed to the organization Vercel account",
     );
   });
   test("omits disconnected subscription and workspace Gateway rails", () => {
@@ -230,7 +230,7 @@ describe("model-policy", () => {
       billingClass: "byok",
       billingClassLabel: "API keys",
     });
-    expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the connected Vercel account");
+    expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the workspace Vercel account");
   });
 
   test("keeps workspace OpenRouter billing separate from deployment OpenRouter", () => {
@@ -254,7 +254,7 @@ describe("model-policy", () => {
     });
 
     expect(billingClassForModel(workspaceModel)).toBe("byok");
-    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the connected OpenRouter account");
+    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
     expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
@@ -326,7 +326,7 @@ describe("model-policy", () => {
           billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
         }),
       ),
-    ).toBe("Billed to the connected Vercel account");
+    ).toBe("Billed to the workspace Vercel account");
   });
 
   test("projects curated shortLabel into picker rows", () => {
@@ -481,5 +481,60 @@ describe("model display across connection scopes", () => {
       catalogModel({ id: "openai/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),
     ]);
     expect(groupPickerRowsByBillingClass(rows)[0]!.rows).toHaveLength(2);
+  });
+});
+
+describe("scope collapse never merges different accounts", () => {
+  const row = (id: string, provider: string, label: string, cost: "organization" | "workspace") =>
+    catalogModel({ id, label, provider, providerLabel: provider, cost });
+
+  test("the same model through OpenRouter and the Anthropic API stays two rows", () => {
+    const rows = projectPickerRows([
+      row(
+        "workspace-openrouter/anthropic/claude-sonnet-4.6",
+        "workspace-openrouter",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+      row(
+        "organization-anthropic/claude-sonnet-4.6",
+        "organization-anthropic",
+        "Claude Sonnet 4.6",
+        "organization",
+      ),
+      row(
+        "workspace-anthropic/claude-sonnet-4.6",
+        "workspace-anthropic",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+    ]);
+    const [keys] = groupPickerRowsByBillingClass(rows);
+    expect(keys!.label).toBe("API keys");
+    // Org + workspace Anthropic collapse; OpenRouter is a different account.
+    expect(
+      keys!.rows
+        .map((candidate) => candidate.provider.replace(/^(organization|workspace)-/, ""))
+        .sort(),
+    ).toEqual(["anthropic", "openrouter"]);
+  });
+
+  test("collapseScopes false keeps every row and scoped groups", () => {
+    const rows = projectPickerRows([
+      row(
+        "organization-anthropic/claude-sonnet-4.6",
+        "organization-anthropic",
+        "Claude Sonnet 4.6",
+        "organization",
+      ),
+      row(
+        "workspace-anthropic/claude-sonnet-4.6",
+        "workspace-anthropic",
+        "Claude Sonnet 4.6",
+        "workspace",
+      ),
+    ]);
+    const groups = groupPickerRowsByBillingClass(rows, { collapseScopes: false });
+    expect(groups.map((group) => group.billingClass)).toEqual(["byok", "organization_byok"]);
   });
 });

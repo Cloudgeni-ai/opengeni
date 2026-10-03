@@ -1301,3 +1301,71 @@ describe("model identity outside settings", () => {
     expect(trigger.querySelector('[data-testid^="billing-class-icon-"]')).toBeNull();
   });
 });
+
+describe("Models settings presentation", () => {
+  const keyModel = (scope: "organization" | "workspace"): ClientModel => ({
+    ...MODELS[0]!,
+    id: `${scope}-anthropic/claude-opus-4-8`,
+    label: "claude-opus-4-8",
+    shortLabel: undefined,
+    provider: `${scope}-anthropic`,
+    providerLabel: "Anthropic API",
+    source: undefined,
+    cost: scope,
+  });
+
+  test("collapseScopes false keeps raw labels, scoped groups and the payment mark", async () => {
+    const models = [keyModel("organization"), keyModel("workspace")];
+    const container = await mount(
+      <>
+        <ModelPolicyPicker
+          models={models}
+          model={models[0]!.id}
+          effort="low"
+          latencyMode="standard"
+          collapseScopes={false}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+        <ModelPolicyPickerMenu
+          models={models}
+          model={models[0]!.id}
+          effort="low"
+          latencyMode="standard"
+          collapseScopes={false}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+      </>,
+    );
+    const trigger = container.querySelector('button[aria-label="Model and effort"]')!;
+    expect(trigger.textContent).toContain("claude-opus-4-8");
+    expect(
+      trigger.querySelector('[data-testid="billing-class-icon-organization_byok"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Workspace providers"]')).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Organization providers"]')).not.toBeNull();
+    expect(container.textContent).toContain("Billed to the organization provider account");
+    expect(container.querySelectorAll('[data-testid^="model-picker-choice-"]')).toHaveLength(2);
+    expect(container.querySelector("[data-model-vendor]")).toBeNull();
+  });
+
+  test("a host's organization API-key branding also labels the merged API keys group", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[keyModel("organization"), keyModel("workspace")]}
+        model="none"
+        effort="low"
+        latencyMode="standard"
+        groupPresentation={{ organization_byok: { label: "Acme keys" } }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('section[aria-label="Acme keys"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid^="model-picker-choice-"]')).toHaveLength(1);
+  });
+});

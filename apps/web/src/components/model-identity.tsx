@@ -7,11 +7,11 @@
  * Never render a raw catalog id, routing prefix or connection scope next to a
  * model outside Models settings.
  */
-import { ModelMark, modelDisplayName, modelVendor, type ModelDisplayInput } from "@opengeni/react";
+import { ModelMark, modelDisplayName, modelHasMark, type ModelDisplayInput } from "@opengeni/react";
 
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 
-export { ModelMark, ModelName, modelDisplayName, modelVendor } from "@opengeni/react";
+export { ModelMark, ModelName, modelDisplayName, modelHasMark, modelVendor } from "@opengeni/react";
 export type { ModelDisplayInput } from "@opengeni/react";
 export { modelPayerHint } from "@/lib/model-payer";
 
@@ -22,7 +22,7 @@ export function ModelTile({ model, size }: { model: ModelDisplayInput; size?: Lo
       size={size}
       name={modelDisplayName(model)}
       icon={
-        modelVendor(model) ? <ModelMark model={model} className="size-full text-fg" /> : undefined
+        modelHasMark(model) ? <ModelMark model={model} className="size-full text-fg" /> : undefined
       }
     />
   );

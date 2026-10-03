@@ -15,7 +15,8 @@ export type AgentBrainPromptModelSelection = {
   latencyMode: LatencyMode;
 };
 
-function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
+/** Scope-free payer words for a catalog model; shared by the prompt routes. */
+export function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   // Scope-free payer words; who connected a key is a Models-settings fact.
   if (model.cost === "free") return "Free in this deployment";
   if (model.cost === "credits") return "Opengeni credits";
