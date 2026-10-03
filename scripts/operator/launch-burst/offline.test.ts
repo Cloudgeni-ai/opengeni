@@ -712,6 +712,51 @@ describe("offline launch burst safety", () => {
   });
 });
 describe("honest measurement fixtures", () => {
+  test("recovery/resume retains the earliest observed worker start, including zero", () => {
+    for (const firstStartMs of [0, 20]) {
+      const value = sample();
+      value.sentMonoMs = 1_000;
+      const observer = new TurnObserver(value, "plain");
+      const firstAttempt = crypto.randomUUID();
+      const resumedAttempt = crypto.randomUUID();
+      observer.observe(event(1, "user.message"), 1_000, "wall");
+      observer.observe(
+        { ...event(2, "turn.started"), turnAttemptId: firstAttempt },
+        1_000 + firstStartMs,
+        "wall",
+      );
+      expect(value.workerStartMs).toBe(firstStartMs);
+      observer.observe(
+        { ...event(3, "turn.started"), turnAttemptId: resumedAttempt },
+        1_200,
+        "wall",
+      );
+      expect(value.workerStartMs).toBe(firstStartMs);
+      observer.observe(
+        { ...event(4, "turn.started"), turnAttemptId: resumedAttempt },
+        1_300,
+        "wall",
+      );
+      expect(value.workerStartMs).toBe(firstStartMs);
+      observer.observe(event(5, "agent.message.completed", { text: "OK" }), 1_400, "wall");
+      expect(observer.observe(event(6, "turn.completed", { output: "OK" }), 1_500, "wall")).toBe(
+        true,
+      );
+      expect(value).toMatchObject({
+        status: "success",
+        workerStartMs: firstStartMs,
+        firstOutputMs: 400,
+        completionMs: 500,
+        attemptIds: [firstAttempt, resumedAttempt],
+      });
+      expect(summarize([value]).workerStartMsAllUsers).toMatchObject({
+        denominator: 1,
+        observed: 1,
+        p50: firstStartMs,
+        max: firstStartMs,
+      });
+    }
+  });
   test("status/reasoning/tools/empty frames/other turns cannot be TTFT", () => {
     const value = sample();
     const observer = new TurnObserver(value, "plain");

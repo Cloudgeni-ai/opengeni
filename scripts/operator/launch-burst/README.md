@@ -144,8 +144,13 @@ release, run ID and UTC windows with the result.
   starts after acceptance, so replayed output is measured when the client receives
   it; this is not a server-only inference latency.
 - Acceptance: successful session POST return. Worker start: client observation
-  of `turn.started`. It includes API/network/dispatch/replay, **not raw Temporal
-  schedule-to-start**. Optional event-time receipt→first-output is separately named.
+  of the earliest `turn.started` on the exact first turn; later recovery/resume
+  starts do not overwrite it, including when the first observed latency is zero.
+  It includes API/network/dispatch/replay, **not raw Temporal schedule-to-start**.
+  Database `session_turns.started_at` can be overwritten on recovery/resume and
+  must not be treated as first-start or raw Temporal Scheduled→Started latency.
+  Acceptance→latest-resume observations from existing traffic are not a burst
+  baseline. Optional event-time receipt→first-output is separately named.
 - Signup: monotonic start of actual signup/auth preparation through completed
   onboarding. It is separate from prompt TTFT and barrier wait; failures have null
   signup latency, not zero. Exact first-turn/attempt IDs and correlation IDs are
@@ -194,16 +199,27 @@ Coordinate read-only exports with the live Launch dashboard owner before executi
 windows, then at least 30 minutes after settlement or the configured scale-down
 cooldown plus rollout time. Mark actual UTC first/last prompt and final terminal
 times. Preserve missing samples, release changes and collection failures explicitly.
+SQLSTATE `57014` from a collection query (statement timeout/query cancellation)
+means failed collection and unknown values, **never a healthy empty queue or zero**.
+Retain the collection error and query/export provenance; missing values remain
+null/unknown rather than being fabricated from a failed query.
 
 Collect API/control/turn worker desired/current/Ready/pending replicas and restart/
 OOM reasons; node Ready/allocatable/requested CPU/memory, unschedulable reasons,
 autoscaler limits/headroom and scaler activation/pressure; Temporal task-queue and
 exact activity waits/errors/backlog; NATS disconnect/reconnect/pressure; DB CPU,
 connections/max, IOPS/latency/locks and pool saturation; ingress/auth/model 429s and
-5xx; sandbox create/readiness/capacity/unknown operation counts. Capture source
-heads, deployed images/releases and metric-query/export provenance. Show actual
-scale-up timing and eventual scale-back to the admitted baseline; a desired replica
-increase without Ready pods is not capacity. Missing observability is work, not PASS.
+5xx; sandbox create/readiness/capacity/unknown operation counts. For each
+before/during/after window, record node pool identity, node SKU, CPU architecture
+and CPU model where observable; regional and per-family quota limits, usage and
+remaining headroom as distinct scopes; infrastructure and application source
+revisions, deployed image identities/releases and metric-query/export provenance.
+Timestamp changes so code, CPU and host changes are attributable, not blended into
+one comparison. Unavailable metadata stays null/unknown; do not infer CPU model
+from SKU or fabricate quota headroom. This is an owner-supplied telemetry plan,
+not a collector implemented by the harness. Show actual scale-up timing and
+eventual scale-back to the admitted baseline; a desired replica increase without
+Ready pods is not capacity. Missing observability is work, not PASS.
 
 Parent cutoffs: any new API OOM or worker cleanup self-termination, rising stuck/
 empty/unknown operations, >1% initial failures, sustained DB pressure (e.g. CPU or
