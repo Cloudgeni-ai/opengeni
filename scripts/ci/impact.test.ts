@@ -284,6 +284,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -842,6 +843,7 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
