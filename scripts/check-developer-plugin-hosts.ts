@@ -113,7 +113,8 @@ const installed = await command(
 );
 const details = await command([...claude, "plugin", "details", "opengeni@opengeni"], claudeEnv);
 assert.match(details, /Skills \(3\)\s+build-with-opengeni, offload-to-opengeni, opengeni-setup/);
-for (const component of ["Agents", "Hooks", "MCP servers", "LSP servers"])
+assert.match(details, /MCP servers \(1\)\s+opengeni\b/);
+for (const component of ["Agents", "Hooks", "LSP servers"])
   assert.match(details, new RegExp(`${component} \\(0\\)`));
 const configuration = JSON.parse(
   await command([...claude, "plugin", "configure", "opengeni@opengeni", "--json"], claudeEnv),
@@ -135,7 +136,11 @@ assert.deepEqual(
   nativePlugin.skills.map((skill: { name: string }) => skill.name).sort(),
   expectedSkills.map((name) => `opengeni:${name}`),
 );
-assert.deepEqual(nativePlugin.mcpServers, []);
+assert.deepEqual(nativePlugin.mcpServers, ["opengeni"]);
+const codexMcp = await command([...codex, "mcp", "get", "opengeni"], codexEnv);
+assert.match(codexMcp, /transport: streamable_http/);
+assert.match(codexMcp, /url: https:\/\/app\.opengeni\.ai\/v1\/mcp/);
+assert.match(codexMcp, /bearer_token_env_var: -/);
 assert.deepEqual(nativePlugin.hooks, []);
 
 // Empirical counterexample: the same package under the legacy manifest recursively registers the guide.
@@ -161,23 +166,26 @@ assert.deepEqual(
   [...expectedSkills, "opengeni-client"].sort().map((name) => `opengeni:${name}`),
 );
 
-const schemaPath = join(root, "scripts/fixtures/agent-plugin-1.0.0.schema.json");
-await command(
-  [
-    bun,
-    "x",
-    "--package",
-    "ajv-cli@5.0.0",
-    "ajv",
-    "validate",
-    "--spec=draft2020",
-    "-s",
-    schemaPath,
-    "-d",
-    join(root, "plugins/opengeni/plugin.json"),
-  ],
-  {},
-);
+for (const [schema, document] of [
+  ["agent-plugin-1.0.0.schema.json", "plugin.json"],
+  ["agent-plugin-mcp-1.0.0.schema.json", "mcp.json"],
+])
+  await command(
+    [
+      bun,
+      "x",
+      "--package",
+      "ajv-cli@5.0.0",
+      "ajv",
+      "validate",
+      "--spec=draft2020",
+      "-s",
+      join(root, "scripts/fixtures", schema!),
+      "-d",
+      join(root, "plugins/opengeni", document!),
+    ],
+    {},
+  );
 
 const receipt = {
   checkedAt: new Date().toISOString(),
@@ -196,6 +204,7 @@ const receipt = {
     install: codexInstall,
     skills: nativePlugin.skills,
     mcpServers: nativePlugin.mcpServers,
+    mcp: codexMcp,
     hooks: nativePlugin.hooks,
   },
   legacyComparison: {
@@ -214,7 +223,7 @@ console.log(
       claudeSkills: expectedSkills,
       codexSkills: expectedSkills,
       legacySkills: receipt.legacyComparison.skills,
-      mcpServers: 0,
+      mcpServers: nativePlugin.mcpServers,
       requiredUserConfigUnset: configuration.unconfigured,
     },
     null,
