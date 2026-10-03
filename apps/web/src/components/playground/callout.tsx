@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 /* ----------------------------------------------------------------------------
-   One short callout at a time, with a straight arrow that ends exactly at the
+   One short callout at a time, in high contrast (the page's text color as its
+   fill, in both themes), with a straight arrow whose tip lands exactly on the
    edge of its target. Its place is measured every frame, so it follows
    resizes, scrolling and layout changes. On phones it docks above or below the
    target with a small caret instead of an arrow. It never covers its target.
@@ -21,7 +22,8 @@ export type CalloutLayout = Readonly<{
 
 const GAP = 40;
 const EDGE = 8;
-const BUBBLE_WIDTH = 320;
+const BUBBLE_WIDTH = 340;
+const MIN_SIDE_WIDTH = 240;
 const NARROW = 640;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -59,15 +61,19 @@ export function computeCalloutLayout(
   const h = bubbleHeight;
   for (const side of sides) {
     if (side === "right" || side === "left") {
-      const left = side === "right" ? target.right + GAP : target.left - GAP - width;
-      if (left < EDGE || left + width > vw - EDGE) continue;
+      // Beside the target the bubble may narrow a little to fit.
+      const room = side === "right" ? vw - EDGE - target.right - GAP : target.left - GAP - EDGE;
+      const sideWidth = Math.min(width, room);
+      if (sideWidth < MIN_SIDE_WIDTH) continue;
+      const left = side === "right" ? target.right + GAP : target.left - GAP - sideWidth;
       const top = clamp(cy - h / 2, EDGE, vh - h - EDGE);
       const y = clamp(cy, top + 12, top + h - 12);
       return {
-        bubble: { left, top, width },
+        bubble: { left, top, width: sideWidth },
         arrow: {
-          from: { x: side === "right" ? left - 2 : left + width + 2, y },
-          to: { x: side === "right" ? target.right + 6 : target.left - 6, y: cy },
+          from: { x: side === "right" ? left - 2 : left + sideWidth + 2, y },
+          // The tip lands exactly on the target's edge.
+          to: { x: side === "right" ? target.right : target.left, y: cy },
         },
         caret: null,
       };
@@ -80,7 +86,7 @@ export function computeCalloutLayout(
       bubble: { left, top, width },
       arrow: {
         from: { x, y: side === "below" ? top - 2 : top + h + 2 },
-        to: { x: cx, y: side === "below" ? target.bottom + 6 : target.top - 6 },
+        to: { x: cx, y: side === "below" ? target.bottom : target.top },
       },
       caret: null,
     };
@@ -148,13 +154,13 @@ export function Callout({
       {layout?.arrow ? (
         <svg
           aria-hidden="true"
-          className="pointer-events-none fixed inset-0 z-40 h-dvh w-screen overflow-visible text-fg-muted"
+          className="pointer-events-none fixed inset-0 z-40 h-dvh w-screen overflow-visible text-fg"
         >
           <defs>
             <marker
               id={marker}
               viewBox="0 0 10 10"
-              refX="8"
+              refX="10"
               refY="5"
               markerWidth="8"
               markerHeight="8"
@@ -169,7 +175,7 @@ export function Callout({
             x2={layout.arrow.to.x}
             y2={layout.arrow.to.y}
             stroke="currentColor"
-            strokeWidth="1.5"
+            strokeWidth="2"
             markerEnd={`url(#${marker})`}
           />
         </svg>
@@ -178,7 +184,7 @@ export function Callout({
         ref={bubble}
         role="status"
         data-callout={id}
-        className="og-step-in fixed z-40 flex items-center gap-3 rounded-[14px] border border-border-strong bg-surface py-2 pr-2 pl-3 text-sm leading-5 text-fg shadow-lg"
+        className="og-step-in og-callout fixed z-40 flex items-center gap-3 rounded-[14px] bg-fg py-2.5 pr-2 pl-3.5 text-sm leading-5 font-medium text-canvas shadow-lg"
         style={
           layout
             ? { left: layout.bubble.left, top: layout.bubble.top, width: layout.bubble.width }
@@ -188,12 +194,10 @@ export function Callout({
         {layout?.caret ? (
           <span
             aria-hidden="true"
-            className="absolute size-2.5 rotate-45 border-border-strong bg-surface"
+            className="absolute size-2.5 rotate-45 bg-fg"
             style={{
               left: layout.caret.x - 5,
-              ...(layout.caret.edge === "top"
-                ? { top: -6, borderLeftWidth: 1, borderTopWidth: 1 }
-                : { bottom: -6, borderRightWidth: 1, borderBottomWidth: 1 }),
+              ...(layout.caret.edge === "top" ? { top: -5 } : { bottom: -5 }),
             }}
           />
         ) : null}

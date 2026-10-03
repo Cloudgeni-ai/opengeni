@@ -198,7 +198,11 @@ describe("playground", () => {
       expect(marked(container)).toEqual([
         '    "--og-color-accent": "#5b4bff",',
         '    "--og-color-primary": "#5b4bff",',
+        '    "--og-color-surface-2": "#5b4bff26",',
       ]);
+      // The chat takes the color beyond the accent: user messages and the
+      // selected chat sit on the tinted secondary surface.
+      expect(product.style.getPropertyValue("--og-color-surface-2")).toBe("#5b4bff26");
       await press(buttonIn(container.querySelector('[aria-label="Theme"]')!, "Light"));
       expect(product.dataset.ogTheme).toBe("light");
       expect(marked(container)).toEqual(['  <div data-og-theme="light" style={{']);
@@ -232,6 +236,7 @@ describe("playground", () => {
     try {
       expect(callout(container)!.dataset.callout).toBe("chat");
       expect(callout(container)!.textContent).toContain("<OpenGeniChat />");
+      expect(callout(container)!.textContent).toContain("chat list, new chat");
       await press(
         buttonIn(
           container.querySelector('[aria-label="Suggested questions"]')!,
@@ -247,6 +252,13 @@ describe("playground", () => {
       expect(callout(container)!.dataset.callout).toBe("code");
       await press(buttonIn(callout(container)!, "Next"));
       expect(callout(container)!.dataset.callout).toBe("ship");
+      expect(callout(container)!.textContent).toContain("This opens a chat where an agent");
+      // The caption steps aside while the callout says it.
+      expect(
+        Array.from(container.querySelectorAll("p")).find((p) =>
+          p.textContent?.startsWith("Opens a chat"),
+        )!.className,
+      ).toContain("invisible");
       await press(buttonIn(callout(container)!, "Skip"));
       expect(callout(container)).toBeNull();
       expect(localStorage.getItem(`og.playground:v4:${encodeURIComponent(SUBJECT)}:tips`)).toBe(

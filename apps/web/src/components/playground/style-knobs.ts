@@ -25,23 +25,23 @@ export function defaultChatStyle(theme: "light" | "dark"): ChatStyle {
   return { accent: ACCENTS[0]!, theme };
 }
 
+/** How strongly the brand color tints the chat's secondary surface. */
+export const SURFACE_TINT_ALPHA = "26";
+
 /**
- * The custom properties for one style. The snippet shows the two base tokens;
- * the derived shades are set here too because the app's own stylesheet
- * computes them once, at the page root.
+ * The custom properties for one style: exactly the snippet's three, plus the
+ * few the package derives from them (its compiled stylesheet recomputes them
+ * per element; the app's own stylesheet computes them once, at the page root).
+ * The tinted secondary surface colors user messages and the selected chat.
  */
 export function chatTokens(style: ChatStyle): CSSProperties {
   const accent = style.accent.value;
   return {
     "--og-color-accent": accent,
-    "--og-color-accent-strong": `color-mix(in oklch, ${accent} 82%, ${style.theme === "dark" ? "white" : "black"})`,
-    "--og-color-accent-deep": `color-mix(in oklch, ${accent} 78%, black)`,
-    "--og-color-accent-fg": "#ffffff",
-    "--og-color-accent-soft": `color-mix(in oklch, ${accent} 14%, transparent)`,
-    "--og-shadow-glow": `0 0 22px color-mix(in oklch, ${accent} 18%, transparent)`,
     "--og-color-primary": accent,
-    "--og-color-primary-fg": "#ffffff",
-    "--og-color-primary-border": accent,
-    "--og-color-primary-hover": `color-mix(in oklch, ${accent} 88%, black)`,
+    "--og-color-surface-2": `${accent}${SURFACE_TINT_ALPHA}`,
+    "--og-color-accent-soft": `color-mix(in oklch, ${accent} 16%, transparent)`,
+    "--og-shadow-glow": `0 0 24px color-mix(in oklch, ${accent} 10%, transparent)`,
+    "--og-color-primary-hover": `color-mix(in srgb, ${accent} 85%, var(--og-color-primary-fg))`,
   } as CSSProperties;
 }

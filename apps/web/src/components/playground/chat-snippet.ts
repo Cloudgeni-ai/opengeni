@@ -1,4 +1,4 @@
-import type { ChatStyle } from "./style-knobs";
+import { SURFACE_TINT_ALPHA, type ChatStyle } from "./style-knobs";
 
 /**
  * The few lines that put the playground's chat in a product: the component,
@@ -15,6 +15,7 @@ export function chatSnippet(style: ChatStyle): string[] {
     style.theme === "light" ? '  <div data-og-theme="light" style={{' : "  <div style={{",
     `    "--og-color-accent": "${style.accent.value}",`,
     `    "--og-color-primary": "${style.accent.value}",`,
+    `    "--og-color-surface-2": "${style.accent.value}${SURFACE_TINT_ALPHA}",`,
     "  }}>",
     "    <OpenGeniChat />",
     "  </div>",

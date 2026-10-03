@@ -22,12 +22,13 @@ describe("playground snippet", () => {
     expect(typeof react.OpenGeniProvider).toBe("function");
   });
 
-  test("a color marks its two lines; light marks one", () => {
+  test("a color marks its three lines; light marks one", () => {
     const before = chatSnippet(dark);
     const recolored = chatSnippet({ ...dark, accent: ACCENTS[1]! });
     expect(changedLines(before, recolored).map((index) => recolored[index])).toEqual([
       `    "--og-color-accent": "${ACCENTS[1]!.value}",`,
       `    "--og-color-primary": "${ACCENTS[1]!.value}",`,
+      `    "--og-color-surface-2": "${ACCENTS[1]!.value}26",`,
     ]);
     const light = chatSnippet({ ...dark, theme: "light" });
     expect(changedLines(before, light).map((index) => light[index])).toEqual([

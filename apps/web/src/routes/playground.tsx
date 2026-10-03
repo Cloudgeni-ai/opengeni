@@ -49,7 +49,8 @@ const SIDES: Record<Tip, readonly CalloutSide[]> = {
 };
 const TARGETS: Record<Tip, string> = {
   chat: "[data-callout-target='questions']",
-  color: "[data-callout-target='colors']",
+  // The selected swatch itself, not the gap between swatches.
+  color: "[data-callout-target='colors'] [aria-checked='true']",
   code: "[data-snippet='page'] [data-changed]",
   ship: "[data-callout-target='ship']",
 };
@@ -176,7 +177,13 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   };
 
   const skip = (
-    <Button type="button" size="xs" variant="ghost" onClick={endTips}>
+    <Button
+      type="button"
+      size="xs"
+      variant="ghost"
+      className="text-canvas/80 hover:bg-canvas/15 hover:text-canvas"
+      onClick={endTips}
+    >
       Skip
     </Button>
   );
@@ -184,8 +191,9 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     chat: {
       text: (
         <>
-          One <code className="font-mono text-xs">{"<OpenGeniChat />"}</code> is the whole chat -
-          ask it something.
+          One{" "}
+          <code className="rounded bg-canvas/15 px-1 font-mono text-xs">{"<OpenGeniChat />"}</code>{" "}
+          is the whole chat - streaming, chat list, new chat, light and dark. Ask it something.
         </>
       ),
       actions: skip,
@@ -196,13 +204,21 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
       actions: (
         <>
           {skip}
-          <Button type="button" size="xs" variant="outline" onClick={() => setTip("ship")}>
+          <Button
+            type="button"
+            size="xs"
+            className="border-transparent bg-canvas text-fg hover:bg-canvas/90"
+            onClick={() => setTip("ship")}
+          >
             Next
           </Button>
         </>
       ),
     },
-    ship: { text: "Ready? An agent will set it up with you.", actions: skip },
+    ship: {
+      text: "Ready? This opens a chat where an agent adds it to your product with you.",
+      actions: skip,
+    },
   };
   // The first callout waits while the answer plays.
   const showTip = tip && !(tip === "chat" && playing > 0) ? tip : null;
@@ -358,7 +374,10 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                   <ArrowRightIcon aria-hidden="true" />
                 </Button>
               </div>
-              <p className="max-w-56 text-xs text-fg-muted">
+              {/* The last callout says the same thing, so the caption steps aside. */}
+              <p
+                className={cn("max-w-56 text-xs text-fg-muted", showTip === "ship" && "invisible")}
+              >
                 Opens a chat where an agent adds it to your product with you.
               </p>
             </div>
