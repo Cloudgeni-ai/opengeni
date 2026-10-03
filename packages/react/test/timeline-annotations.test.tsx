@@ -394,6 +394,11 @@ describe("timeline annotations", () => {
     await rendered.rerender(view(second.id));
     expect(document.activeElement).toBe(notes.item(1));
     expect(consumed).toBe(3);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view("00000000-0000-4000-8000-000000000599"));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(4);
     await rendered.unmount();
   });
 

@@ -117,6 +117,7 @@ export function TimelineAnnotationsDialog({
     }
     // A consumed request must not reclaim focus or scroll on layout/callback updates.
     if (focusedAnnotationIdRef.current === focusAnnotationId) return;
+    focusedAnnotationIdRef.current = null;
     if (position.maxHeight <= 0) return;
     revealNote(focusAnnotationId);
     const note = noteRefs.current.get(focusAnnotationId);
