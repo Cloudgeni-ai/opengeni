@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   bootstrapWorkspace,
+  applyCreditLedgerEntry,
+  sumUsageQuantity,
+  openUsageReservationQuantity,
   createSessionGoal,
   getSessionGoal,
   materializeGoalContinuation,
@@ -51,6 +54,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     steps: ConstructorParameters<typeof ScriptedModel>[0],
     completedGoal = true,
     unrelatedGoal = false,
+    aggregateOnlyBilling = false,
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -87,6 +91,17 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     });
     const model = new ScriptedModel(steps);
     const production = createProductionAgentRuntime({ model });
+    if (aggregateOnlyBilling) {
+      await applyCreditLedgerEntry(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        type: "test_credit",
+        amountMicros: 5_000_000,
+        sourceType: "test",
+        sourceId: session.id,
+        idempotencyKey: `aggregate-stream-credit:${session.id}`,
+      });
+    }
     let toolCalls = 0;
     const runtime = {
       ...production,
@@ -124,7 +139,27 @@ describe("empty final reply production runtime with PostgreSQL", () => {
             },
           });
         }
-        return production.runStream(...args);
+        const stream = await production.runStream(...args);
+        if (aggregateOnlyBilling) {
+          // This runtime reports billing only through its final SDK aggregate.
+          // Keep the production producer, model admission, usage accumulator,
+          // history events, and final output; omit worker-facing terminal frames.
+          const toStream = stream.toStream.bind(stream);
+          stream.toStream = () =>
+            toStream().pipeThrough(
+              new TransformStream({
+                transform(event, controller) {
+                  if (
+                    event.type === "raw_model_stream_event" &&
+                    event.data.type === "response_done"
+                  )
+                    return;
+                  controller.enqueue(event);
+                },
+              }),
+            );
+        }
+        return stream;
       },
       buildAgent: (...args: Parameters<typeof production.buildAgent>) => {
         const agent = production.buildAgent(...args);
@@ -147,6 +182,23 @@ describe("empty final reply production runtime with PostgreSQL", () => {
         databaseUrl: shared.appUrl,
         openaiModel: "scripted-model",
         sandboxBackend: "none",
+        ...(aggregateOnlyBilling
+          ? {
+              billingMode: "stripe" as const,
+              usageLimitsMode: "static" as const,
+              staticUsageLimitsJson: JSON.stringify({
+                maxMonthlyTokensPerWorkspace: 10_000_000,
+                maxMonthlyCostMicrosPerAccount: 10_000_000,
+              }),
+              modelPricingJson: JSON.stringify({
+                "scripted-model": {
+                  inputMicrosPerMillionTokens: 1_000_000,
+                  outputMicrosPerMillionTokens: 2_000_000,
+                  marginBps: 0,
+                },
+              }),
+            }
+          : {}),
       }),
       db: client.db,
       bus: new MemoryEventBus(),
@@ -194,6 +246,74 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       { output: "Completed result: verified." },
     ]);
     expect(actual.events.filter((e) => e.type === "turn.started")).toHaveLength(1);
+  }, 60_000);
+  test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {
+    const answer = "Completed result: verified.";
+    const actual = await run(
+      [
+        { inputTokens: 100, outputText: " ", output: [assistantMessage("")] },
+        { inputTokens: 200, outputText: answer },
+      ],
+      true,
+      false,
+      true,
+    );
+    expect(actual.model.calls).toBe(2);
+    expect(actual.turn?.status).toBe("completed");
+    expect(actual.events.filter((event) => event.type === "turn.started")).toHaveLength(1);
+    expect(JSON.stringify(actual.model.requests[1]?.input)).toContain(
+      "Runtime final-reply handoff",
+    );
+    const expectedCost = 302 + answer.length * 2;
+    const debits = await shared.admin<Array<{ amount_micros: string; idempotency_key: string }>>`
+      select amount_micros, idempotency_key from credit_ledger_entries
+      where account_id = ${actual.grant.accountId} and type = 'model_usage_debit'`;
+    expect(debits).toHaveLength(2);
+    expect(new Set(debits.map((row) => row.idempotency_key)).size).toBe(2);
+    expect(debits.reduce((sum, row) => sum + Number(row.amount_micros), 0)).toBe(-expectedCost);
+    const facts = actual.events.filter((event) => event.type === "agent.model.usage");
+    expect(facts).toHaveLength(2);
+    expect(new Set(facts.map((event) => event.payload.sourceKey)).size).toBe(2);
+    expect(facts.map((event) => event.payload.inputTokens)).toEqual([100, 200]);
+    const rows = await shared.admin<
+      Array<{ event_type: string; quantity: string; idempotency_key: string }>
+    >`
+      select event_type, quantity, idempotency_key from usage_events
+      where workspace_id = ${actual.grant.workspaceId!}
+        and turn_id = ${actual.result.turnId}
+        and event_type in ('model.tokens', 'model.cost')`;
+    expect(
+      rows
+        .filter((row) => row.event_type === "model.tokens")
+        .map((row) => Number(row.quantity))
+        .sort((a, b) => a - b),
+    ).toEqual([101, 200 + answer.length]);
+    expect(new Set(rows.map((row) => row.idempotency_key)).size).toBe(4);
+    expect(
+      await sumUsageQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        workspaceId: actual.grant.workspaceId!,
+        eventType: "model.tokens",
+        since: new Date(0),
+      }),
+    ).toBe(301 + answer.length);
+    expect(
+      await sumUsageQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        workspaceId: actual.grant.workspaceId!,
+        eventType: "model.cost",
+        since: new Date(0),
+      }),
+    ).toBe(expectedCost);
+    expect(
+      await openUsageReservationQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        workspaceId: actual.grant.workspaceId!,
+        eventType: "model.tokens.reserved",
+        since: new Date(0),
+        holdSince: new Date(0),
+      }),
+    ).toBe(0);
   }, 60_000);
   test("a second empty reply completes with a typed notice and never loops", async () => {
     const actual = await run([{ output: [assistantMessage("")] }]);

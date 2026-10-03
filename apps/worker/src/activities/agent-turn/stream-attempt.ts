@@ -640,6 +640,7 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
     });
+    const streamUsageIdentity = crypto.randomUUID();
     const streamCallIds = new Set<string>();
     const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
@@ -1607,7 +1608,7 @@ export async function runTurnStreamAttempt(
       const aggregateSourceKey = modelUsageSourceKey({
         responseId: null,
         dispatchId: modelUsageDispatchId,
-        positionalKey: "aggregate",
+        positionalKey: `aggregate:${streamUsageIdentity}`,
       });
       if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
         // The aggregate frame is only a billing fallback when no terminal
