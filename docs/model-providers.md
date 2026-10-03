@@ -1425,6 +1425,17 @@ addressable when a large tool batch exceeds the server's 20-block lookback.
 Signed thinking is never marked; canonical history is unchanged. One TTL applies
 to every marker: mixed TTLs and `scope: global` are not implemented. This is not
 a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
+Inline Claude images use a request-only raster projection with both dimensions
+bounded to 2,000 pixels from their first use. The bound does not depend on image
+count, so crossing the many-image threshold never changes an older image's cached
+representation. Images within both dimension and encoded-byte limits remain
+byte-identical. Resized images preserve orientation and aspect ratio, use lossless
+PNG when it fits both the original byte size and the 10 MiB encoded limit, and
+otherwise use WebP with deterministic quality steps. Image payloads never grow.
+Dimension notes describe the transport image; coordinate tools must also account
+for any provider-side resizing. Original uploads, retained artifacts and canonical
+history stay unchanged. Replays produce
+the same projection; URL images keep their existing provider-managed behavior.
 Usage includes fresh input, cache reads, cache writes and output. Per-response SDK
 usage preserves reported 5-minute and 1-hour creation counts separately; downstream
 durable telemetry and UI currently show aggregate writes. Registry pricing has one
