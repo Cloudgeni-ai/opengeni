@@ -109,6 +109,7 @@ import {
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
   creditsDefaultSessionModel,
+  loadWorkspaceClaudeSubscriptionReadiness,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
 } from "@opengeni/core";
@@ -542,34 +543,37 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const catalogSettings = deps.resolveCatalogSettings();
+    const resolvedCatalog = await deps.resolveCatalogSettings();
     const providerKinds: WorkspaceCustomModelProviderKind[] = [
       "vercel_gateway",
       "openrouter",
       ...CLAUDE_CONNECTION_KINDS.filter(
-        (kind) => kind !== "claude_subscription" || deps.settings.claudeSubscriptionEnabled,
+        (kind) =>
+          kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
       ),
     ];
     const [
       connectionModelRestrictions,
-      resolvedCatalog,
       policy,
       codexSubscriptionActive,
       codexModelAvailability,
       xaiSubscriptionActive,
+      claudePool,
       workspaceConnections,
       workspaceCustomModels,
       organizationProviders,
       workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
-      catalogSettings,
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
-      catalogSettings.then(({ settings }) =>
-        loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
-      ),
+      loadWorkspaceCodexModelAvailability(deps.db, resolvedCatalog.settings, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
       listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,
@@ -588,10 +592,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
       workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
     for (const kind of CLAUDE_CONNECTION_KINDS) {
-      if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) continue;
-      claudeConnections[kind] = organizationProviders[kind];
+      if (kind === "claude_subscription" && !resolvedCatalog.settings.claudeSubscriptionEnabled)
+        continue;
+      claudeConnections[kind] = {
+        active:
+          kind === "claude_subscription"
+            ? claudePool.organization
+            : organizationProviders[kind].active,
+        models: organizationProviders[kind].models,
+      };
       workspaceClaudeConnections[kind] = {
-        active: workspaceConnectionActive(kind),
+        active:
+          kind === "claude_subscription" ? claudePool.workspace : workspaceConnectionActive(kind),
         models: workspaceCustomModels[kind],
       };
     }
