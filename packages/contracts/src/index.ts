@@ -4965,6 +4965,10 @@ export type BillingBalance = z.infer<typeof BillingBalance>;
 
 export const CreateCheckoutRequest = z.object({
   accountId: z.string().uuid().optional(),
+  /**
+   * Credits to buy. Required unless `promotionCode` is given; a fixed-amount
+   * USD code then sets the amount, so a $100 code buys exactly $100 of credits.
+   */
   amountUsd: z
     .number()
     .min(5)
@@ -4972,7 +4976,10 @@ export const CreateCheckoutRequest = z.object({
     .refine(
       (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
       { message: "amountUsd must use cent precision" },
-    ),
+    )
+    .optional(),
+  /** A Stripe promotion code to apply up front, as the customer typed it. */
+  promotionCode: z.string().trim().min(1).max(64).optional(),
   successUrl: z.string().url().optional(),
   cancelUrl: z.string().url().optional(),
 });
@@ -4981,8 +4988,29 @@ export type CreateCheckoutRequest = z.infer<typeof CreateCheckoutRequest>;
 export const CreateCheckoutResponse = z.object({
   checkoutSessionId: z.string(),
   url: z.string().url(),
+  /** The credits this checkout grants once it completes. */
+  amountUsd: z.number().optional(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
+
+/**
+ * Where one checkout stands: Stripe's session status, and whether its credits
+ * reached the organization's balance. Credits post from Stripe's webhook; this
+ * read also settles a completed checkout whose webhook has not arrived yet.
+ */
+export const BillingCheckoutStatus = z.object({
+  checkoutSessionId: z.string(),
+  status: z.enum(["open", "complete", "expired"]),
+  credit: z.object({
+    state: z.enum(["pending", "granted"]),
+    amountMicros: z.number().int(),
+    currency: z.literal("usd"),
+    /** True when a coupon covered the whole checkout, so nothing was charged. */
+    free: z.boolean(),
+  }),
+  balance: BillingBalance.nullable(),
+});
+export type BillingCheckoutStatus = z.infer<typeof BillingCheckoutStatus>;
 
 export const CreateBillingPortalRequest = z.object({
   accountId: z.string().uuid().optional(),

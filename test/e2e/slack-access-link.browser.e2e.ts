@@ -290,8 +290,8 @@ describe("Slack access-link browser acceptance", () => {
       await page.reload({ waitUntil: "networkidle" });
       // A managed principal with no workspace access lands on organization
       // onboarding; the bare "No workspace access" panel is the unmanaged path.
-      await expectText(page.locator("main"), "Create your organization");
-      await expectVisible(page.getByLabel("Organization name"));
+      await expectText(page.locator("main"), "How do you want to use Opengeni?");
+      await expectVisible(page.getByRole("button", { name: /^Run agents in the cloud/ }));
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
       expect(await page.getByRole("button", { name: "Cancel" }).count()).toBe(0);

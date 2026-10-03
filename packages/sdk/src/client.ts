@@ -291,6 +291,7 @@ import type {
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
+  BillingCheckoutStatus,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -8536,6 +8537,24 @@ export class OpenGeniClient {
   /** Start a Stripe checkout for prepaid credits. */
   async createBillingCheckout(request: CreateCheckoutRequest): Promise<CreateCheckoutResponse> {
     return await this.requestJson<CreateCheckoutResponse>("POST", "/v1/billing/checkout", request);
+  }
+
+  /**
+   * Where one checkout stands, and whether its credits reached the balance.
+   * Poll it after the customer returns from Stripe Checkout.
+   */
+  async getBillingCheckout(
+    checkoutSessionId: string,
+    options: { accountId?: string } = {},
+  ): Promise<BillingCheckoutStatus> {
+    return await this.requestJson(
+      "GET",
+      `/v1/billing/checkout/${encodeURIComponent(checkoutSessionId)}`,
+      undefined,
+      {
+        ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+      },
+    );
   }
 
   /** Open Stripe's hosted portal for invoices and payment information. */

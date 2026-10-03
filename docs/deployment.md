@@ -2793,6 +2793,16 @@ The runtime secret must provide values such as:
   `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
   dispute holds on new checkouts remove the corresponding fraction of package
   credits. Existing customer balances are account-wide.
+  Customers can also type a code in Opengeni first (signup onboarding, **Add
+  credits**, Organization > Billing): `POST /v1/billing/checkout` with
+  `promotionCode` looks the code up in Stripe and applies it up front, and a
+  fixed USD amount-off code sets the package to that amount, so a $100 code
+  grants exactly $100. When the code covers the whole package the total is
+  $0, so that checkout skips automatic tax and the billing address and the
+  customer only confirms. Checkout opens in a new tab and the page waits on
+  `GET /v1/billing/checkout/:checkoutSessionId`, which reports the credits
+  once granted and settles a completed session whose webhook is late (same
+  ledger idempotency key, so it never grants twice).
 - sandbox backend credentials when required
 
 Do not commit real secret values.

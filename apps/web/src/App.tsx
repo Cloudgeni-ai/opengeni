@@ -48,6 +48,7 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
 import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
 import {
   parseModelsAccount,
@@ -585,6 +586,8 @@ const workspaceOrganizationRoute = createRoute({
     search: Record<string, unknown>,
   ): {
     checkout?: CheckoutOutcome;
+    /** Stripe's session id on a same-tab return, so billing can celebrate its credits. */
+    checkoutSession?: string;
     section?: OrganizationAdminSection;
     account?: string;
     view?: ModelsView | OrganizationView | DeveloperView;
@@ -594,6 +597,8 @@ const workspaceOrganizationRoute = createRoute({
     webhook?: string;
   } & ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
+    const checkoutSession =
+      checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
     const section = parseOrganizationSection(search.section);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view =
@@ -617,6 +622,7 @@ const workspaceOrganizationRoute = createRoute({
         : undefined;
     return {
       ...(checkout ? { checkout } : {}),
+      ...(checkoutSession ? { checkoutSession } : {}),
       ...(section ? { section } : {}),
       ...(account ? { account } : {}),
       ...(view ? { view } : {}),
@@ -1007,6 +1013,7 @@ function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
   const {
     checkout,
+    checkoutSession,
     section,
     account,
     view,
@@ -1022,6 +1029,7 @@ function Organization() {
     <LazyOrgSettingsRoute
       workspaceId={workspaceId}
       checkout={checkout}
+      checkoutSession={checkoutSession}
       section={page}
       modelsAccount={page === "models" ? account : undefined}
       modelsView={page === "models" ? parseModelsView(view) : undefined}

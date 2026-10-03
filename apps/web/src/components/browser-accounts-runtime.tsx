@@ -19,6 +19,7 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import type { OnboardingDestination } from "@/components/onboarding/developer-setup-step";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { userErrorText } from "@/lib/api-error";
@@ -314,7 +315,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
   invitation: OrganizationInvitationContinuation | null;
-  onComplete: () => void;
+  onComplete: (destination?: OnboardingDestination) => void;
 }) {
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
