@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "851d0d790fcefec568aaaf39e6b6fc7bb699830e9f7829ad69c8862d05213340"
+      "sha256": "8aa3763e6e4c64abfde01a3c7c475d5da681ac274598323b328734a75fa991f1"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -167,7 +167,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "install-smoke",
       "step": "Smoke the install script (Unix)",
-      "sha256": "e4499cffc236e1b07c7914ae240ecf7e00ff30cf9a82cbfba2d5ec2e41c481a1"
+      "sha256": "ba466df67f0454df50b23447cc12a4bfc0edc5d8d1f4cc4679765024e979ecf3"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
