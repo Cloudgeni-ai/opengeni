@@ -26,6 +26,19 @@ const defaultResources = {
 };
 
 describe("renderTemporalValues", () => {
+  test("keeps the committed upstream example resource envelopes aligned with generator defaults", async () => {
+    const example = Bun.YAML.parse(
+      await Bun.file(
+        new URL("../deploy/stacks/official-temporal-postgres.values.example.yaml", import.meta.url),
+      ).text(),
+    ) as Record<string, any>;
+    const generated = Bun.YAML.parse(renderTemporalValues(requiredEnv)) as Record<string, any>;
+
+    for (const role of Object.keys(defaultResources)) {
+      expect(example.server[role]?.resources).toEqual(generated.server[role].resources);
+    }
+  });
+
   test("renders byte-bounded history cache and Go/container memory headroom", () => {
     const values = Bun.YAML.parse(renderTemporalValues(requiredEnv)) as Record<string, any>;
 
