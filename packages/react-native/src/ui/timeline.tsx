@@ -42,6 +42,13 @@ export interface AgentTimelineProps {
   humanInput?: readonly PendingHumanInputRequest[];
   onApproval?(approvalId: string, decision: "approve" | "reject"): void;
   onAnswer?(requestId: string, answers: HumanInputAnswer[] | null): void;
+  /**
+   * Where pending approvals and questions render. `tray`: the host renders
+   * `AgentAttentionTray` above its composer and the timeline only marks the wait.
+   */
+  attentionPlacement?: "inline" | "tray";
+  /** Open a full step view (e.g. `AgentStepsSheet`) instead of expanding work in place. */
+  onOpenSteps?(steps: ActivityItem[], title: string): void;
   renderMarkdown?: MarkdownRenderer;
   /** Host display name for the agent. */
   agentName?: string;
@@ -118,10 +125,12 @@ export function AgentTimeline(props: AgentTimelineProps) {
     }));
     const needsYou = (props.approvals?.length ?? 0) > 0 || (props.humanInput?.length ?? 0) > 0;
     if (running && !needsYou && !groups.some(isLive)) out.push({ key: "working", kind: "working" });
-    for (const approval of props.approvals ?? []) out.push({ key: `approval:${approval.id}`, kind: "approval", approval });
-    for (const request of props.humanInput ?? []) out.push({ key: `question:${request.id}`, kind: "question", request });
+    if (props.attentionPlacement !== "tray") {
+      for (const approval of props.approvals ?? []) out.push({ key: `approval:${approval.id}`, kind: "approval", approval });
+      for (const request of props.humanInput ?? []) out.push({ key: `question:${request.id}`, kind: "question", request });
+    }
     return out;
-  }, [groups, running, props.approvals, props.humanInput]);
+  }, [groups, running, props.approvals, props.humanInput, props.attentionPlacement]);
 
   return (
     <FlatList
@@ -261,9 +270,9 @@ function WorkBlock(
     steps.length === 0 ? null : theme.layout.activity === "rail" ? (
       <RailSteps items={steps} theme={theme} waiting={waiting} />
     ) : theme.layout.activity === "cards" ? (
-      <CardSteps current={current} duration={duration} failed={failed} items={steps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
+      <CardSteps current={current} duration={duration} failed={failed} items={steps} onOpen={props.onOpenSteps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
     ) : (
-      <FoldSteps current={current} duration={duration} failed={failed} items={steps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
+      <FoldSteps current={current} duration={duration} failed={failed} items={steps} onOpen={props.onOpenSteps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
     );
 
   return (
@@ -316,7 +325,19 @@ function StatusDot({ item, theme, size = 8, waiting }: { item: ActivityItem; the
 }
 
 /** Calm: one quiet line; tap to reveal the steps. */
-function FoldSteps(props: { items: ActivityItem[]; theme: AgentTheme; running: boolean; waiting: boolean; failed: boolean; duration: string; toolCount: number; current?: ToolCallItem }) {
+type StepSummaryProps = {
+  items: ActivityItem[];
+  theme: AgentTheme;
+  running: boolean;
+  waiting: boolean;
+  failed: boolean;
+  duration: string;
+  toolCount: number;
+  current?: ToolCallItem;
+  onOpen?(steps: ActivityItem[], title: string): void;
+};
+
+function FoldSteps(props: StepSummaryProps) {
   const { theme, running } = props;
   const [open, setOpen] = useState(false);
   const steps = props.toolCount ? `${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}` : "";
@@ -335,7 +356,7 @@ function FoldSteps(props: { items: ActivityItem[]; theme: AgentTheme; running: b
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
         hitSlop={8}
-        onPress={() => setOpen((value) => !value)}
+        onPress={() => (props.onOpen ? props.onOpen(props.items, label) : setOpen((value) => !value))}
         style={{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 32 }}
       >
         {props.waiting ? (
@@ -382,7 +403,11 @@ function CompactStep({ item, theme }: { item: ActivityItem; theme: AgentTheme })
 }
 
 /** Workbench: always-visible rail with status dots, monospace input and output preview. */
-function RailSteps({ items, theme, waiting }: { items: ActivityItem[]; theme: AgentTheme; waiting: boolean }) {
+export function AgentStepList(props: { items: readonly ActivityItem[]; theme: AgentTheme; waiting?: boolean }) {
+  return <RailSteps items={props.items} theme={props.theme} waiting={props.waiting ?? false} />;
+}
+
+function RailSteps({ items, theme, waiting }: { items: readonly ActivityItem[]; theme: AgentTheme; waiting: boolean }) {
   return (
     <View style={{ paddingLeft: 4 }}>
       {items.map((item, index) => {
@@ -435,7 +460,7 @@ function RailSteps({ items, theme, waiting }: { items: ActivityItem[]; theme: Ag
 }
 
 /** Field: one bold card stating what is happening now, steps on demand. */
-function CardSteps(props: { items: ActivityItem[]; theme: AgentTheme; running: boolean; waiting: boolean; failed: boolean; duration: string; toolCount: number; current?: ToolCallItem }) {
+function CardSteps(props: StepSummaryProps) {
   const { theme, running } = props;
   const [open, setOpen] = useState(false);
   const headline = props.waiting
@@ -460,7 +485,7 @@ function CardSteps(props: { items: ActivityItem[]; theme: AgentTheme; running: b
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ expanded: open }}
-      onPress={() => setOpen((value) => !value)}
+      onPress={() => (props.onOpen ? props.onOpen(props.items, headline) : setOpen((value) => !value))}
       style={{
         borderRadius: theme.radius.card,
         backgroundColor: theme.colors.surface,

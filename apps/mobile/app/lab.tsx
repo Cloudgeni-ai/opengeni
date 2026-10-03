@@ -9,8 +9,10 @@ import {
 } from "@opengeni/react/session";
 import { labScenarios, type LabScenarioId } from "@opengeni/react-native/lab";
 import {
+  AgentAttentionTray,
   AgentComposer,
   AgentIcon,
+  AgentStepsSheet,
   AgentTimeline,
   ComposerChip,
   agentDirections,
@@ -18,6 +20,7 @@ import {
   type AgentDirectionId,
   type AgentTheme,
 } from "@opengeni/react-native/ui";
+import type { ActivityItem } from "@opengeni/react/session";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useMemo, useState } from "react";
@@ -25,7 +28,13 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } fro
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { renderAgentMarkdown } from "@/markdown";
 
-type Params = { direction?: AgentDirectionId; scenario?: LabScenarioId; scheme?: "light" | "dark"; chrome?: string };
+type Params = {
+  direction?: AgentDirectionId;
+  scenario?: LabScenarioId;
+  scheme?: "light" | "dark";
+  chrome?: string;
+  attention?: "tray" | "inline";
+};
 
 export default function DesignLab() {
   const params = useLocalSearchParams<Params>();
@@ -33,13 +42,23 @@ export default function DesignLab() {
   const scenarioId = params.scenario ?? "working";
   const scheme = params.scheme ?? "light";
   const showChrome = params.chrome !== "0";
+  const attention = params.attention ?? "tray";
   const theme = useMemo(() => agentTheme(direction, scheme), [direction, scheme]);
   const insets = useSafeAreaInsets();
   const scenarios = useMemo(() => labScenarios(), []);
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
   const groups = useMemo(() => groupTimeline(buildTimeline(scenario.events), { readableTurns: true }), [scenario]);
-  const approvals = useMemo(() => projectPendingApprovals(scenario.events), [scenario]);
-  const humanInput = useMemo(() => projectPendingHumanInputRequests(scenario.events), [scenario]);
+  const [resolved, setResolved] = useState<string[]>([]);
+  const approvals = useMemo(
+    () => projectPendingApprovals(scenario.events).filter((entry) => !resolved.includes(entry.id)),
+    [scenario, resolved],
+  );
+  const humanInput = useMemo(
+    () => projectPendingHumanInputRequests(scenario.events).filter((entry) => !resolved.includes(entry.id)),
+    [scenario, resolved],
+  );
+  const resolve = (id: string) => setResolved((current) => [...current, id]);
+  const [sheet, setSheet] = useState<{ title: string; steps: ActivityItem[] } | null>(null);
   const [draft, setDraft] = useState("");
   const set = (next: Partial<Params>) => router.setParams({ direction, scenario: scenarioId, scheme, chrome: params.chrome ?? "1", ...next });
 
@@ -76,12 +95,25 @@ export default function DesignLab() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <AgentTimeline
           approvals={approvals}
+          attentionPlacement={attention}
           groups={groups}
           humanInput={humanInput}
+          onAnswer={resolve}
+          onApproval={resolve}
+          onOpenSteps={(steps, title) => setSheet({ steps, title })}
           renderMarkdown={renderAgentMarkdown}
           running={scenario.running}
           theme={theme}
         />
+        {attention === "tray" ? (
+          <AgentAttentionTray
+            approvals={approvals}
+            humanInput={humanInput}
+            onAnswer={resolve}
+            onApproval={resolve}
+            theme={theme}
+          />
+        ) : null}
         <AgentComposer
           accessories={
             <>
@@ -98,6 +130,13 @@ export default function DesignLab() {
           value={draft}
         />
       </KeyboardAvoidingView>
+      <AgentStepsSheet
+        onClose={() => setSheet(null)}
+        steps={sheet?.steps ?? []}
+        theme={theme}
+        title={sheet?.title ?? ""}
+        visible={sheet !== null}
+      />
     </View>
   );
 }

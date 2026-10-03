@@ -1,4 +1,6 @@
-export { AgentTimeline, UserMessage, WorkingLine } from "./timeline";
+export { AgentStepList, AgentTimeline, UserMessage, WorkingLine } from "./timeline";
+export { AgentStepsSheet } from "./steps-sheet";
+export { AgentAttentionTray } from "./attention";
 export type { AgentTimelineProps, MarkdownRenderer } from "./timeline";
 export { AgentComposer, ComposerChip } from "./composer";
 export type { AgentComposerProps } from "./composer";

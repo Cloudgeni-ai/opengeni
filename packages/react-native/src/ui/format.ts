@@ -21,8 +21,13 @@ export function toolDetail(item: ToolCallItem): string | null {
   const record = args as Record<string, unknown>;
   const known = firstString(record, ["cmd", "command", "query", "q", "path", "url", "title", "id", "name"]);
   if (known) return known;
-  const json = JSON.stringify(record);
-  return json === "{}" ? null : json.length > 90 ? `${json.slice(0, 89)}…` : json;
+  const pairs = Object.entries(record)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .slice(0, 3)
+    .map(([key, value]) => `${key.replace(/[_-]+/g, " ")}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+  if (pairs.length === 0) return null;
+  const text = pairs.join(" · ");
+  return text.length > 110 ? `${text.slice(0, 109)}…` : text;
 }
 
 /** Short preview of a settled tool output. */
