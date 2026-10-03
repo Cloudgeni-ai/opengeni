@@ -631,12 +631,12 @@ dev_processes_running() {
 }
 
 stack_http_ready() {
-  curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_API_PORT}/healthz" >/dev/null 2>&1 &&
-    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
-    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_TURN_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
-    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
-    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
-    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_WEB_PORT}/" >/dev/null 2>&1
+  curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_API_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_TURN_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m "${OPENGENI_DEV_PROBE_TIMEOUT_SECONDS:-3}" "http://127.0.0.1:${OPENGENI_WEB_PORT}/" >/dev/null 2>&1
 }
 
 wait_for_stack_readiness() {
@@ -662,7 +662,8 @@ monitor_dev_stack() {
       unhealthy_checks=0
     else
       unhealthy_checks=$((unhealthy_checks + 1))
-      if [ "$unhealthy_checks" -ge 2 ]; then
+      # A loaded host can miss a probe or two; only a sustained outage stops the stack.
+      if [ "$unhealthy_checks" -ge "${OPENGENI_DEV_UNHEALTHY_CHECKS:-6}" ]; then
         echo "OpenGeni dev stack lost aggregate readiness. Stopping instead of leaving a partial stack running." >&2
         failed_process_status=1
         return 1
