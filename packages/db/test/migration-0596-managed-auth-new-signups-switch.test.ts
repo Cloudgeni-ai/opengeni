@@ -23,7 +23,7 @@ import {
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const SETTER = "set_managed_auth_new_signups_enabled(boolean, text, text)";
 const TABLE = "opengeni_private.managed_auth_new_signups_switch_revisions";
-const MIGRATION = "0585_managed_auth_new_signups_switch.sql";
+const MIGRATION = "0596_managed_auth_new_signups_switch.sql";
 let owned: OwnerMigratedTestDatabase | null = null;
 let appClient: DbClient | null = null;
 let app: postgres.Sql | null = null;
@@ -85,7 +85,7 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-describe("migration 0585 managed auth new signups switch", () => {
+describe("migration 0596 managed auth new signups switch", () => {
   test("is a rolling, operator-only switch", () => {
     const migration = readFileSync(new URL(`../drizzle/${MIGRATION}`, import.meta.url), "utf8");
     expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -108,7 +108,7 @@ describe("migration 0585 managed auth new signups switch", () => {
     expect(seed).toEqual({
       signups_enabled: true,
       previous_signups_enabled: null,
-      operator: "migration:0585",
+      operator: "migration:0596",
     });
     expect((await readManagedAuthNewSignupsSwitch(appClient.db))?.signupsEnabled).toBe(true);
   });
@@ -169,7 +169,7 @@ describe("migration 0585 managed auth new signups switch", () => {
   test("strips default-privilege grants from the switch table and setter at creation", async () => {
     if (!owned || !owner) return;
     const migration = readFileSync(new URL(`../drizzle/${MIGRATION}`, import.meta.url), "utf8");
-    const rollback = new Error("roll back the 0585 replay");
+    const rollback = new Error("roll back the 0596 replay");
     let grantees: { table_grantees: string[]; setter_grantees: string[] } | undefined;
     await owner
       .begin(async (tx) => {

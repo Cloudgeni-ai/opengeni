@@ -34,7 +34,7 @@ REVOKE ALL ON opengeni_private.managed_auth_new_signups_switch_revisions FROM PU
 INSERT INTO opengeni_private.managed_auth_new_signups_switch_revisions (
   signups_enabled, previous_signups_enabled, operator, reason
 ) VALUES (
-  true, NULL, 'migration:0585',
+  true, NULL, 'migration:0596',
   'Initial state: new sign-ups are open; the deployment flag remains the master switch.'
 );
 

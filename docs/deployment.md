@@ -116,9 +116,9 @@ default 30 seconds) publishes two 0/1 gauges:
 New grants happen only while both gauges are 1. The runtime gauge alone reads 1
 on every deployment that never opted in, so never read it as "the trial is live".
 
-## New account sign-up switch (0585)
+## New account sign-up switch (0596)
 
-`0585_managed_auth_new_signups_switch.sql` is a rolling migration with the same
+`0596_managed_auth_new_signups_switch.sql` is a rolling migration with the same
 shape as the 0521 trial switch above. It needs no drain and no
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then run the normal
 `db:provision-roles`. Its seed revision keeps sign-ups open, so this migration
