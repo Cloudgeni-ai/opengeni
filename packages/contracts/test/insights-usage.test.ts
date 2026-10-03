@@ -396,6 +396,63 @@ describe("Insights query contracts", () => {
     }
   });
 
+  test("custom dates and resolved priors require representable AD years, including lower/upper edges", () => {
+    for (const dates of [
+      { from: "0000-01-02", to: "0000-01-02" },
+      { from: "0000-12-31", to: "0001-01-01" },
+      { from: "0001-01-01", to: "0001-01-01" },
+      { from: "0001-01-02", to: "0001-01-03" },
+      { from: "-0001-01-02", to: "-0001-01-02" },
+      { from: "9999-12-31", to: "9999-12-31" },
+    ]) {
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ]) {
+        expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(false);
+      }
+      expect(() => resolveInsightsUsageCustomWindow(dates)).toThrow();
+    }
+    for (const dates of [
+      { from: "0001-01-02", to: "0001-01-02" },
+      { from: "0001-01-03", to: "0001-01-04" },
+      { from: "9999-12-30", to: "9999-12-30" },
+    ]) {
+      const window = resolveInsightsUsageCustomWindow(dates);
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ]) {
+        expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(true);
+      }
+      expect(
+        InsightsUsageResponse.safeParse({ ...response(), range: "custom", ...window }).success,
+      ).toBe(true);
+      expect(
+        Object.values(window)
+          .filter((value) => value !== "hour" && value !== "day")
+          .every((value) => !value.startsWith("0000-")),
+      ).toBe(true);
+    }
+    expect(
+      resolveInsightsUsageCustomWindow({ from: "0001-01-02", to: "0001-01-02" }).priorWindowStart,
+    ).toBe("0001-01-01T00:00:00.000Z");
+    const yearZeroPrior = {
+      ...response(),
+      range: "custom",
+      bucket: "hour",
+      windowStart: "0001-01-01T00:00:00Z",
+      windowEnd: "0001-01-02T00:00:00Z",
+      priorWindowStart: "0000-12-31T00:00:00Z",
+      priorWindowEnd: "0001-01-01T00:00:00Z",
+    };
+    expect(InsightsUsageResponse.safeParse(yearZeroPrior).success).toBe(false);
+  });
+
   test("custom dates accept exactly 370 days and reject 371 in both query scopes and responses", () => {
     const dates = { from: "2026-01-01", to: "2027-01-05" };
     const window = resolveInsightsUsageCustomWindow(dates);

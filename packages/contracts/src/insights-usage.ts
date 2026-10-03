@@ -34,8 +34,16 @@ const UtcDay = z
   .regex(/^\d{4}-\d{2}-\d{2}$/)
   .refine((value) => {
     const instant = Date.parse(`${value}T00:00:00Z`);
-    return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value;
-  }, "Expected a real UTC calendar date (YYYY-MM-DD)");
+    return (
+      !value.startsWith("0000-") &&
+      Number.isFinite(instant) &&
+      new Date(instant).toISOString().slice(0, 10) === value
+    );
+  }, "Expected a real UTC calendar date in years 0001 through 9999 (YYYY-MM-DD)");
+const CustomUtcDateTime = UtcDateTime.refine(
+  (value) => !value.startsWith("0000-"),
+  "Custom UTC boundaries must use years 0001 through 9999",
+);
 const DAY_MS = 86_400_000;
 const CUSTOM_MAX_DAYS = 370;
 
@@ -51,8 +59,9 @@ function customWindow(from: string, to: string) {
     priorWindowStart: new Date(priorStart).toISOString(),
     priorWindowEnd: new Date(start).toISOString(),
   };
-  // The wire datetime schema uses four-digit years, including the resolved prior.
-  if (!Object.values(windows).every((value) => UtcDateTime.safeParse(value).success))
+  // Four-digit AD years must also represent the prior and exclusive end.
+  // PostgreSQL has no year zero even though ISO/Zod datetime permits it.
+  if (!Object.values(windows).every((value) => CustomUtcDateTime.safeParse(value).success))
     return undefined;
   return { ...windows, bucket: end - start <= 2 * DAY_MS ? ("hour" as const) : ("day" as const) };
 }
@@ -543,6 +552,20 @@ export const InsightsUsageResponse = z
       });
     }
     if (value.range === "custom") {
+      for (const field of [
+        "windowStart",
+        "windowEnd",
+        "priorWindowStart",
+        "priorWindowEnd",
+      ] as const) {
+        if (!CustomUtcDateTime.safeParse(value[field]).success) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: "Custom UTC boundaries must use years 0001 through 9999",
+          });
+        }
+      }
       if (
         windowStart === windowEnd ||
         windowEnd - windowStart > CUSTOM_MAX_DAYS * DAY_MS ||
