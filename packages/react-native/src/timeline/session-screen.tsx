@@ -107,7 +107,7 @@ export function NativeSessionScreen({
         emptyState={
           empty && failed ? (
             <LoadFailure
-              message={controller.error?.message}
+              message={loadFailureMessage(controller.error)}
               onRetry={() => void controller.refresh()}
             />
           ) : empty && controller.initialLoading ? (
@@ -195,6 +195,18 @@ function useAutoRecover(failed: boolean, live: boolean, refresh: () => Promise<v
     }, delay.current);
     return () => clearTimeout(timer);
   }, [failed, refresh]);
+}
+
+/** Transport failures read as a connection problem, never as a native stack. */
+function loadFailureMessage(error: Error | null): string | undefined {
+  if (!error) return undefined;
+  if (
+    error.name === "TypeError" ||
+    /fetch failed|network request failed|could not connect|offline|timed out/i.test(error.message)
+  ) {
+    return "OpenGeni couldn't be reached. Check your connection; this retries automatically.";
+  }
+  return error.message;
 }
 
 function LoadFailure({ message, onRetry }: { message?: string | undefined; onRetry: () => void }) {
