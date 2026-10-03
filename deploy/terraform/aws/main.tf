@@ -19,9 +19,8 @@ locals {
 data "aws_caller_identity" "current" {}
 
 locals {
-  selected_subnet_ids   = var.network.create_vpc ? aws_subnet.public[*].id : var.network.subnet_ids
-  selected_vpc_id       = var.network.create_vpc ? aws_vpc.this[0].id : var.network.vpc_id
-  postgres_client_cidrs = var.network.create_vpc ? [var.network.cidr_block] : var.postgres.allowed_client_cidrs
+  selected_subnet_ids = var.network.create_vpc ? aws_subnet.public[*].id : var.network.subnet_ids
+  selected_vpc_id     = var.network.create_vpc ? aws_vpc.this[0].id : var.network.vpc_id
 }
 
 resource "aws_vpc" "this" {
@@ -352,7 +351,17 @@ resource "aws_security_group" "postgres" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "postgres_from_vpc" {
-  for_each          = var.postgres.mode == "managed" ? toset(local.postgres_client_cidrs) : toset([])
+  # Preserve the existing managed-VPC state address on upgrades.
+  count             = var.postgres.mode == "managed" && var.network.create_vpc ? 1 : 0
+  security_group_id = aws_security_group.postgres[0].id
+  cidr_ipv4         = var.network.cidr_block
+  from_port         = 5432
+  ip_protocol       = "tcp"
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "postgres_from_client_cidrs" {
+  for_each          = var.postgres.mode == "managed" && !var.network.create_vpc ? toset(var.postgres.allowed_client_cidrs) : toset([])
   security_group_id = aws_security_group.postgres[0].id
   cidr_ipv4         = each.value
   from_port         = 5432
