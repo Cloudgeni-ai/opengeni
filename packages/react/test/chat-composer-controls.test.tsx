@@ -492,4 +492,111 @@ describe("ChatComposer delivery and lifecycle controls", () => {
       mounted.container.querySelectorAll('button[aria-label="Resume this workstream"]'),
     ).toHaveLength(1);
   });
+
+  test("Stop run control: Stop only while running, no Pause, next message continues", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const active: EffectiveSessionControl = {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    const stop = () =>
+      mounted!.container.querySelector<HTMLButtonElement>('button[aria-label="Stop"]');
+    const pause = () =>
+      mounted!.container.querySelector('button[aria-label="Pause this workstream"]');
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} runControl="stop" />,
+    );
+    // Idle: neither control.
+    expect(stop()).toBeNull();
+    expect(pause()).toBeNull();
+
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} runControl="stop" running />,
+    );
+    expect(pause()).toBeNull();
+    expect(stop()?.getAttribute("data-analytics-action")).toBe("stop");
+    await act(async () => stop()?.click());
+    expect(spy.pauses).toBe(1);
+
+    // Stopped: the conversation's own pause is not presented; sending continues it.
+    const blocker = {
+      kind: "session" as const,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      displayName: "Paused here",
+      actor: null,
+      reason: null,
+      changedAt: null,
+      revision: 1,
+    };
+    const stopped: EffectiveSessionControl = {
+      ...active,
+      state: "paused",
+      directState: "paused",
+      controlVersion: 1,
+      controlEtag: "paused",
+      primaryBlocker: blocker,
+      blockers: [blocker],
+    };
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={stopped} runControl="stop" />,
+    );
+    expect(stop()).toBeNull();
+    expect(
+      mounted.container.querySelector('button[aria-label="Resume this workstream"]'),
+    ).toBeNull();
+    const textarea = mounted.container.querySelector("textarea")!;
+    expect(textarea.getAttribute("placeholder")).toBe("Message the agent…");
+    await press(textarea, {});
+    expect(spy.sends).toEqual(["steer"]);
+
+    // A pause applied elsewhere (here: the workspace) still shows and still queues.
+    const elsewhere: EffectiveSessionControl = {
+      ...stopped,
+      directState: "active",
+      controlEtag: "workspace",
+    };
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={elsewhere} runControl="stop" />,
+    );
+    expect(textarea.getAttribute("placeholder")).toBe(
+      "Message the agent — it will wait in the queue…",
+    );
+    await press(textarea, {});
+    expect(spy.sends).toEqual(["steer", "send"]);
+  });
+
+  test("runControl none hides every run control", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        runControl="none"
+        running
+        effectiveControl={{
+          state: "active",
+          controlVersion: 0,
+          controlEtag: "active",
+          directState: "active",
+          primaryBlocker: null,
+          additionalBlockerCount: 0,
+          blockers: [],
+          resumeOptions: [],
+          override: null,
+          settlement: null,
+        }}
+      />,
+    );
+    expect(mounted.container.querySelector('button[aria-label="Stop"]')).toBeNull();
+    expect(
+      mounted.container.querySelector('button[aria-label="Pause this workstream"]'),
+    ).toBeNull();
+  });
 });

@@ -330,6 +330,8 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
+/** Below this timeline viewport height the "Back to your message" pill stays hidden. */
+const QUESTION_NAV_MIN_VIEWPORT_PX = 320;
 /** Breathing room above the question when following stops at an answer. */
 const QUESTION_NAV_MARGIN_PX = 12;
 /**
@@ -1335,7 +1337,13 @@ export function MessageTimeline({
     questionNavFrameRef.current = requestFrame(() => {
       questionNavFrameRef.current = null;
       const node = scrollRef.current;
-      const next = node ? readQuestionNav(node) : null;
+      // A short viewport (a narrow embed above a decision card) has no room
+      // for a floating pill that would cover the very rows being read.
+      // clientHeight <= 1 is pre-layout/headless, not a short viewport.
+      const roomy =
+        node !== null &&
+        (node.clientHeight <= 1 || node.clientHeight >= QUESTION_NAV_MIN_VIEWPORT_PX);
+      const next = node && roomy ? readQuestionNav(node) : null;
       setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
     });
   }, [readableTurns]);

@@ -1,8 +1,13 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
-import { MenuIcon, SendIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, LoaderCircleIcon, MenuIcon, XIcon } from "lucide-react";
 import { useCallback, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
+import {
+  useHostTheme,
+  type HostSurfacePreference,
+  type HostThemePreference,
+} from "../lib/host-theme";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
@@ -11,6 +16,8 @@ export type OpenGeniChatLabels = SessionListLabels & {
   openChats: string;
   closeChats: string;
   newChatPlaceholder: string;
+  /** Heading above the new-chat composer; empty hides it. */
+  newChatTitle: string;
   send: string;
   newChatUnavailable: string;
 };
@@ -18,7 +25,8 @@ export type OpenGeniChatLabels = SessionListLabels & {
 const DEFAULT_LABELS: Omit<OpenGeniChatLabels, keyof SessionListLabels> = {
   openChats: "Open chats",
   closeChats: "Close chats",
-  newChatPlaceholder: "Start a new chat…",
+  newChatPlaceholder: "Ask anything…",
+  newChatTitle: "How can I help?",
   send: "Send",
   newChatUnavailable: "New chats are not enabled for this product.",
 };
@@ -45,6 +53,18 @@ export type OpenGeniChatProps = ClientOverride & {
   className?: string | undefined;
   /** Defaults to filling the host. */
   height?: CSSProperties["height"];
+  /**
+   * Light or dark. Defaults to `auto`: follow the host page (an enclosing
+   * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
+   * host's `color-scheme`, then its background), not the OS setting alone.
+   */
+  theme?: HostThemePreference | undefined;
+  /**
+   * `host` (default) derives backgrounds and cards from the host background so
+   * the chat blends in; `theme` uses the `--og-color-*` surface tokens as they
+   * are. Customized surface tokens are always kept.
+   */
+  surface?: HostSurfacePreference | undefined;
 };
 
 type CreateClient = Partial<Pick<OpenGeniClient, "createSession">>;
@@ -67,6 +87,8 @@ export function OpenGeniChat({
   labels: labelOverrides,
   className,
   height = "100%",
+  theme,
+  surface,
 }: OpenGeniChatProps) {
   const labels = { ...DEFAULT_LABELS, ...labelOverrides } as OpenGeniChatLabels;
   const scope = { client, workspaceId };
@@ -75,6 +97,8 @@ export function OpenGeniChat({
   const selected = controlledSessionId !== undefined ? controlledSessionId : uncontrolled;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [listRevision, setListRevision] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+  const hostTheme = useHostTheme(root, { theme, surface });
 
   const select = useCallback(
     (next: string | null) => {
@@ -117,8 +141,13 @@ export function OpenGeniChat({
 
   return (
     <div
-      className={cn("og-root og-chat relative flex min-h-0 min-w-0 bg-og-bg text-og-fg", className)}
-      style={{ height }}
+      ref={root}
+      className={cn(
+        "og-root og-chat relative flex min-h-0 min-w-0 bg-og-bg text-og-base text-og-fg",
+        className,
+      )}
+      style={{ ...hostTheme.style, height }}
+      data-og-theme={hostTheme.attribute}
       data-og-chat=""
     >
       <aside
@@ -128,8 +157,8 @@ export function OpenGeniChat({
         {list}
       </aside>
       {drawerOpen ? (
-        <div className="og-chat-drawer absolute inset-0 z-20 flex" data-og-chat-drawer="">
-          <div className="flex h-full w-[min(20rem,85%)] flex-col border-r border-og-border bg-og-bg shadow-xl">
+        <div className="og-chat-drawer absolute inset-0 z-30 flex" data-og-chat-drawer="">
+          <div className="flex h-full w-[min(20rem,85%)] flex-col border-r border-og-border bg-og-bg shadow-og-lg">
             <div className="flex justify-end p-1">
               <button
                 type="button"
@@ -145,13 +174,13 @@ export function OpenGeniChat({
           <button
             type="button"
             aria-label={labels.closeChats}
-            className="flex-1 bg-og-bg/60"
+            className="flex-1 bg-black/25"
             onClick={() => setDrawerOpen(false)}
           />
         </div>
       ) : null}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="og-chat-menu flex items-center gap-2 border-b border-og-border px-2 py-1">
+        <div className="og-chat-menu flex items-center gap-2 px-2 py-1">
           <button
             type="button"
             aria-label={labels.openChats}
@@ -164,7 +193,7 @@ export function OpenGeniChat({
           </button>
           <span className="text-og-sm font-semibold text-og-fg-muted">{labels.heading}</span>
         </div>
-        <div className="min-h-0 flex-1 px-3 pb-3 pt-1">
+        <div className="og-chat-main min-h-0 flex-1 px-3 pb-3 pt-1">
           {selected ? (
             <SessionConversation
               {...conversationProps}
@@ -225,25 +254,24 @@ function NewChat({
   return (
     <form
       onSubmit={(event) => void submit(event)}
-      className="box-border flex h-full flex-col justify-end gap-2 p-3"
+      className="mx-auto box-border flex h-full w-full max-w-3xl flex-col justify-center gap-4 p-3 pb-[12vh]"
       data-og-new-chat-composer=""
     >
-      {error ? (
-        <p role="alert" className="text-og-xs text-og-status-failed">
-          {formatError(
-            error.cause,
-            error.cause instanceof Error && error.cause.message === labels.newChatUnavailable
-              ? labels.newChatUnavailable
-              : undefined,
-          )}
-        </p>
+      {labels.newChatTitle ? (
+        <h2 className="text-center text-og-md font-medium text-og-fg">{labels.newChatTitle}</h2>
       ) : null}
-      <div className="flex items-end gap-2 rounded-lg border border-og-border bg-og-surface-1 p-2">
+      <div
+        className={cn(
+          "flex items-end gap-2 rounded-og-lg border border-og-border/90 bg-og-surface-1 p-2 pl-3.5 shadow-og-sm",
+          "transition-[border-color,box-shadow] duration-200 ease-og-out",
+          "focus-within:border-og-accent/50 focus-within:shadow-og-glow",
+        )}
+      >
         <textarea
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               event.currentTarget.form?.requestSubmit();
             }
@@ -252,17 +280,36 @@ function NewChat({
           aria-label={labels.newChatPlaceholder}
           rows={2}
           disabled={sending}
-          className="min-h-10 flex-1 resize-none bg-transparent text-og-base text-og-fg outline-hidden placeholder:text-og-fg-subtle"
+          className="min-h-12 flex-1 resize-none bg-transparent py-1 text-og-composer text-og-fg outline-hidden placeholder:text-og-fg-subtle md:text-og-composer-wide"
         />
         <button
           type="submit"
           aria-label={labels.send}
           disabled={sending || !text.trim()}
-          className="rounded-md bg-og-accent p-2 text-og-accent-fg disabled:opacity-50"
+          className={cn(
+            "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md pointer-coarse:size-11",
+            "border border-og-primary-border bg-og-primary text-og-primary-fg",
+            "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+            "hover:bg-og-primary-hover active:scale-95 disabled:cursor-not-allowed disabled:opacity-50",
+          )}
         >
-          <SendIcon className="size-4" aria-hidden />
+          {sending ? (
+            <LoaderCircleIcon className="size-4 animate-og-spin" aria-hidden />
+          ) : (
+            <ArrowUpIcon className="size-4" aria-hidden />
+          )}
         </button>
       </div>
+      {error ? (
+        <p role="alert" className="text-center text-og-sm text-og-status-failed">
+          {formatError(
+            error.cause,
+            error.cause instanceof Error && error.cause.message === labels.newChatUnavailable
+              ? labels.newChatUnavailable
+              : undefined,
+          )}
+        </p>
+      ) : null}
     </form>
   );
 }

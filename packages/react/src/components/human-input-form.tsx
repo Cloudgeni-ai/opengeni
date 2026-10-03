@@ -122,6 +122,8 @@ function HumanInputRequestForm({
   const formatError = useErrorMessage();
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
+  const decision = binaryDecision(request.questions);
+  const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   const resolvedTitle =
     title === undefined
       ? singleQuestion
@@ -458,7 +460,7 @@ function HumanInputRequestForm({
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
               <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
                 {resolvedTitle}
-                {singleQuestion?.required && !request.allowSkip ? (
+                {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
                   </span>
@@ -505,106 +507,229 @@ function HumanInputRequestForm({
         </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div
-          ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-        >
-          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
-            {request.questions.map((question, index) => {
-              if (singleQuestion) {
-                // Title already carries the question; only render the control + help extras.
-                return (
-                  <div key={question.id} data-human-input-question={question.id}>
-                    {preview(question)}
-                    <QuestionControls
-                      question={question}
-                      questionNumber={null}
-                      labelledBy={titleId}
-                      draft={drafts[question.id] ?? emptyDraft()}
-                      fieldId={`${formId}-${index}`}
-                      error={validationErrors[question.id]}
-                      messages={messages}
-                      autoFocus={autoFocus}
-                      firstOption
-                      showPromptChrome={false}
-                      allowSkip={request.allowSkip}
-                      busy={busy}
-                      onUpdate={(apply) => update(question.id, apply)}
-                    />
-                  </div>
-                );
-              }
+      {decision ? (
+        <>
+          {(error ?? submissionError) ? (
+            <p role="alert" className="shrink-0 px-4 pt-3 text-og-sm text-og-status-failed">
+              {error ?? submissionError}
+            </p>
+          ) : null}
+          <footer
+            className="flex shrink-0 flex-wrap items-center justify-end gap-2 px-4 py-3"
+            data-human-input-decision=""
+          >
+            {request.allowSkip ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void submitResponse({ outcome: "skipped" })}
+                className="mr-auto inline-flex min-h-9 items-center rounded-og-md px-2 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-hover hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-11"
+              >
+                {resolvedSkipLabel}
+              </button>
+            ) : null}
+            {[decision.decline, decision.accept].map((option) => {
+              const primary = option === decision.accept;
               return (
-                <div
-                  key={question.id}
-                  data-human-input-question={question.id}
-                  className="flex flex-col gap-1.5"
+                <button
+                  key={option.id}
+                  type="button"
+                  disabled={busy}
+                  title={option.description ?? undefined}
+                  data-human-input-choice={option.id}
+                  onClick={() => {
+                    setDecisionChoice(option.id);
+                    void submitResponse({
+                      outcome: "answered",
+                      answers: [{ questionId: decision.question.id, values: [option.id] }],
+                    });
+                  }}
+                  className={cn(
+                    "inline-flex min-h-9 items-center rounded-og-md border px-3.5 py-1.5 text-og-sm font-medium transition disabled:opacity-50 pointer-coarse:min-h-11",
+                    primary
+                      ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
+                      : "border-og-border bg-og-surface-1 text-og-fg hover:bg-og-surface-2",
+                  )}
                 >
-                  {preview(question)}
-                  <QuestionControls
-                    question={question}
-                    questionNumber={index + 1}
-                    labelledBy={undefined}
-                    draft={drafts[question.id] ?? emptyDraft()}
-                    fieldId={`${formId}-${index}`}
-                    error={validationErrors[question.id]}
-                    messages={messages}
-                    autoFocus={autoFocus && index === 0}
-                    firstOption={index === 0}
-                    showPromptChrome
-                    allowSkip={request.allowSkip}
-                    busy={busy}
-                    onUpdate={(apply) => update(question.id, apply)}
-                  />
-                </div>
+                  {busy && decisionChoice === option.id ? messages.submitting : option.label}
+                </button>
               );
             })}
-          </fieldset>
-        </div>
-        {overflowBelow ? (
-          <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
-            aria-hidden="true"
-          >
-            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
-            <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
-              {messages.moreBelow}
-            </span>
+          </footer>
+        </>
+      ) : (
+        <>
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div
+              ref={scrollRef}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+            >
+              <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
+                {request.questions.map((question, index) => {
+                  if (singleQuestion) {
+                    // Title already carries the question; only render the control + help extras.
+                    return (
+                      <div key={question.id} data-human-input-question={question.id}>
+                        {preview(question)}
+                        <QuestionControls
+                          question={question}
+                          questionNumber={null}
+                          labelledBy={titleId}
+                          draft={drafts[question.id] ?? emptyDraft()}
+                          fieldId={`${formId}-${index}`}
+                          error={validationErrors[question.id]}
+                          messages={messages}
+                          autoFocus={autoFocus}
+                          firstOption
+                          showPromptChrome={false}
+                          allowSkip={request.allowSkip}
+                          busy={busy}
+                          onUpdate={(apply) => update(question.id, apply)}
+                        />
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={question.id}
+                      data-human-input-question={question.id}
+                      className="flex flex-col gap-1.5"
+                    >
+                      {preview(question)}
+                      <QuestionControls
+                        question={question}
+                        questionNumber={index + 1}
+                        labelledBy={undefined}
+                        draft={drafts[question.id] ?? emptyDraft()}
+                        fieldId={`${formId}-${index}`}
+                        error={validationErrors[question.id]}
+                        messages={messages}
+                        autoFocus={autoFocus && index === 0}
+                        firstOption={index === 0}
+                        showPromptChrome
+                        allowSkip={request.allowSkip}
+                        busy={busy}
+                        onUpdate={(apply) => update(question.id, apply)}
+                      />
+                    </div>
+                  );
+                })}
+              </fieldset>
+            </div>
+            {overflowBelow ? (
+              <div
+                className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
+                aria-hidden="true"
+              >
+                <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
+                <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
+                  {messages.moreBelow}
+                </span>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
 
-      {(error ?? submissionError) ? (
-        <p
-          role="alert"
-          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
-        >
-          {error ?? submissionError}
-        </p>
-      ) : null}
+          {(error ?? submissionError) ? (
+            <p
+              role="alert"
+              className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
+            >
+              {error ?? submissionError}
+            </p>
+          ) : null}
 
-      <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
-        {request.allowSkip ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void submitResponse({ outcome: "skipped" })}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
-          >
-            {resolvedSkipLabel}
-          </button>
-        ) : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
-        >
-          {busy ? messages.submitting : resolvedSubmitLabel}
-        </button>
-      </footer>
+          <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
+            {request.allowSkip ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void submitResponse({ outcome: "skipped" })}
+                className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
+              >
+                {resolvedSkipLabel}
+              </button>
+            ) : null}
+            <button
+              type="submit"
+              disabled={busy}
+              className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
+            >
+              {busy ? messages.submitting : resolvedSubmitLabel}
+            </button>
+          </footer>
+        </>
+      )}
     </form>
   );
+}
+
+const ACCEPT_WORDS = new Set([
+  "approve",
+  "approved",
+  "yes",
+  "confirm",
+  "allow",
+  "accept",
+  "proceed",
+  "continue",
+  "ok",
+  "okay",
+  "apply",
+  "go",
+]);
+const DECLINE_WORDS = new Set([
+  "cancel",
+  "decline",
+  "reject",
+  "deny",
+  "no",
+  "don't",
+  "dont",
+  "abort",
+  "stop",
+  "skip",
+  "keep",
+  "leave",
+]);
+
+function firstWord(label: string): string {
+  return (
+    label
+      .trim()
+      .toLowerCase()
+      .replace(/[’]/g, "'")
+      .split(/[\s,.:;!?()]+/)[0] ?? ""
+  );
+}
+
+/**
+ * A yes/no decision (an approval asked as a question): one required
+ * single-choice question with exactly an accept and a decline option. It is
+ * answered with two buttons; an "Other" free-text answer has no meaning for it,
+ * and the composer still accepts a different instruction.
+ */
+export function binaryDecision(questions: readonly HumanInputQuestion[]): {
+  question: HumanInputQuestion;
+  accept: HumanInputQuestion["options"][number];
+  decline: HumanInputQuestion["options"][number];
+} | null {
+  if (questions.length !== 1) return null;
+  const question = questions[0]!;
+  if (question.kind !== "single_select" || question.skillReview || question.options.length !== 2)
+    return null;
+  const [first, second] = question.options as [
+    HumanInputQuestion["options"][number],
+    HumanInputQuestion["options"][number],
+  ];
+  const kind = (option: HumanInputQuestion["options"][number]) => {
+    const word = firstWord(option.label);
+    return ACCEPT_WORDS.has(word) ? "accept" : DECLINE_WORDS.has(word) ? "decline" : null;
+  };
+  const a = kind(first);
+  const b = kind(second);
+  if (a === "accept" && b === "decline") return { question, accept: first, decline: second };
+  if (a === "decline" && b === "accept") return { question, accept: second, decline: first };
+  return null;
 }
 
 function QuestionControls({

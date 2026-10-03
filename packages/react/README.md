@@ -19,8 +19,10 @@ island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
 (`styles/tokens.css`) — color, typography, radius, shadow, motion. Dark mode is
-the first-class default; light is an opt-in via `data-og-theme="light"` on any
-ancestor. Components are styled with Tailwind v4 utilities mapped onto the
+the first-class token default; light is an opt-in via `data-og-theme="light"` on
+any ancestor. The embedded chat roots (`OpenGeniChat`, `SessionConversation`)
+resolve light or dark from the host page instead; see
+[Conversation UI](#conversation-ui). Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
@@ -109,11 +111,30 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
 
-`SessionConversation` hides its model picker when the client config reports
-`modelSelection: false` (a proxy that fixes the model policy); pass
-`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
-deployment enables uploads (`attachments={false}` opts out), pending tool
-approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+`SessionConversation` and `OpenGeniChat` are built to look native inside
+someone else's product with zero styling:
+
+- **Theme follows the host**, not the OS: an enclosing `data-og-theme`, then
+  `class="dark"`/`data-theme` (and similar) on `<html>`/`<body>`, the host's
+  `color-scheme`, then the luminance of the background the chat sits on. Pass
+  `theme="light" | "dark"` to force one.
+- **Surfaces blend into the host** (`surface="host"`, default): backgrounds and
+  cards are opaque mixes of the host background, so a navy app gets navy cards.
+  Host-customized `--og-color-*` tokens are kept; `surface="theme"` uses the
+  token surfaces as they are.
+- **Run control is Stop, not Pause**: a Stop control appears only while a
+  response runs, and the next message continues a stopped conversation. Opt
+  into the console's workstream Pause with `composerProps={{ runControl: "pause" }}`
+  (`"none"` hides both).
+- **No model picker by default**: end users rarely choose models. Pass
+  `modelPicker`, or report `modelSelection: true` from the proxy
+  (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
+  also fixes the policy server-side.
+
+Attachments appear when the deployment enables uploads (`attachments={false}`
+opts out), pending tool approvals render Approve/Reject, a yes/no question
+renders as two buttons, a failed load offers Try again, and `toolRegistry`
+customizes tool rendering.
 
 The root keeps all existing exports, including workbench components, but never
 imports their optional peers. Conversation-only Next.js/Vite hosts do not need

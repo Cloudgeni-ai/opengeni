@@ -20,6 +20,16 @@ and supported theme/density/label hooks. Keep UI-owned copy free of OpenGeni
 branding; source quotations and user/assistant content are not UI labels. Verify
 the installed error-copy API separately, not just the heading/placeholder.
 
+`OpenGeniChat` and `SessionConversation` follow the host theme by default: an
+enclosing `data-og-theme`, then `class="dark"`/`data-theme` on `<html>` or
+`<body>`, the host's `color-scheme`, then the page background. Do not wire the
+OS `prefers-color-scheme` into them; pass `theme="light" | "dark"` only to force
+one. Their backgrounds and cards derive from the host background
+(`surface="host"`), so mount them without a wrapper panel color; customized
+`--og-color-*` tokens are kept. End users see a Stop control only while a
+response runs (no Pause), and no model picker unless the host opts in
+(`modelPicker` or `createSessionProxyHandler({ modelSelection: true })`).
+
 Stock mode uses the shipped components and `compiled.css` without extra host
 cosmetic CSS. The quality target is simple, polished and smooth at desktop
 around 1440px and mobile around 390px in supported light/dark themes. Host
