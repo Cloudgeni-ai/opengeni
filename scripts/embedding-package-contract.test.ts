@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import contractsConfig from "../packages/contracts/tsup.config";
 import sdkConfig from "../packages/sdk/tsup.config";
 import {
   publishableWorkspacePackages,
@@ -86,30 +87,36 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
   }
 });
 
-test("every public SDK source subpath has a matching runtime build entry", async () => {
-  const directory = join(import.meta.dir, "../packages/sdk");
-  const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-  const resolved = typeof sdkConfig === "function" ? await sdkConfig({}) : sdkConfig;
-  const configs = Array.isArray(resolved) ? resolved : [resolved];
-  const entries = new Set(
-    configs.flatMap((config) =>
-      Array.isArray(config.entry) ? config.entry : Object.values(config.entry ?? {}),
-    ),
-  );
-  const published = structuredClone(manifest);
-  rewriteEntryPointsToDist(published);
-  for (const [subpath, value] of Object.entries(manifest.exports)) {
-    const source = value as { import?: string; default?: string };
-    const runtime = source.import ?? source.default;
-    if (!runtime?.startsWith("./src/") || !runtime.endsWith(".ts")) continue;
-    expect(entries.has(runtime.slice(2)), `${subpath} runtime build entry`).toBe(true);
-    if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1") {
-      const emitted = published.exports[subpath];
-      expect(existsSync(join(directory, emitted.types)), `${subpath} declarations`).toBe(true);
-      expect(
-        existsSync(join(directory, emitted.import ?? emitted.default)),
-        `${subpath} runtime`,
-      ).toBe(true);
+test("every public SDK and contracts source subpath has a matching runtime build entry", async () => {
+  for (const [packageName, config] of [
+    ["sdk", sdkConfig],
+    ["contracts", contractsConfig],
+  ] as const) {
+    const directory = join(import.meta.dir, "../packages", packageName);
+    const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+    const resolved = typeof config === "function" ? await config({}) : config;
+    const configs = Array.isArray(resolved) ? resolved : [resolved];
+    const entries = new Set(
+      configs.flatMap((options) =>
+        Array.isArray(options.entry) ? options.entry : Object.values(options.entry ?? {}),
+      ),
+    );
+    const published = structuredClone(manifest);
+    rewriteEntryPointsToDist(published);
+    for (const [subpath, value] of Object.entries(manifest.exports)) {
+      const source = value as { import?: string; default?: string };
+      const runtime = source.import ?? source.default;
+      if (!runtime?.startsWith("./src/") || !runtime.endsWith(".ts")) continue;
+      const label = `@opengeni/${packageName}/${subpath}`;
+      expect(entries.has(runtime.slice(2)), `${label} runtime build entry`).toBe(true);
+      if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1") {
+        const emitted = published.exports[subpath];
+        expect(existsSync(join(directory, emitted.types)), `${label} declarations`).toBe(true);
+        expect(
+          existsSync(join(directory, emitted.import ?? emitted.default)),
+          `${label} runtime`,
+        ).toBe(true);
+      }
     }
   }
 });

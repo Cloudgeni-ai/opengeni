@@ -7,7 +7,7 @@ import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@open
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime";
+import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime/gmail-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
