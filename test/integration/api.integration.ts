@@ -4314,10 +4314,21 @@ describe("API component integration", () => {
 
     workflow.syncError = new Error("temporal unavailable");
     const failedCreateName = `mcp-sync-fail-${crypto.randomUUID()}`;
+    const beforeMissingIntent = await listScheduledTasks(dbClient.db, grant.workspaceId);
+    await expect(
+      callMcpTool(mcp, "scheduled_tasks_create", {
+        name: `mcp-missing-intent-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+      }),
+    ).rejects.toThrow("Choose an existing chat");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeMissingIntent);
+    expect(workflow.synced).toHaveLength(0);
     await expect(
       callMcpTool(mcp, "scheduled_tasks_create", {
         name: failedCreateName,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
       }),
     ).rejects.toThrow("temporal unavailable");
@@ -4331,6 +4342,7 @@ describe("API component integration", () => {
     const taskReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
       name: `mcp-rollback-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt: "inspect" },
     });
     const taskId = taskReceipt.resource.id;
@@ -4375,6 +4387,7 @@ describe("API component integration", () => {
     const created = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
       name: originalName,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt },
     });
     expect(created).toMatchObject({
@@ -4486,6 +4499,7 @@ describe("API component integration", () => {
     const task = await callMcpTool<McpMutationReceiptType>(allowedMcp, "scheduled_tasks_create", {
       name: `mcp-limit-trigger-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt: "inspect" },
     });
     workflow.synced = [];
@@ -4513,13 +4527,16 @@ describe("API component integration", () => {
       grant,
     );
 
+    const beforeLimitedCreate = await listScheduledTasks(dbClient.db, grant.workspaceId);
     await expect(
       callMcpTool(blockedCreateMcp, "scheduled_tasks_create", {
         name: `mcp-limit-create-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
       }),
     ).rejects.toThrow("scheduled task limit reached");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeLimitedCreate);
     expect(workflow.synced).toHaveLength(0);
     await recordUsageEvent(dbClient.db, {
       accountId: grant.accountId,
@@ -4555,12 +4572,24 @@ describe("API component integration", () => {
       },
       grant,
     );
+    const beforeLimitedTrigger = await sumUsageQuantity(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
     await expect(
       callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", {
         id: task.resource.id,
       }),
     ).rejects.toThrow("monthly agent run limit reached");
     expect(workflow.triggers).toHaveLength(0);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId: grant.workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(beforeLimitedTrigger);
   });
 
   test("returns 404 for missing scheduled task actions", async () => {
@@ -4639,7 +4668,7 @@ describe("API component integration", () => {
         schedule: { type: "interval", everySeconds: 3600 },
         runMode: "existing_session",
         targetSessionId: target.id,
-        agentConfig: { prompt: "continue exactly here" },
+        prompt: "continue exactly here",
       }),
     });
     expect(createResponse.status).toBe(201);
@@ -4714,7 +4743,7 @@ describe("API component integration", () => {
       schedule: { type: "interval", everySeconds: 3600 },
       runMode: "existing_session",
       targetSessionId: mcpTarget.id,
-      agentConfig: { prompt: "continue MCP target" },
+      prompt: "continue MCP target",
     });
     const summary = await callMcpTool<{ targetSessionId: string | null }>(
       mcp,
@@ -6665,10 +6694,12 @@ describe("API component integration", () => {
       ] as Permission[],
     };
     const noAttachMcp = buildOpenGeniMcpServer(mcpDeps, noAttachGrant);
+    const beforeDeniedCreate = await listScheduledTasks(dbClient.db, grant.workspaceId);
     await expect(
       callMcpTool(noAttachMcp, "scheduled_tasks_create", {
         name: `mcp-self-attach-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       }),
@@ -6683,10 +6714,26 @@ describe("API component integration", () => {
       callMcpTool(attachOnlyMcp, "scheduled_tasks_create", {
         name: `mcp-without-use-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
+    const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...noAttachGrant,
+      permissions: [...noAttachGrant.permissions, "variable-sets:use"] as Permission[],
+    });
+    await expect(
+      callMcpTool(useOnlyMcp, "scheduled_tasks_create", {
+        name: `mcp-use-without-attach-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "inspect" },
+        environmentId: environment.id,
+      }),
+    ).rejects.toThrow("missing permission: variable-sets:attach");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeDeniedCreate);
+    expect(workflow.synced).toHaveLength(0);
 
     const createdReceipt = await callMcpTool<McpMutationReceiptType>(
       adminMcp,
@@ -6694,6 +6741,7 @@ describe("API component integration", () => {
       {
         name: `mcp-attach-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       },
@@ -6729,6 +6777,9 @@ describe("API component integration", () => {
         agentConfig: { prompt: "exfiltrate the injected secrets" },
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
+    expect(
+      await getScheduledTask(dbClient.db, grant.workspaceId, createdReceipt.resource.id),
+    ).toEqual(created);
   });
 
   test("registers manager orchestration MCP tools gated by session permissions", async () => {
