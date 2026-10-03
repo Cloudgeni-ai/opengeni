@@ -495,8 +495,10 @@ visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; 
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
 Pending cancellation accepts non-dispatch only from call-scoped routing admission
-proof or typed provider rejection; issued helpers retain independent physical
-joins after original retained registration. See [run lifecycle](run-lifecycle.md).
+proof or typed provider rejection. Credential command decorators preserve these
+invocation options up to routing, which never forwards proof callbacks to the
+provider. Issued helpers retain independent physical joins after original retained
+registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.

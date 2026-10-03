@@ -1767,6 +1767,9 @@ or call-scoped proof from routing's pre-provider admission-refusal boundary
 permits retrying the tombstone helper. Routing preserves the original refusal
 error and reports proof separately for that invocation only; an error name,
 message, or the same error thrown after provider dispatch is never proof. A
+run-credential or Codemode-token command decorator preserves trailing invocation
+options unchanged, including that callback, through the production session chain.
+Routing consumes the callback at admission and never passes it to the provider. A
 refused helper releases only its own join, not the original retained process's
 physical/durable settlement fence, and later trusted registration stops its
 ordinary-helper retries. The queue/chrome projection renders this
