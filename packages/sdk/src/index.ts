@@ -1,4 +1,5 @@
-export {
+// Types only: a value re-export would pull the contracts runtime into the root entry.
+export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionSetupTokenRequest,
@@ -227,13 +228,8 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
-export {
-  humanizeModelSlug,
-  isRawModelLabel,
-  modelDisplayName,
-  modelSlug,
-  modelVendor,
-} from "./model-display";
+// Model display helpers live on the `@opengeni/sdk/model-display` subpath so the
+// root entry stays free of the contracts runtime (publish closure guard).
 export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
