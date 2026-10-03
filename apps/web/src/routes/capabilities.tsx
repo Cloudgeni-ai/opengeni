@@ -787,6 +787,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           : [];
       })()
     : [];
+  const selectedConnectPlan = selectedItem ? capabilityConnectPlan(selectedItem) : null;
+  const selectedSocialSetupAvailable =
+    selectedConnectPlan?.mode !== "social_oauth" ||
+    nativeProviderAvailable(nativeConnectCatalog, selectedConnectPlan.provider);
   const canManageSocial = canManageSlackReactionSummon(context.accessContext, workspaceId);
   const canReadConnections =
     context.accessContext === null
@@ -1104,6 +1108,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   async function handleAction(action: ConnectAction) {
     if (!selected || !selectedItem || busyId !== null || selectedSetupUnavailable) return;
+    // Social authorization starts a new provider attempt even when existing
+    // rows are retained for management. Disconnect never needs this readiness.
+    if (
+      action.type === "social_oauth" &&
+      !nativeProviderAvailable(nativeConnectCatalog, action.provider)
+    )
+      return;
     setBusyId(selectedItem.id);
     setSheetError(null);
     try {
@@ -1570,6 +1581,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         }}
         socialConnections={selectedSocialConnections}
         canManageSocial={canManageSocial}
+        socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}

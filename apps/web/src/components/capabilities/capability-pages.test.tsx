@@ -13,7 +13,7 @@ import { nativeCatalogItemNotice } from "./native-connect-readiness";
 import { IntegrationPage } from "./integration-page";
 import type { IntegrationViewModel } from "./integration-view-model";
 import { ProviderPage } from "./provider-page";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, SocialConnection } from "@/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -205,6 +205,86 @@ describe("CatalogItemPage", () => {
     await act(async () => buttons(view.container, "Retry")[0]!.click());
     expect(retry).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledTimes(0);
+    await view.unmount();
+  });
+
+  test("existing social history stays manageable while unavailable provider authorization is withheld", async () => {
+    for (const provider of ["x", "reddit"] as const) {
+      for (const status of ["connected", "needs_reauth", "disabled"] as const) {
+        const account = {
+          id: "existing-social",
+          provider,
+          status,
+          subjectId: null,
+          ownership: "workspace",
+          accountHandle: "existing-account",
+          accountName: "Existing account",
+        } as SocialConnection;
+        // The API catalog may project enabled=false despite an existing row.
+        const social = item({
+          kind: "api",
+          mcpUrl: null,
+          endpointUrl: null,
+          id: `api:${provider}`,
+          name: provider === "x" ? "X" : "Reddit",
+          enabled: false,
+          surfaceType: "provider_integration",
+          metadata: { providerAdapter: "social", provider },
+        });
+        const onAction = mock(() => {});
+        const view = await render(
+          <CatalogItemPage
+            {...common}
+            item={social}
+            socialConnections={[account]}
+            onAction={onAction}
+            setupUnavailable={nativeCatalogItemNotice(
+              social,
+              { status: "ready", providers: [] },
+              () => {},
+              { connections: [], socialConnections: [account] },
+            )}
+            socialSetupAvailable={false}
+          />,
+        );
+        expect(visibleText(view.container)).toContain("Existing account");
+        expect(buttons(view.container, "Add another account")).toHaveLength(0);
+        expect(buttons(view.container, `Reconnect ${social.name}`)).toHaveLength(0);
+        expect(buttons(view.container, `Connect ${social.name}`)).toHaveLength(0);
+        if (status !== "disabled") {
+          await act(async () => buttons(view.container, "Disconnect")[0]!.click());
+          expect(onAction).toHaveBeenCalledWith({
+            type: "disconnect_social",
+            item: social,
+            connectionId: account.id,
+          });
+        }
+        await view.unmount();
+      }
+    }
+  });
+
+  test("available social authorization still opens the fresh account flow", async () => {
+    const social = item({
+      kind: "api",
+      mcpUrl: null,
+      endpointUrl: null,
+      id: "api:reddit",
+      name: "Reddit",
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "reddit" },
+    });
+    const onAction = mock(() => {});
+    const view = await render(
+      <CatalogItemPage {...common} item={social} onAction={onAction} socialSetupAvailable />,
+    );
+    await act(async () => buttons(view.container, "Connect Reddit")[0]!.click());
+    expect(onAction).toHaveBeenCalledWith({
+      type: "social_oauth",
+      item: social,
+      provider: "reddit",
+      ownership: "workspace",
+    });
     await view.unmount();
   });
 

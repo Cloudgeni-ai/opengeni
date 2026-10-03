@@ -1,9 +1,4 @@
 import {
-  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
-  isRetiredNativeAtlassianSource,
-  isRetiredNativeAtlassianTask,
-} from "@opengeni/contracts/atlassian-native-retirement";
-import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -13,6 +8,11 @@ import {
   resolveFirstPartyMcpToolPolicy,
   type Settings,
 } from "@opengeni/config";
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianSource,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import type {
   AccessGrant,
   KnowledgeSourceSyncAction,

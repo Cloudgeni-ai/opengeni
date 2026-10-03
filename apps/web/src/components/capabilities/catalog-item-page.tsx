@@ -85,6 +85,7 @@ export function CatalogItemPage({
   backLabel,
   setupUnavailable,
   fikenSetup,
+  socialSetupAvailable = true,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -103,6 +104,8 @@ export function CatalogItemPage({
   /** A native readiness check blocks only fresh setup, never existing management. */
   setupUnavailable?: IntegrationViewModel["notice"];
   fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
+  /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
+  socialSetupAvailable?: boolean;
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
@@ -223,7 +226,7 @@ export function CatalogItemPage({
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
   } else if (plan.mode === "social_oauth") {
-    primary = (
+    primary = socialSetupAvailable ? (
       <Button
         type="button"
         size="sm"
@@ -238,7 +241,7 @@ export function CatalogItemPage({
             ? "Add another account"
             : `Connect ${title}`}
       </Button>
-    );
+    ) : null;
   } else if (item.enabled) {
     if (reconnect?.kind === "oauth") {
       primary = (
