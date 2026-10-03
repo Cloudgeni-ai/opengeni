@@ -298,6 +298,7 @@ export function ComputerViewer({
   const connectionState = controlUnavailable ? "error" : frames.state;
   // RFB has one combined input switch; partial native input stays view-only.
   const rfbInputEnabled =
+    rfbStream?.inputAllowed === true &&
     !machineLocked &&
     !controlUnavailable &&
     computer.session?.capabilities?.pointerInput === true &&

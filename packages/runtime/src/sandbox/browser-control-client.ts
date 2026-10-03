@@ -328,6 +328,8 @@ export type BrowserViewGrant = {
   expiresAt: string;
 };
 
+export type ComputerViewGrant = BrowserViewGrant & { scopedRfbInput: boolean };
+
 export type BrowserStateUploadGrant = {
   url: string;
   requiredHeaders: Readonly<Record<string, string>>;
@@ -740,8 +742,13 @@ export class BrowserControlClient {
 
   async createComputerViewGrant(
     reference: PlacementComputerSessionReference,
-    input: { grantId: string; token: string; expiresAt: string },
-  ): Promise<BrowserViewGrant> {
+    input: {
+      grantId: string;
+      token: string;
+      expiresAt: string;
+      rfbScope?: { targetId: string; targetGeneration: string; inputAllowed: boolean };
+    },
+  ): Promise<ComputerViewGrant> {
     const binding = parseComputerReference(reference);
     const grantId = requireUuid(input.grantId, "computer view grant id");
     const expiresAt = timestamp(input.expiresAt, "computer view grant expiry");
@@ -754,6 +761,13 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         token: requireToken(input.token, "computer view grant token"),
         expiresAt,
+        ...(input.rfbScope
+          ? {
+              targetId: requireOpaqueId(input.rfbScope.targetId, "RFB target id"),
+              targetGeneration: requireGeneration(input.rfbScope.targetGeneration),
+              inputAllowed: input.rfbScope.inputAllowed,
+            }
+          : {}),
       },
     });
     if (!isRecord(data) || data.grantId !== grantId || data.expiresAt !== expiresAt) {
@@ -761,7 +775,23 @@ export class BrowserControlClient {
         "interaction controller returned malformed computer view grant",
       );
     }
-    return { grantId, expiresAt };
+    if (data.scopedRfbInput !== undefined && typeof data.scopedRfbInput !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "interaction controller returned invalid RFB scope capability",
+      );
+    }
+    if (
+      input.rfbScope &&
+      (data.scopedRfbInput !== true ||
+        data.targetId !== input.rfbScope.targetId ||
+        data.targetGeneration !== input.rfbScope.targetGeneration ||
+        data.inputAllowed !== input.rfbScope.inputAllowed)
+    ) {
+      throw new BrowserControlProtocolError(
+        "interaction controller did not bind the requested RFB scope",
+      );
+    }
+    return { grantId, expiresAt, scopedRfbInput: data.scopedRfbInput === true };
   }
 
   /** Quiesce one exact controller, upload its encrypted working profile, and

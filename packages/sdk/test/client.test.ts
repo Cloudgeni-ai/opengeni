@@ -73,6 +73,32 @@ function makeClient(
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
+  test.each([undefined, false, true])(
+    "defaults legacy Computer RFB grants to view only (%p)",
+    async (inputAllowed) => {
+      const { client } = makeClient(() =>
+        jsonResponse({
+          computerSessionId: SESSION_ID,
+          controllerGeneration: "controller-1",
+          targetId: "screen-1",
+          expiresAt: "2026-08-10T12:00:00.000Z",
+          stream: {
+            kind: "direct_rfb",
+            url: "wss://computer.example.test/rfb",
+            protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+            ...(inputAllowed === undefined ? {} : { inputAllowed }),
+          },
+        }),
+      );
+      const attachment = await client.attachComputerSession(WORKSPACE_ID, SESSION_ID, {
+        targetId: "screen-1",
+      });
+      expect(attachment.stream.kind).toBe("direct_rfb");
+      if (attachment.stream.kind === "direct_rfb")
+        expect(attachment.stream.inputAllowed).toBe(inputAllowed === true);
+    },
+  );
+
   test("Claude sign-in uses scoped JSON browser mutations without passing tokens or requesting inference", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ connected: true, credentialVersion: 1 }),

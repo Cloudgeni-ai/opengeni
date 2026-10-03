@@ -35,6 +35,96 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test.each([undefined, false, true, "true"])(
+    "negotiates explicit server-enforced RFB scope capability (%p)",
+    async (capability) => {
+      const requests: Array<Record<string, unknown>> = [];
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const body = (await request.json()) as Record<string, unknown>;
+          requests.push(body);
+          return success({
+            grantId: body.grantId,
+            expiresAt: body.expiresAt,
+            ...(capability === undefined ? {} : { scopedRfbInput: capability }),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const reference = { computerSessionId: randomUUID(), controllerGeneration: "controller-1" };
+        const input = {
+          grantId: randomUUID(),
+          token: viewToken,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const pending = client.createComputerViewGrant(reference, input);
+        if (typeof capability === "string")
+          await expect(pending).rejects.toBeInstanceOf(BrowserControlProtocolError);
+        else
+          expect(await pending).toEqual({
+            grantId: input.grantId,
+            expiresAt: input.expiresAt,
+            scopedRfbInput: capability === true,
+          });
+        expect(Object.keys(requests[0]!).sort()).toEqual([
+          "controllerGeneration",
+          "expiresAt",
+          "grantId",
+          "token",
+        ]);
+      } finally {
+        await server.stop(true);
+      }
+    },
+  );
+
+  test.each(["exact", "missing", "target", "generation", "input"])(
+    "requires an exact RFB scope binding receipt (%s)",
+    async (receipt) => {
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const body = (await request.json()) as Record<string, unknown>;
+          return success({
+            grantId: body.grantId,
+            expiresAt: body.expiresAt,
+            ...(receipt === "missing" ? {} : { scopedRfbInput: true }),
+            targetId: receipt === "target" ? "another-screen" : body.targetId,
+            targetGeneration: receipt === "generation" ? "target-2" : body.targetGeneration,
+            inputAllowed: receipt === "input" ? false : body.inputAllowed,
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const input = {
+          grantId: randomUUID(),
+          token: viewToken,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          rfbScope: { targetId: "screen-1", targetGeneration: "target-1", inputAllowed: true },
+        };
+        const pending = client.createComputerViewGrant(
+          { computerSessionId: randomUUID(), controllerGeneration: "controller-1" },
+          input,
+        );
+        if (receipt === "exact") expect(await pending).toMatchObject({ scopedRfbInput: true });
+        else await expect(pending).rejects.toBeInstanceOf(BrowserControlProtocolError);
+      } finally {
+        await server.stop(true);
+      }
+    },
+  );
+
   for (const field of ["fencedInputBatches", "focusedInputObservations"])
     for (const capability of [undefined, true, false, "true"]) {
       test(`validates optional ${field} capability (${capability})`, async () => {
@@ -1471,7 +1561,7 @@ describe("BrowserControlClient", () => {
           token: viewToken,
           expiresAt,
         }),
-      ).toEqual({ grantId, expiresAt });
+      ).toEqual({ grantId, expiresAt, scopedRfbInput: false });
       const session = client.computerSessionClient({
         reference,
         controlToken,
