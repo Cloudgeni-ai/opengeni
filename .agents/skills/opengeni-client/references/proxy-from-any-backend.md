@@ -125,6 +125,18 @@ def upstream_headers(request, user_id):
             headers[name] = request.headers[name]
     return headers
 
+def relay_events(upstream, client):
+    # Event streams are long-lived and end normally (deploys, idle timeouts).
+    # Treat an upstream end, even mid-chunk, as a clean end: the SDK reconnects
+    # with Last-Event-ID. Always close the upstream when the browser leaves.
+    try:
+        yield from upstream.iter_raw()
+    except (httpx.ReadError, httpx.RemoteProtocolError, httpx.StreamClosed):
+        pass
+    finally:
+        upstream.close()
+        client.close()
+
 def opengeni_proxy(request, rest):
     user = request.user  # your auth; CsrfViewMiddleware covers POST/PUT/PATCH
     if not user.is_authenticated:
@@ -146,7 +158,8 @@ def opengeni_proxy(request, rest):
         client = httpx.Client(timeout=None)
         upstream = client.send(
             client.build_request("GET", url, headers=headers, params=request.GET), stream=True)
-        response = StreamingHttpResponse(upstream.iter_raw(), status=upstream.status_code,
+        response = StreamingHttpResponse(relay_events(upstream, client),
+                                         status=upstream.status_code,
                                          content_type="text/event-stream")
         response["Cache-Control"] = "no-store"
         response["X-Accel-Buffering"] = "no"
@@ -166,5 +179,7 @@ def opengeni_proxy(request, rest):
 ```
 
 Run it with an ASGI or threaded server so open event streams do not block other
-requests. The `ROUTES` patterns cover the allowlist; the body rules in the table
+requests. In any other framework, relay the event stream the same way: pass it
+through unbuffered, treat an upstream end as a normal end (never a 500), and
+close the upstream request when the browser disconnects. The `ROUTES` patterns cover the allowlist; the body rules in the table
 still need their few lines of checks.
