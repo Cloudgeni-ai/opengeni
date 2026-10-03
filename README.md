@@ -69,9 +69,10 @@ Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
 ## Use it from your code and product
 
-Give your coding agent the skills-only [OpenGeni plugin](docs/developer-plugin.md)
-for SDK setup, product building, and the offload workflow in Claude Code, Codex, Cursor,
-or supported ChatGPT surfaces. Remote offloading requires a separately available transport.
+Give your coding agent the [OpenGeni plugin](docs/developer-plugin.md)
+for SDK setup, product building, and offloading work in Claude Code, Codex, Cursor,
+or supported ChatGPT surfaces. It also connects the agent to your OpenGeni organization
+through MCP; sign in once in the browser.
 
 The default integration embeds the full OpenGeni conversation in your product: `SessionConversation` in the browser, backed by the session SDK through `createSessionProxyHandler` on your server. Verify your installed SDK and target deployment support it, set the API URL explicitly, and follow the [product integration guide](https://docs.opengeni.ai/embed-manually) for authentication and explicit user onboarding.
 
