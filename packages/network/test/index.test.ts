@@ -293,6 +293,39 @@ describe("DNS-pinned outbound transport", () => {
     }
   });
 
+  test("identifies the default pinned client and preserves Request and init user agents", async () => {
+    const received: Array<string | null> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const userAgent = request.headers.get("user-agent");
+        received.push(userAgent);
+        return new Response("metadata", { status: userAgent ? 200 : 403 });
+      },
+    });
+    const url = `http://identified-client.example.test:${server.port}/metadata`;
+    const options = { dnsLookup: async () => [{ address: "127.0.0.1", family: 4 as const }] };
+    try {
+      const defaultResponse = await pinnedFetch(url, undefined, testEscape, options);
+      expect(defaultResponse.status).toBe(200);
+      await defaultResponse.body?.cancel();
+      const request = new Request(url, { headers: { "User-Agent": "ExampleClient/2" } });
+      const requestResponse = await pinnedFetch(request, undefined, testEscape, options);
+      await requestResponse.body?.cancel();
+      const overrideResponse = await pinnedFetch(
+        request,
+        { headers: { "User-Agent": "ExampleOverride/3" } },
+        testEscape,
+        options,
+      );
+      await overrideResponse.body?.cancel();
+      expect(received).toEqual(["OpenGeni", "ExampleClient/2", "ExampleOverride/3"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("reads a chunked response through the pinned Undici request adapter", async () => {
     const server = Bun.serve({
       hostname: "127.0.0.1",

@@ -24,6 +24,7 @@ import {
   hasConnectorToolPermissionTarget,
 } from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
   capabilityPresentation,
@@ -244,6 +245,7 @@ export function DetailBody({
   canManageSocial,
   canManageSkills = false,
   onAction,
+  onRetryAuthInspection,
 }: {
   workspaceId?: string;
   item: CapabilityCatalogItem;
@@ -261,6 +263,7 @@ export function DetailBody({
   canManageSocial: boolean;
   canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
+  onRetryAuthInspection?: (() => void) | undefined;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
   const defaultOwnership = defaultCapabilityConnectionOwnership(item);
@@ -611,11 +614,15 @@ export function DetailBody({
               </ConnectionActions>
             </div>
           ) : plan.mode === "setup_required" ? (
-            <p role="status" className="text-sm text-fg-muted">
-              {item.metadata.authDiscovery === "checking"
-                ? "Checking sign-in requirements…"
-                : "Setup required. Check the provider’s instructions, or reopen to retry."}
-            </p>
+            <McpAuthDiscoveryNotice
+              checking={item.metadata.authDiscovery === "checking"}
+              message={
+                typeof item.metadata.authDiscoveryMessage === "string"
+                  ? item.metadata.authDiscoveryMessage
+                  : undefined
+              }
+              onRetry={onRetryAuthInspection}
+            />
           ) : item.kind === "mcp" ? (
             <ConnectionActions onCancel={onCancel} busy={busy}>
               <Button

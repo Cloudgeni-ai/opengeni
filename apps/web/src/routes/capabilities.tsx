@@ -722,7 +722,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     id: string;
     url: string;
     kind: "oauth2" | "none" | "unknown";
+    message?: string | undefined;
   } | null>(null);
+  const [authInspectionRevision, setAuthInspectionRevision] = useState(0);
   const rawSelectedItem: CapabilityCatalogItem | null = useMemo(
     () => resolveSheetItem(selected, items),
     [selected, items],
@@ -741,7 +743,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     setAuthInspection(null);
     void client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
       (result) => {
-        if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind });
+        if (active) setAuthInspection({ id, url: inspectUrl, ...result });
       },
       () => {
         if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" });
@@ -750,7 +752,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     return () => {
       active = false;
     };
-  }, [client, workspaceId, selectedItemId, inspectUrl, needsAuthInspection]);
+  }, [
+    client,
+    workspaceId,
+    selectedItemId,
+    inspectUrl,
+    needsAuthInspection,
+    authInspectionRevision,
+  ]);
   const inspection =
     authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl
       ? authInspection
@@ -765,7 +774,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               : inspection?.kind === "none"
                 ? ("none" as const)
                 : null,
-          metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
+          metadata: {
+            ...rawSelectedItem.metadata,
+            authDiscovery: inspection?.kind ?? "checking",
+            authDiscoveryMessage: inspection?.message,
+          },
         }
       : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
@@ -1585,6 +1598,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSkills={canManageSkills}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
+        onRetryAuthInspection={
+          needsAuthInspection
+            ? () => {
+                setAuthInspection(null);
+                setAuthInspectionRevision((revision) => revision + 1);
+              }
+            : undefined
+        }
         onBack={() => {
           setSheetError(null);
           back.onBack();
