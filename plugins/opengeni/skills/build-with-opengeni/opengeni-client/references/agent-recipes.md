@@ -50,7 +50,6 @@ await job.createSession(workspaceId, {
   skills: productSkills,
   tools: selectedProductTools,
   firstPartyMcpTools: [],
-  firstPartyMcpPermissions: [],
   bundledSkillIds: [],
 });
 ```
@@ -62,15 +61,21 @@ for background API/MCP access, or the product's signed workspace credential
 provider for short-lived managed-sandbox Git/cloud material. See
 [Data tools and credentials](data-tools-and-credentials.md).
 
-The two empty first-party arrays deliberately give this job no delegated
-OpenGeni tool authority. Remote first-party MCP preparation is skipped without
-a token or endpoint request; do not add a permission just to start the job.
-Product MCP servers, independently authorized connections, host-owned local
-adapters and already-authorized native runtime mechanics keep their own
-authorization paths. Requesting first-party tools or dedicated `files`/`docs`
-with this ceiling leaves them unavailable with an `insufficient_scope`
-advisory. In inbound automation templates both arrays also default to `[]`;
-ordinary `createSession` omission still inherits its existing defaults.
+`firstPartyMcpTools: []` narrows the broad first-party model-visible selection;
+it does not set a zero permission ceiling. Public `createSession` rejects an
+explicit `firstPartyMcpPermissions: []` with 422, including `asService` calls.
+This recipe omits that override, preserving the top-level default worker
+permission set (or inherited policy for a child), not zero authority. Any
+intentional public permission override must be nonempty and within the
+creator's grant; do not add permissions merely to make startup succeed.
+
+Inbound automation `sessionTemplate` is a different boundary: both first-party
+arrays default to `[]`, and explicit `[]` is supported. That empty effective
+ceiling skips remote OpenGeni-delegated MCP preparation without a token or
+endpoint request. Requested first-party tools or dedicated `files`/`docs` stay
+unavailable with an `insufficient_scope` advisory. Product MCP servers,
+independent connections, host-owned local adapters and already-authorized native
+runtime mechanics keep their own authorization paths.
 
 ## Per-user tool tokens
 

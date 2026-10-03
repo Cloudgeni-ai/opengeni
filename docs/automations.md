@@ -36,6 +36,12 @@ defaults; explicitly setting both arrays to `[]` preserves that behavior.
 Keep these arrays empty for product-only jobs; do not add `sessions:read` or
 another permission just to let a turn start.
 
+This automation-template boundary differs from public `createSession`:
+the latter still rejects `firstPartyMcpPermissions: []` with 422, including
+SDK `asService` calls. Omitting that public field preserves existing default
+or inherited permissions, not zero authority; `firstPartyMcpTools: []` alone
+narrows model visibility, not the permission ceiling.
+
 With an effective permission ceiling of `[]`, tool preparation skips remote
 OpenGeni-delegated MCP servers before token signing, connection, or catalog
 discovery, including eager and deferred startup. The broad `opengeni` server

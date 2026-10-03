@@ -219,17 +219,24 @@ Read response visibility from `session.tenancy?.visibility`, not
 requests; the response's tenancy projection may be absent when private-session
 support is unavailable. Absence means unknown, not `"workspace"`.
 
-For a product-only background job, use both `firstPartyMcpTools: []` and
-`firstPartyMcpPermissions: []` (see [Agent recipes](agent-recipes.md)). An
-explicit empty permission ceiling is zero delegated OpenGeni authority, not a
-default grant or a request to mint an empty token. Remote first-party MCP tools
-are not prepared; requesting them or dedicated first-party `files`/`docs`
-produces an `insufficient_scope` advisory and no executable catalog entry.
-External-host MCP servers, host-owned local adapters, independent connections
-and already-authorized native runtime mechanics retain their own authority.
-Automation templates default omitted first-party arrays to `[]`; ordinary
-sessions with undefined permissions retain their existing defaults. Never pad
-the permissions merely to make startup succeed.
+Public `createSession` rejects `firstPartyMcpPermissions: []` with 422,
+including `asService` calls. `firstPartyMcpTools: []` narrows the broad
+model-visible selection, not permission authority. Omitting permissions is not
+zero authority: a top-level request retains the default worker permission set,
+and a child inherits its bounded policy. An intentional public permission
+override must be nonempty and within the creator's grant. See
+[Agent recipes](agent-recipes.md); never pad permissions merely to make startup
+succeed.
+
+Automation session templates instead default both first-party arrays to `[]`
+and support explicit empty arrays. That supported automation ceiling, or an
+already-effective internal or linked permission ceiling of `[]`, is zero
+delegated OpenGeni authority. Runtime skips remote first-party MCP preparation;
+requested first-party tools or dedicated `files`/`docs` remain absent with an
+`insufficient_scope` advisory. External-host MCP servers, host-owned local
+adapters, independent connections and already-authorized native runtime
+mechanics retain their own authority. This runtime behavior does not widen
+public `createSession` admission.
 
 `effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
 locally if your UI needs capability sections:
