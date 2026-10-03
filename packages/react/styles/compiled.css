@@ -2249,6 +2249,12 @@
 :where(.og-root).max-w-5xl,:where(.og-root) .max-w-5xl {
     max-width: var(--container-5xl);
   }
+:where(.og-root).max-w-28,:where(.og-root) .max-w-28 {
+    max-width: calc(var(--spacing) * 28);
+  }
+:where(.og-root).max-w-32,:where(.og-root) .max-w-32 {
+    max-width: calc(var(--spacing) * 32);
+  }
 :where(.og-root).max-w-40,:where(.og-root) .max-w-40 {
     max-width: calc(var(--spacing) * 40);
   }
@@ -6086,6 +6092,26 @@
 :where(.og-root).\@max-\[20rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[20rem\]\/model-controls\:hidden {
     @container model-controls (width < 20rem) {
       display: none;
+    }
+  }
+:where(.og-root).\@sm\/computer-viewer\:grid,:where(.og-root) .\@sm\/computer-viewer\:grid {
+    @container computer-viewer (width >= 24rem) {
+      display: grid;
+    }
+  }
+:where(.og-root).\@sm\/computer-viewer\:inline,:where(.og-root) .\@sm\/computer-viewer\:inline {
+    @container computer-viewer (width >= 24rem) {
+      display: inline;
+    }
+  }
+:where(.og-root).\@sm\/computer-viewer\:max-w-40,:where(.og-root) .\@sm\/computer-viewer\:max-w-40 {
+    @container computer-viewer (width >= 24rem) {
+      max-width: calc(var(--spacing) * 40);
+    }
+  }
+:where(.og-root).\@sm\/computer-viewer\:max-w-52,:where(.og-root) .\@sm\/computer-viewer\:max-w-52 {
+    @container computer-viewer (width >= 24rem) {
+      max-width: calc(var(--spacing) * 52);
     }
   }
 :where(.og-root).\@xl\/computer-viewer\:max-h-none,:where(.og-root) .\@xl\/computer-viewer\:max-h-none {
