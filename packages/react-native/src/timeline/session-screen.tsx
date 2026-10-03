@@ -4,7 +4,11 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View, type TextInput } from "react-native";
+import {
+  defaultChatComposerMessages,
+  type ChatComposerMessages,
+} from "@opengeni/react/composer-messages";
 import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
@@ -32,7 +36,7 @@ export interface NativeSessionScreenProps extends Omit<
     | Partial<
         Pick<
           SessionComposerProps,
-          "renderLeading" | "options" | "header" | "placeholder" | "onAttach"
+          "renderLeading" | "options" | "header" | "placeholder" | "onAttach" | "messages"
         >
       >
     | undefined;
@@ -60,6 +64,7 @@ export function NativeSessionScreen({
 }: NativeSessionScreenProps) {
   const theme = useNativeTimelineTheme();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
+  const composerInput = useRef<TextInput>(null);
   const items = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
@@ -151,6 +156,16 @@ export function NativeSessionScreen({
         placeholder={composerSlots?.placeholder}
         bottomInset={bottomInset}
         keyboardBottomOffset={keyboardBottomOffset}
+        inputRef={composerInput}
+        messages={composerSlots?.messages}
+        below={
+          composer.draftConflict ? (
+            <DraftConflictStrip
+              messages={composerSlots?.messages}
+              onResolve={(choice) => void composer.resolveDraftConflict(choice)}
+            />
+          ) : null
+        }
         header={
           <>
             {composerSlots?.header}
@@ -159,7 +174,11 @@ export function NativeSessionScreen({
         }
         above={
           <>
-            <QueueDock queue={queue} />
+            <QueueDock
+              queue={queue}
+              composer={composer}
+              onComposerFocus={() => composerInput.current?.focus()}
+            />
             {approvals.length > 0 && status === "requires_action" ? (
               <ApprovalStrip
                 approvals={approvals}
@@ -303,6 +322,57 @@ function AttachmentChips({
           </View>
         );
       })}
+    </View>
+  );
+}
+
+/** The web composer's draft-conflict line: keep this device's draft or take the other. */
+function DraftConflictStrip(props: {
+  messages?: Partial<ChatComposerMessages> | undefined;
+  onResolve: (choice: "keep_mine" | "use_remote") => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const text = { ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] };
+  return (
+    <View
+      accessibilityRole="alert"
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: 4,
+        paddingTop: 6,
+      }}
+    >
+      <Text style={{ ...text, flexGrow: 1, flexShrink: 1, flexBasis: 180 }}>
+        {messages.draftConflict}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        hitSlop={10}
+        onPress={() => props.onResolve("use_remote")}
+      >
+        <Text style={{ ...text, textDecorationLine: "underline" }}>{messages.useOtherDraft}</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        hitSlop={10}
+        onPress={() => props.onResolve("keep_mine")}
+      >
+        <Text
+          style={{
+            ...text,
+            ...fontStyle(theme, 500),
+            color: c["status-failed"],
+            textDecorationLine: "underline",
+          }}
+        >
+          {messages.keepMine}
+        </Text>
+      </Pressable>
     </View>
   );
 }

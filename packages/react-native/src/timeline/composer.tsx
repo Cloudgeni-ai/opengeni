@@ -1,4 +1,8 @@
-import { useState, type ReactNode } from "react";
+import {
+  defaultChatComposerMessages,
+  type ChatComposerMessages,
+} from "@opengeni/react/composer-messages";
+import { useState, type ReactNode, type Ref } from "react";
 import { Platform, Pressable, Text, TextInput, View } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { IconButton } from "./controls";
@@ -42,6 +46,12 @@ export interface SessionComposerProps {
   inset?: number | undefined;
   /** Lift above the keyboard (bottom-docked composer). Off for an inline card. */
   liftWithKeyboard?: boolean | undefined;
+  /** Rendered under the card (draft conflict, composer notices). */
+  below?: ReactNode;
+  /** The message field, for hosts that focus it (queue Edit, replies). */
+  inputRef?: Ref<TextInput> | undefined;
+  /** The shared composer catalog; hosts translate by overriding entries. */
+  messages?: Partial<ChatComposerMessages> | undefined;
 }
 
 export function SessionComposer(props: SessionComposerProps) {
@@ -61,6 +71,7 @@ export function SessionComposer(props: SessionComposerProps) {
   });
   // Web shows the workstream control whenever the host can pause or resume.
   const showPause = Boolean(props.paused ? props.onResume : props.onPause);
+  const messages = { ...defaultChatComposerMessages, ...props.messages };
   return (
     <Animated.View
       style={[{ paddingHorizontal: props.inset ?? 16, paddingTop: 4, backgroundColor: c.bg }, lift]}
@@ -82,14 +93,12 @@ export function SessionComposer(props: SessionComposerProps) {
       >
         {props.header}
         <TextInput
-          accessibilityLabel="Message the agent"
+          ref={props.inputRef}
+          accessibilityLabel={messages.inputLabel}
           value={props.value}
           onChangeText={props.onChangeText}
           placeholder={
-            props.placeholder ??
-            (props.paused
-              ? "Message the agent — it will wait in the queue…"
-              : "Send a follow-up...")
+            props.placeholder ?? (props.paused ? messages.pausedPlaceholder : "Send a follow-up...")
           }
           placeholderTextColor={c["fg-subtle"]}
           multiline
@@ -136,7 +145,9 @@ export function SessionComposer(props: SessionComposerProps) {
             <IconButton
               icon={props.paused ? "play" : "pause"}
               tone="secondary"
-              accessibilityLabel={props.paused ? "Resume this workstream" : "Pause this workstream"}
+              accessibilityLabel={
+                props.paused ? messages.resumeThisWorkstream : messages.pauseAriaLabel
+              }
               onPress={props.paused ? props.onResume : props.onPause}
               busy={props.pauseBusy}
             />
@@ -144,13 +155,14 @@ export function SessionComposer(props: SessionComposerProps) {
           <IconButton
             icon="arrow-up"
             tone="primary"
-            accessibilityLabel="Send message"
+            accessibilityLabel={messages.sendMessageAriaLabel}
             onPress={props.onSend}
             disabled={!props.canSend}
             busy={props.sending}
           />
         </View>
       </View>
+      {props.below}
     </Animated.View>
   );
 }

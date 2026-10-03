@@ -6,6 +6,8 @@
 import type { SessionQueueSnapshot, SessionTurn } from "@opengeni/sdk";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./components/queue-item-content";
 
+export { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent };
+
 export const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
 export const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
 const QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS = 32;
