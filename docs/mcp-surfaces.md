@@ -49,7 +49,14 @@ workspace, or selected ones). The connection then acts as that person:
   `members:manage` for people and invitations), and the database still checks
   the person's own role. Same-origin checks don't apply: no browser credentials
   ride along.
-- Read only connections are refused any change before it runs.
+- Read only connections are refused any change before it runs. Requests that
+  only read but are sent as POST (knowledge and document search, reading a
+  session file, a git diff, previews; `READ_ONLY_POST_ACTIONS` in
+  `apps/api/src/organization-mcp.ts`) still run.
+- The access setting is literal, like an explicit organization key: in Custom,
+  `workspace:admin` is one permission, never a wildcard for the ones left out.
+  The person's own role still expands as usual, so Full access reaches
+  everything the person can do.
 - Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
   steps, and integration OAuth starts) and actions outside the connected
   organization (creating another organization, accepting an invitation) stay

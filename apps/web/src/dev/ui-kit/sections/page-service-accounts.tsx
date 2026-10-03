@@ -80,6 +80,7 @@ function fakeApi(initial: OrganizationServiceAccount[]): ServiceAccountsApi {
   let accounts = [...initial];
   return {
     list: async () => accounts,
+    get: async (id) => accounts.find((each) => each.id === id)!,
     create: async (request) => {
       const created = {
         ...ACCOUNTS[1]!,

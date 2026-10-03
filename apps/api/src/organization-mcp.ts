@@ -43,6 +43,23 @@ export type OrganizationMcpCaller =
     }
   | { kind: "key"; authorization: string; accessKey: string | null };
 
+/**
+ * Requests that only read but are sent as POST (a search query or a file path
+ * in the body). Read only connections may run them; each route still checks
+ * its own read permission.
+ */
+export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
+  "/v1/workspaces/:workspaceId/knowledge/search",
+  "/v1/workspaces/:workspaceId/knowledge/entries/search",
+  "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
+  "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
+  "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
+  "/v1/workspaces/:workspaceId/integrations/preview",
+  "/v1/workspaces/:workspaceId/plugins/preview",
+  "/v1/workspaces/:workspaceId/skills/preview",
+  "/v1/organizations/:organizationId/external-identities/lookup",
+]);
+
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const STREAM_READ_MS = 2_000;
 
@@ -228,6 +245,7 @@ async function callAction(
   if (
     context.caller.kind === "person" &&
     !reads &&
+    !READ_ONLY_POST_ACTIONS.has(entry.path) &&
     isReadOnlyPermissionSet(context.caller.access.permissions)
   ) {
     return failure("This connection is read only, so it can't change anything.");
