@@ -219,7 +219,10 @@ function webRules(
         const disc = 5.5;
         return (
           <View key={node.key} style={{ flexDirection: "row", marginBottom: 4 }}>
-            <View accessible={false} style={{ width: 20, height: line, alignItems: "center", justifyContent: "center" }}>
+            <View
+              accessible={false}
+              style={{ width: 20, height: line, alignItems: "center", justifyContent: "center" }}
+            >
               <View
                 style={{
                   width: disc,

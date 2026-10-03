@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
+import { OpenGeniClient, type ClientModel, type Workspace } from "@opengeni/sdk";
 import {
   createHydratedPersistenceAdapter,
   type OpenGeniReactNativeAdapters,
@@ -28,6 +28,8 @@ interface AccountState {
   client: OpenGeniClient;
   adapters: OpenGeniReactNativeAdapters;
   workspaces: Workspace[];
+  /** The deployment's client model catalog (labels for the composer pill). */
+  models: ClientModel[];
   workspaceId: string | null;
   setWorkspaceId(id: string): void;
   error: Error | null;
@@ -68,13 +70,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [account.id],
   );
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [models, setModels] = useState<ClientModel[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const next = await client.listWorkspaces();
+      const [next, config] = await Promise.all([
+        client.listWorkspaces(),
+        client.getClientConfig().catch(() => null),
+      ]);
       setWorkspaces(next);
+      if (config) setModels(config.models);
       setWorkspaceId((current) => current ?? next[0]?.id ?? null);
       setError(null);
     } catch (caught) {
@@ -87,8 +94,18 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   }, [reload]);
 
   const value = useMemo<AccountState>(
-    () => ({ account, client, adapters, workspaces, workspaceId, setWorkspaceId, error, reload }),
-    [account, client, adapters, workspaces, workspaceId, error, reload],
+    () => ({
+      account,
+      client,
+      adapters,
+      workspaces,
+      models,
+      workspaceId,
+      setWorkspaceId,
+      error,
+      reload,
+    }),
+    [account, client, adapters, workspaces, models, workspaceId, error, reload],
   );
   return <AccountContext.Provider value={value}>{children}</AccountContext.Provider>;
 }

@@ -1,3 +1,4 @@
+import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
@@ -16,7 +17,7 @@ const renderMarkdown = createWebMarkdownRenderer({ onCopy: (text) => void copyTe
 
 export default function SessionScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { client, workspaceId } = useAccount();
+  const { client, models, workspaceId } = useAccount();
   if (!workspaceId || !id) {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
@@ -26,13 +27,14 @@ export default function SessionScreen() {
   }
   return (
     <AppThemeProvider>
-      <LiveSession client={client} sessionId={id} workspaceId={workspaceId} />
+      <LiveSession client={client} models={models} sessionId={id} workspaceId={workspaceId} />
     </AppThemeProvider>
   );
 }
 
 function LiveSession(props: {
   client: ReturnType<typeof useAccount>["client"];
+  models: ReturnType<typeof useAccount>["models"];
   sessionId: string;
   workspaceId: string;
 }) {
@@ -44,11 +46,10 @@ function LiveSession(props: {
     workspaceId: props.workspaceId,
   });
   const session = controller.session.session;
-  const model = typeof session?.metadata?.model === "string" ? session.metadata.model : null;
-  const effort =
-    typeof session?.metadata?.reasoningEffort === "string"
-      ? session.metadata.reasoningEffort
-      : null;
+  // The web composer's phone-width pill: compact model name, effort when it is a choice.
+  const pill = session?.model
+    ? compactModelPill(props.models, session.model, session.reasoningEffort)
+    : null;
   return (
     <>
       <Stack.Screen
@@ -66,8 +67,8 @@ function LiveSession(props: {
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
         composer={{
-          options: model ? (
-            <ComposerPill label={`${model.split("/").pop()}${effort ? ` · ${effort}` : ""}`} />
+          options: pill ? (
+            <ComposerPill label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name} />
           ) : null,
         }}
       />

@@ -26,9 +26,9 @@ import { cn } from "../lib/cn";
 import { MENU_CHEVRON_CLASS } from "../lib/menu-styles";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
-  effortOptionsForModel,
   findPickerRow,
   labelReasoningEffort,
+  modelOffersEffortChoice,
   projectClientModelRows,
   scopedBillingClassLabel,
   type PickerBillingClass,
@@ -560,10 +560,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             ? messages.connectTitle
             : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}
         </span>
-        {selected &&
-        !needsModel &&
-        effortOptionsForModel(selected.catalog).length > 1 &&
-        selected.catalog.capabilities?.reasoning.runnable !== false ? (
+        {selected && !needsModel && modelOffersEffortChoice(selected.catalog) ? (
           <span
             className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
             title={labelReasoningEffort(props.effort)}

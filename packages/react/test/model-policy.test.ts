@@ -5,6 +5,7 @@ import {
   advancedSourceSummary,
   billingClassForModel,
   coerceReasoningEffortForModel,
+  compactModelPill,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
@@ -407,6 +408,21 @@ describe("model-policy", () => {
     expect(effortOptionsForModel(model)).toEqual(["low", "high", "max"]);
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
+    // The composer pill: compact name, effort only when effort is a choice.
+    expect(compactModelPill([{ ...model, shortLabel: "5.6 Sol" }], model.id, "high")).toEqual({
+      name: "5.6 Sol",
+      effort: "High",
+    });
+    expect(compactModelPill([model], model.id, "low")).toEqual({ name: "Sol", effort: "Low" });
+    const single = {
+      ...model,
+      capabilities: {
+        ...model.capabilities!,
+        reasoning: { ...model.capabilities!.reasoning, efforts: ["low" as const] },
+      },
+    };
+    expect(compactModelPill([single], model.id, "low")).toEqual({ name: "Sol", effort: null });
+    expect(compactModelPill([], "codex/gpt-6-luna", "low").effort).toBeNull();
   });
 
   test("marks blocked models non-selectable in picker rows", () => {

@@ -115,6 +115,30 @@ export function coerceReasoningEffortForModel(
   return defaultEffortForModel(model);
 }
 
+/** Whether the composer offers (and therefore labels) a reasoning-effort choice. */
+export function modelOffersEffortChoice(model: ClientModel): boolean {
+  return (
+    effortOptionsForModel(model).length > 1 && model.capabilities?.reasoning.runnable !== false
+  );
+}
+
+/**
+ * The composer model pill at phone width: the catalog's compact name (falling
+ * back to the display name) and the effort label when effort is a choice.
+ */
+export function compactModelPill(
+  models: readonly ClientModel[],
+  modelId: string,
+  effort: ReasoningEffort | null | undefined,
+): { name: string; effort: string | null } {
+  const row = findPickerRow(projectClientModelRows([...models]), modelId);
+  return {
+    name: row?.shortLabel ?? row?.label ?? modelDisplayName(modelId),
+    effort:
+      row && effort && modelOffersEffortChoice(row.catalog) ? labelReasoningEffort(effort) : null,
+  };
+}
+
 export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[] {
   const modes = model.capabilities?.latencyModes ?? [];
   return modes.filter((mode) => mode.runnable).map((mode) => mode.id);
