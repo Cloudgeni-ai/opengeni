@@ -1640,6 +1640,19 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- The model route switch setter is operator-only (migration owner).
+    IF to_regprocedure(
+      format('%I.set_model_route(text,text,text,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_model_route(text, text, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_model_route(text, text, text, text) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     -- The new-account sign-up switch setter is operator-only (migration owner).
     IF to_regprocedure(
       format('%I.set_managed_auth_new_signups_enabled(boolean,text,text)', ${literal(schema)})
@@ -2169,6 +2182,13 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.verified_signup_trial_switch_revisions TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.model_route_switch_revisions') IS NOT NULL THEN
+      -- Read-only so catalog resolution can route new turns. Only the owner-only
+      -- audited setter appends revisions; runtime identities and PUBLIC never write them.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.model_route_switch_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.model_route_switch_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.model_route_switch_revisions TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.managed_auth_new_signups_switch_revisions') IS NOT NULL THEN
       -- Read-only so the API can decide each sign-up. Only the owner-only

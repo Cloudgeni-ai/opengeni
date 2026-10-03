@@ -13,6 +13,7 @@ import {
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
+  listSessionTurnExecutionProviderIds,
   listTurnOpenSuffixToolCalls,
   type Database,
 } from "@opengeni/db";
@@ -25,16 +26,25 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 
-/** Project only artifacts explicitly rejected by the provider out of its next view. */
+/**
+ * Project artifacts the target provider cannot use out of its next view: those
+ * the provider explicitly rejected, and those another provider minted (exact
+ * row ids from `foreignArtifactRowIds`). Durable rows are never changed.
+ */
 export function projectRejectedProviderArtifacts(
   rows: ReadonlyArray<{
+    id?: string;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt?: Date | null;
   }>,
+  foreignArtifactRowIds: ReadonlySet<string> = new Set(),
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
-    if (!row.providerArtifactInvalidatedAt) {
+    if (
+      !row.providerArtifactInvalidatedAt &&
+      !(row.id !== undefined && foreignArtifactRowIds.has(row.id))
+    ) {
       out.push(row.item);
       continue;
     }
@@ -49,6 +59,50 @@ export function projectRejectedProviderArtifacts(
     out.push(row.item);
   }
   return out;
+}
+
+/**
+ * Opaque reasoning (`encrypted_content`) is bound to the provider organization
+ * that minted it; another provider rejects the whole request with HTTP 400.
+ * Select the exact active rows whose producing turn was accepted on a different
+ * provider than `currentProviderId`. Rows of turns without a frozen policy, and
+ * rows without a turn, keep today's behavior. Codex callers pass no provider:
+ * its transport owns the exact rejection-and-invalidation recovery instead.
+ */
+export async function foreignProviderArtifactRowIds(
+  db: Database,
+  scope: { workspaceId: string; sessionId: string },
+  rows: ReadonlyArray<{
+    id: string;
+    item: Record<string, unknown>;
+    providerArtifactInvalidatedAt?: Date | null;
+    turnId?: string | null;
+  }>,
+  currentProviderId: string | undefined,
+  loadTurnProviderIds: typeof listSessionTurnExecutionProviderIds = listSessionTurnExecutionProviderIds,
+): Promise<Set<string>> {
+  if (!currentProviderId) return new Set();
+  const candidates = rows.filter(
+    (row): row is typeof row & { turnId: string } =>
+      typeof row.turnId === "string" &&
+      !row.providerArtifactInvalidatedAt &&
+      hasOpaqueProviderArtifact(row.item),
+  );
+  if (candidates.length === 0) return new Set();
+  const providers = await loadTurnProviderIds(
+    db,
+    scope.workspaceId,
+    scope.sessionId,
+    candidates.map((row) => row.turnId),
+  );
+  return new Set(
+    candidates
+      .filter((row) => {
+        const producer = providers.get(row.turnId);
+        return producer !== undefined && producer !== currentProviderId;
+      })
+      .map((row) => row.id),
+  );
 }
 
 /** Build the attempt-local RunState view after an explicit provider rejection. */
@@ -83,6 +137,14 @@ export type TurnInputOptions = {
   mcpAvailabilityNote?: string;
   knowledgeSourcePreparationNote?: string;
   providerApi: HistoryProviderApi;
+  /**
+   * Provider that serves this turn. When set, opaque artifacts minted by a
+   * different provider are left out of this request's view (see
+   * foreignProviderArtifactRowIds). Omitted for Codex, whose transport owns
+   * exact rejection recovery.
+   */
+  opaqueArtifactProviderId?: string;
+  loadTurnProviderIds?: typeof listSessionTurnExecutionProviderIds;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -643,7 +705,10 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
+  preparationOptions: Pick<
+    TurnInputOptions,
+    "onPreparationPhase" | "opaqueArtifactProviderId" | "loadTurnProviderIds"
+  > = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [stored, envelope] = await Promise.all([
@@ -654,11 +719,18 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
+  const foreignArtifactRowIds = await foreignProviderArtifactRowIds(
+    db,
+    { workspaceId: trigger.workspaceId, sessionId: trigger.sessionId },
+    stored,
+    preparationOptions.opaqueArtifactProviderId,
+    preparationOptions.loadTurnProviderIds,
+  );
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",
     async () => {
-      const active = projectRejectedProviderArtifacts(stored);
+      const active = projectRejectedProviderArtifacts(stored, foreignArtifactRowIds);
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );
@@ -716,6 +788,7 @@ async function messageInput(
           .filter(
             (row) =>
               row.providerArtifactInvalidatedAt === null &&
+              !foreignArtifactRowIds.has(row.id) &&
               hasOpaqueProviderArtifact(row.item) &&
               preparedItems.has(row.item),
           )

@@ -9,6 +9,7 @@ import {
   configuredGatewayWorkspaceProductModelIds,
   configuredGatewayOrganizationProductModelIds,
   configuredModels,
+  configuredModelFallbackRoutes,
   isModelAvailableForNewSelection,
   configuredModelNotes,
   configuredOpenRouterWorkspaceProductModelIds,
@@ -16,6 +17,7 @@ import {
   configuredProviders,
   validateModelCatalogSettings,
   withCodexCatalogProvider,
+  withModelFallbackRouteSelection,
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
@@ -49,6 +51,7 @@ import {
   listWorkspaceOpenRouterCustomModels,
   listOrganizationModelProviderCustomModelsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
+  readModelRouteSwitchStates,
   type Database,
 } from "@opengeni/db";
 
@@ -190,8 +193,20 @@ export async function resolveCatalogSettings(
   if (!row) {
     throw new Error("database model catalog source is configured but the singleton row is missing");
   }
-  const settings = applyModelCatalogDocument(envSettings, row.document);
-  validateModelCatalogSettings(settings);
+  const documentSettings = applyModelCatalogDocument(envSettings, row.document);
+  validateModelCatalogSettings(documentSettings);
+  // The catalog declares reviewed fallback routes; the audited route switch
+  // selects which products new turns send to them. Read it only when a route
+  // is declared, so catalogs without one never depend on the switch table.
+  const settings =
+    configuredModelFallbackRoutes(documentSettings).length > 0
+      ? withModelFallbackRouteSelection(
+          documentSettings,
+          (await readModelRouteSwitchStates(db))
+            .filter((state) => state.route === "fallback")
+            .map((state) => state.productModelId),
+        )
+      : documentSettings;
   return {
     settings,
     source: "database",

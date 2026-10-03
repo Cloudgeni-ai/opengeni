@@ -21,6 +21,7 @@ import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  settingsForAcceptedModelRoute,
   settingsForAcceptedSubscriptionTurn,
   resolveTurnExecutionPolicyV1,
   type Settings,
@@ -331,6 +332,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
+  // The operator route switch only steers new turns. An accepted turn keeps the
+  // credits route frozen in its policy (Azure primary or Gateway fallback), so a
+  // flip never turns its next attempt into a definition-drift failure.
+  capabilitySettings = settingsForAcceptedModelRoute(capabilitySettings, installedPolicy.policy);
   capabilitySettings = settingsForAcceptedSubscriptionTurn(
     capabilitySettings,
     installedPolicy.policy,

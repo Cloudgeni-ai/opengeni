@@ -719,6 +719,7 @@ export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
+export * from "./model-route-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -43580,6 +43581,7 @@ export async function getActiveSessionHistoryItemsPaged(
     position: number;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
+    turnId: string | null;
   }>
 > {
   if (
@@ -43724,6 +43726,7 @@ export async function getActiveSessionHistoryItemsPaged(
         position: number;
         item: Record<string, unknown>;
         providerArtifactInvalidatedAt: Date | null;
+        turnId: string | null;
       }> = [];
       let afterPosition: number | null = null;
       for (;;) {
@@ -43733,6 +43736,7 @@ export async function getActiveSessionHistoryItemsPaged(
           item: Record<string, unknown>;
           itemCodecVersion: number | null;
           providerArtifactInvalidatedAt: Date | null;
+          turnId: string | null;
         }> = await scopedDb
           .select({
             id: schema.sessionHistoryItems.id,
@@ -43740,6 +43744,7 @@ export async function getActiveSessionHistoryItemsPaged(
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
             providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
+            turnId: schema.sessionHistoryItems.turnId,
           })
           .from(schema.sessionHistoryItems)
           .where(
@@ -43770,6 +43775,46 @@ export async function getActiveSessionHistoryItemsPaged(
     },
     { isolationLevel: "repeatable read" },
   );
+}
+
+/**
+ * The provider each listed turn of one session was accepted on, from its frozen
+ * execution policy. Turns without a policy (legacy) are omitted. Model-input
+ * preparation uses this to keep provider-minted opaque artifacts away from a
+ * different provider without rewriting durable history.
+ */
+export async function listSessionTurnExecutionProviderIds(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnIds: readonly string[],
+): Promise<Map<string, string>> {
+  const unique = [...new Set(turnIds)];
+  if (unique.length === 0) return new Map();
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.sessionTurns.id,
+        providerId: sql<
+          string | null
+        >`${schema.sessionTurns.metadata} -> 'turnExecutionPolicyV1' ->> 'providerId'`,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          inArray(schema.sessionTurns.id, unique),
+        ),
+      );
+    return new Map(
+      rows.flatMap((row) =>
+        typeof row.providerId === "string" && row.providerId.length > 0
+          ? [[row.id, row.providerId] as const]
+          : [],
+      ),
+    );
+  });
 }
 
 /** Bounded finalized voice turns used only to resume a later realtime call. */

@@ -461,6 +461,12 @@ export async function runTurnStreamAttempt(
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         providerApi,
+        // Opaque reasoning minted by another provider (an earlier turn on the
+        // other credits route, or another model) cannot be decrypted here. Codex
+        // keeps its exact rejection-and-invalidation recovery instead.
+        ...(resolvedModel?.provider.kind === "codex-subscription"
+          ? {}
+          : { opaqueArtifactProviderId: turnExecutionPolicy.providerId }),
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,

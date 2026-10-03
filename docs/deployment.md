@@ -222,6 +222,83 @@ The control worker's sandbox-lease reaper pass publishes
 runtime switch. It does not see the API-only ceiling; `/v1/config/client` is
 the combined answer.
 
+## Credits model route switch (0597)
+
+`0597_model_route_switch.sql` is a rolling migration with the same shape as the
+0521 and 0596 switches. It needs no drain and no
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then run the normal
+`db:provision-roles`. It seeds no revision, and catalog resolution reads it only
+while the database model catalog declares a `fallbackRoutes` entry, so neither
+the migration nor the release changes inference on its own.
+
+It is the capacity escape hatch for credits models: an operator moves one
+deployment credits product (for example `gpt-6-luna`) from its primary route
+(Azure) to the reviewed fallback route declared in the catalog (the managed
+Vercel AI Gateway, pinned to one endpoint provider). Users keep the same model
+id, label, aliases, price schedule and credits billing. See
+[model providers](model-providers.md#credits-fallback-routes) for what the
+fallback route keeps and drops.
+
+Two inputs decide a product's route:
+
+- The catalog declares the route (reviewed, CAS-versioned, preflighted against
+  the runtime environment by the Update Model Catalog workflow). Declaring it
+  changes no model definition. The preflight fails if the route could not run,
+  for example without `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`.
+- The newest row for that product in the append-only
+  `opengeni_private.model_route_switch_revisions` table selects it. Catalog
+  resolution reads it for every new turn, so a flip applies to the next accepted
+  turn on every API and worker replica, with no deploy or restart. No row, or a
+  newest row of `primary`, means the primary route.
+
+To move a product, connect as the migration owner (the role in
+`OPENGENI_MIGRATIONS_DATABASE_URL`) and call the audited setter:
+
+```sql
+select set_model_route(
+  'gpt-6-luna',                                                   -- catalog product id
+  'fallback',                                                     -- or 'primary'
+  'github:<owner>/<repo>:actor:<actor>:run:<run id>:attempt:<n>', -- operator identity, 1-200 characters
+  'Azure Luna quota exhausted during launch'                      -- reason, 6-1000 characters
+);
+```
+
+The setter returns the new revision as JSON (`revision`, `productModelId`,
+`route`, `previousRoute`, `changed`, `operator`, `reason`, `databaseRole`,
+`changedAt`); every call appends one revision, even without a change, and
+records the calling database login. Revisions cannot be updated, deleted, or
+truncated. Run it from the same audited operator path as the other switches,
+never from an application pod. Read the current routes with:
+
+```sql
+select distinct on (product_model_id)
+       product_model_id, route, revision, operator, reason, changed_at
+from opengeni_private.model_route_switch_revisions
+order by product_model_id, revision desc;
+```
+
+What the switch guarantees:
+
+- Only new turns move. An accepted turn keeps the route frozen in its execution
+  policy through approval resume, capacity waits, retries and worker recovery,
+  so a flip never fails in-flight work with definition drift. Both routes stay
+  executable while any accepted turn still names either one.
+- A revision for a product without a declared route is inert. Removing a
+  declared route returns its product to the primary route, but like any removed
+  definition it fails accepted turns still frozen on that route: switch the
+  product back to `primary` and let those turns finish before removing it.
+- History is never rewritten. Opaque reasoning that the other provider minted is
+  left out of each request's view (provider-bound `encrypted_content` cannot be
+  decrypted elsewhere); durable rows keep it.
+- Credits debits use the Gateway-reported cost of each call plus the product's
+  configured margin, and a call reported from any provider other than the
+  pinned one is refused before usage is recorded.
+- The setter is `SECURITY DEFINER` and callable only by its owner. PUBLIC and
+  every runtime role lack `EXECUTE`. The migration strips every non-owner grant
+  on the table and the setter at creation, `db:provision-roles` revokes any later
+  stray grant, and runtime posture fails readiness if a runtime role can call the
+  setter or write the table. Runtime roles get `SELECT` only.
+
 ## Meaningful child attention (0503)
 
 `0585_session_attention_cursor.sql` persists the newest meaningful attention

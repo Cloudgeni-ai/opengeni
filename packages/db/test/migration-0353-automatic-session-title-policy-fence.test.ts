@@ -1102,6 +1102,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "activate_session_tenancy_from_additional_organization(uuid)",
       "set_verified_signup_trial_credits_enabled(boolean, text, text)",
       "set_managed_auth_new_signups_enabled(boolean, text, text)",
+      "set_model_route(text, text, text, text)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(

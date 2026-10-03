@@ -751,6 +751,12 @@ const SettingsSchema = z.object({
   resolvedGatewayModelsJson: z.string().optional(),
   resolvedOpenRouterModelsJson: z.string().optional(),
   resolvedCodexModelsJson: z.string().optional(),
+  // Reviewed credits fallback routes declared by the catalog document, and the
+  // product ids an operator has currently switched onto them (resolved from the
+  // audited model route switch at catalog resolution). Neither has an env
+  // binding: the catalog owns declarations, the switch owns selection.
+  resolvedModelFallbackRoutesJson: z.string().optional(),
+  activeModelFallbackRoutesJson: z.string().optional(),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
   // ("responses" | "chat") and the models it exposes. The models a client may
@@ -2454,6 +2460,29 @@ export const OpenRouterCatalogModel = z
   .strict();
 export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
 
+/**
+ * A reviewed alternate route for one deployment-funded credits product. When
+ * an operator switches the product onto it (the audited model route switch),
+ * new turns keep the same product id, label, aliases, pricing and credits
+ * billing but are served by the managed Vercel AI Gateway, pinned to exactly
+ * one endpoint provider. One provider keeps provider-minted opaque reasoning
+ * valid for every call of a turn; a Gateway fallback list could move calls
+ * between organizations. Accepted turns keep the route frozen in their policy.
+ */
+export const ModelFallbackRoute = z
+  .object({
+    productId: z.string().min(1),
+    via: z.literal(OPENGENI_GATEWAY_PROVIDER_ID),
+    upstreamModelId: z.string().regex(/^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    providers: z.tuple([z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)]),
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    pricing: z.never().optional(),
+    apiKey: z.never().optional(),
+  })
+  .strict();
+export type ModelFallbackRoute = z.infer<typeof ModelFallbackRoute>;
+
 const DeploymentRegistryBaseUrl = z
   .string()
   .url()
@@ -2535,6 +2564,7 @@ export const ModelCatalogDocument = z
     codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
+    fallbackRoutes: z.array(ModelFallbackRoute).optional(),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
     billing: z.never().optional(),
     enabled: z.never().optional(),
@@ -2624,6 +2654,40 @@ export const ModelCatalogDocument = z
         "upstreamModelId",
       ]),
     );
+    const fallbackPrimaryIds = new Set([
+      ...document.builtInModels,
+      ...document.registryProviders.flatMap((provider) => provider.models.map((model) => model.id)),
+    ]);
+    const fallbackProductIds = new Set<string>();
+    const fallbackUpstreamIds = new Set<string>();
+    document.fallbackRoutes?.forEach((route, index) => {
+      if (!fallbackPrimaryIds.has(route.productId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallbackRoutes", index, "productId"],
+          message: "a fallback route must name a built-in or registry deployment product",
+        });
+      }
+      if (fallbackProductIds.has(route.productId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallbackRoutes", index, "productId"],
+          message: `duplicate fallback route for ${route.productId}`,
+        });
+      }
+      fallbackProductIds.add(route.productId);
+      if (
+        gatewayUpstreamIds.has(route.upstreamModelId) ||
+        fallbackUpstreamIds.has(route.upstreamModelId)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallbackRoutes", index, "upstreamModelId"],
+          message: `Gateway upstream model id ${route.upstreamModelId} is already routed`,
+        });
+      }
+      fallbackUpstreamIds.add(route.upstreamModelId);
+    });
     if (document.defaultModel && /[\u000A\u000D|]/u.test(document.defaultModel)) {
       context.addIssue({
         code: "custom",
@@ -2724,6 +2788,11 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
     resolvedCodexModelsJson:
       document.codexModels === undefined ? undefined : JSON.stringify(document.codexModels),
+    resolvedModelFallbackRoutesJson:
+      document.fallbackRoutes === undefined ? undefined : JSON.stringify(document.fallbackRoutes),
+    // Selection is never part of the reviewed document. Catalog resolution
+    // applies the audited route switch after this pure overlay.
+    activeModelFallbackRoutesJson: undefined,
     modelNotesJson: JSON.stringify(document.modelNotes),
   };
   return resolved;
@@ -2986,6 +3055,102 @@ function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalo
     return [...OPENGENI_OPENROUTER_MODELS];
   }
   return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
+}
+
+/** Fallback routes declared by the database catalog document (none in code mode). */
+export function configuredModelFallbackRoutes(
+  settings: Pick<Settings, "resolvedModelFallbackRoutesJson">,
+): ModelFallbackRoute[] {
+  if (settings.resolvedModelFallbackRoutesJson === undefined) return [];
+  return z.array(ModelFallbackRoute).parse(JSON.parse(settings.resolvedModelFallbackRoutesJson));
+}
+
+/** Declared products an operator has switched onto their fallback route. */
+export function activeModelFallbackRouteProductIds(
+  settings: Pick<Settings, "resolvedModelFallbackRoutesJson" | "activeModelFallbackRoutesJson">,
+): string[] {
+  if (settings.activeModelFallbackRoutesJson === undefined) return [];
+  const declared = new Set(configuredModelFallbackRoutes(settings).map((route) => route.productId));
+  return z
+    .array(z.string().min(1))
+    .parse(JSON.parse(settings.activeModelFallbackRoutesJson))
+    .filter((productId) => declared.has(productId));
+}
+
+function activeModelFallbackRoutes(settings: Settings): Map<string, ModelFallbackRoute> {
+  const active = new Set(activeModelFallbackRouteProductIds(settings));
+  return new Map(
+    configuredModelFallbackRoutes(settings)
+      .filter((route) => active.has(route.productId))
+      .map((route) => [route.productId, route] as const),
+  );
+}
+
+/**
+ * Apply an operator route selection to resolved catalog settings. Product ids
+ * without a declared fallback route are ignored, so a stale switch row can
+ * never invent a route; selection never changes product identity or pricing.
+ */
+export function withModelFallbackRouteSelection(
+  settings: Settings,
+  productIds: Iterable<string>,
+): Settings {
+  const requested = new Set(productIds);
+  const active = configuredModelFallbackRoutes(settings)
+    .map((route) => route.productId)
+    .filter((productId) => requested.has(productId))
+    .sort();
+  const activeJson = active.length === 0 ? undefined : JSON.stringify(active);
+  if (activeJson === settings.activeModelFallbackRoutesJson) return settings;
+  return { ...settings, activeModelFallbackRoutesJson: activeJson };
+}
+
+/**
+ * Called only with the durable policy installed for a claimed accepted attempt.
+ * The operator switch chooses the route for new turns; an accepted turn keeps
+ * the route frozen in its policy across resume, retry and worker recovery, so
+ * both declared routes stay executable while the switch moves.
+ */
+export function settingsForAcceptedModelRoute(
+  settings: Settings,
+  policy: Pick<TurnExecutionPolicyV1, "productModelId" | "providerId">,
+): Settings {
+  const route = configuredModelFallbackRoutes(settings).find(
+    (candidate) => candidate.productId === policy.productModelId,
+  );
+  if (!route) return settings;
+  const active = new Set(activeModelFallbackRouteProductIds(settings));
+  const frozenOnFallback = policy.providerId === route.via;
+  if (active.has(route.productId) === frozenOnFallback) return settings;
+  if (frozenOnFallback) active.add(route.productId);
+  else active.delete(route.productId);
+  return withModelFallbackRouteSelection(settings, active);
+}
+
+/**
+ * Capabilities of a product while it runs on its Gateway fallback route. The
+ * product keeps its reasoning vocabulary, modalities and limits; only features
+ * not reviewed on the Gateway wire are withdrawn: hosted tools, Responses
+ * WebSocket and separately billed latency modes.
+ */
+function fallbackRouteCapabilities(primary: ModelCapabilitiesV1): ModelCapabilitiesV1 {
+  const unreviewed = { upstream: "unknown" as const, runnable: false };
+  return normalizeCapabilities({
+    ...primary,
+    hostedTools: {
+      webSearch: unreviewed,
+      xSearch: unreviewed,
+      codeExecution: unreviewed,
+      imageGeneration: unreviewed,
+    },
+    transports: {
+      sse: { upstream: "supported", runnable: true },
+      responsesWebSocket: unreviewed,
+      realtimeAudio: { upstream: "unsupported", runnable: false },
+    },
+    promptCaching: { upstream: "supported", runnable: true, mode: "implicit" },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  });
 }
 
 export function configuredOpenRouterUpstreamModelIds(settings: Settings): string[] {
@@ -4553,7 +4718,11 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
       settings.claudeSubscriptionEnabled ||
       !(provider.api === "anthropic-messages" && provider.anthropic?.auth === "oauth"),
   );
-  if (settings.vercelAiGatewayApiKey && configuredGatewayCatalogModels(settings).length > 0) {
+  if (
+    settings.vercelAiGatewayApiKey &&
+    (configuredGatewayCatalogModels(settings).length > 0 ||
+      configuredModelFallbackRoutes(settings).length > 0)
+  ) {
     injected.push(
       gatewayRegistryProvider(settings, {
         kind: "vercel-gateway-managed",
@@ -5555,14 +5724,15 @@ function finalizeConfiguredModel(
   input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits" | "cost">,
 ): ConfiguredModel {
   const requestPolicy =
-    provider.kind === "vercel-gateway-managed" ||
+    input.requestPolicy ??
+    (provider.kind === "vercel-gateway-managed" ||
     provider.kind === "vercel-gateway-workspace" ||
     provider.kind === "vercel-gateway-organization"
       ? gatewayRequestPolicyForUpstreamModel(
           input.upstreamModelId,
           configuredGatewayCatalogModels(settings),
         )
-      : undefined;
+      : undefined);
   const modelWithoutVersion: Omit<ConfiguredModel, "definitionVersion"> = {
     schemaVersion: 1,
     ...input,
@@ -5751,6 +5921,54 @@ export function configuredModels(
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
         }),
       );
+    }
+  }
+  const fallbackRoutes = activeModelFallbackRoutes(settings);
+  if (fallbackRoutes.size > 0) {
+    const gatewayProvider = providerById.get(OPENGENI_GATEWAY_PROVIDER_ID);
+    if (!gatewayProvider || gatewayProvider.kind !== "vercel-gateway-managed") {
+      throw new Error(
+        "A model fallback route is active but the managed Vercel AI Gateway is not configured",
+      );
+    }
+    for (const [index, primary] of out.entries()) {
+      const route = fallbackRoutes.get(primary.id);
+      if (!route) continue;
+      if (
+        primary.credentialSource.kind !== "deployment" ||
+        primary.billing.upstreamPayer !== "deployment" ||
+        primary.billing.metering !== "opengeni_credits"
+      ) {
+        throw new Error(
+          `Model fallback route ${primary.id} must replace a deployment-funded credits product`,
+        );
+      }
+      const capabilities = fallbackRouteCapabilities(primary.capabilities);
+      const {
+        schemaVersion: _schemaVersion,
+        definitionVersion: _definitionVersion,
+        executionLimits: _executionLimits,
+        cost: _cost,
+        requestPolicy: _requestPolicy,
+        ...identity
+      } = primary;
+      // Same product identity, labels, aliases, limits and pricing schedule;
+      // only the serving route changes. Gateway-reported cost then debits the
+      // provider's actual price plus this product's configured margin.
+      out[index] = finalizeConfiguredModel(settings, gatewayProvider, {
+        ...identity,
+        providerId: gatewayProvider.id,
+        providerLabel: gatewayProvider.label,
+        api: "responses",
+        upstreamModelId: route.upstreamModelId,
+        deployment: { upstreamModelId: route.upstreamModelId, wireApi: "responses" },
+        credentialSource: gatewayProvider.credentialSource,
+        billing: gatewayProvider.billing,
+        capabilities,
+        requestPolicy: { gateway: { only: [...route.providers], caching: "auto" } },
+        reasoningEffort: capabilities.reasoning.runnable,
+        hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+      });
     }
   }
   assertUniqueModelIdentities(out);
@@ -8035,6 +8253,26 @@ export function validateModelCatalogSettings(
     throw new Error(
       `The default model ${settings.openaiModel} is not executable in the resolved model catalog`,
     );
+  }
+  // A declared fallback route must be executable before an operator can need
+  // it: resolve every declared route as if switched on, so a missing Gateway
+  // credential or a non-credits product fails the catalog preflight instead of
+  // the first turn after the switch.
+  const declaredFallbackRoutes = configuredModelFallbackRoutes(settings);
+  if (declaredFallbackRoutes.length > 0) {
+    const fallbackModels = configuredModels(
+      withModelFallbackRouteSelection(
+        settings,
+        declaredFallbackRoutes.map((route) => route.productId),
+      ),
+      source,
+    );
+    for (const route of declaredFallbackRoutes) {
+      const fallback = fallbackModels.find((model) => model.id === route.productId);
+      if (!fallback || fallback.providerId !== route.via) {
+        throw new Error(`Model fallback route ${route.productId} is not executable`);
+      }
+    }
   }
   // An operator-set credits default must name a credits-billed model in the
   // env catalog; a typo would otherwise fall back silently to the first

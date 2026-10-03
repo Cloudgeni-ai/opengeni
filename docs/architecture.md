@@ -391,6 +391,8 @@ both catalog projection and request shaping consume it.
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.
+Catalog `fallbackRoutes` plus the 0597 route switch move new credits turns to
+a Gateway route; claim re-pins accepted turns.
 Accepted execution-policy digests tolerate only provably additive latency-mode
 and input-modality declarations, retaining the frozen mode and request tier;
 provider identity and all other executable fields remain exact.

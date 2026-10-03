@@ -242,6 +242,7 @@ Choose an active deployment default before retiring its old entry.
   "registryProviders": [],
   "gatewayModels": [],
   "openrouterModels": [],
+  "fallbackRoutes": [],
   "modelNotes": {
     "gpt-6-sol": "Use for difficult implementation work."
   }
@@ -637,6 +638,68 @@ Custom slugs may be prepared while disconnected, become selectable only after
 the workspace Gateway connection is active and policy allows them, and are
 available to session, automation, scheduled-task, and goal-continuation policy
 resolution through the same workspace-scoped catalog overlay.
+
+## Credits fallback routes
+
+A deployment credits product can declare one reviewed alternate route in the
+database catalog. An operator then moves the product between its primary route
+and the fallback with the audited model route switch
+([deployment](deployment.md#credits-model-route-switch-0597)), without a deploy:
+
+```json
+{
+  "fallbackRoutes": [
+    {
+      "productId": "gpt-6-luna",
+      "via": "opengeni-gateway",
+      "upstreamModelId": "openai/gpt-6-luna",
+      "providers": ["openai"]
+    }
+  ]
+}
+```
+
+- `productId` names a built-in or registry deployment product billed with
+  OpenGeni credits. `via` is the managed Vercel AI Gateway; it requires
+  `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`. `providers` pins exactly one Gateway
+  endpoint provider and is sent as both `only` and `order`. One provider keeps
+  provider-minted opaque reasoning valid for every call of a turn; a list could
+  move calls between organizations. Credentials, billing and pricing fields are
+  rejected.
+- Declaring a route changes no definition. While a product is switched, its
+  definition keeps the product id, aliases, labels, execution limits and pricing
+  schedule, and swaps only the serving route: provider `opengeni-gateway`, the
+  declared upstream slug, the Responses wire, deployment credentials, and
+  `opengeni_credits` billing. Users see the same model; no session reports it
+  removed.
+- The turn execution policy freezes the route. New turns resolve the current
+  switch; accepted turns keep their route through resume, capacity waits,
+  retries and recovery (`settingsForAcceptedModelRoute`, applied at claim before
+  the policy is verified), so both routes stay executable during a flip.
+- Credits debit the Gateway-reported cost of each call plus the product's
+  configured margin; the static product schedule is only the fallback when that
+  metadata is absent. A call reported from an unpinned provider is refused.
+- Opaque reasoning (`encrypted_content`) is bound to the organization that
+  minted it. Every non-Codex request leaves out opaque artifacts from turns whose
+  frozen policy names a different provider, keeping their plaintext summaries;
+  durable rows are unchanged, and rows without a frozen policy keep today's
+  replay. Codex keeps its exact rejection-and-invalidation recovery instead.
+
+What the fallback keeps and drops relative to Azure Responses:
+
+| Feature                         | Fallback route (Gateway Responses, one provider)                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Reasoning across tool calls     | Kept within a route: `include: ["reasoning.encrypted_content"]` round-trips on the Responses wire.            |
+| Reasoning across the switch     | Dropped once per session: the other provider's opaque reasoning is left out; summaries remain.               |
+| Prompt caching                  | Automatic for OpenAI models; the provider-side cache starts cold after a switch.                             |
+| Context compaction              | Unchanged: credits sessions use portable compaction on whichever route serves the turn.                      |
+| Function tools, images, effort  | Kept; reasoning vocabulary and modalities are copied from the primary definition.                            |
+| Hosted tools (web search)       | Not runnable until reviewed on the Gateway wire.                                                              |
+| Latency modes                   | `standard` only; a session on `fast` must choose `standard` while switched.                                   |
+| Native tool search, hosted `apply_patch`, `text.verbosity` | Use the Gateway's generic dispatcher, function `apply_patch`, and the provider's default verbosity. |
+
+Workspace model policies that allow only specific providers see the fallback
+as provider `opengeni-gateway`.
 
 ## OpenRouter rails
 
