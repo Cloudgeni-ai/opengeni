@@ -987,12 +987,10 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
-  // Human take-control toggle: when ON (default) the negotiated DesktopStream
-  // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
-  // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
-  // deployment: the cell reports mode "read-only" and the client disables the
-  // "Take control" affordance. This gates the HUMAN viewer plane; agent
-  // interaction is authorized through managed ComputerSession tools.
+  // Human sandbox input policy. Canonical ComputerSession attachments reflect
+  // it and /actions enforces it independently of the client. The legacy
+  // DesktopStream adapter also reports read-only when disabled. Agent tools
+  // retain their separate session-control authority.
   sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive

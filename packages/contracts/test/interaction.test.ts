@@ -22,6 +22,7 @@ import {
   ComputerSessionCapabilities,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
+  ComputerSessionInputPosture,
   ComputerTargetListResponse,
   CreateNetworkRouteRequest,
   CreateSiteAuthConnectionRequest,
@@ -456,6 +457,55 @@ describe("interaction contracts", () => {
         ...attachment,
         stream: { ...attachment.stream, inputAllowed: "true" },
       }).success,
+    ).toBe(false);
+  });
+
+  test("preserves canonical attachment input posture and accepts older frame responses", () => {
+    const attachment = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+      stream: {
+        kind: "direct_websocket",
+        url: "wss://computer.example.test/frames",
+        protocols: ["opengeni.computer.v1", "opengeni.auth.fixture"],
+      },
+    };
+    for (const inputAllowed of [undefined, false, true]) {
+      const parsed = ComputerSessionAttachment.parse({
+        ...attachment,
+        ...(inputAllowed === undefined ? {} : { inputAllowed }),
+      });
+      expect(parsed.inputAllowed).toBe(inputAllowed);
+      expect(parsed.stream.kind).toBe("direct_websocket");
+    }
+    expect(
+      ComputerSessionAttachment.safeParse({ ...attachment, inputAllowed: "true" }).success,
+    ).toBe(false);
+  });
+
+  test("requires exact resource/controller and an explicit boolean input posture", () => {
+    const posture = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      inputAllowed: false,
+    };
+    expect(ComputerSessionInputPosture.parse(posture)).toEqual(posture);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, inputAllowed: undefined }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, inputAllowed: "true" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, controllerGeneration: "" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, computerSessionId: "other" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, controlToken: "unexpected" }).success,
     ).toBe(false);
   });
 

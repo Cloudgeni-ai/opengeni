@@ -43,6 +43,7 @@ import {
   useComputerFrameStream,
 } from "../hooks/use-computer-frame-stream";
 import { useComputerSession } from "../hooks/use-computer-session";
+import { useComputerInputPosture } from "../hooks/use-computer-input-posture";
 import { useComputerSessions } from "../hooks/use-computer-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
@@ -294,12 +295,52 @@ export function ComputerViewer({
       : null;
   const rfbStream =
     frames.attachment?.stream.kind === "direct_rfb" ? frames.attachment.stream : null;
+  const appTarget = computer.selectedTarget?.kind === "app";
+  const appInputPosture = useComputerInputPosture({
+    ...override,
+    computerSessionId: selection?.sessionId ?? null,
+    controllerGeneration: computer.session?.controller?.controllerGeneration ?? null,
+    enabled: enabled && controllerReady && appTarget,
+  });
+  const inputPostureRef = useRef({
+    sessionId: selection?.sessionId ?? null,
+    controllerGeneration: computer.session?.controller?.controllerGeneration ?? null,
+    denied: false,
+  });
+  const postureSessionId = selection?.sessionId ?? null;
+  const postureController = computer.session?.controller?.controllerGeneration ?? null;
+  if (
+    inputPostureRef.current.sessionId !== postureSessionId ||
+    inputPostureRef.current.controllerGeneration !== postureController
+  ) {
+    inputPostureRef.current = {
+      sessionId: postureSessionId,
+      controllerGeneration: postureController,
+      denied: false,
+    };
+  }
+  if (
+    frames.attachment?.computerSessionId === postureSessionId &&
+    frames.attachment.controllerGeneration === postureController
+  ) {
+    inputPostureRef.current.denied = frames.attachment.inputAllowed === false;
+  }
+  // Keep a known denial while a fresh attachment is pending or a semantic-only
+  // target has no stream. Only a fresh posture for this controller clears it.
+  const inputDenied = appTarget
+    ? appInputPosture.inputAllowed !== true
+    : inputPostureRef.current.denied;
+  const attachmentInputAllowed = frames.attachment !== null && !inputDenied;
+  const inputPosturePending = appTarget
+    ? appInputPosture.pending
+    : inputDenied && (frames.state === "attaching" || frames.state === "reconnecting");
   const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
   const controlUnavailable = computer.controlError !== null;
   const connectionState = controlUnavailable ? "error" : frames.state;
   // RFB has one combined input switch; partial native input stays view-only.
   const rfbInputEnabled =
     rfbStream?.inputAllowed === true &&
+    attachmentInputAllowed &&
     !machineLocked &&
     !controlUnavailable &&
     computer.session?.capabilities?.pointerInput === true &&
@@ -451,6 +492,7 @@ export function ComputerViewer({
   const perform = useCallback(
     async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
       if (computer.controlError) throw computer.controlError;
+      if (inputDenied) throw new Error("Desktop is view only. Refresh to check desktop controls.");
       let receipt;
       if (action.type === "pointer") {
         if (!frame) throw new Error("Desktop view is not ready for pointer input.");
@@ -462,12 +504,13 @@ export function ComputerViewer({
         throw new Error(receipt.error?.message ?? "Desktop input did not complete.");
       }
     },
-    [act, actFromFrame, computer.controlError],
+    [act, actFromFrame, computer.controlError, inputDenied],
   );
 
   const reconnect = () => {
     void refreshComputer();
-    frames.reconnect();
+    if (appTarget) appInputPosture.refresh();
+    else frames.reconnect();
   };
 
   const copyFromRfb = useCallback(
@@ -591,7 +634,7 @@ export function ComputerViewer({
         relevantSessionIds={currentIds}
         selectedSessionId={selection?.sessionId ?? null}
         creating={creating}
-        refreshing={registry.refreshing}
+        refreshing={registry.refreshing || inputPosturePending}
         interventionCounts={interventionCounts}
         targets={controllerReady ? computer.targets : []}
         selectedTargetId={computer.selectedTarget?.id ?? null}
@@ -609,7 +652,13 @@ export function ComputerViewer({
         }}
         onCreate={hideGenericCreate ? undefined : createComputer}
         onRefresh={() => {
-          if (connectionState === "error" && !generationLossSelected && !generationLossFrames) {
+          if (appTarget) {
+            appInputPosture.refresh();
+          } else if (
+            (connectionState === "error" || inputDenied) &&
+            !generationLossSelected &&
+            !generationLossFrames
+          ) {
             frames.reconnect();
           }
           void Promise.all([refreshRegistry(), refreshComputer()]);
@@ -687,14 +736,23 @@ export function ComputerViewer({
                 target={computer.selectedTarget}
                 machineLocked={machineLocked}
                 controlUnavailable={controlUnavailable}
+                inputAllowed={!inputDenied}
                 connectionState={connectionState}
-                connectionError={computer.controlError ?? frames.error ?? computer.error}
+                connectionError={
+                  computer.controlError ?? appInputPosture.error ?? frames.error ?? computer.error
+                }
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
                 backgroundInput={computer.session?.capabilities?.backgroundInput === true}
-                clipboardEnabled={computer.session?.capabilities?.clipboard === true}
-                pointerInput={computer.session?.capabilities?.pointerInput === true}
-                keyboardInput={computer.session?.capabilities?.keyboardInput === true}
+                clipboardEnabled={
+                  attachmentInputAllowed && computer.session?.capabilities?.clipboard === true
+                }
+                pointerInput={
+                  attachmentInputAllowed && computer.session?.capabilities?.pointerInput === true
+                }
+                keyboardInput={
+                  attachmentInputAllowed && computer.session?.capabilities?.keyboardInput === true
+                }
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={
@@ -706,8 +764,9 @@ export function ComputerViewer({
             {showControls ? (
               <ComputerSemanticPanel
                 observation={computer.observation}
-                mutating={computer.mutating || controlUnavailable}
+                mutating={computer.mutating || controlUnavailable || inputDenied}
                 controlUnavailable={controlUnavailable}
+                inputAllowed={!inputDenied}
                 onAction={(action) =>
                   void perform(action, null).catch((cause) =>
                     notifyError(cause, "Desktop action failed."),
@@ -721,6 +780,7 @@ export function ComputerViewer({
             target={computer.selectedTarget}
             connectionState={connectionState}
             controlUnavailable={controlUnavailable}
+            inputAllowed={!inputDenied}
             refreshing={registry.refreshing}
             showControls={showControls}
             controlCount={semanticControls(computer.observation).length}
@@ -879,6 +939,8 @@ function ComputerToolbar(props: {
       <button
         type="button"
         onClick={props.onRefresh}
+        disabled={props.refreshing}
+        aria-busy={props.refreshing}
         className="grid size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
         aria-label="Refresh desktops"
       >
@@ -1138,6 +1200,7 @@ function ComputerViewport(props: {
   target: ComputerTarget | null;
   machineLocked: boolean;
   controlUnavailable: boolean;
+  inputAllowed: boolean;
   connectionState: string;
   connectionError: Error | null;
   mutating: boolean;
@@ -1673,6 +1736,7 @@ function ComputerViewport(props: {
           observation={props.observation}
           machineLocked={props.machineLocked}
           controlUnavailable={props.controlUnavailable}
+          inputAllowed={props.inputAllowed}
           connectionState={props.connectionState}
           error={props.connectionError}
           onAction={(action) => enqueue(action, null)}
@@ -1721,6 +1785,7 @@ function ComputerViewportFallback(props: {
   observation: ComputerObservation | null;
   machineLocked: boolean;
   controlUnavailable: boolean;
+  inputAllowed: boolean;
   connectionState: string;
   error: Error | null;
   onAction: (action: ComputerAction) => void;
@@ -1758,13 +1823,15 @@ function ComputerViewportFallback(props: {
           <p className="text-og-menu font-medium text-og-fg">
             {isAttachedChromeGenerationLossError(props.error)
               ? "Chrome reconnected—open a fresh browser/desktop."
-              : props.controlUnavailable
-                ? "Desktop controls unavailable"
-                : props.error
-                  ? "Live view disconnected"
-                  : appControls
-                    ? "App controls"
-                    : computerConnectionLabel(props.connectionState)}
+              : !props.inputAllowed
+                ? "View only"
+                : props.controlUnavailable
+                  ? "Desktop controls unavailable"
+                  : props.error
+                    ? "Live view disconnected"
+                    : appControls
+                      ? "App controls"
+                      : computerConnectionLabel(props.connectionState)}
           </p>
         </div>
         {props.error ? (
@@ -1774,7 +1841,12 @@ function ComputerViewportFallback(props: {
               : (controlFailure?.message ?? props.error.message)}
           </p>
         ) : null}
-        {interactive.length > 0 && !props.controlUnavailable ? (
+        {!props.inputAllowed ? (
+          <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
+            Refresh to check desktop controls.
+          </p>
+        ) : null}
+        {interactive.length > 0 && !props.controlUnavailable && props.inputAllowed ? (
           <div className="mt-3 border-t border-og-border pt-3">
             <p className="mb-2 text-og-xs text-og-fg-subtle">App controls remain available</p>
             <div className="flex flex-wrap gap-1.5">
@@ -1812,6 +1884,7 @@ function ComputerSemanticPanel(props: {
   observation: ComputerObservation | null;
   mutating: boolean;
   controlUnavailable: boolean;
+  inputAllowed: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
   const nodes = semanticControls(props.observation).slice(0, 100);
@@ -1820,7 +1893,11 @@ function ComputerSemanticPanel(props: {
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
         <KeyboardIcon className="size-3" /> App controls
       </div>
-      {props.controlUnavailable ? (
+      {!props.inputAllowed ? (
+        <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
+          View only · refresh to check desktop controls.
+        </p>
+      ) : props.controlUnavailable ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
           Reconnect to use app controls.
         </p>
@@ -1868,6 +1945,7 @@ function ComputerSemanticControl(props: {
         className="rounded-og-sm px-2 py-1.5 hover:bg-og-surface-2"
         onSubmit={(event) => {
           event.preventDefault();
+          if (props.mutating) return;
           props.onAction({
             type: "semantic",
             locator: { kind: "ref", ref: node.ref },
@@ -1921,6 +1999,7 @@ function ComputerStatusBar(props: {
   target: ComputerTarget | null;
   connectionState: string;
   controlUnavailable: boolean;
+  inputAllowed: boolean;
   refreshing: boolean;
   showControls: boolean;
   controlCount: number;
@@ -1936,28 +2015,32 @@ function ComputerStatusBar(props: {
         )}
       />
       <span>
-        {props.controlUnavailable
-          ? "Controls unavailable"
-          : props.target?.kind === "app"
-            ? "App controls"
-            : props.connectionState === "live"
-              ? "Live"
-              : computerConnectionLabel(props.connectionState)}
+        {!props.inputAllowed
+          ? "View only"
+          : props.controlUnavailable
+            ? "Controls unavailable"
+            : props.target?.kind === "app"
+              ? "App controls"
+              : props.connectionState === "live"
+                ? "Live"
+                : computerConnectionLabel(props.connectionState)}
       </span>
       <span className="min-w-0 flex-1 truncate">
-        {props.controlUnavailable
-          ? "Reconnect to use desktop input"
-          : screen
-            ? "Full screen · input may move pointer and focus"
-            : props.target?.kind === "app"
-              ? props.session?.capabilities?.backgroundActions
-                ? "App · controls work in the background"
-                : "App controls"
-              : props.session?.capabilities?.backgroundInput
-                ? "Window · clicks and typing stay in the background"
-                : props.session?.capabilities?.backgroundActions
-                  ? "Window · app controls work in the background"
-                  : (props.target?.kind ?? "Desktop")}
+        {!props.inputAllowed
+          ? "Refresh to check desktop controls"
+          : props.controlUnavailable
+            ? "Reconnect to use desktop input"
+            : screen
+              ? "Full screen · input may move pointer and focus"
+              : props.target?.kind === "app"
+                ? props.session?.capabilities?.backgroundActions
+                  ? "App · controls work in the background"
+                  : "App controls"
+                : props.session?.capabilities?.backgroundInput
+                  ? "Window · clicks and typing stay in the background"
+                  : props.session?.capabilities?.backgroundActions
+                    ? "Window · app controls work in the background"
+                    : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}

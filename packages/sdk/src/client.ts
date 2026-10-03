@@ -142,6 +142,7 @@ import {
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
   type ComputerSessionHeartbeatResponse,
+  type ComputerSessionInputPosture,
   type ComputerSessionLifecycleRequest,
   type ComputerSessionListResponse,
   type ComputerSessionMutationResponse,
@@ -4504,6 +4505,20 @@ export class OpenGeniClient {
     return await this.requestJson<ComputerClipboard>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/clipboard`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async getComputerInputPosture(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionInputPosture> {
+    return await this.requestJson<ComputerSessionInputPosture>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/input-posture`,
       undefined,
       {},
       options,

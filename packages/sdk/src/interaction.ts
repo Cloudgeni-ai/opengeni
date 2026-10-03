@@ -1266,8 +1266,17 @@ export type ComputerSessionAttachment = {
   computerSessionId: string;
   controllerGeneration: string;
   targetId: string;
+  /** Viewer posture when attached; actions still reauthorize the live source. */
+  inputAllowed?: boolean | undefined;
   stream: ComputerFrameStreamAttachment;
   expiresAt: string;
+};
+
+/** Caller-specific hint only; every action still requires live authorization. */
+export type ComputerSessionInputPosture = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  inputAllowed: boolean;
 };
 
 export type ComputerSessionAttachmentRequest = {
@@ -1602,6 +1611,11 @@ export interface InteractionTransport {
     computerSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerSession>;
+  getComputerInputPosture?(
+    workspaceId: string,
+    computerSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerSessionInputPosture>;
   readComputerClipboard(
     workspaceId: string,
     computerSessionId: string,
@@ -2552,6 +2566,13 @@ export class ComputerSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionAttachment> {
     return await this.transport.attachComputerSession(this.workspaceId, this.id, request, options);
+  }
+
+  async inputPosture(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionInputPosture> {
+    if (!this.transport.getComputerInputPosture) {
+      throw new Error("Computer input posture requires a current interaction transport.");
+    }
+    return await this.transport.getComputerInputPosture(this.workspaceId, this.id, options);
   }
 
   async heartbeat(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionHeartbeatResponse> {

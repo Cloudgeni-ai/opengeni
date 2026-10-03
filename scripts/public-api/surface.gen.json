@@ -2735,6 +2735,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/input-posture",
+      "sdk": [
+        "OpenGeniClient.getComputerInputPosture"
+      ],
+      "request": [],
+      "response": [
+        "ComputerSessionInputPosture"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",
       "sdk": [
         "OpenGeniClient.getComputerActionReceipt"
@@ -11192,6 +11203,7 @@
         "$|kind=direct_websocket.protocols[]": "string",
         "$|kind=direct_websocket.url": "string!",
         "$|kind=direct_rfb": "object",
+        "$|kind=direct_rfb.inputAllowed": "boolean!",
         "$|kind=direct_rfb.kind": "const!=[\"\\\"direct_rfb\\\"\"]",
         "$|kind=direct_rfb.protocols": "array!",
         "$|kind=direct_rfb.protocols[]": "string",
@@ -11289,6 +11301,7 @@
         "$.computerSessionId": "string!",
         "$.controllerGeneration": "string!",
         "$.expiresAt": "string!",
+        "$.inputAllowed": "boolean?",
         "$.stream": "ref(ComputerFrameStreamAttachment)!",
         "$.targetId": "string!"
       }
@@ -11333,6 +11346,17 @@
         "$.alive": "const!=[\"true\"]",
         "$.computerSessionId": "string!",
         "$.controllerGeneration": "string!"
+      }
+    },
+    "ComputerSessionInputPosture": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.computerSessionId": "string!",
+        "$.controllerGeneration": "string!",
+        "$.inputAllowed": "boolean!"
       }
     },
     "ComputerSessionLifecycleRequest": {
@@ -25521,6 +25545,7 @@
       "ComputerSessionCapabilities": "type",
       "ComputerSessionCollection": "value",
       "ComputerSessionHeartbeatResponse": "type",
+      "ComputerSessionInputPosture": "type",
       "ComputerSessionLifecycleRequest": "type",
       "ComputerSessionListResponse": "type",
       "ComputerSessionMutationResponse": "type",
@@ -27281,6 +27306,7 @@
       "ComputerSessionCapabilities": "type",
       "ComputerSessionCollection": "value",
       "ComputerSessionHeartbeatResponse": "type",
+      "ComputerSessionInputPosture": "type",
       "ComputerSessionLifecycleRequest": "type",
       "ComputerSessionListResponse": "type",
       "ComputerSessionMutationResponse": "type",
@@ -29392,6 +29418,7 @@
       "end",
       "get",
       "heartbeat",
+      "inputPosture",
       "observe",
       "receipt",
       "targets"
@@ -29688,6 +29715,7 @@
       "getCompanyProfileRevision",
       "getComposerDraft",
       "getComputerActionReceipt",
+      "getComputerInputPosture",
       "getComputerSession",
       "getConnectorToolPermissions",
       "getDocumentBase",
