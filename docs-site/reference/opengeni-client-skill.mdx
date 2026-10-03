@@ -1643,7 +1643,8 @@ createSessionProxyHandler(og, {
 ```
 
 ```ts
-// The MCP endpoint, any library; official SDK shown. Next: export POST/GET = mcp.
+// The MCP endpoint, any library; official SDK shown (needs zod >= 3.25; upgrade
+// an older zod or "zod/v3" won't resolve). Next: export POST/GET = mcp.
 // Express: app.all("/api/mcp", toNodeMiddleware(mcp)); Hono: toHonoHandler(mcp).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
