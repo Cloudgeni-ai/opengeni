@@ -149,6 +149,23 @@ async function enter(input: HTMLInputElement, value: string): Promise<void> {
   });
 }
 
+/** A provider row in the shared connect list, by its visible name. */
+function providerRow(container: HTMLElement, title: string): HTMLButtonElement | null {
+  return (
+    Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-row-action]")).find(
+      (button) => button.textContent?.trim() === title,
+    ) ?? null
+  );
+}
+
+async function clickButton(container: HTMLElement, text: string): Promise<void> {
+  await act(async () =>
+    Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === text)!
+      .click(),
+  );
+}
+
 async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
@@ -448,22 +465,14 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Choose how to power your chats");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use Opengeni credits");
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "SuperGrok")).not.toBeNull();
+      expect(providerRow(container, "Opengeni credits")).not.toBeNull();
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect OpenRouter"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "OpenRouter")!.click());
       expect(container.querySelector<HTMLInputElement>("#onboarding-provider-key")!.value).toBe("");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -496,8 +505,8 @@ describe("organization onboarding UI", () => {
       await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.textContent).toContain("Choose how to power your chats");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).toBeNull();
-      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
+      expect(providerRow(container, "Codex")).toBeNull();
+      expect(providerRow(container, "SuperGrok")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -525,11 +534,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -573,12 +578,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.querySelector('button[aria-label="Connect OpenAI"]')).not.toBeNull();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Azure OpenAI"]')!
-          .click(),
-      );
+      expect(providerRow(container, "OpenAI")).not.toBeNull();
+      await act(async () => providerRow(container, "Azure OpenAI")!.click());
       await enter(
         container.querySelector('input[placeholder="https://your-resource.openai.azure.com"]')!,
         "https://customer.openai.azure.com",
@@ -716,11 +717,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "SuperGrok")!.click());
+      await clickButton(container, "Sign in with xAI");
       await flush();
       // Not the Personal workspace's "Only me" scope, which the API refuses there.
       expect(organizationSupergrokConnectStart).toHaveBeenCalledWith("organization-a");
@@ -758,9 +756,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       expect(codexConnectStart).toHaveBeenCalledTimes(1);
       // For the organization its creator owns, not the Personal workspace.
@@ -792,7 +789,7 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       expect(container.textContent).not.toContain("Waiting for you to sign in");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(providerRow(container, "Codex")).not.toBeNull();
       expect(onComplete).not.toHaveBeenCalled();
       expect(codexConnectPoll).not.toHaveBeenCalled();
     } finally {
@@ -837,11 +834,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "SuperGrok")!.click());
+      await clickButton(container, "Sign in with xAI");
       await flush();
       await flush();
       expect(container.textContent).toContain("Still waiting?");
@@ -883,16 +877,20 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Free Model is set up and free to use");
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.textContent).toContain("Want a more capable model? (optional)");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use Opengeni credits");
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "Opengeni credits")).not.toBeNull();
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find(
         (button) => button.textContent?.trim() === "Start chatting for free",
       )!;
-      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      const buy = providerRow(container, "Opengeni credits")!;
       // The free path precedes every paid option in reading order.
       expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
+      await act(async () => buy.click());
+      const buyButton = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("in credits"),
+      )!;
+      expect(buyButton.getAttribute("data-analytics-action")).toBe("buy_credits");
       await act(async () => start.click());
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
@@ -970,9 +968,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       await flush();
       await flush();
@@ -1094,15 +1091,16 @@ describe("organization onboarding UI", () => {
       );
       expect(container.textContent).not.toContain("Start chatting for free");
       expect(container.textContent).not.toContain("free to use. No card");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.querySelector('button[aria-label="Connect OpenRouter"]')).not.toBeNull();
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "OpenRouter")).not.toBeNull();
       expect(container.textContent).toContain("Buy more Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
-      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      // Buying more is a collapsed row in the shared list, not a second primary action.
+      const buy = providerRow(container, "Buy more Opengeni credits")!;
+      expect(buttons.find((button) => button.textContent?.includes("in credits"))).toBeUndefined();
       // Chatting on the included credits precedes every other option.
       expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
       await act(async () => start.click());
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
@@ -1174,7 +1172,7 @@ describe("organization onboarding UI", () => {
         name: "trial credits",
         billingMode: "stripe" as const,
         modelDefaults: freeModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        defaultSelection: { model: "credits-model", reasoningEffort: "xhigh", source: "credits" },
         balanceMicros: 10_000_000,
         heading: "You got $10 in free credits",
         billingRead: true,
@@ -1194,7 +1192,11 @@ describe("organization onboarding UI", () => {
         name: "credits-billed deployment default with zero balance",
         billingMode: "stripe" as const,
         modelDefaults: creditsModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "deployment" },
+        defaultSelection: {
+          model: "credits-model",
+          reasoningEffort: "xhigh",
+          source: "deployment",
+        },
         balanceMicros: 0,
         heading: "Choose how to power your chats",
         billingRead: true,
@@ -1212,7 +1214,7 @@ describe("organization onboarding UI", () => {
         name: "self-hosted",
         billingMode: "disabled" as const,
         modelDefaults: freeModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        defaultSelection: { model: "credits-model", reasoningEffort: "xhigh", source: "credits" },
         balanceMicros: 10_000_000,
         heading: "Start chatting for free",
         billingRead: false,
@@ -1267,7 +1269,7 @@ describe("organization onboarding UI", () => {
         if (scenario.heading === "You got $10 in free credits") {
           expect(container.textContent).toContain("You can start right now.");
           expect(container.textContent).toContain(
-            "New chats use Credits Model with low reasoning.",
+            "New chats use Credits Model with extra high reasoning.",
           );
           expect(container.textContent).toContain(
             "When your credits run out, new chats use Free Model, which is free.",
@@ -1348,9 +1350,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       await flush();
       await flush();
@@ -1499,8 +1500,17 @@ describe("organization onboarding UI", () => {
           name: "Developer setup",
           description: "Created at signup to add Opengeni agents to your product.",
           access: "developer_setup",
+          expiresAt: expect.any(String),
         },
       ]);
+      // The signup key lasts 30 days, not the preset's 24-hour default.
+      const keyLifetimeMs =
+        Date.parse(
+          (createOrganizationApiKey.mock.calls[0]![1] as { expiresAt: string }).expiresAt,
+        ) - Date.now();
+      expect(keyLifetimeMs).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
+      expect(keyLifetimeMs).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000);
+      expect(container.textContent).toContain("It expires in 30 days");
       // Shown once, in its own copy step; the prompt never carries it.
       expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(token);
       expect(container.textContent).toContain("1. Copy your key");

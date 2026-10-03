@@ -53,7 +53,7 @@ function Fixture() {
         includedModel={{ id: "free-model", label: "Opengeni Free", free: true }}
         startingCredits={{
           balance: { balanceMicros: 10_000_000, currency: "usd" },
-          model: { id: "gpt-6-luna", label: "GPT-6 Luna", reasoningEffort: "high" },
+          model: { id: "gpt-6-luna", label: "GPT-6 Luna", reasoningEffort: "xhigh" },
         }}
         activeEmail="maja@northwind.example"
         onSignOut={() => undefined}

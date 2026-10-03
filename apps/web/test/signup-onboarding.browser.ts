@@ -189,8 +189,8 @@ try {
         const { context, page, errors } = await open(theme, width);
         await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
         await createOrganization(page, theme, width);
-        await page.getByRole("button", { name: "Use your own subscription or key" }).click();
-        await page.getByRole("button", { name: "Connect Codex" }).waitFor();
+        await page.getByRole("button", { name: /^Other ways to pay/ }).click();
+        await page.getByRole("button", { name: "Codex", exact: true }).waitFor();
         await check(page, "6-cloud-credits-options", theme, width);
         await page.getByRole("button", { name: "Start chatting", exact: true }).click();
         await page.getByText("Opened home").waitFor();
