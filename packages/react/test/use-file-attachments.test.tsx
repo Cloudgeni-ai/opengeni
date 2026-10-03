@@ -5,7 +5,11 @@
    distinct progress (`uploading`) and loss-prevention (`hasUnresolved`) gates.
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { OpenGeniSecureContextRequiredError, type FileAsset } from "@opengeni/sdk";
+import {
+  formatErrorMessage,
+  OpenGeniSecureContextRequiredError,
+  type FileAsset,
+} from "@opengeni/sdk";
 import { act, startTransition, Suspense } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -680,7 +684,8 @@ describe("useFileAttachments", () => {
     await flush();
     const attachment = hook.result.current.attachments[0]!;
     expect(attachment.status).toBe("failed");
-    expect(attachment.error).toBe("blob storage exploded");
+    expect(attachment.error).toBe("The request could not be completed.");
+    expect((attachment.errorCause as Error).message).toBe("blob storage exploded");
     expect(hook.result.current.readyResources).toEqual([]);
     expect(hook.result.current.uploading).toBe(false);
     expect(hook.result.current.hasUnresolved).toBe(true);
@@ -710,7 +715,8 @@ describe("useFileAttachments", () => {
       name: "dragged.png",
       status: "failed",
       errorCode: "secure_context_required",
-      error: failure.message,
+      error: formatErrorMessage(failure),
+      errorCause: failure,
     });
     expect(hook.result.current.hasUnresolved).toBe(true);
     await hook.unmount();
@@ -745,7 +751,8 @@ describe("useFileAttachments", () => {
         name: "http.png",
         status: "failed",
         errorCode: "secure_context_required",
-        error: failure.message,
+        error: formatErrorMessage(failure),
+        errorCause: failure,
       });
       expect(hook.result.current.hasUnresolved).toBe(true);
     } finally {
@@ -780,7 +787,8 @@ describe("useFileAttachments", () => {
       name: "embedded.png",
       status: "failed",
       errorCode: "secure_context_required",
-      error: "Use HTTPS",
+      error: "Attachments require secure browser cryptography. Use a supported browser over HTTPS.",
+      errorCause: failure,
     });
     await hook.unmount();
   });
@@ -810,7 +818,7 @@ describe("useFileAttachments", () => {
     await flush();
     const id = hook.result.current.attachments[0]!.id;
     expect(hook.result.current.attachments[0]!.status).toBe("failed");
-    expect(hook.result.current.attachments[0]!.error).toBe("transient network error");
+    expect(hook.result.current.attachments[0]!.error).toBe("The request could not be completed.");
 
     await flushing(() => hook.result.current.retry(id));
     expect(hook.result.current.attachments[0]!.status).toBe("uploading");
@@ -822,6 +830,7 @@ describe("useFileAttachments", () => {
     const attachment = hook.result.current.attachments[0]!;
     expect(attachment.status).toBe("ready");
     expect(attachment.error).toBeUndefined();
+    expect(attachment.errorCause).toBeUndefined();
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     expect(hook.result.current.hasUnresolved).toBe(false);
     expect(calls).toBe(2);

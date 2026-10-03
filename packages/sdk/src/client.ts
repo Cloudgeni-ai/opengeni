@@ -8442,6 +8442,27 @@ export class OpenGeniClient {
     );
   }
 
+  async getOrganizationModelUsage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts/organization-model-usage").OrganizationModelUsage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-models",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getOrganizationUsageWorkspacePage(
     options: {
       accountId: string;
@@ -8480,6 +8501,8 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      rootSessionId?: string;
+      sessionId?: string;
       signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
@@ -8491,6 +8514,8 @@ export class OpenGeniClient {
         range: options.range ?? "week",
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.rootSessionId !== undefined ? { rootSessionId: options.rootSessionId } : {}),
+        ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
       { signal: options.signal },
     );

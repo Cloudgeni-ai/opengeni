@@ -84,6 +84,13 @@ describe("production session conditional loading", () => {
     ).join("\n");
     expect(eagerSource).not.toMatch(/["'`]credit-card["'`]/u);
     expect(eagerSource).not.toMatch(/["'`]fingerprint-pattern["'`]/u);
+    // The composer's Plus glyph shares the existing primitives request.
+    const sharedGlyphs = Object.values(manifest).find(
+      (entry) => entry.name === "session-shared-primitives",
+    )!;
+    expect(await readFile(`${repoRoot}/apps/web/dist/${sharedGlyphs.file}`, "utf8")).toMatch(
+      /["'`]plus["'`]/u,
+    );
     // The Variable Set editor is its own chunk, outside the session's static graph.
     expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
     expect(panelAsset).toBeTruthy();

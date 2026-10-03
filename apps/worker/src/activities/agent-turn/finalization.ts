@@ -416,12 +416,12 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
-    for (const [scope, snapshot] of providerTurn.latestClaudeUsage) {
+    for (const snapshot of providerTurn.latestClaudeUsage.values()) {
       await waitForTurnFinalizerStep(
         recordClaudeSubscriptionUsage(
           db,
           settings,
-          { accountId: input.accountId, workspaceId: input.workspaceId, scope },
+          { accountId: input.accountId, workspaceId: input.workspaceId, scope: snapshot.scope },
           snapshot,
         ).catch(() => null),
         finalizerSignal,

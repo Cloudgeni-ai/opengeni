@@ -1,5 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { requireAgentConfigAdmission } from "@opengeni/core";
+import { modelUnavailableHttpException, requireAgentConfigAdmission } from "@opengeni/core";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   AUTOMATION_MAX_MATCHED_TRIGGERS,
@@ -692,9 +692,7 @@ function workspaceCustomModelCommitGuard(input: {
       reference,
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }

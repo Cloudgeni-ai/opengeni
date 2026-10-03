@@ -16,6 +16,7 @@ import {
   type SessionToolSelection,
 } from "@/components/pickers";
 import { DropdownMenu } from "@/components/ui/dropdown-menu";
+import { BillingClassMark } from "@/components/billing-class-mark";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -245,6 +246,83 @@ function catalogModel(
 }
 
 describe("catalog-backed ModelPicker", () => {
+  test("first-party branding stays explicit while custom presentation and provider identities survive", async () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "deployment/free", label: "Free deployment", cost: "free" }),
+      catalogModel({
+        id: "codex/example",
+        label: "Codex model",
+        source: "codex",
+        cost: "subscription",
+      }),
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      for (const mode of ["default", "custom", "undefined"] as const) {
+        const customized = mode === "custom";
+        await act(async () =>
+          root.render(
+            <>
+              <ModelPickerMenu
+                rows={rows}
+                model="deployment/free"
+                effort="low"
+                latencyMode="standard"
+                {...(mode === "default"
+                  ? {}
+                  : customized
+                    ? {
+                        groupPresentation: {
+                          opengeni_credits: { label: "Console models", icon: null },
+                        },
+                      }
+                    : {
+                        groupPresentation: {
+                          opengeni_credits: { label: undefined, icon: undefined },
+                        },
+                      })}
+                onModelChange={() => {}}
+                onEffortChange={() => {}}
+                onLatencyModeChange={() => {}}
+              />
+              <BillingClassMark
+                billingClass="opengeni_credits"
+                presentation={
+                  mode === "undefined" ? { label: undefined, icon: undefined } : undefined
+                }
+              />
+              <BillingClassMark billingClass="codex_subscription" />
+            </>,
+          ),
+        );
+        const group = container.querySelector(
+          `section[aria-label="${customized ? "Console models" : "Opengeni"}"]`,
+        )!;
+        expect(group).not.toBeNull();
+        expect(
+          group.querySelector('[data-testid="billing-class-icon-opengeni_credits"]') === null,
+        ).toBe(customized);
+        if (!customized)
+          expect(group.querySelector('svg[viewBox="0 0 176 138.73"]')).not.toBeNull();
+        expect(group.textContent).toContain("Free");
+        expect(
+          container.querySelector(
+            '[role="img"][aria-label="Opengeni"] svg[viewBox="0 0 176 138.73"]',
+          ),
+        ).not.toBeNull();
+        expect(
+          container.querySelector('[role="img"][aria-label="Codex"] svg[viewBox="0 0 24 24"]'),
+        ).not.toBeNull();
+        expect(container.querySelector('section[aria-label="Codex"]')).not.toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("renders selected product model and effort on the trigger", async () => {
     const rows: PickerModelRow[] = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
@@ -292,6 +370,10 @@ describe("catalog-backed ModelPicker", () => {
       expect(
         trigger?.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
       ).toBeTruthy();
+      expect(
+        trigger?.querySelector('[aria-label="Opengeni"] svg[viewBox="0 0 176 138.73"]'),
+      ).not.toBeNull();
+      expect(trigger?.querySelector(".lucide-sparkles")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

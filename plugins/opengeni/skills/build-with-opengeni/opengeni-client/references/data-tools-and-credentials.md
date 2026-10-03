@@ -177,6 +177,71 @@ an extra body field; an ordinary login token is not a bridge credential. Check
 expiry, issuer/audience and operation scope with negative tests. These are host
 authorization tests, not proof supplied by OpenGeni's tool selection or approval.
 
+### Reauthorize current host policy, not only signed claims
+
+After verifying the provider token's signature, issuer/audience and expiry,
+reload the current host user and its membership/record-owner policy for each
+call. A disabled owner or downgraded role must lose authority even while an old
+JWT remains cryptographically valid. For writes, recheck at the transaction
+boundary; a prior read is not a permission lease. The host-owned adapter below
+uses illustrative policy fields, not an OpenGeni token/SDK schema:
+
+```js
+function requireLiveToolAuthority(claims, user, grant, operation) {
+  if (typeof claims?.subjectId !== "string" || !claims.subjectId ||
+      typeof claims.tenantId !== "string" || !claims.tenantId ||
+      user?.enabled !== true || user.id !== claims.subjectId ||
+      grant?.active !== true || grant.subjectId !== user.id ||
+      grant.tenantId !== claims.tenantId ||
+      !Array.isArray(grant.operations) || !grant.operations.includes(operation) ||
+      !Array.isArray(claims.operations) || !claims.operations.includes(operation)) {
+    throw new Error("Tool request is not authorized.");
+  }
+  return { subjectId: user.id, tenantId: grant.tenantId };
+}
+
+// Website-share credentials are not team-report credentials.
+function websiteShareMayReadReport(share, report) {
+  return share?.kind === "website-share" &&
+    typeof share.websiteId === "string" && share.websiteId.length > 0 &&
+    report?.scope?.kind === "website" &&
+    report.scope.websiteId === share.websiteId;
+}
+
+// Host parses dates into validated UTC milliseconds; this example is half-open.
+function requireAuthorizedWindow(requested, allowed) {
+  if (![requested.start, requested.end, allowed.start, allowed.end].every(Number.isSafeInteger) ||
+      requested.start >= requested.end || allowed.start >= allowed.end ||
+      requested.start < allowed.start || requested.end > allowed.end) {
+    throw new Error("Requested date window is not authorized.");
+  }
+  return requested;
+}
+```
+
+Load `user` and `grant` from fresh trusted host records, never from browser/model
+fields or the token's old role alone. The token is only a ceiling. After this
+check, still authorize each requested record and field against that context.
+A one-user workspace still requires enabled-owner and record-ownership checks.
+
+### Scope report reads and publication
+
+Authorize the stored report's actual scope on list, summary, detail and export
+routes. A website-share credential must not expose a team report merely because
+that team contains the shared website. Filter summaries before returning them;
+transcript access is a separate check. Signed-in team sharing remains valid under
+its own current membership policy; the website-share helper is not that policy.
+The host derives this persisted scope from authorized records, not an unchecked
+editor-submitted authorization/provenance field.
+
+Enforce the advertised analytics window in the server/provider query, including
+time zone and the provider's boundary conventions, not only in prompts or UI.
+Bind reopening/export headers and session lookup to the currently selected
+report's immutable ID and authorized session, not the first mounted report.
+Persist generated-report provenance on the trusted backend from verified
+session/job receipts. An ordinary editor's submitted body or `generated` flag
+cannot establish that provenance or impersonate a different session/author.
+
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.

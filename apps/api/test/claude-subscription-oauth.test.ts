@@ -22,6 +22,7 @@ import {
   loadIntegrationOAuthPendingState,
   loadClaudeSubscriptionUsageCredential,
   readClaudeSubscriptionUsage,
+  recordClaudeSubscriptionUsage,
   resolveClaudeSubscriptionCredential,
   storeIntegrationOAuthPendingState,
   upsertWorkspaceProviderApiKeyConnection,
@@ -281,6 +282,17 @@ for (const organization of [false, true]) {
       JSON.parse(original.serializedCredential).identity,
     );
     expect(JSON.parse(final.serializedCredential).oauth.refreshToken).toBe("fixture-refresh-v2");
+    // A delayed response from the prior access token cannot mark the renewed
+    // token as revoked, even though renewal deliberately retains generation.
+    expect(
+      await recordClaudeSubscriptionUsage(client.db, settings, usageScope(scope), {
+        token: original.token,
+        expectedConnectionId: original.connectionId,
+        expectedCredentialVersion: original.credentialVersion,
+        refresh: { status: "reconnect", checkedAt: new Date().toISOString() },
+      }),
+    ).toBeNull();
+    expect(await readClaudeSubscriptionUsage(client.db, usageScope(scope))).toEqual(final.usage);
   });
 }
 

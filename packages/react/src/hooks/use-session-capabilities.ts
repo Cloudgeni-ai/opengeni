@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
+import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
 // "on-demand" is the boxless-benign resting state: the lease is not currently
@@ -289,7 +290,7 @@ export function useSessionCapabilities(
                 return;
               }
               setState("error");
-              setError(cause instanceof Error ? cause : new Error(String(cause)));
+              setError(normalizeError(cause));
             }
           });
       }, warmingPollMs);
@@ -469,7 +470,7 @@ export function useSessionCapabilities(
           return;
         }
         setState("error");
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        setError(normalizeError(cause));
       }
     })();
 

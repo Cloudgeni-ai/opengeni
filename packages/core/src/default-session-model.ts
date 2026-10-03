@@ -114,8 +114,22 @@ function creditsCandidate(
 ): DefaultModelSelection | null {
   const fallbackEffort = input.settings.openaiReasoningEffort;
   const deployment = findSelection(input.selections, input.settings.openaiModel);
-  if (deployment?.availability.selectable && deployment.model.cost === "credits") return null;
   const configured = findSelection(input.selections, input.settings.creditsDefaultModel);
+  if (deployment?.availability.selectable && deployment.model.cost === "credits") {
+    // An operator's paid deployment default is never replaced. When it is the
+    // credits default model itself, credit holders get the credits default
+    // effort rather than the deployment-wide fallback effort.
+    if (configured?.model.id !== deployment.model.id) return null;
+    return {
+      model: deployment.model.id,
+      reasoningEffort: clampReasoningEffortForConfiguredModel(
+        deployment.model,
+        input.settings.creditsDefaultReasoningEffort,
+        fallbackEffort,
+      ),
+      source: "credits",
+    };
+  }
   if (configured?.availability.selectable && configured.model.cost === "credits") {
     return {
       model: configured.model.id,
@@ -155,9 +169,10 @@ function creditsCandidate(
  *    balance (a purchase, a grant, or the verified-signup trial grant), the
  *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
- *    credits-billed model when that one is not selectable. Skipped when the
- *    deployment default is already a selectable credits-billed model, so an
- *    operator's paid default is never replaced.
+ *    credits-billed model when that one is not selectable. When the
+ *    deployment default is already a selectable credits-billed model it is
+ *    never replaced: it keeps the deployment effort, except that it takes the
+ *    credits default effort when it is the credits default model itself.
  * 4. `deployment`: the deployment default with the deployment reasoning effort
  *    when stably admissible; otherwise the first stably admissible catalog
  *    model with its own default effort. With no admitted models, retain the

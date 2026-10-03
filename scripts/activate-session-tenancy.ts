@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import postgres from "postgres";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../packages/db/src/lossless-json";
 
 const REQUIRED_MIGRATIONS = [
   "0285_organization_tenancy_inventory.sql",
@@ -15,14 +16,37 @@ const REQUIRED_MIGRATIONS = [
   "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
 export const FLEET_PREPARATION_MIGRATION = "0583_session_tenancy_operator_permission.sql";
-// Deliberately absent from this preparatory PR. Applying only the rolling
-// definitions cannot admit an irreversible fleet activation.
-export const FLEET_MIGRATION = "0584_private_sessions_fleet_activation.sql";
+// Rolling definitions alone cannot admit the irreversible fleet activation.
+export const FLEET_MIGRATION = "0586_private_sessions_fleet_activation.sql";
 
 export function requiredActivationMigrations(allOrganizations: boolean): readonly string[] {
   return allOrganizations
     ? [...REQUIRED_MIGRATIONS, FLEET_PREPARATION_MIGRATION, FLEET_MIGRATION]
     : REQUIRED_MIGRATIONS;
+}
+
+export function activationDatabaseUrl(databaseUrl: string): string {
+  // Preserve the authority/path verbatim, including postgres-js multi-host URLs.
+  // URL query parameters override connection options in the actual driver.
+  const fragmentIndex = databaseUrl.indexOf("#");
+  const fragment = fragmentIndex < 0 ? "" : databaseUrl.slice(fragmentIndex);
+  const connectionUrl = fragmentIndex < 0 ? databaseUrl : databaseUrl.slice(0, fragmentIndex);
+  const queryIndex = connectionUrl.indexOf("?");
+  const authorityAndPath = queryIndex < 0 ? connectionUrl : connectionUrl.slice(0, queryIndex);
+  const parameters = new URLSearchParams(queryIndex < 0 ? "" : connectionUrl.slice(queryIndex + 1));
+  parameters.set("application_name", LOSSLESS_CONTENT_WRITER_APPLICATION_NAME);
+  return `${authorityAndPath}?${parameters.toString()}${fragment}`;
+}
+
+export function activationConnectionOptions(searchPath?: string) {
+  return {
+    max: 1,
+    connection: {
+      // Use the same PgBouncer-compatible current-protocol identity as createDb.
+      application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      ...(searchPath ? { search_path: searchPath } : {}),
+    },
+  };
 }
 
 function argument(name: string, argv: readonly string[] = process.argv): string | null {
@@ -33,11 +57,9 @@ function argument(name: string, argv: readonly string[] = process.argv): string 
 export function activationScope(argv: readonly string[]): {
   organizationId: string | null;
   allOrganizations: boolean;
-  enableOrganizationPrivateSessions: boolean;
 } {
   const organizationId = argument("--organization-id", argv);
   const allOrganizations = argv.includes("--all-organizations");
-  const enableOrganizationPrivateSessions = argv.includes("--enable-organization-private-sessions");
   if (
     allOrganizations === Boolean(organizationId) ||
     (organizationId !== null &&
@@ -45,12 +67,12 @@ export function activationScope(argv: readonly string[]): {
   ) {
     throw new Error("Supply exactly one of --organization-id <uuid> or --all-organizations");
   }
-  if (allOrganizations !== enableOrganizationPrivateSessions) {
+  if (argv.includes("--enable-organization-private-sessions")) {
     throw new Error(
-      "Fleet activation requires --enable-organization-private-sessions; single-org activation does not enable the preference",
+      "Activation preserves organization preferences; an owner or admin must opt in separately",
     );
   }
-  return { organizationId, allOrganizations, enableOrganizationPrivateSessions };
+  return { organizationId, allOrganizations };
 }
 
 function canonicalJson(value: unknown): string {
@@ -221,6 +243,44 @@ function applicationRoles(): string[] {
   return roles;
 }
 
+export async function assertSessionTenancyApplicationRolesDrained(
+  transaction: postgres.TransactionSql,
+  roles: readonly string[],
+): Promise<void> {
+  if (
+    roles.length < 1 ||
+    roles.length > 16 ||
+    new Set(roles).size !== roles.length ||
+    roles.some((role) => !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(role))
+  ) {
+    throw new Error("Session tenancy activation application roles are invalid");
+  }
+  const validRoles = await transaction<{ name: string }[]>`
+    select rolname as name from pg_catalog.pg_roles
+    where rolname = any(${[...roles]}::text[])
+      and rolcanlogin and not rolsuper and not rolbypassrls
+  `;
+  if (validRoles.length !== roles.length) {
+    throw new Error("Session tenancy activation requires exact restricted application login roles");
+  }
+  // Activity is cached for the transaction; every admission/final check must
+  // discard that snapshot so an application reconnect cannot hide behind it.
+  await transaction`select pg_catalog.pg_stat_clear_snapshot()`;
+  const [activity] = await transaction<{ connected: boolean }[]>`
+    select exists (
+      select 1 from pg_catalog.pg_stat_activity activity
+      where activity.datname = pg_catalog.current_database()
+        and activity.usename = any(${[...roles]}::text[])
+        and activity.pid <> pg_catalog.pg_backend_pid()
+    ) as connected
+  `;
+  if (activity?.connected !== false) {
+    throw new Error(
+      "Session tenancy activation requires every application role session to be stopped",
+    );
+  }
+}
+
 export async function activateSessionTenancyTransaction(
   transaction: postgres.TransactionSql,
   options: {
@@ -231,7 +291,7 @@ export async function activateSessionTenancyTransaction(
   },
 ): Promise<unknown> {
   const { organizationId, allOrganizations, activatedBy, roles } = options;
-  // SHARE fixes the exact existing population until the receipt AND permission
+  // SHARE fixes the exact existing population until the receipt
   // coverage check commits. Any failure rolls the entire cutover back.
   if (allOrganizations) await transaction`lock table managed_accounts in share mode`;
   const requiredMigrations = requiredActivationMigrations(allOrganizations);
@@ -243,6 +303,7 @@ export async function activateSessionTenancyTransaction(
   if (missing.length > 0) {
     throw new Error(`Session tenancy activation migrations are missing: ${missing.join(", ")}`);
   }
+  await assertSessionTenancyApplicationRolesDrained(transaction, roles);
   const organizations = allOrganizations
     ? await transaction<{ id: string }[]>`select id from managed_accounts order by id`
     : [{ id: organizationId! }];
@@ -292,6 +353,7 @@ export async function activateSessionTenancyTransaction(
   const activations = [];
   for (const { id, inventoryDigest, parityDigest, backfillEvidence } of pending) {
     await transaction`select set_config('opengeni.account_id', ${id}, true)`;
+    await transaction`select pg_catalog.pg_stat_clear_snapshot()`;
     const [activation] = await transaction<
       Array<{
         accountId: string;
@@ -309,34 +371,29 @@ export async function activateSessionTenancyTransaction(
     if (!activation) throw new Error(`Session tenancy activation returned no receipt for ${id}`);
     activations.push({ ...activation, inventoryDigest, parityDigest, backfillEvidence });
   }
-  if (!allOrganizations) return activations[0];
-  let permissionsEnabled = 0;
-  // Do not skip already-activated orgs here: a receipt alone does NOT make the
-  // shared-workspace choice usable. The owner-only helper also enforces drain
-  // when the complete frozen population was already activated.
-  for (const { id } of organizations) {
-    const [row] = await transaction<{ setting: { enabled?: boolean; changed?: boolean } }[]>`
-      select enable_organization_private_sessions_from_activation(${id}::uuid, ${roles}::text[]) as setting
-    `;
-    if (row?.setting.enabled !== true)
-      throw new Error(`Session tenancy permission missing for ${id}`);
-    if (row.setting.changed) permissionsEnabled += 1;
+  if (!allOrganizations) {
+    await assertSessionTenancyApplicationRolesDrained(transaction, roles);
+    return activations[0];
   }
+  // Activation is platform readiness, not consent. Preserve every existing
+  // preference (including explicit opt-outs) without invoking the enable helper.
   for (const { id } of organizations) {
     await transaction`select set_config('opengeni.account_id', ${id}, true)`;
-    const [verified] = await transaction<{ activated: boolean; enabled: boolean }[]>`
-      select session_tenancy_product_activated(${id}::uuid, 1) as activated,
-        organization_private_sessions_enabled(${id}::uuid) as enabled
+    const [verified] = await transaction<{ activated: boolean }[]>`
+      select session_tenancy_product_activated(${id}::uuid, 1) as activated
     `;
-    if (verified?.activated !== true || verified.enabled !== true) {
-      throw new Error(`Session tenancy activation and permission coverage missing for ${id}`);
+    if (verified?.activated !== true) {
+      throw new Error(`Session tenancy activation coverage missing for ${id}`);
     }
   }
+  // Source-table locks from every new activation are still held. A live late
+  // reconnect aborts this caller's transaction and rolls back all its receipts.
+  // The replay-only fleet must prove the same drain even without new receipts.
+  await assertSessionTenancyApplicationRolesDrained(transaction, roles);
   return {
     organizationCount: organizations.length,
     alreadyActivated,
     newlyActivated: activations.length,
-    permissionsEnabled,
     activations,
   };
 }
@@ -354,10 +411,7 @@ async function main(): Promise<void> {
   if (!databaseUrl) throw new Error("OPENGENI_MIGRATIONS_DATABASE_URL is required");
   const roles = applicationRoles();
   const searchPath = dbSearchPath(settings);
-  const sql = postgres(databaseUrl, {
-    max: 1,
-    ...(searchPath ? { connection: { search_path: searchPath } } : {}),
-  });
+  const sql = postgres(activationDatabaseUrl(databaseUrl), activationConnectionOptions(searchPath));
   try {
     const result = await sql.begin((transaction) =>
       activateSessionTenancyTransaction(transaction, {

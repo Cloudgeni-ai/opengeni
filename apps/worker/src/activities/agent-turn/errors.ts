@@ -37,6 +37,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  AnthropicRequestError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1043,13 +1044,42 @@ function isRawDatabaseQueryError(error: unknown): boolean {
   );
 }
 
+function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | undefined {
+  if (error instanceof AnthropicRequestError) return error;
+  return error instanceof Error && error.cause instanceof AnthropicRequestError
+    ? error.cause
+    : undefined;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  const anthropic = anthropicRequestDiagnostic(error);
+  if (anthropic) {
+    return {
+      ...failure,
+      code: failure.code ?? anthropic.code,
+      retryable: failure.retryable ?? false,
+      ...(anthropic.detail ? { detail: anthropic.detail } : {}),
+      ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!anthropicRequestDiagnostic(error)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(

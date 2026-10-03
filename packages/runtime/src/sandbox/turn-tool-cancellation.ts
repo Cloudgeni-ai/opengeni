@@ -13,6 +13,7 @@ import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
   ProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
   type PendingCommandSupervision,
 } from "./provider-command-session";
@@ -621,6 +622,9 @@ function retainedProcessSession(
  * tool's string result, keeping the run alive instead of failing the turn.
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  if (error instanceof ProviderCommandInputOutcomeUnknownError) {
+    return `Command input acknowledgement unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. The input may have been accepted; its outcome is unknown and it was not resent. Do not resend stdin. Inspect the existing command with write_stdin using empty chars.`;
+  }
   if (isProviderCommandObservationUnavailableError(error)) {
     return `Command observation unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. Outcome unknown; the original invocation remains retained. Do not replay the command or resend stdin; observe the existing command.`;
   }

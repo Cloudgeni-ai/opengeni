@@ -2,6 +2,7 @@ import { ChevronRightIcon, Loader2Icon, SquareIcon } from "lucide-react";
 import { useState } from "react";
 import type { UseSessionBackgroundCommandsResult } from "../hooks/use-session-background-commands";
 import { formatClockTime } from "../lib/format";
+import { useErrorMessage } from "../lib/error-message";
 
 /** The current session's live commands. Settled commands belong to the timeline. */
 export function SessionCommandsPanel({
@@ -11,6 +12,7 @@ export function SessionCommandsPanel({
   commands: UseSessionBackgroundCommandsResult;
   readOnly?: boolean;
 }) {
+  const formatError = useErrorMessage();
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const active = state.commands.filter(
@@ -22,7 +24,7 @@ export function SessionCommandsPanel({
     try {
       await state.cancel(id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Stop was not confirmed. Try again.");
+      setError(formatError(cause));
     } finally {
       setPending(null);
     }

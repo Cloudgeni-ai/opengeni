@@ -72,7 +72,7 @@ beforeAll(async () => {
   if (shared) client = createDb(shared.appUrl);
 }, 180_000);
 
-test("private-session totals stay actor-visible under the application RLS role", async () => {
+test("private-session amounts are complete under the application RLS role without exposing session metadata", async () => {
   if (!shared || !client) {
     console.warn(
       "SKIPPED organization usage private-session assertions: PostgreSQL fixture unavailable",
@@ -134,9 +134,12 @@ test("private-session totals stay actor-visible under the application RLS role",
   const outsider = await withSessionRlsActorContext({ subjectId: "user:unrelated" }, () =>
     getOrganizationUsageSummary(client!.db, input, now),
   );
-  expect(outsider.totals).toEqual([]);
-  expect(outsider.buckets).toEqual([]);
-  expect(outsider.workspaces.every((workspace) => workspace.totals.length === 0)).toBe(true);
+  expect(outsider.totals).toEqual(owner.totals);
+  expect(outsider.buckets).toEqual(owner.buckets);
+  expect(outsider.workspaces).toEqual(owner.workspaces);
+  const serialized = JSON.stringify(outsider);
+  expect(serialized).not.toContain(session.id);
+  expect(serialized).not.toContain("Private usage fixture");
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -299,12 +302,12 @@ test("Personal workspaces appear as usage-only rows keyed by owner membership", 
   const other = await withSessionRlsActorContext({ subjectId: reader }, () =>
     getOrganizationUsageSummary(client!.db, input, now),
   );
-  expect(cost(other.totals)).toBe("27");
+  expect(cost(other.totals)).toBe("127");
   expect(other.workspaces.map((row) => row.workspaceId)).toEqual([grant.workspaceId!]);
   expect(other.personalWorkspaces).toEqual([
     {
       membershipId,
-      totals: [{ eventType: "model.cost", unit: "usd_micros", quantity: "7", eventCount: "1" }],
+      totals: [{ eventType: "model.cost", unit: "usd_micros", quantity: "107", eventCount: "2" }],
     },
   ]);
   expect(other.personalWorkspaceCount).toBe(1);
@@ -313,7 +316,7 @@ test("Personal workspaces appear as usage-only rows keyed by owner membership", 
     [...other.workspaces, ...other.personalWorkspaces]
       .map((row) => BigInt(cost(row.totals) ?? "0"))
       .reduce((sum, value) => sum + value, 0n),
-  ).toBe(27n);
+  ).toBe(127n);
   // Amounts only: no Personal workspace id, name or session reaches the wire.
   const wire = JSON.stringify(other);
   expect(wire).not.toContain(personalId);

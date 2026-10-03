@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
-import { type ProviderCommandSession } from "../src/sandbox/provider-command-session";
+import {
+  type ProviderCommandSession,
+  withProviderCommandHandle,
+} from "../src/sandbox/provider-command-session";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 
 const locator = (): ModalRouterProviderCommand => ({
@@ -13,6 +16,52 @@ const locator = (): ModalRouterProviderCommand => ({
     stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
     stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
   },
+});
+
+test("a failed first read retains identity without inventing an output capture", async () => {
+  const session: ChannelASession & ProviderCommandSession = {};
+  const command = locator();
+  let reads = 0,
+    starts = 0,
+    captures = 0;
+  installModalCommandSession(session, {
+    start: async () => {
+      starts++;
+      return command;
+    },
+    read: async (value) => {
+      if (reads++ === 0) throw new Error("observation unavailable");
+      return {
+        command: value,
+        expected: value as ModalRouterProviderCommand,
+        chunks: [],
+        exitCode: null,
+      };
+    },
+    readProbe: async () => {
+      throw new Error("unexpected probe");
+    },
+    write: async () => {},
+  });
+  const first = await withProviderCommandHandle(3, () => session.execCommand!({ cmd: "work" }));
+  session.bindProviderCommand!(3, command, {
+    load: async () => command,
+    acknowledge: async () => {
+      throw new Error("unexpected legacy acknowledgement");
+    },
+    reserveInput: async () => 0,
+    captureRouterPage: async (page) => {
+      captures++;
+      return { command: page.command, captured: true };
+    },
+  });
+  expect(await session.captureCommandOutput!(first)).toBe(true);
+  expect(captures).toBe(0);
+  expect(session.getProviderCommand!(3)).toEqual(command);
+  const next = await session.writeStdin!({ sessionId: 3, chars: "", yieldTimeMs: 1 });
+  expect(await session.captureCommandOutput!(next)).toBe(true);
+  expect(captures).toBe(1);
+  expect(starts).toBe(1);
 });
 
 test("byte-offset sessions atomically capture before acknowledging or replaying", async () => {

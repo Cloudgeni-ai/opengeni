@@ -297,6 +297,18 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
+`validation_failed` (`model is not available: <id>`) plus
+`details: { code: "model_unavailable", modelId }`; retrying the same request
+cannot succeed, so clients must choose another model. The web console detects
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
+
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model
 selection immediately, while an already accepted turn or an existing-session
@@ -710,6 +722,13 @@ credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
 
+Accepted policies also tolerate strictly additive latency-mode and input-modality
+declarations. Verification reconstructs an exact historical subset digest, keeping
+the frozen runnable mode and every retained mode declaration unchanged. It never
+rewrites the accepted policy or request tier. Removed modes/modalities, changed
+mode support or billing multipliers, and all other executable-definition drift
+remain fail-closed; this path does not compose with historical digest migrations.
+
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
@@ -1065,9 +1084,12 @@ first match wins:
    against a database catalog (edited independently of this env value), fall
    back instead: when the configured model is not selectable, the first
    selectable credits-billed model in operator catalog order is used at its own
-   default reasoning. This step is skipped when the deployment default is
-   already a selectable credits-billed model, so an operator's paid default is
-   never replaced.
+   default reasoning. When the deployment default is already a selectable
+   credits-billed model, it is never replaced: it keeps the deployment effort,
+   except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
+   `credits`) when it is the credits default model itself, so a deployment
+   whose default is `gpt-6-luna` still starts credit holders on extra high
+   reasoning.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -1462,6 +1484,23 @@ are not advertised without those features. Normal agent calls stream; title and
 compaction calls remain nonstreaming. The default output ceiling remains 32k,
 within the adapter's conservative context budget, rather than copying 128k from
 an unrelated request. No live subscription probe is part of these tests.
+
+Mid-conversation system blocks must follow a user and precede an assistant (or
+end the request). The adapter groups retained system inputs at that boundary
+within each assistant-delimited phase, including after portable compaction;
+canonical roles and exact content remain unchanged.
+
+Machine-only system phases after an assistant receive a request-local user-role
+transport anchor identifying machine origin and the absence of human input.
+It adds no durable history, human intent or authority; system content remains
+system-role and stays after the same assistant. Tool pairing still validates
+before projection.
+
+HTTP and SSE failures retain
+only the provider error envelope's type/message in a UTF-8-bounded 4 KiB
+`turn.failed.detail`, plus the bounded provider request ID. Malformed/non-JSON
+bodies expose status only. Outgoing requests, arbitrary body fields and headers
+are not diagnostics; generic exception text and serialization remain structural.
 
 ### Claude subscription usage
 

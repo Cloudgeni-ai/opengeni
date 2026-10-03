@@ -50,6 +50,8 @@ const getOrganizationUsageSummary = mock(
     nextWorkspaceCursor: null,
     personalWorkspaces: [],
     personalWorkspaceCount: 0,
+    privateChats: [],
+    privateChatsTruncated: false,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -437,6 +439,8 @@ describe("organization billing StrictMode ownership", () => {
       nextWorkspaceCursor: workspaceId,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     }));
     const container = document.createElement("div");
     document.body.appendChild(container);

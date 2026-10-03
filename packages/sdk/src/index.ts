@@ -207,6 +207,7 @@ export {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
@@ -656,10 +657,12 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,
@@ -722,6 +725,7 @@ export type {
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
   ClaudeUsageWindow,
+  ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,

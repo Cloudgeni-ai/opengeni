@@ -49,7 +49,7 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
-import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
+import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
 import {
   parseModelsAccount,
   parseModelsView,
@@ -381,11 +381,29 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const INSIGHTS_SEARCH_KEYS = [
+  "view",
+  "range",
+  "chart",
+  "provider",
+  "model",
+  "root",
+  "session",
+] as const;
+type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
-  // Opened from Organization settings > Billing & usage: back returns there.
-  validateSearch: (search: Record<string, unknown>): ReturnToSearch => parseReturnTo(search),
+  // Insights filters pass as strings (the lazy chunk validates their values);
+  // `from` is set when opened from Organization settings > Billing & usage.
+  validateSearch: (search: Record<string, unknown>): InsightsRawSearch & ReturnToSearch => ({
+    ...Object.fromEntries(
+      INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+        typeof search[key] === "string" ? [[key, search[key]]] : [],
+      ),
+    ),
+    ...parseReturnTo(search),
+  }),
   component: Insights,
 });
 const workspaceCapabilitiesRoute = createRoute({
@@ -803,7 +821,23 @@ function Machines() {
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
   const search = workspaceInsightsRoute.useSearch();
-  return <LazyInsightsRoute workspaceId={workspaceId} returnTo={returnToOf(search)} />;
+  const navigate = workspaceInsightsRoute.useNavigate();
+  const { from: _from, fromLabel: _fromLabel, ...insightsSearch } = search;
+  const returnTo = returnToOf(search);
+  return (
+    <LazyInsightsRoute
+      workspaceId={workspaceId}
+      search={insightsSearch}
+      returnTo={returnTo}
+      onSearchChange={(next, options) =>
+        void navigate({
+          // Filters replace the search; the back link's origin stays.
+          search: { ...next, ...returnToSearch(returnTo) },
+          replace: options?.replace ?? false,
+        })
+      }
+    />
+  );
 }
 
 function CapabilitiesLegacyRedirect() {

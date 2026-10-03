@@ -1,10 +1,16 @@
+import { isDeepStrictEqual } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   SandboxMaterializationVerificationError,
   retainMaterializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
 } from "../materialization-verification-error";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
-import { ProviderCommandObservationUnavailableError } from "../provider-command-session";
+import {
+  ProviderCommandObservationUnavailableError,
+  ProviderCommandStartOutcomeUnknownError,
+  type ProviderCommandOutput,
+} from "../provider-command-session";
 
 const MARKER = "__OPENGENI_MATERIALIZED_PATH_VISIBLE__";
 const OUTPUT_LIMIT = 16 * 1024;
@@ -26,6 +32,7 @@ export async function verifyModalMaterializedPath(
   const cancellation = new AbortController();
   const deadlineReason = new Error("Materialization visibility observation deadline exceeded");
   let providerCommand: ModalProviderCommand | undefined;
+  let startUnknown: ProviderCommandStartOutcomeUnknownError | undefined;
   let stdout = "";
   let stderr = "";
   const diagnostic = (
@@ -55,13 +62,57 @@ export async function verifyModalMaterializedPath(
   timer.unref();
   pending.add(cancellation);
   try {
-    providerCommand = await control.start(
-      { cmd: command, workdir, shell: "sh", login: false, tty: false },
-      cancellation.signal,
-    );
+    try {
+      providerCommand = await control.start(
+        { cmd: command, workdir, shell: "sh", login: false, tty: false },
+        cancellation.signal,
+      );
+    } catch (error) {
+      // A possibly dispatched fixed visibility probe has one original locator.
+      // Observe that invocation; never replay it or the surrounding mutation.
+      if (!(error instanceof ProviderCommandStartOutcomeUnknownError)) throw error;
+      providerCommand = structuredClone(error.command);
+      startUnknown = error;
+    }
     for (;;) {
       cancellation.signal.throwIfAborted();
-      const page = await control.readProbe(providerCommand, 1_000, cancellation);
+      let page: ProviderCommandOutput;
+      try {
+        page = await control.readProbe(providerCommand, 1_000, cancellation);
+      } catch (error) {
+        cancellation.signal.throwIfAborted();
+        if (
+          !(error instanceof ProviderCommandObservationUnavailableError) ||
+          !error.readRetryAllowed
+        ) {
+          if (!startUnknown) throw error;
+          // A missing/denied read cannot disprove the original Start. Preserve
+          // its exact invocation without granting any further read retry.
+          throw new ProviderCommandObservationUnavailableError(
+            structuredClone(providerCommand),
+            new AggregateError(
+              [startUnknown, error],
+              "Original visibility Start and observation remain uncertain",
+            ),
+            false,
+          );
+        }
+        // Unavailable reads do not advance any cursor. A contradictory locator
+        // is an invariant failure, never authority to inspect another process.
+        if (!isDeepStrictEqual(error.command, providerCommand))
+          throw new SandboxMaterializationVerificationError(diagnostic("invalid_response"), {
+            cause: error,
+          });
+        // Read retries remain inside this probe's original thirty-second
+        // deadline, including outages longer than a single bounded read.
+        try {
+          await delay(100, undefined, { signal: cancellation.signal });
+        } catch (interrupted) {
+          cancellation.signal.throwIfAborted();
+          throw interrupted;
+        }
+        continue;
+      }
       // Cancellation ends observation, not the process. Never accept a late
       // success after the attempt requested cancellation.
       cancellation.signal.throwIfAborted();
@@ -107,7 +158,15 @@ export async function verifyModalMaterializedPath(
         },
         {
           cause: providerCommand
-            ? new ProviderCommandObservationUnavailableError(providerCommand, error)
+            ? new ProviderCommandObservationUnavailableError(
+                providerCommand,
+                startUnknown
+                  ? new AggregateError(
+                      [startUnknown, error],
+                      "Original visibility Start and observation deadline remain uncertain",
+                    )
+                  : error,
+              )
             : error,
         },
       );

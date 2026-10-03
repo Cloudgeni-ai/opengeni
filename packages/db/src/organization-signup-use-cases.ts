@@ -6,7 +6,7 @@ export const ORGANIZATION_SIGNUP_USE_CASES = ["embed", "cloud"] as const;
 export type OrganizationSignupUseCase = (typeof ORGANIZATION_SIGNUP_USE_CASES)[number];
 
 /**
- * Record one person's signup answer for one organization (migration 0586).
+ * Record one person's signup answer for one organization (migration 0595).
  * Call only for the authenticated managed human (`user:` subject) after
  * authorizing their membership in `organizationId`. The first answer wins: a
  * repeated or replayed call returns the stored choice unchanged.

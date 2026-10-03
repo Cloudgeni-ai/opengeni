@@ -100,8 +100,14 @@ console.log(reply.status, reply.text); // "completed", "pending", or "cancelled"
 
 Backend authorization does not stop an account A response already in flight from arriving after account B signs in. On logout, login, tenant or session switch, stop polling, abort requests, reset private messages/approvals/cursors and cached session IDs, and increment an identity/session epoch. Guard both success and error rendering by the captured epoch: abort alone is insufficient, including for A → B → A. Never reuse A's session ID for B. These presentation guards do not replace server-side ownership checks.
 
+An in-place account replacement needs the same reset even if no component unmount occurs. For reopened reports, refresh headers and authorization mappings from the currently selected report/session, not the first mounted record. Initialize static enhancement scripts after their DOM targets exist (`defer`, modules or `DOMContentLoaded`), with native form/POST fallback intact.
+
+Treat `agent.message.completed`/`phase: "commentary"` as progress, not completion. Wait for the expected turn's canonical `turn.completed` and original final output before caching a result; handle empty/wait-ended output and action-required states separately. Use bounded [original-result reads](/integrate/background-agents#bring-results-back), not lossy monitoring snippets as permanent final answers.
+
 Fold ordered, deduplicated approval events instead of treating every replayed request as pending. Preserve the original approval and decision IDs; see [Approvals & questions](/integrate/approvals-and-questions). The full [client Skill](/reference/opengeni-client-skill) contains framework-neutral, tested identity-epoch and event-fold examples for your existing frontend module; no new app architecture is required.
 
 Catch SDK initialization, configuration, calls and local persistence inside the host route's error boundary. Return friendly host-branded notices, never upstream `error.message`, response bodies or stack traces. Keep redacted diagnostics server-only. An unknown outcome or accepted decision followed by local-save failure requires reconciliation, not a promise that nothing changed or a blind repeat action.
+
+Brand UI-owned notices, not legitimate source quotations or user/assistant transcript content. Check the installed [SDK formatter and React provider error-copy API](/integrate/conversation-ui#error-copy) separately; conversation label overrides alone do not prove that exceptions are remapped, and host guidance does not change library defaults.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>
