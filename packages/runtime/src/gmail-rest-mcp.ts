@@ -1121,7 +1121,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     if (tool === "import_message" || tool === "insert_message") {
       const raw = await this.rawInput(args);
       if (!raw) throw new GmailRestInputError("raw or rawFile is required");
-      const url = urlFor(`messages/${tool === "import_message" ? "import" : "insert"}`);
+      const url = urlFor(tool === "import_message" ? "messages/import" : "messages");
       const date = enumArg(args.internalDateSource, "internalDateSource", [
         "receivedTime",
         "dateHeader",
