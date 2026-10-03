@@ -1158,15 +1158,16 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       const id = requiredId(args.messageId, "messageId");
       const url = urlFor(`messages/${encodeURIComponent(id)}`);
       url.searchParams.set("format", tool === "download_message" ? "raw" : "full");
-      const message = await this.request<GmailMessage>(
-        tool,
-        url,
-        { signal: signal ?? null },
-        true,
-        GMAIL_BINARY_RESPONSE_MAX_BYTES,
-      );
+      let destinationUrl = url.toString();
       let bytes: Buffer, filename: string, mediaType: string, identity: string;
       if (tool === "download_message") {
+        const message = await this.request<GmailMessage>(
+          tool,
+          url,
+          { signal: signal ?? null },
+          true,
+          GMAIL_BINARY_RESPONSE_MAX_BYTES,
+        );
         bytes = decodeBinary(
           requiredString(message.raw, "provider raw message", GMAIL_BINARY_RESPONSE_MAX_BYTES),
         );
@@ -1174,27 +1175,44 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         mediaType = "message/rfc822";
         identity = `message:${id}:raw`;
       } else {
-        const parts = walkParts(message.payload);
         const partId = args.partId === "" ? "" : optionalString(args.partId, "partId", 256);
-        const attachmentId = optionalString(args.attachmentId, "attachmentId", 256);
+        // Attachment IDs are opaque and can be longer than message or part IDs.
+        const attachmentId = optionalString(args.attachmentId, "attachmentId", 4096);
         if (partId === undefined && !attachmentId)
           throw new GmailRestInputError("partId or attachmentId is required");
-        const part = parts.find(
-          (item) =>
-            (partId === undefined || (item.partId ?? "") === partId) &&
-            (!attachmentId || item.body?.attachmentId === attachmentId),
-        );
-        if (!part || part.parts?.length)
-          throw new GmailRestInputError("Requested MIME leaf part was not found in this message");
-        bytes = await this.partBytes(id, part, tool, signal);
-        filename = safeFileName(part.filename || `part-${safeIdentity(part.partId || "0")}.bin`);
-        mediaType = part.mimeType ?? "application/octet-stream";
-        identity = `message:${id}:part:${part.partId ?? ""}`;
+        if (partId === undefined) {
+          // Provider attachment tokens can change between metadata reads. Use
+          // the original token on its message-scoped endpoint, without trying
+          // to match it against a new snapshot. A stable part ID preserves MIME
+          // metadata; callers with only a token may supply the known filename.
+          bytes = await this.partBytes(id, { body: { attachmentId: attachmentId! } }, tool, signal);
+          destinationUrl = `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId!)}`;
+          filename = safeFileName(
+            optionalString(args.fileName, "fileName", 1024) ??
+              `attachment-${sha256(Buffer.from(attachmentId!)).slice(0, 24)}.bin`,
+          );
+          mediaType = "application/octet-stream";
+          identity = `message:${id}:attachment:${sha256(Buffer.from(attachmentId!))}`;
+        } else {
+          const message = await this.request<GmailMessage>(
+            tool,
+            url,
+            { signal: signal ?? null },
+            true,
+            GMAIL_BINARY_RESPONSE_MAX_BYTES,
+          );
+          const part = walkParts(message.payload).find((item) => (item.partId ?? "") === partId);
+          if (!part || part.parts?.length)
+            throw new GmailRestInputError("Requested MIME leaf part was not found in this message");
+          bytes = await this.partBytes(id, part, tool, signal);
+          filename = safeFileName(part.filename || `part-${safeIdentity(part.partId || "0")}.bin`);
+          mediaType = part.mimeType ?? "application/octet-stream";
+          identity = `message:${id}:part:${part.partId ?? ""}`;
+        }
       }
       if (bytes.byteLength > GMAIL_DOWNLOAD_MAX_BYTES)
         throw new GmailRestInputError("Gmail download exceeds 50 MiB");
       const connectionId = this.pinnedConnectionId!;
-      const destinationUrl = url.toString();
       return await this.options.materializeGmailFile({
         serverId: this.options.serverId,
         connectionId,
@@ -1233,6 +1251,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     if ((part.body?.size ?? 0) > GMAIL_DOWNLOAD_MAX_BYTES)
       throw new GmailRestInputError("Gmail MIME part exceeds 50 MiB");
     let data = part.body?.data;
+    let expectedSize = part.body?.size;
     if (data === undefined && part.body?.attachmentId) {
       const body = await this.request<{ data?: string; size?: number }>(
         tool,
@@ -1242,14 +1261,15 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         GMAIL_BINARY_RESPONSE_MAX_BYTES,
       );
       data = body.data;
+      expectedSize ??= body.size;
     }
-    if (data === undefined && part.body?.size === 0) return Buffer.alloc(0);
+    if (data === undefined && expectedSize === 0) return Buffer.alloc(0);
     if (data === undefined)
       throw new GmailRestProviderError("Gmail did not provide the requested MIME part bytes");
     const bytes = decodeBinary(data);
     if (
       bytes.byteLength > GMAIL_DOWNLOAD_MAX_BYTES ||
-      (part.body?.size !== undefined && bytes.byteLength !== part.body.size)
+      (expectedSize !== undefined && bytes.byteLength !== expectedSize)
     )
       throw new GmailRestProviderError("Gmail MIME part size verification failed");
     return bytes;

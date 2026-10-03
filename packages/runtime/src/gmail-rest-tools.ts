@@ -168,8 +168,8 @@ export const GMAIL_EXTRA_TOOLS: Tool[] = [
   ]),
   tool(
     "download_attachment",
-    "Downloads the exact original bytes of a MIME part to the agent filesystem. Select partId from get_message, or attachmentId. Supports inline data, embedded images and body parts. Returns a verified file receipt, never a signed URL.",
-    { messageId: string, partId: string, attachmentId: string },
+    "Downloads exact original bytes to the agent filesystem. Prefer stable partId from get_message to preserve MIME metadata; it takes precedence. An opaque attachmentId is fetched directly for the selected message and may use fileName from the original metadata. Supports inline data, embedded images and body parts. Returns a verified file receipt, never a signed URL.",
+    { messageId: string, partId: string, attachmentId: string, fileName: string },
     ["messageId"],
   ),
   tool(
