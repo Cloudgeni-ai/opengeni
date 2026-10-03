@@ -43,9 +43,10 @@ concurrency:
   # only waste capacity. Movement on main alone does not invalidate an admitted
   # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
-  # merged. Main pushes remain independent because an ancestor can still be an
-  # admitted release source after a newer merge lands.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}', github.run_id) }}
+  # merged. Main pushes share one queue without cancelling: the running build
+  # finishes (its images stay usable), and only the newest waiting push runs
+  # next, so rapid merges cannot pile up dozens of queued runs.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && 'ci-main-push' || format('ci-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
