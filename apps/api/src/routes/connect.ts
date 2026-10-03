@@ -78,6 +78,11 @@ import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integra
 import { executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import {
+  bindNativeProviderStart,
+  delegatedNativeProviderStart,
+  requireNativeProviderStartTransport,
+} from "../integrations/delegated-native-provider-handoff";
 import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
@@ -1068,23 +1073,44 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload the current connection setup" });
-            const started = await startMcpOAuth(deps, {
-              ...scope,
+            const payload = {
+              requestedScopes: [],
+              mcpUrl: values.mcpUrl,
+              ownership: attempt.ownership,
+              returnUrl: stored.returnUrl,
+              ...(attempt.account ? { connectionId: attempt.account.id } : {}),
+            };
+            const delegatedStart = await delegatedNativeProviderStart(deps, {
+              authorization,
+              provider: "mcp-oauth",
               ...(before.providerId === "gmail" || before.providerId === "slack-personal"
                 ? { integrationKey: before.providerId }
                 : {}),
-              ...(continuation ? { externalContinuation: continuation } : {}),
-              connectAttemptId: attempt.id,
-              personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
               requestUrl: c.req.url,
-              payload: {
-                requestedScopes: [],
-                mcpUrl: values.mcpUrl,
-                ownership: attempt.ownership,
-                returnUrl: stored.returnUrl,
-                ...(attempt.account ? { connectionId: attempt.account.id } : {}),
-              },
+              connectAttemptId: attempt.id,
+              connectAttemptRevision: attempt.revision + 1,
+              payload,
             });
+            if (!delegatedStart) requireNativeProviderStartTransport(c, deps, authorization);
+            const started =
+              delegatedStart ??
+              (await startMcpOAuth(deps, {
+                ...scope,
+                ...(before.providerId === "gmail" || before.providerId === "slack-personal"
+                  ? { integrationKey: before.providerId }
+                  : {}),
+                ...(continuation ? { externalContinuation: continuation } : {}),
+                connectAttemptId: attempt.id,
+                personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
+                requestUrl: c.req.url,
+                payload,
+              }));
+            if (!delegatedStart)
+              bindNativeProviderStart(c, deps, {
+                authorization,
+                provider: "mcp-oauth",
+                ...started,
+              });
             const authorizationUrl = started.authorizationUrl;
             if (!authorizationUrl)
               throw new HTTPException(502, {
@@ -1490,20 +1516,39 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             throw new HTTPException(409, {
               message: "Social account changed or cannot be safely reconnected",
             });
-          const started = await startSocialOAuth(
-            { db: tx, settings: deps.settings, observability: deps.observability },
+          const delegatedStart = await delegatedNativeProviderStart(
+            { ...deps, db: tx },
             {
-              accountId: scope.accountId,
-              workspaceId,
-              subjectId: scope.subjectId,
-              personalOwnershipAllowed: scope.personalOwnerVerified,
+              authorization,
+              provider: "social",
               connectAttemptId: id,
               requestUrl: c.req.url,
               payload: { provider: input.providerId, ownership: input.ownership },
             },
           );
+          if (!delegatedStart) requireNativeProviderStartTransport(c, deps, authorization);
+          const started =
+            delegatedStart ??
+            (await startSocialOAuth(
+              { db: tx, settings: deps.settings, observability: deps.observability },
+              {
+                accountId: scope.accountId,
+                workspaceId,
+                subjectId: scope.subjectId,
+                personalOwnershipAllowed: scope.personalOwnerVerified,
+                connectAttemptId: id,
+                requestUrl: c.req.url,
+                payload: { provider: input.providerId, ownership: input.ownership },
+              },
+            ));
           if (!started.authorizationUrl)
             throw new HTTPException(503, { message: "Social authorization is unavailable" });
+          if (!delegatedStart)
+            bindNativeProviderStart(c, deps, {
+              authorization,
+              provider: "social",
+              ...started,
+            });
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,
@@ -1803,8 +1848,46 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           (input.ownership !== "personal" || !isPersonalConnectionOwnerPrincipal(authorization))
         )
           throw new HTTPException(422, { message: "This connector requires personal ownership" });
-        const started =
+        const handoffProvider =
           input.providerId === "github-personal"
+            ? null
+            : input.providerId === "fiken-oauth"
+              ? "fiken"
+              : input.providerId === "atlassian"
+                ? "atlassian"
+                : ["google-drive-knowledge", "google-drive-publish"].includes(input.providerId)
+                  ? "google-drive"
+                  : input.providerId === "slack-bot"
+                    ? "slack-bot"
+                    : "provider-oauth";
+        const delegatedStart = handoffProvider
+          ? await delegatedNativeProviderStart(
+              { ...deps, db: tx },
+              {
+                authorization,
+                provider: handoffProvider,
+                requestUrl: c.req.url,
+                connectAttemptId: id,
+                payload: {
+                  ...(handoffProvider === "provider-oauth"
+                    ? { definitionId: input.providerId, ownership: input.ownership }
+                    : {}),
+                  ...(["google-drive-knowledge", "google-drive-publish"].includes(input.providerId)
+                    ? {
+                        capability:
+                          input.providerId === "google-drive-publish" ? "publish" : "source_read",
+                      }
+                    : {}),
+                  ...(input.reconnectAccountId ? { connectionId: input.reconnectAccountId } : {}),
+                },
+              },
+            )
+          : null;
+        if (handoffProvider && !delegatedStart)
+          requireNativeProviderStartTransport(c, deps, authorization);
+        const started =
+          delegatedStart ??
+          (input.providerId === "github-personal"
             ? await startPersonalGitHubOAuth(
                 { ...deps, db: tx },
                 {
@@ -1881,9 +1964,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                               : {}),
                           },
                         },
-                      );
+                      ));
         if (!started.authorizationUrl)
           throw new HTTPException(502, { message: "provider did not return an authorization URL" });
+        if (handoffProvider && !delegatedStart)
+          bindNativeProviderStart(c, deps, {
+            authorization,
+            provider: handoffProvider,
+            ...started,
+          });
         const reconnect = input.reconnectAccountId
           ? await getConnectionMetadata(tx, workspaceId, input.reconnectAccountId, scope.subjectId)
           : null;

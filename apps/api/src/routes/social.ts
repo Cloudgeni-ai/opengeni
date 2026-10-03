@@ -26,6 +26,13 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
+import {
+  bindNativeProviderStart,
+  delegatedNativeProviderStart,
+  nativeProviderCallbackFailureUrl,
+  nativeProviderCallbackState,
+  requireNativeProviderStartTransport,
+} from "../integrations/delegated-native-provider-handoff";
 import { parseRequestJson } from "../http/request-body";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -103,7 +110,8 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // First-party social OAuth (X / Reddit). Distinct from the MCP integrations
   // flow: providers are pinned, tokens land in social_connections, and the
-  // callback is unauthenticated (browser redirect) but bound by signed state.
+  // Native callbacks require the initiating browser's independent state binding;
+  // verified external continuations retain their separately checked origin.
   app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const parsed = SocialOAuthStartRequest.safeParse(await c.req.json());
@@ -127,6 +135,14 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertPersonalConnectionOwnerPrincipal(access);
     }
     const grant = access.grant;
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "social",
+      requestUrl: c.req.url,
+      payload,
+    });
+    if (handoff) return c.json(OAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
     const result = await startSocialOAuth(
       { db, settings, observability },
       {
@@ -138,15 +154,26 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload,
       },
     );
+    bindNativeProviderStart(c, deps, {
+      authorization: access,
+      provider: "social",
+      ...result,
+    });
     return c.json(OAuthStartResponse.parse(result));
   });
 
   app.get("/v1/social/oauth/callback", async (c) => {
+    const state = await nativeProviderCallbackState(c, deps, "social", c.req.query("state"));
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "social", c.req.query("state"), c.req.url),
+        302,
+      );
     const result = await completeSocialOAuthCallback(
       { db, settings, observability },
       {
         code: c.req.query("code"),
-        state: c.req.query("state"),
+        state,
         error: c.req.query("error"),
         requestUrl: c.req.url,
       },

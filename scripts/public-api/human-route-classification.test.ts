@@ -87,6 +87,26 @@ describe("reviewed human-route classification", () => {
     expect(
       entries.get("GET /v1/workspaces/:workspaceId/connections/github/oauth/native-start")?.class,
     ).toBe("person_present");
+    expect(
+      entries.get("GET /v1/workspaces/:workspaceId/connections/:provider/oauth/native-start")
+        ?.class,
+    ).toBe("person_present");
+    for (const path of [
+      "/v1/integrations/google-drive/callback",
+      "/v1/integrations/atlassian/callback",
+      "/v1/integrations/fiken/callback",
+      "/v1/integrations/slack/callback",
+      "/v1/social/oauth/callback",
+      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
+    ]) {
+      const entry = entries.get(`GET ${path}`);
+      expect(entry?.class).toBe("person_present");
+      expect(entry?.gates).toContain("requirePersonPresentRouteAuthorization");
+      expect(
+        snapshot.missingGateCandidates.find((candidate) => candidate.path === path)?.status,
+      ).toBe("fixed_phase_2");
+    }
     for (const path of [
       "/v1/workspaces/:workspaceId/github/connect",
       "/v1/workspaces/:workspaceId/pr-review/github/connect",

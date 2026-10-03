@@ -13,6 +13,7 @@ import {
   PERSONAL_GITHUB_TOKEN_URL,
   PERSONAL_GITHUB_USER_URL,
   PersonalGitHubConnectionMetadata,
+  PersonalGitHubOAuthStartResponse,
 } from "@opengeni/contracts/personal-github";
 import {
   createDb,
@@ -24,16 +25,23 @@ import {
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
+import {
+  getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
+} from "@opengeni/db/canonical-human-identities";
 import { migrate } from "@opengeni/db/migrate";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
 
 import { createApp } from "../src/app";
+import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
+import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 
 const DELEGATION_SECRET = "personal-github-oauth-delegation";
 const STATE_SECRET = "personal-github-oauth-state";
@@ -45,7 +53,11 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
+let managedAuth: NonNullable<ReturnType<typeof createManagedAuth>>;
+let managedAuthSessionAdapter: ReturnType<typeof createBetterAuthSessionAdapter>;
+let fixturePasswordHash: string;
 const workspaceIds: string[] = [];
+const authUserIds: string[] = [];
 
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_PERSONAL_GITHUB_OAUTH_TEST_POSTGRES_ADMIN_URL;
@@ -74,7 +86,10 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   settings = testSettings({
+    databaseUrl: shared.appUrl,
     productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+    betterAuthSecret: "personal-github-native-browser-secret-at-least-32-bytes",
     delegationSecret: DELEGATION_SECRET,
     authRequired: true,
     accessKey: EDGE_ACCESS_KEY,
@@ -87,12 +102,21 @@ beforeAll(async () => {
     githubPersonalOauthClientId: CLIENT_ID,
     githubPersonalOauthClientSecret: CLIENT_SECRET,
   });
+  managedAuth = createManagedAuth(settings, client.db, {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:personal-github-oauth", retentionSeconds: 86400 },
+    send: async () => ({ status: "sent", providerMessageId: null }),
+  })!;
+  managedAuthSessionAdapter = createBetterAuthSessionAdapter(managedAuth, client.db);
+  fixturePasswordHash = await hashManagedAuthPassword("personal-github-fixture-password");
 }, 180_000);
 
 afterAll(async () => {
   for (const workspaceId of workspaceIds) {
     await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   }
+  for (const userId of authUserIds)
+    await shared!.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 180_000);
@@ -100,10 +124,19 @@ afterAll(async () => {
 async function freshWorkspace() {
   const userId = `personal-github-${crypto.randomUUID()}`;
   const subjectId = `user:${userId}`;
+  const email = `${userId}@example.test`;
+  await shared!.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'Personal GitHub user', ${email}, true)`;
+  authUserIds.push(userId);
+  await shared!.admin`
+    insert into auth_identities (id, user_id, provider_id, account_id, password)
+    values (${randomUUID()}, ${userId}, 'credential', ${userId}, ${fixturePasswordHash})`;
   const access = await ensureManagedAccessForUser(client.db, {
     userId,
-    email: `${userId}@example.test`,
+    email,
     name: "Personal GitHub user",
+    emailVerified: true,
   });
   const workspaceId = access.defaultWorkspaceId!;
   const personalWorkspaceId = access.workspaceGrants.find(
@@ -111,12 +144,47 @@ async function freshWorkspace() {
   )!.workspaceId;
   const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId)!;
   workspaceIds.push(...access.workspaceGrants.map((candidate) => candidate.workspaceId));
-  return { accountId: grant.accountId, workspaceId, personalWorkspaceId, subjectId };
+  // Seed a real canonical session, then let Better Auth's native cookie signer
+  // and resolver prove this person. No bearer or signed-state flag is a login.
+  await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+  const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
+  const binding = projection.loginBindings.find(
+    (candidate) => candidate.providerId === "credential" && candidate.status === "active",
+  )!;
+  expect(binding).toBeDefined();
+  const sessionId = randomUUID(),
+    token = randomUUID();
+  await shared!.admin`
+    insert into auth_sessions (
+      id, user_id, token, expires_at, identity_id, identity_revision,
+      auth_revision, login_binding_id, login_binding_revision
+    ) values (
+      ${sessionId}, ${userId}, ${token}, now() + interval '1 hour',
+      ${projection.activeIdentity.id}, ${projection.activeIdentity.identityRevision},
+      ${projection.activeIdentity.authRevision}, ${binding.id}, ${binding.revision}
+    )`;
+  const cookie = (
+    await managedAuthSessionAdapter.createLegacySelectedSessionCookies({ token } as never, null)
+  )
+    .map((value) => value.split(";", 1)[0])
+    .join("; ");
+  return { accountId: grant.accountId, workspaceId, personalWorkspaceId, subjectId, cookie };
+}
+
+function nativeHeaders(workspace: Awaited<ReturnType<typeof freshWorkspace>>) {
+  return {
+    cookie: workspace.cookie,
+    origin: settings.publicBaseUrl!,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/json",
+    "x-opengeni-access-key": EDGE_ACCESS_KEY,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  };
 }
 
 async function bearer(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
-  principalKind: "human_session" | "service" = "human_session",
+  principalKind: "human_session" | "service",
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
@@ -146,53 +214,59 @@ function githubFixture() {
     disabled: false,
     permissions: { pull: true, push: true, admin: false, maintain: true, triage: true },
   };
-  const fetch: typeof globalThis.fetch = async (input, init) => {
-    const url = new URL(input instanceof Request ? input.url : input.toString());
-    if (url.href === PERSONAL_GITHUB_TOKEN_URL) {
-      const body =
-        init?.body instanceof URLSearchParams
-          ? init.body
-          : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
-      tokenRequests.push(body);
-      return Response.json({
-        access_token: `github-access-${tokenRequests.length}`,
-        refresh_token: `github-refresh-${tokenRequests.length}`,
-        token_type: "bearer",
-        expires_in: 28_800,
-        refresh_token_expires_in: 15_897_600,
-        scope: scopes,
-      });
-    }
-    if (url.href === PERSONAL_GITHUB_USER_URL) {
-      return Response.json(
-        { id: githubUserId, login: `octocat-${githubUserId}` },
-        { headers: { "x-oauth-scopes": scopes } },
-      );
-    }
-    if (url.origin === PERSONAL_GITHUB_API_ORIGIN && url.pathname === "/user/repos") {
-      repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
-      if (repositoryUnauthorizedOnce) {
-        repositoryUnauthorizedOnce = false;
-        return Response.json({ message: "bad credentials" }, { status: 401 });
+  const fetch: typeof globalThis.fetch = Object.assign(
+    async (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: Parameters<typeof globalThis.fetch>[1],
+    ) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.href === PERSONAL_GITHUB_TOKEN_URL) {
+        const body =
+          init?.body instanceof URLSearchParams
+            ? init.body
+            : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
+        tokenRequests.push(body);
+        return Response.json({
+          access_token: `github-access-${tokenRequests.length}`,
+          refresh_token: `github-refresh-${tokenRequests.length}`,
+          token_type: "bearer",
+          expires_in: 28_800,
+          refresh_token_expires_in: 15_897_600,
+          scope: scopes,
+        });
       }
-      return Response.json([repository]);
-    }
-    if (
-      url.origin === PERSONAL_GITHUB_API_ORIGIN &&
-      url.pathname === "/repos/Cloudgeni-ai/opengeni"
-    ) {
-      repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
-      return Response.json(repository);
-    }
-    if (
-      url.origin === PERSONAL_GITHUB_API_ORIGIN &&
-      url.pathname === "/repos/Cloudgeni-ai/opengeni/branches"
-    ) {
-      branchRequests.push({ url: url.toString(), redirect: init?.redirect });
-      return Response.json([{ name: "feature/picker" }, { name: "main" }]);
-    }
-    return new Response("not found", { status: 404 });
-  };
+      if (url.href === PERSONAL_GITHUB_USER_URL) {
+        return Response.json(
+          { id: githubUserId, login: `octocat-${githubUserId}` },
+          { headers: { "x-oauth-scopes": scopes } },
+        );
+      }
+      if (url.origin === PERSONAL_GITHUB_API_ORIGIN && url.pathname === "/user/repos") {
+        repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
+        if (repositoryUnauthorizedOnce) {
+          repositoryUnauthorizedOnce = false;
+          return Response.json({ message: "bad credentials" }, { status: 401 });
+        }
+        return Response.json([repository]);
+      }
+      if (
+        url.origin === PERSONAL_GITHUB_API_ORIGIN &&
+        url.pathname === "/repos/Cloudgeni-ai/opengeni"
+      ) {
+        repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
+        return Response.json(repository);
+      }
+      if (
+        url.origin === PERSONAL_GITHUB_API_ORIGIN &&
+        url.pathname === "/repos/Cloudgeni-ai/opengeni/branches"
+      ) {
+        branchRequests.push({ url: url.toString(), redirect: init?.redirect });
+        return Response.json([{ name: "feature/picker" }, { name: "main" }]);
+      }
+      return new Response("not found", { status: 404 });
+    },
+    { preconnect: () => undefined },
+  );
   return {
     fetch,
     tokenRequests,
@@ -214,9 +288,10 @@ function testApp(fixture: ReturnType<typeof githubFixture>) {
   return createApp({
     settings,
     db: client.db,
-    bus: {} as never,
+    bus: new MemoryEventBus(),
     workflowClient: {} as never,
-    managedAuth: null,
+    managedAuth,
+    managedAuthSessionAdapter,
     githubPersonalFetch: fixture.fetch,
   } as never);
 }
@@ -225,23 +300,53 @@ async function start(
   fixture: ReturnType<typeof githubFixture>,
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   connectionId?: string,
-  principalKind: "human_session" | "service" = "human_session",
 ) {
   const path = connectionId
     ? `/v1/workspaces/${workspace.workspaceId}/connections/${connectionId}/github/reconnect`
     : `/v1/workspaces/${workspace.workspaceId}/connections/github/oauth/start`;
   const response = await testApp(fixture).request(path, {
     method: "POST",
-    headers: {
-      authorization: await bearer(workspace, principalKind),
-      "content-type": "application/json",
-      "x-opengeni-access-key": EDGE_ACCESS_KEY,
-      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-    },
+    headers: nativeHeaders(workspace),
     body: "{}",
   });
+  expect(response.status).toBe(200);
+  const body = PersonalGitHubOAuthStartResponse.parse(await response.json());
+  const state = readSignedState(
+    new URL(body.authorizationUrl).searchParams.get("state")!,
+    STATE_SECRET,
+  );
+  expect(state).toMatchObject({
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: workspace.subjectId,
+    canonicalManagedHumanSession: true,
+    personalOwnerVerified: true,
+  });
+  return { response, authorizationUrl: body.authorizationUrl, body };
+}
+
+async function legacyBearerStart(
+  fixture: ReturnType<typeof githubFixture>,
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  principalKind: "human_session" | "service",
+  includeNativeCookie = false,
+) {
+  const response = await testApp(fixture).request(
+    `/v1/workspaces/${workspace.workspaceId}/connections/github/oauth/start`,
+    {
+      method: "POST",
+      headers: {
+        ...(includeNativeCookie ? nativeHeaders(workspace) : {}),
+        authorization: await bearer(workspace, principalKind),
+        "content-type": "application/json",
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+      body: "{}",
+    },
+  );
   const body = (await response.json()) as { authorizationUrl?: string; error?: unknown };
-  return { response, authorizationUrl: body.authorizationUrl ?? "", body };
+  return { response, body };
 }
 
 async function callback(fixture: ReturnType<typeof githubFixture>, state: string) {
@@ -267,11 +372,7 @@ describe("personal GitHub OAuth", () => {
     const response = await testApp(fixture).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`,
       {
-        headers: {
-          authorization: await bearer(workspace),
-          "x-opengeni-access-key": EDGE_ACCESS_KEY,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: nativeHeaders(workspace),
       },
     );
     expect(response.status).toBe(200);
@@ -294,12 +395,7 @@ describe("personal GitHub OAuth", () => {
     );
     expect(connection).toBeDefined();
     const basePath = `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`;
-    const headers = {
-      authorization: await bearer(workspace),
-      "content-type": "application/json",
-      "x-opengeni-access-key": EDGE_ACCESS_KEY,
-      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-    };
+    const headers = nativeHeaders(workspace);
     const app = testApp(fixture);
 
     const listed = await app.request(`${basePath}?limit=50`, { headers });
@@ -523,6 +619,11 @@ describe("personal GitHub OAuth", () => {
     });
     expect(credential?.credential.client_secret).toBeUndefined();
     expect(fixture.tokenRequests[0]?.get("code_verifier")).toHaveLength(64);
+    expect(authorizationUrl.searchParams.get("code_challenge")).toBe(
+      createHash("sha256")
+        .update(fixture.tokenRequests[0]!.get("code_verifier")!)
+        .digest("base64url"),
+    );
 
     const replay = await callback(fixture, state);
     expect(new URL(replay.headers.get("location")!).searchParams.get("reason")).toBe(
@@ -542,7 +643,7 @@ describe("personal GitHub OAuth", () => {
     expect(fixture.tokenRequests).toHaveLength(1);
   }, 60_000);
 
-  test("the signed canonical managed-human claim reaches the personal-workspace authority lane", async () => {
+  test("native browser state reaches the canonical personal-workspace authority lane", async () => {
     if (!available) return;
     const provisioned = await freshWorkspace();
     const workspace = { ...provisioned, workspaceId: provisioned.personalWorkspaceId };
@@ -551,11 +652,14 @@ describe("personal GitHub OAuth", () => {
     expect(started.response.status).toBe(200);
     const originalState = new URL(started.authorizationUrl).searchParams.get("state")!;
     const decoded = readSignedState(originalState, STATE_SECRET) as Record<string, unknown>;
-    const canonicalState = createSignedState(STATE_SECRET, {
-      ...decoded,
-      canonicalManagedHumanSession: true,
-    });
-    const connected = await callback(fixture, canonicalState);
+    expect(decoded.canonicalManagedHumanSession).toBe(true);
+    const [membership] = await shared!.admin<{ count: number }[]>`
+      select count(*)::integer as count from workspace_memberships
+      where workspace_id = ${workspace.workspaceId} and subject_id = ${workspace.subjectId}`;
+    expect(membership!.count).toBe(0);
+    // Redeem only state emitted after actual native cookie resolution; never
+    // manufacture the canonical claim by re-signing a bearer-known state.
+    const connected = await callback(fixture, originalState);
     expect(
       new URL(connected.headers.get("location")!).searchParams.get("github_personal_oauth"),
     ).toBe("success");
@@ -646,18 +750,13 @@ describe("personal GitHub OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = githubFixture();
-    expect((await start(fixture, workspace, undefined, "service")).response.status).toBe(422);
+    expect((await legacyBearerStart(fixture, workspace, "service")).response.status).toBe(403);
 
     const generic = await testApp(fixture).request(
       `/v1/workspaces/${workspace.workspaceId}/connections`,
       {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace),
-          "content-type": "application/json",
-          "x-opengeni-access-key": EDGE_ACCESS_KEY,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "github.com",
           kind: "oauth2",
@@ -700,6 +799,28 @@ describe("personal GitHub OAuth", () => {
     expect(unchanged.version).toBe(connection.version);
   }, 60_000);
 
+  test("legacy human-shaped and service bearers cannot start owner OAuth, even alongside a native cookie", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    for (const principalKind of ["human_session", "service"] as const) {
+      for (const includeNativeCookie of [false, true]) {
+        const denied = await legacyBearerStart(
+          fixture,
+          workspace,
+          principalKind,
+          includeNativeCookie,
+        );
+        expect(denied.response.status).toBe(403);
+        expect(denied.body.authorizationUrl).toBeUndefined();
+      }
+    }
+    expect(fixture.tokenRequests).toHaveLength(0);
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toEqual([]);
+  }, 60_000);
+
   test("disconnect is generation-fenced and idempotent", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -713,16 +834,14 @@ describe("personal GitHub OAuth", () => {
       expectedVersion: connection.version,
       idempotencyKey: crypto.randomUUID(),
     };
-    const authorization = await bearer(workspace);
+    const headers = nativeHeaders(workspace);
     const machineDisconnect = await testApp(fixture).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
       {
         method: "DELETE",
         headers: {
+          ...headers,
           authorization: await bearer(workspace, "service"),
-          "content-type": "application/json",
-          "x-opengeni-access-key": EDGE_ACCESS_KEY,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
         body: JSON.stringify(body),
       },
@@ -732,12 +851,7 @@ describe("personal GitHub OAuth", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
       {
         method: "DELETE",
-        headers: {
-          authorization,
-          "content-type": "application/json",
-          "x-opengeni-access-key": EDGE_ACCESS_KEY,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers,
         body: "{}",
       },
     );
@@ -747,12 +861,7 @@ describe("personal GitHub OAuth", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
         {
           method: "DELETE",
-          headers: {
-            authorization,
-            "content-type": "application/json",
-            "x-opengeni-access-key": EDGE_ACCESS_KEY,
-            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-          },
+          headers,
           body: JSON.stringify(body),
         },
       );

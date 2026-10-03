@@ -5835,7 +5835,7 @@ describe("API component integration", () => {
     );
   });
 
-  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+  test("configured-token browser handoff cannot silently redeem native GitHub OAuth code", async () => {
     const stateSecret = "github-owner-authority-state";
     const delegationSecret = "test-delegation-secret";
     const installationId = 438826628;
@@ -5852,6 +5852,7 @@ describe("API component integration", () => {
     const responseStateHeaderName = ["set", "cookie"].join("-");
     const requestStateHeaderName = ["coo", "kie"].join("");
     let authorityCalls = 0;
+    let discoveryCalls = 0;
     const repository = {
       id: 4001,
       installationId,
@@ -5881,7 +5882,10 @@ describe("API component integration", () => {
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
       githubAppApi: {
-        discoverInstallationBindingCandidates: async () => [],
+        discoverInstallationBindingCandidates: async () => {
+          discoveryCalls++;
+          return [];
+        },
         authorizeInstallationBinding: async () => {
           authorityCalls += 1;
           return {
@@ -5924,36 +5928,24 @@ describe("API component integration", () => {
       `/v1/github/oauth/callback?code=discover-configured-owner&state=${encodeURIComponent(discoveryState)}`,
       { headers: { [requestStateHeaderName]: discoveryStateHeader } },
     );
-    expect(discovery.status).toBe(302);
-    const installLocation = new URL(discovery.headers.get("location")!);
-    expect(installLocation.origin + installLocation.pathname).toBe(
-      "https://github.com/apps/opengeni-test-app/installations/new",
-    );
-    const installState = installLocation.searchParams.get("state")!;
-    const installStateHeader = discovery.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
-    const setup = await app.request(
-      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(installState)}`,
-      { headers: { [requestStateHeaderName]: installStateHeader } },
-    );
-    expect(setup.status).toBe(302);
-    const oauthState = new URL(setup.headers.get("location")!).searchParams.get("state")!;
-    const oauthStateHeader = setup.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
-    const callback = await app.request(
-      `/v1/github/oauth/callback?code=fresh-configured-owner&state=${encodeURIComponent(oauthState)}`,
-      { headers: { [requestStateHeaderName]: oauthStateHeader } },
-    );
-    expect(callback.status).toBe(200);
-    expect(authorityCalls).toBe(1);
-    expect(
-      await listGitHubInstallationAccessForWorkspace(dbClient.db, grant.workspaceId),
-    ).toMatchObject([
+    // A configured bearer may carry its bounded installation handoff, but the
+    // state cookie is not independently verified native-browser authorization.
+    expect(discovery.status).toBe(401);
+    const bearerCallback = await app.request(
+      `/v1/github/oauth/callback?code=discover-configured-owner&state=${encodeURIComponent(discoveryState)}`,
       {
-        installationId,
-        githubAccountId: 801,
-        authorityKind: "personal_owner",
-        repositoryIds: [repository.id],
+        headers: {
+          [authHeaderName]: managerBearer,
+          [requestStateHeaderName]: discoveryStateHeader,
+        },
       },
-    ]);
+    );
+    expect(bearerCallback.status).toBe(403);
+    expect(discoveryCalls).toBe(0);
+    expect(authorityCalls).toBe(0);
+    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, grant.workspaceId)).toEqual(
+      [],
+    );
   });
 
   // Source preparation, scope isolation, and agent MCP publication/review are

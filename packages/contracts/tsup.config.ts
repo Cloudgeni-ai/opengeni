@@ -28,6 +28,7 @@ export default defineConfig({
     "src/model-picker-order.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
+    "src/organization-access.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",

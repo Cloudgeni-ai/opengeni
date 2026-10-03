@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Settings } from "@opengeni/config";
+import { requireAccessGrantAuthorization, stampDelegatedHumanAuthorization } from "@opengeni/core";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -18,6 +19,7 @@ import {
   getConnectionMetadata,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
+  synchronizeCanonicalHumanLoginBindings,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -27,6 +29,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { bindNativeProviderStart } from "../src/integrations/delegated-native-provider-handoff";
 
 const DELEGATION_SECRET = "google-drive-isolation-delegation-secret";
 const STATE_SECRET = "google-drive-isolation-state-secret";
@@ -39,6 +42,17 @@ const ROTATED_REFRESH_TOKEN = "google-drive-isolation-rotated-refresh-token-do-n
 const PROVIDER_ERROR_DETAIL = "google-drive-isolation-provider-error-detail-do-not-leak";
 
 type Authority = { accountId: string; workspaceId: string };
+type NativeBrowser = {
+  cookie: string;
+  flowCookies: Map<string, string>;
+  sessionId: string;
+  user: { id: string; name: string; email: string; emailVerified: boolean };
+};
+const nativeBrowsers = new Map<string, NativeBrowser>();
+
+function subjectFor(authority: Authority, label = "subject-a"): string {
+  return `user:google-drive-isolation-${authority.accountId}-${label}`;
+}
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -84,7 +98,43 @@ async function freshAuthority(accountId?: string): Promise<Authority> {
   await shared.admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${resolvedAccountId})`;
-  for (const subjectId of ["subject-a", "subject-b"]) {
+  for (const label of ["subject-a", "subject-b"]) {
+    const subjectId = subjectFor(
+      { accountId: resolvedAccountId, workspaceId: workspace!.id },
+      label,
+    );
+    if (!accountId) {
+      const userId = subjectId.slice("user:".length);
+      await shared.admin`insert into auth_users (id, name, email, email_verified)
+        values (${userId}, 'Google Drive isolation user', ${`${resolvedAccountId}-${label}@example.test`}, true)`;
+      const [personal] = await shared.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${resolvedAccountId}, 'Google Drive isolation personal workspace') returning id`;
+      await shared.admin`insert into workspace_inference_controls (workspace_id, account_id)
+        values (${personal!.id}, ${resolvedAccountId})`;
+      await shared.admin`insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (${resolvedAccountId}, ${subjectId}, 'member', 'active', ${personal!.id})`;
+      await shared.admin`insert into auth_identities (id, user_id, provider_id, account_id)
+        values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+      const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      const sessionId = crypto.randomUUID();
+      await shared.admin`insert into auth_sessions (
+        id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+      ) values (${sessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision})`;
+      nativeBrowsers.set(subjectId, {
+        cookie: `google-drive-native-session=${sessionId}`,
+        flowCookies: new Map(),
+        sessionId,
+        user: {
+          id: userId,
+          name: "Google Drive isolation user",
+          email: `${resolvedAccountId}-${label}@example.test`,
+          emailVerified: true,
+        },
+      });
+    }
     await shared.admin`
       insert into workspace_memberships (
         account_id, workspace_id, subject_id, subject_label, role, permissions
@@ -103,7 +153,7 @@ async function bearer(
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     ...authority,
-    subjectId,
+    subjectId: subjectFor(authority, subjectId),
     permissions,
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3600,
@@ -133,7 +183,7 @@ function providerDouble(
     authorization: string | null;
     body: URLSearchParams;
   }> = [];
-  const fetch: typeof globalThis.fetch = async (input, init) => {
+  const fetch = (async (...[input, init]: Parameters<typeof globalThis.fetch>) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     const body =
       init?.body instanceof URLSearchParams
@@ -179,19 +229,84 @@ function providerDouble(
       return Response.json({ incompleteSearch: false, files: [] });
     }
     return new Response("not found", { status: 404 });
-  };
+  }) as unknown as typeof globalThis.fetch;
   return { fetch, requests };
 }
 
+function browserCookie(authority: Authority, label = "subject-a") {
+  const browser = nativeBrowsers.get(subjectFor(authority, label))!;
+  return [browser.cookie, ...browser.flowCookies.values()].join("; ");
+}
+
+function rememberFlowCookies(authority: Authority, response: Response, label = "subject-a") {
+  const browser = nativeBrowsers.get(subjectFor(authority, label))!;
+  const cookies = response.headers.getSetCookie();
+  expect(cookies.length).toBeGreaterThan(0);
+  for (const cookie of cookies) {
+    expect(cookie).toContain("HttpOnly");
+    const pair = cookie.split(";", 1)[0]!;
+    browser.flowCookies.set(pair.slice(0, pair.indexOf("=")), pair);
+  }
+}
+
 function api(googleDriveFetch: typeof globalThis.fetch) {
-  return createApp({
+  const deps = {
     settings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
-    managedAuth: null,
+    managedAuth: {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const cookies = (headers.get("cookie") ?? "").split(";").map((value) => value.trim());
+          const browser = [...nativeBrowsers.values()].find((candidate) =>
+            cookies.includes(candidate.cookie),
+          );
+          return {
+            headers: new Headers(),
+            response: browser ? { session: { id: browser.sessionId }, user: browser.user } : null,
+          };
+        },
+      },
+    },
     googleDriveFetch,
-  } as never);
+  } as never;
+  const server = createApp(deps);
+  // Explicitly bind hand-signed malformed parser fixtures through the real
+  // native resolver. Normal starts and callbacks never use this test endpoint.
+  server.post("/__fixture/google-drive/native-bind", async (c) => {
+    const { workspaceId, state } = (await c.req.json()) as { workspaceId: string; state: string };
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const authorizationUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    authorizationUrl.searchParams.set("state", state);
+    bindNativeProviderStart(c, deps, {
+      authorization,
+      provider: "google-drive",
+      authorizationUrl: authorizationUrl.toString(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    return c.body(null, 204);
+  });
+  return server;
+}
+
+async function bindParserFixture(
+  authority: Authority,
+  fetch: typeof globalThis.fetch,
+  state: string,
+) {
+  const response = await api(fetch).request("/__fixture/google-drive/native-bind", {
+    method: "POST",
+    headers: { cookie: browserCookie(authority), "content-type": "application/json" },
+    body: JSON.stringify({ workspaceId: authority.workspaceId, state }),
+  });
+  expect(response.status, await response.clone().text()).toBe(204);
+  rememberFlowCookies(authority, response);
 }
 
 async function start(
@@ -200,18 +315,54 @@ async function start(
   subjectId = "subject-a",
   connectionId?: string,
 ) {
-  return await api(fetch).request(
-    `/v1/workspaces/${authority.workspaceId}/connections/google-drive/install`,
+  const request = new Request(
+    `http://127.0.0.1:8000/v1/workspaces/${authority.workspaceId}/connections/google-drive/install`,
     {
       method: "POST",
       headers: {
-        authorization: await bearer(authority, subjectId),
         "content-type": "application/json",
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
       body: JSON.stringify(connectionId ? { connectionId } : {}),
     },
   );
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: authority.accountId,
+    subjectId: subjectFor(authority, subjectId),
+    permissions: ["connections:read", "connections:write"],
+    workspaceScope: { kind: "selected", workspaceIds: [authority.workspaceId] },
+  });
+  // Hono.request(string, init) constructs another Request and loses this proof.
+  const server = api(fetch);
+  const started = await server.fetch(request);
+  if (started.status !== 200) return started;
+  const body = (await started.json()) as { authorizationUrl: string; expiresAt: string };
+  const handoff = new URL(body.authorizationUrl);
+  expect(handoff.origin).toBe("http://127.0.0.1:8000");
+  expect(handoff.pathname).toBe(
+    `/v1/workspaces/${authority.workspaceId}/connections/google-drive/oauth/native-start`,
+  );
+  expect(handoff.searchParams.has("state")).toBe(false);
+  const intent = handoff.searchParams.get("intent")!;
+  const claims = readSignedState(intent, STATE_SECRET)!;
+  expect(claims).toMatchObject({
+    kind: "delegated_native_provider_handoff",
+    provider: "google-drive",
+    accountId: authority.accountId,
+    workspaceId: authority.workspaceId,
+    subjectId: subjectFor(authority, subjectId),
+  });
+  const opened = await server.request(handoff.toString(), {
+    headers: { cookie: browserCookie(authority, subjectId) },
+  });
+  expect(opened.status, await opened.clone().text()).toBe(302);
+  rememberFlowCookies(authority, opened, subjectId);
+  const authorizationUrl = new URL(opened.headers.get("location")!);
+  expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+  const providerState = readSignedState(authorizationUrl.searchParams.get("state")!, STATE_SECRET)!;
+  expect(providerState.kind).toBe("google_drive_oauth");
+  expect(providerState.nonce).not.toBe(claims.nonce);
+  return Response.json({ ...body, authorizationUrl: authorizationUrl.toString() });
 }
 
 async function connect(authority: Authority, google: ReturnType<typeof providerDouble>) {
@@ -222,26 +373,81 @@ async function connect(authority: Authority, google: ReturnType<typeof providerD
   );
   const state = authorizationUrl.searchParams.get("state");
   expect(state).toBeTruthy();
-  const completed = await callback(google.fetch, state!);
+  const completed = await callback(authority, google.fetch, state!);
   expect(completed.headers.get("location")).toContain("google_drive=connected");
   const connection = (
-    await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")
+    await listConnectionsMetadata(client.db, authority.workspaceId, subjectFor(authority))
   ).find((candidate) => candidate.providerDomain === "googleapis.com");
   expect(connection).toBeTruthy();
   return { state: state!, connection: connection!, completed };
 }
 
 async function callback(
+  authority: Authority,
   fetch: typeof globalThis.fetch,
   state: string,
   suffix = "code=fixture-code",
 ) {
   return await api(fetch).request(
     `/v1/integrations/google-drive/callback?${suffix}&state=${encodeURIComponent(state)}`,
+    { headers: { cookie: browserCookie(authority) } },
   );
 }
 
 describe("Google Drive OAuth isolation proof", () => {
+  test("human-shaped legacy bearer cannot start personal OAuth", async () => {
+    const authority = await freshAuthority();
+    const google = providerDouble();
+    const response = await api(google.fetch).request(
+      `/v1/workspaces/${authority.workspaceId}/connections/google-drive/install`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(authority, "subject-a"),
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: "{}",
+      },
+    );
+    expect(response.status).toBe(403);
+    expect(google.requests).toHaveLength(0);
+    expect((await start(authority, google.fetch)).status).toBe(200);
+  });
+  test("callback requires its flow cookie and exact native browser, not delegation", async () => {
+    const authority = await freshAuthority();
+    const google = providerDouble();
+    const started = await start(authority, google.fetch);
+    const state = new URL(
+      ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+    const callbackUrl = `http://127.0.0.1:8000/v1/integrations/google-drive/callback?code=fixture-code&state=${encodeURIComponent(state)}`;
+    const browser = nativeBrowsers.get(subjectFor(authority))!;
+    const other = nativeBrowsers.get(subjectFor(authority, "subject-b"))!;
+    const server = api(google.fetch);
+    expect(
+      (await server.request(callbackUrl, { headers: { cookie: browser.cookie } })).status,
+    ).toBe(403);
+    expect(
+      (
+        await server.request(callbackUrl, {
+          headers: { cookie: [other.cookie, ...browser.flowCookies.values()].join("; ") },
+        })
+      ).status,
+    ).toBe(403);
+    const delegated = new Request(callbackUrl, { headers: { cookie: browserCookie(authority) } });
+    stampDelegatedHumanAuthorization(delegated, {
+      organizationId: authority.accountId,
+      subjectId: subjectFor(authority),
+      permissions: ["connections:read", "connections:write"],
+      workspaceScope: { kind: "selected", workspaceIds: [authority.workspaceId] },
+    });
+    expect((await server.fetch(delegated)).status).toBe(403);
+    expect(google.requests).toHaveLength(0);
+    expect((await callback(authority, google.fetch, state)).headers.get("location")).toContain(
+      "google_drive=connected",
+    );
+  });
   test("a state minted by another flow cannot be presented to this callback", async () => {
     // This state carries no ownership field and no provider identity, and its
     // return path is byte-identical to `/workspaces/<ws>/capabilities` - a path
@@ -261,7 +467,11 @@ describe("Google Drive OAuth isolation proof", () => {
 
     const { kind: _dropped, ...foreignFlow } = payload;
     for (const candidate of [foreignFlow, { ...foreignFlow, kind: "atlassian_oauth" }]) {
-      const refused = await callback(google.fetch, createSignedState(STATE_SECRET, candidate));
+      const refused = await callback(
+        authority,
+        google.fetch,
+        createSignedState(STATE_SECRET, candidate),
+      );
       expect(refused.status).toBe(302);
       // Correctly signed, so it may name its own workspace page, but never
       // anything its payload chose.
@@ -272,16 +482,14 @@ describe("Google Drive OAuth isolation proof", () => {
     // Refused before any provider traffic, and nothing was written.
     expect(google.requests).toHaveLength(0);
     expect(
-      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
-        (candidate) => candidate.providerDomain === "googleapis.com",
-      ),
+      (
+        await listConnectionsMetadata(client.db, authority.workspaceId, subjectFor(authority))
+      ).filter((candidate) => candidate.providerDomain === "googleapis.com"),
     ).toEqual([]);
 
-    // Positive control: the same payload with its own kind restored connects.
-    const accepted = await callback(
-      google.fetch,
-      createSignedState(STATE_SECRET, { ...foreignFlow, kind: "google_drive_oauth" }),
-    );
+    // Positive control: the original browser-minted state retains its own kind
+    // and flow-binding cookie, and connects.
+    const accepted = await callback(authority, google.fetch, state);
     expect(accepted.headers.get("location")).toContain("google_drive=connected");
   });
 
@@ -290,9 +498,8 @@ describe("Google Drive OAuth isolation proof", () => {
     // `subjectId: state.subjectId`. The start route admits only a managed human
     // and stamps `personalOwnerVerified` into the signed state; a state minted
     // by an older deployment carries no such claim, which is the rolling-deploy
-    // window this fence exists to close. Note `subject-a` is a host-opaque
-    // subject that passes the subject-shape check, so only the claim can be
-    // doing the work here.
+    // window this fence exists to close. This is a real native subject with
+    // live membership, so only the removed owner claim explains the refusal.
     const authority = await freshAuthority();
     const google = providerDouble();
     const started = await start(authority, google.fetch);
@@ -304,24 +511,22 @@ describe("Google Drive OAuth isolation proof", () => {
     expect(payload.personalOwnerVerified).toBe(true);
 
     const { personalOwnerVerified: _dropped, ...legacyPayload } = payload;
-    const refused = await callback(google.fetch, createSignedState(STATE_SECRET, legacyPayload));
+    const legacyState = createSignedState(STATE_SECRET, legacyPayload);
+    await bindParserFixture(authority, google.fetch, legacyState);
+    const refused = await callback(authority, google.fetch, legacyState);
     expect(refused.status).toBe(302);
     expect(refused.headers.get("location")).toContain("google_drive=error");
     expect(refused.headers.get("location")).toContain("reason=http_422");
     // No provider call and no row: the refusal happens before token exchange.
     expect(google.requests).toHaveLength(0);
     expect(
-      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
-        (candidate) => candidate.providerDomain === "googleapis.com",
-      ),
+      (
+        await listConnectionsMetadata(client.db, authority.workspaceId, subjectFor(authority))
+      ).filter((candidate) => candidate.providerDomain === "googleapis.com"),
     ).toEqual([]);
 
-    // The same hand-minted state with the claim restored is accepted, so the
-    // fence is the claim itself and not some unrelated state rejection.
-    const accepted = await callback(
-      google.fetch,
-      createSignedState(STATE_SECRET, { ...legacyPayload, personalOwnerVerified: true }),
-    );
+    // The original native state has the claim and its genuine flow cookie.
+    const accepted = await callback(authority, google.fetch, state);
     expect(accepted.headers.get("location")).toContain("google_drive=connected");
   });
 
@@ -344,7 +549,7 @@ describe("Google Drive OAuth isolation proof", () => {
     const payload = readSignedState(state!, STATE_SECRET) as Record<string, unknown>;
     expect(payload).toMatchObject({
       ...authority,
-      subjectId: "subject-a",
+      subjectId: subjectFor(authority),
       returnPath: `/workspaces/${authority.workspaceId}/capabilities`,
     });
     expect(JSON.stringify(payload)).not.toContain(ACCESS_TOKEN);
@@ -357,7 +562,13 @@ describe("Google Drive OAuth isolation proof", () => {
       ...payload,
       returnPath: "https://attacker.invalid/oauth-capture",
     });
-    const rejectedReturn = await callback(google.fetch, maliciousReturn, "error=access_denied");
+    await bindParserFixture(authority, google.fetch, maliciousReturn);
+    const rejectedReturn = await callback(
+      authority,
+      google.fetch,
+      maliciousReturn,
+      "error=access_denied",
+    );
     expect(rejectedReturn.status).toBe(302);
     expect(rejectedReturn.headers.get("location")).toBe(
       `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_invalid`,
@@ -368,13 +579,14 @@ describe("Google Drive OAuth isolation proof", () => {
       ...payload,
       connectionId: "c0ffee00-cafe-4000-8000-000000000001",
     });
-    const rejectedReconnect = await callback(google.fetch, unpairedReconnect);
+    await bindParserFixture(authority, google.fetch, unpairedReconnect);
+    const rejectedReconnect = await callback(authority, google.fetch, unpairedReconnect);
     expect(rejectedReconnect.headers.get("location")).toBe(
       `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_invalid`,
     );
     expect(google.requests).toHaveLength(0);
 
-    const completed = await callback(google.fetch, state!);
+    const completed = await callback(authority, google.fetch, state!);
     expect(completed.status).toBe(302);
     expect(completed.headers.get("location")).toMatch(
       new RegExp(
@@ -392,11 +604,11 @@ describe("Google Drive OAuth isolation proof", () => {
     const verifier = tokenRequest?.body.get("code_verifier");
     expect(verifier).toBeTruthy();
     expect(createHash("sha256").update(verifier!).digest("base64url")).toBe(
-      authorizationUrl.searchParams.get("code_challenge"),
+      authorizationUrl.searchParams.get("code_challenge")!,
     );
     expect(startedBody.authorizationUrl).not.toContain(verifier!);
 
-    const replay = await callback(google.fetch, state!);
+    const replay = await callback(authority, google.fetch, state!);
     expect(replay.headers.get("location")).toBe(
       `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/capabilities?google_drive=error&reason=state_replayed`,
     );
@@ -417,16 +629,16 @@ describe("Google Drive OAuth isolation proof", () => {
     // An authentic but aged link names its workspace, so it returns there and
     // says it expired. It still authorizes nothing.
     const expired = createSignedState(STATE_SECRET, payload, Math.floor(Date.now() / 1000) - 601);
-    expect((await callback(google.fetch, expired)).headers.get("location")).toBe(
+    expect((await callback(authority, google.fetch, expired)).headers.get("location")).toBe(
       `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/plugins?google_drive=error&reason=state_expired`,
     );
     // A tampered or foreign-secret state names no trustworthy workspace.
     const tampered = `${state.slice(0, -1)}${state.endsWith("a") ? "b" : "a"}`;
-    expect((await callback(google.fetch, tampered)).headers.get("location")).toBe(
+    expect((await callback(authority, google.fetch, tampered)).headers.get("location")).toBe(
       "http://127.0.0.1:3000/integrations?google_drive=error&reason=state_invalid",
     );
     const foreign = createSignedState("another-deployment-secret", payload);
-    expect((await callback(google.fetch, foreign)).headers.get("location")).toBe(
+    expect((await callback(authority, google.fetch, foreign)).headers.get("location")).toBe(
       "http://127.0.0.1:3000/integrations?google_drive=error&reason=state_invalid",
     );
     expect(google.requests).toHaveLength(0);
@@ -436,9 +648,9 @@ describe("Google Drive OAuth isolation proof", () => {
       ...payload,
       accountId: otherAccount.accountId,
     });
-    expect((await callback(google.fetch, accountMismatch)).headers.get("location")).toBe(
-      `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/capabilities?google_drive=error&reason=http_403`,
-    );
+    // The new browser boundary denies mismatched ownership before entering the
+    // provider adapter; this is an HTTP refusal, not an OAuth failure redirect.
+    expect((await callback(authority, google.fetch, accountMismatch)).status).toBe(403);
     expect(google.requests).toHaveLength(0);
 
     const connected = await connect(authority, google);
@@ -457,9 +669,13 @@ describe("Google Drive OAuth isolation proof", () => {
       (await start(otherAccount, google.fetch, "subject-a", connected.connection.id)).status,
     ).toBe(404);
     expect(
-      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-b")).filter(
-        (connection) => connection.providerDomain === "googleapis.com",
-      ),
+      (
+        await listConnectionsMetadata(
+          client.db,
+          authority.workspaceId,
+          subjectFor(authority, "subject-b"),
+        )
+      ).filter((connection) => connection.providerDomain === "googleapis.com"),
     ).toEqual([]);
   });
 
@@ -475,12 +691,12 @@ describe("Google Drive OAuth isolation proof", () => {
     const state = new URL(
       ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
     ).searchParams.get("state")!;
-    const pending = callback(google.fetch, state);
+    const pending = callback(authority, google.fetch, state);
     await identityStarted.promise;
     await shared.admin`
       update workspace_memberships
       set permissions = ${shared.admin.json(["connections:read"])}
-      where workspace_id = ${authority.workspaceId} and subject_id = 'subject-a'`;
+      where workspace_id = ${authority.workspaceId} and subject_id = ${subjectFor(authority)}`;
     identityGate.resolve();
 
     const rejected = await pending;
@@ -488,16 +704,16 @@ describe("Google Drive OAuth isolation proof", () => {
       `http://127.0.0.1:3000/workspaces/${authority.workspaceId}/capabilities?google_drive=error&reason=http_403`,
     );
     expect(
-      (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
-        (connection) => connection.providerDomain === "googleapis.com",
-      ),
+      (
+        await listConnectionsMetadata(client.db, authority.workspaceId, subjectFor(authority))
+      ).filter((connection) => connection.providerDomain === "googleapis.com"),
     ).toEqual([]);
     expect(
       google.requests.filter((request) => request.url === "https://oauth2.googleapis.com/token"),
     ).toHaveLength(1);
 
-    const replay = await callback(google.fetch, state);
-    expect(replay.headers.get("location")).toContain("reason=http_403");
+    const replay = await callback(authority, google.fetch, state);
+    expect(replay.status).toBe(403);
     expect(
       google.requests.filter((request) => request.url === "https://oauth2.googleapis.com/token"),
     ).toHaveLength(1);
@@ -516,15 +732,15 @@ describe("Google Drive OAuth isolation proof", () => {
       const state = new URL(
         ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
       ).searchParams.get("state")!;
-      const rejected = await callback(google.fetch, state);
+      const rejected = await callback(authority, google.fetch, state);
       expect(rejected.headers.get("location")).toContain("reason=scope_not_granted");
       expect(
         google.requests.some((request) => new URL(request.url).pathname === "/drive/v3/about"),
       ).toBe(false);
       expect(
-        (await listConnectionsMetadata(client.db, authority.workspaceId, "subject-a")).filter(
-          (connection) => connection.providerDomain === "googleapis.com",
-        ),
+        (
+          await listConnectionsMetadata(client.db, authority.workspaceId, subjectFor(authority))
+        ).filter((connection) => connection.providerDomain === "googleapis.com"),
       ).toEqual([]);
     }
 
@@ -536,7 +752,7 @@ describe("Google Drive OAuth isolation proof", () => {
       connectionId: connected.connection.id,
       providerDomain: "googleapis.com",
       kind: "oauth2",
-      subjectId: "subject-a",
+      subjectId: subjectFor(authority),
       allowSubjectOwned: true,
     });
     const reconnect = providerDouble();
@@ -562,14 +778,14 @@ describe("Google Drive OAuth isolation proof", () => {
       },
     );
     expect(paused.status).toBe(200);
-    const stale = await callback(reconnect.fetch, reconnectState);
+    const stale = await callback(authority, reconnect.fetch, reconnectState);
     expect(stale.headers.get("location")).toContain("reason=connection_conflict");
     const credentialAfter = await loadConnectionCredentialForBroker(client.db, settings, {
       workspaceId: authority.workspaceId,
       connectionId: connected.connection.id,
       providerDomain: "googleapis.com",
       kind: "oauth2",
-      subjectId: "subject-a",
+      subjectId: subjectFor(authority),
       allowSubjectOwned: true,
     });
     expect(credentialAfter?.credential).toEqual(credentialBefore?.credential);
@@ -578,7 +794,7 @@ describe("Google Drive OAuth isolation proof", () => {
         client.db,
         authority.workspaceId,
         connected.connection.id,
-        "subject-a",
+        subjectFor(authority),
       ),
     ).toMatchObject({
       version: connected.connection.version + 1,
@@ -616,7 +832,7 @@ describe("Google Drive OAuth isolation proof", () => {
       connectionId: connected.connection.id,
       providerDomain: "googleapis.com",
       kind: "oauth2",
-      subjectId: "subject-a",
+      subjectId: subjectFor(authority),
       allowSubjectOwned: true,
     });
     expect(rotated?.credential).toMatchObject({
@@ -627,7 +843,7 @@ describe("Google Drive OAuth isolation proof", () => {
       client.db,
       authority.workspaceId,
       connected.connection.id,
-      "subject-a",
+      subjectFor(authority),
     );
     expect(JSON.stringify(current)).not.toContain(ROTATED_ACCESS_TOKEN);
     expect(JSON.stringify(current)).not.toContain(ROTATED_REFRESH_TOKEN);
@@ -684,7 +900,7 @@ describe("Google Drive OAuth isolation proof", () => {
         client.db,
         revokedAuthority.workspaceId,
         revokedConnection.connection.id,
-        "subject-a",
+        subjectFor(revokedAuthority),
       ),
     ).toMatchObject({
       status: "needs_reauth",
@@ -745,7 +961,7 @@ describe("Google Drive OAuth isolation proof", () => {
           union all select 'webhooks', to_jsonb(value)::text from stripe_webhook_events value
           union all select 'host_exports', to_jsonb(value)::text from host_export_outbox value
         ) sinks where body like ${`%${secret}%`}`;
-      expect(exposed).toEqual([]);
+      expect([...exposed]).toEqual([]);
     }
   });
 });

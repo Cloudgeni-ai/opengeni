@@ -137,6 +137,16 @@ import {
   resumePersonalGitHubOAuthInNativeBrowser,
 } from "../integrations/personal-github";
 import {
+  bindNativeProviderStart,
+  delegatedNativeProviderStart,
+  nativeProviderCallbackFailureUrl,
+  nativeProviderCallbackState,
+  NativeHandoffProvider,
+  requireNativeProviderBrowserTransport,
+  requireNativeProviderStartTransport,
+  resumeDelegatedNativeProviderStart,
+} from "../integrations/delegated-native-provider-handoff";
+import {
   browseAtlassianSources,
   completeAtlassianOAuthCallback,
   disconnectAtlassian,
@@ -446,34 +456,54 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireLegacyOAuthActor(access);
     const grant = access.grant;
     const payload = await parseRequestJson(c, OpenGeniSlackBotInstallRequest);
-    return c.json(
-      await withOrganizationIntegrationAcquisition(
-        db,
-        { accountId: grant.accountId, workspaceId },
-        ["slack-bot"],
-        (tx) =>
-          startSlackBotInstall(
-            { ...deps, db: tx },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              subjectId: grant.subjectId,
-              requestUrl: c.req.url,
-              ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
-            },
-          ),
-      ),
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "slack-bot",
+      payload,
+      requestUrl: c.req.url,
+    });
+    if (handoff)
+      return c.json({ authorizationUrl: handoff.authorizationUrl, expiresAt: handoff.expiresAt });
+    requireNativeProviderStartTransport(c, deps, access);
+    const result = await withOrganizationIntegrationAcquisition(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      ["slack-bot"],
+      (tx) =>
+        startSlackBotInstall(
+          { ...deps, db: tx },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            requestUrl: c.req.url,
+            ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+          },
+        ),
     );
+    bindNativeProviderStart(c, deps, { authorization: access, provider: "slack-bot", ...result });
+    return c.json(result);
   });
 
   app.get("/v1/integrations/slack/callback", async (c) => {
+    const admittedState = await nativeProviderCallbackState(
+      c,
+      deps,
+      "slack-bot",
+      c.req.query("state"),
+    );
+    if (admittedState === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "slack-bot", c.req.query("state"), c.req.url),
+        302,
+      );
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, c.req.url);
     let state: OpenGeniSlackInstallState | null = null;
     let exactReturnUrl: string | undefined;
     let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
     let stage: SlackBotInstallCallbackFailureStage = "permission_check";
     try {
-      state = readOpenGeniSlackInstallState(c.req.query("state"), settings);
+      state = readOpenGeniSlackInstallState(admittedState, settings);
       if (state.connectAttemptId) {
         const stored = await getConnectAttempt(db, state, state.connectAttemptId);
         if (stored.attempt.providerId !== "slack-bot" || stored.attempt.ownership !== "workspace")
@@ -713,24 +743,38 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const payload = await parseRequestJson(c, FikenOAuthStartRequest);
     requireEnvironmentEncryption(settings);
-    return c.json(
-      FikenOAuthStartResponse.parse(
-        await startFikenOAuth(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          requestUrl: c.req.url,
-          payload,
-        }),
-      ),
-    );
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "fiken",
+      payload,
+      requestUrl: c.req.url,
+    });
+    if (handoff) return c.json(FikenOAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
+    const continuation = externalActorContinuationForAuthorization(access);
+    const result = await startFikenOAuth(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      requestUrl: c.req.url,
+      payload,
+      ...(continuation ? { externalContinuation: continuation } : {}),
+    });
+    bindNativeProviderStart(c, deps, { authorization: access, provider: "fiken", ...result });
+    return c.json(FikenOAuthStartResponse.parse(result));
   });
 
   app.get("/v1/integrations/fiken/callback", async (c) => {
     assertIntegrationsEnabled();
+    const state = await nativeProviderCallbackState(c, deps, "fiken", c.req.query("state"));
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "fiken", c.req.query("state"), c.req.url),
+        302,
+      );
     const result = await completeFikenOAuthCallback(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(state ? { state } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
@@ -752,17 +796,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid Google Drive install request" });
     }
-    return c.json(
-      GoogleDriveOAuthStartResponse.parse(
-        await startGoogleDriveOAuth(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          requestUrl: c.req.url,
-          payload: parsed.data,
-        }),
-      ),
-    );
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "google-drive",
+      payload: parsed.data,
+      requestUrl: c.req.url,
+    });
+    if (handoff) return c.json(GoogleDriveOAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
+    const continuation = externalActorContinuationForAuthorization(access);
+    const result = await startGoogleDriveOAuth(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      requestUrl: c.req.url,
+      payload: parsed.data,
+      ...(continuation ? { externalContinuation: continuation } : {}),
+    });
+    bindNativeProviderStart(c, deps, {
+      authorization: access,
+      provider: "google-drive",
+      ...result,
+    });
+    return c.json(GoogleDriveOAuthStartResponse.parse(result));
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/atlassian/install", async (c) => {
@@ -778,24 +834,38 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid Atlassian install request" });
     }
-    return c.json(
-      AtlassianOAuthStartResponse.parse(
-        await startAtlassianOAuth(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          requestUrl: c.req.url,
-          payload: parsed.data,
-        }),
-      ),
-    );
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "atlassian",
+      payload: parsed.data,
+      requestUrl: c.req.url,
+    });
+    if (handoff) return c.json(AtlassianOAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
+    const continuation = externalActorContinuationForAuthorization(access);
+    const result = await startAtlassianOAuth(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      requestUrl: c.req.url,
+      payload: parsed.data,
+      ...(continuation ? { externalContinuation: continuation } : {}),
+    });
+    bindNativeProviderStart(c, deps, { authorization: access, provider: "atlassian", ...result });
+    return c.json(AtlassianOAuthStartResponse.parse(result));
   });
 
   app.get("/v1/integrations/atlassian/callback", async (c) => {
     assertIntegrationsEnabled();
+    const state = await nativeProviderCallbackState(c, deps, "atlassian", c.req.query("state"));
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "atlassian", c.req.query("state"), c.req.url),
+        302,
+      );
     const result = await completeAtlassianOAuthCallback(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(state ? { state } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
@@ -868,9 +938,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
     assertIntegrationsEnabled();
+    const state = await nativeProviderCallbackState(c, deps, "google-drive", c.req.query("state"));
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "google-drive", c.req.query("state"), c.req.url),
+        302,
+      );
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(state ? { state } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       ...(c.req.query("picked_file_ids") ? { pickedFileIds: c.req.query("picked_file_ids") } : {}),
       requestUrl: c.req.url,
@@ -1477,6 +1553,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.redirect(result.authorizationUrl, 302);
   });
 
+  app.get("/v1/workspaces/:workspaceId/connections/:provider/oauth/native-start", async (c) => {
+    assertIntegrationsEnabled();
+    requireNativeProviderBrowserTransport(c, deps);
+    const provider = NativeHandoffProvider.safeParse(c.req.param("provider"));
+    if (!provider.success)
+      throw new HTTPException(404, { message: "Provider handoff unavailable" });
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      c.req.param("workspaceId"),
+      provider.data === "social" ? "workspace:read" : "connections:write",
+    );
+    const result = await resumeDelegatedNativeProviderStart(deps, {
+      authorization,
+      provider: provider.data,
+      intent: c.req.query("intent") ?? "",
+      requestUrl: c.req.url,
+    });
+    bindNativeProviderStart(c, deps, { authorization, provider: provider.data, ...result });
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    return c.redirect(result.authorizationUrl, 302);
+  });
+
   app.post("/v1/workspaces/:workspaceId/connections/oauth/start", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
@@ -1489,6 +1589,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = parsed.data;
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "mcp-oauth",
+      payload,
+      requestUrl: c.req.url,
+    });
+    if (handoff) return c.json(OAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
@@ -1503,6 +1611,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload,
       },
     );
+    bindNativeProviderStart(c, deps, { authorization: access, provider: "mcp-oauth", ...result });
     return c.json(OAuthStartResponse.parse(result));
   });
 
@@ -1517,32 +1626,59 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: parsed.error.issues[0]?.message ?? "invalid Integration OAuth start request",
       });
     }
-    return c.json(
-      OAuthStartResponse.parse(
-        await startApiIntegrationProviderOAuth(deps, {
-          ...(externalActorContinuationForAuthorization(access)
-            ? { externalContinuation: externalActorContinuationForAuthorization(access)! }
-            : {}),
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
-          requestUrl: c.req.url,
-          payload: parsed.data,
-        }),
-      ),
-    );
+    const handoff = await delegatedNativeProviderStart(deps, {
+      authorization: access,
+      provider: "provider-oauth",
+      payload: parsed.data,
+      requestUrl: c.req.url,
+    });
+    if (handoff) return c.json(OAuthStartResponse.parse(handoff));
+    requireNativeProviderStartTransport(c, deps, access);
+    const result = await startApiIntegrationProviderOAuth(deps, {
+      ...(externalActorContinuationForAuthorization(access)
+        ? { externalContinuation: externalActorContinuationForAuthorization(access)! }
+        : {}),
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+      requestUrl: c.req.url,
+      payload: parsed.data,
+    });
+    bindNativeProviderStart(c, deps, {
+      authorization: access,
+      provider: "provider-oauth",
+      ...result,
+    });
+    return c.json(OAuthStartResponse.parse(result));
   });
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
+    const providerOAuth = isApiIntegrationProviderOAuthState(c.req.query("state"), deps.settings);
+    const state = await nativeProviderCallbackState(
+      c,
+      deps,
+      providerOAuth ? "provider-oauth" : "mcp-oauth",
+      c.req.query("state"),
+    );
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(
+          deps,
+          providerOAuth ? "provider-oauth" : "mcp-oauth",
+          c.req.query("state"),
+          c.req.url,
+        ),
+        302,
+      );
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(state ? { state } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     };
-    const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
+    const result = providerOAuth
       ? await completeApiIntegrationProviderOAuth(deps, input)
       : await completeMcpOAuthCallback(
           { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
@@ -1558,9 +1694,20 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
+    const state = await nativeProviderCallbackState(
+      c,
+      deps,
+      "provider-oauth",
+      c.req.query("state"),
+    );
+    if (state === undefined)
+      return c.redirect(
+        nativeProviderCallbackFailureUrl(deps, "provider-oauth", c.req.query("state"), c.req.url),
+        302,
+      );
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
-      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(state ? { state } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });

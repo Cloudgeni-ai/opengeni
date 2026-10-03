@@ -387,7 +387,10 @@ describe("BrowserSession route discipline", () => {
     expect(durable).toContain(
       "provider exposed a hosted login URL outside the human-only endpoint",
     );
-    expect(interactive).toContain('grant.principalKind !== "human_session"');
+    expect(interactive).toContain("requireDelegableHumanRouteAuthorization(");
+    expect(interactive).toContain(
+      'await requireAccessGrantAuthorization(context, deps, workspaceId, "sessions:control")',
+    );
     expect(interactive).toContain('action: "interactive"');
     expect(interactive).not.toContain("completeExternalAuth");
   });

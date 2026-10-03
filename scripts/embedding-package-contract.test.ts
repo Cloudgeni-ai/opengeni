@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import contractsConfig from "../packages/contracts/tsup.config";
 import sdkConfig from "../packages/sdk/tsup.config";
 import {
   publishableWorkspacePackages,
@@ -38,11 +39,18 @@ test("Connect is published before its SDK and React consumers without a React/se
   }
 });
 
+test("organization access has a runtime build entry as well as a declaration export", () => {
+  expect(contractsConfig.entry).toContain("src/organization-access.ts");
+});
+
 test("new public subpaths retain source entries and rewrite to JS/declarations and typed CSS", () => {
   const root = join(import.meta.dir, "..");
   for (const [directory, subpaths] of [
     ["packages/connect", ["."]],
-    ["packages/contracts", ["./browser-storage", "./allowance-refusal", "./usage-allowances"]],
+    [
+      "packages/contracts",
+      ["./browser-storage", "./allowance-refusal", "./usage-allowances", "./organization-access"],
+    ],
     [
       "packages/sdk",
       ["./site", "./browser", "./allowance-refusal", "./workspace-integrations", "./session-proxy"],

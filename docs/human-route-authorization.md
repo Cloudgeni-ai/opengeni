@@ -1,4 +1,4 @@
-# Human and browser route authorization (OPE-647)
+# Human and browser route authorization
 
 `scripts/public-api/human-route-classification.json` is the reviewed inventory
 of human/browser-gated HTTP registrations, including indirect helpers,
@@ -34,6 +34,20 @@ Provider flow initiation/polling can delegate to the exact verified user; actual
 provider consent or credential entry completes at the returned browser URL.
 Native GitHub handoffs mint a fresh cookie-bound browser nonce: the delegated
 caller's known initiation state is not itself proof of independent consent.
+Drive, Atlassian, Fiken, Slack, Social, MCP OAuth and curated provider OAuth
+follow the same separation. Delegated starts return a single-use, exact-person
+native handoff intent, not provider consent state or a PKCE challenge. The real
+native browser rechecks the original scope, live permissions, reconnect
+generation and Connect revision, then creates fresh provider state and an
+independent HttpOnly callback binding. Native code callbacks require both that
+binding and current authorization for the same person, organization and
+workspace. An agent-known signed state or PKCE flow alone is insufficient.
+Intent payloads are encrypted with the configured environment-encryption key;
+OAuth app client secrets are scoped machine configuration, not native login
+passwords, and never appear in clear handoff-query claims. Missing encryption
+configuration fails closed before a delegated handoff is issued.
+Genuine encrypted external continuations keep their distinct live origin and
+commit-time checks; they do not become native browser authority.
 Provider code redemption, browser login/session changes, canonical
 identity recovery, reset-credit payment confirmation and new native identity
 binding consent remain independent browser ceremonies. Merely returning a
@@ -106,6 +120,10 @@ the SDK public surface because browser-only routes still need classification.
 Phase 2 resolution status: mixed event approvals and hosted login initiation
 require verified owning-user proof, billing link creation gets cookie-only CSRF admission,
 and the Personal settings exception enforces a separate mutation ceiling.
+The seven legacy native-provider callback findings also require independent
+browser consent bindings before any provider code exchange. Their existing
+nonce, policy, owner, stored external-origin and persistence fences remain in
+force after admission.
 An `organization_allowed` classification does not activate a database lifecycle
 that currently only accepts native membership actors: retain its fail-closed
 denial until the organization-key foundation supplies the corresponding live
@@ -117,3 +135,8 @@ person-present outcomes; raw API callback URLs are not safe handoff URLs.
 Cross-organization creation and the global invitation cursor fail closed for a
 single-organization delegation. Invitation acceptance checks its organization
 before mutation and never auto-binds invitations across organizations.
+An organization service cannot stand in for a different consenting person in
+a native-provider flow; that separate service-to-person handoff lifecycle is
+not implemented and remains fail-closed. Managed sign-in enrollment opens the
+existing security page for the person to choose Connect; it does not fabricate
+a browser session or automatically resume the native credential ceremony.

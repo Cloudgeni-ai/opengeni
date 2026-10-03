@@ -2,7 +2,12 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import postgres from "postgres";
 import { Hono } from "hono";
-import { OrganizationIntegrationDeniedError, type ConnectAttempt } from "@opengeni/contracts";
+import {
+  OrganizationIntegrationDeniedError,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
+import type { ConnectAttempt } from "@opengeni/contracts/connect";
 import { type ApiRouteDeps } from "@opengeni/core";
 import {
   beginConnectAttempt,
@@ -11,6 +16,7 @@ import {
   getConnectAttempt,
   type DbClient,
   listGitHubInstallationAccessForWorkspace,
+  synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
 import {
@@ -28,8 +34,15 @@ let client: DbClient;
 const keyId = crypto.randomUUID();
 const token = crypto.randomUUID();
 const scope = { accountId: crypto.randomUUID(), workspaceId: "", subjectId: `api_key:${keyId}` };
+const nativeUserId = `github-policy-${crypto.randomUUID()}`;
+const nativeSubjectId = `user:${nativeUserId}`;
+const nativeEmail = `${nativeUserId}@example.test`;
+const nativePermissions: Permission[] = ["workspace:admin", "secrets:write", "github:manage"];
+const nativeSessionId = crypto.randomUUID();
+const nativeCookie = "github-policy-native=verified";
 let revision = 0;
 const secret = "github-policy-fixture-state";
+const delegationSecret = "github-policy-legacy-delegation-fixture";
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_ADMIN_URL;
   const appUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_APP_URL;
@@ -54,9 +67,36 @@ beforeAll(async () => {
   ).id;
   await shared.admin`insert into api_keys (id, account_id, name, credential_kind, prefix, key_hash, permissions)
     values (${keyId}, ${scope.accountId}, 'Fixture', 'organization', 'test', ${createHash("sha256").update(token).digest("hex")}, '["workspace:admin","secrets:write","github:manage"]'::jsonb)`;
+  await shared.admin`insert into auth_users (id, name, email, email_verified)
+    values (${nativeUserId}, 'GitHub policy native owner', ${nativeEmail}, true)`;
+  const [personal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${scope.accountId}, 'GitHub policy personal workspace') returning id`;
+  await shared.admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${personal!.id}, ${scope.accountId})`;
+  await shared.admin`insert into organization_memberships (
+    account_id, subject_id, role, status, personal_workspace_id
+  ) values (${scope.accountId}, ${nativeSubjectId}, 'owner', 'active', ${personal!.id})`;
+  await shared.admin`insert into workspace_memberships (
+    account_id, workspace_id, subject_id, subject_label, role, permissions
+  ) values (${scope.accountId}, ${scope.workspaceId}, ${nativeSubjectId}, 'GitHub native owner', 'owner',
+    ${shared.admin.json(nativePermissions)})`;
+  await shared.admin`insert into auth_identities (id, user_id, provider_id, account_id)
+    values (${crypto.randomUUID()}, ${nativeUserId}, 'credential', ${nativeUserId})`;
+  const identity = await synchronizeCanonicalHumanLoginBindings(client.db, nativeUserId);
+  await shared.admin`insert into auth_sessions (
+    id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+  ) values (${nativeSessionId}, ${nativeUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+    ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision})`;
 }, 180_000);
 afterAll(async () => {
-  if (shared) await shared.admin`delete from managed_accounts where id = ${scope.accountId}`;
+  if (shared) {
+    // The native pointer has a restrictive workspace FK; remove this fixture
+    // membership before cascading account-owned workspaces during cleanup.
+    await shared.admin`delete from organization_memberships
+      where account_id = ${scope.accountId} and subject_id = ${nativeSubjectId}`;
+    await shared.admin`delete from managed_accounts where id = ${scope.accountId}`;
+  }
   await client?.close();
   await shared?.release();
 });
@@ -78,11 +118,30 @@ async function allow(keys: string[]) {
 function deps(discover: () => Promise<unknown>): ApiRouteDeps {
   return {
     db: client.db,
+    managedAuth: {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => ({
+          headers: new Headers(),
+          response: headers.get("cookie")?.split("; ").includes(nativeCookie)
+            ? {
+                session: { id: nativeSessionId },
+                user: {
+                  id: nativeUserId,
+                  name: "GitHub policy native owner",
+                  email: nativeEmail,
+                  emailVerified: true,
+                },
+              }
+            : null,
+        }),
+      },
+    },
     githubStateSecret: secret,
     settings: testSettings({
       sandboxBackend: "none",
       environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
       productAccessMode: "managed",
+      delegationSecret,
       prReviewGithubAppId: "54321",
       prReviewGithubClientId: "fixture-client",
       prReviewGithubClientSecret: "fixture-secret",
@@ -120,7 +179,8 @@ for (const provider of ["github-app", "github-lens"] as const) {
         calls++;
         if (boundary === "late policy") await allow([]);
         if (boundary === "late actor")
-          await shared.admin`update api_keys set revoked_at = now() where id = ${keyId}`;
+          await shared.admin`update workspace_memberships set permissions = '[]'::jsonb
+            where workspace_id = ${scope.workspaceId} and subject_id = ${nativeSubjectId}`;
         return {
           actorId: 7,
           actorLogin: "fixture",
@@ -152,6 +212,9 @@ for (const provider of ["github-app", "github-lens"] as const) {
       api.prReviewGithubAppApi = { authorizeInstallationBinding: proof } as never;
       const state = createSignedState(secret, {
         ...scope,
+        subjectId: nativeSubjectId,
+        initiatingSubjectId: nativeSubjectId,
+        initiatingExpiresAt: Math.floor(Date.now() / 1_000) + 500,
         installationId,
         intent:
           provider === "github-app" ? "installation_authority_oauth" : "pr_review_github_oauth",
@@ -161,13 +224,14 @@ for (const provider of ["github-app", "github-lens"] as const) {
       const response = await routes(api).request(
         `/v1/${provider === "github-app" ? "github" : "pr-review/github"}/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
         {
-          headers: { ...headers(), cookie: `${cookie}=${state}` },
+          headers: { cookie: `${nativeCookie}; ${cookie}=${state}` },
         },
       );
       // Restore this synthetic shared test actor before assertions so the
       // negative probe does not strand subsequent independent test cases.
       if (boundary === "late actor")
-        await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
+        await shared.admin`update workspace_memberships set permissions = ${shared.admin.json(nativePermissions)}
+          where workspace_id = ${scope.workspaceId} and subject_id = ${nativeSubjectId}`;
       expect({
         status: response.status,
         body: response.status === 403 ? undefined : await response.text(),
@@ -181,6 +245,48 @@ for (const provider of ["github-app", "github-lens"] as const) {
         await shared.admin`select count(*)::int as count from pr_review_app_registrations where workspace_id = ${scope.workspaceId}`;
       expect(registrations!.count).toBe(0);
     });
+  test(`${provider} native callback refuses service and human-shaped legacy bearer even with a browser cookie`, async () => {
+    await allow([provider]);
+    let calls = 0;
+    const api = deps(async () => {
+      calls++;
+      return [];
+    });
+    const state = createSignedState(secret, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: nativeSubjectId,
+      initiatingSubjectId: nativeSubjectId,
+      initiatingExpiresAt: Math.floor(Date.now() / 1_000) + 500,
+      intent:
+        provider === "github-app"
+          ? "installation_authority_discovery"
+          : "pr_review_github_discovery",
+    });
+    const legacy = await signDelegatedAccessToken(delegationSecret, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: nativeSubjectId,
+      permissions: nativePermissions,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    });
+    const cookie =
+      provider === "github-app" ? "opengeni_github_state" : "opengeni_pr_review_github_state";
+    for (const bearer of [token, legacy]) {
+      const response = await routes(api).request(
+        `/v1/${provider === "github-app" ? "github" : "pr-review/github"}/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+        {
+          headers: {
+            authorization: `Bearer ${bearer}`,
+            cookie: `${nativeCookie}; ${cookie}=${state}`,
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+    }
+    expect(calls).toBe(0);
+  });
 }
 for (const provider of ["github", "gitlab", "azure_devops"] as const)
   test(`manual ${provider} PR review registration uses explicit provider classification`, async () => {
@@ -350,7 +456,9 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
   let calls = 0;
   let restrict = false;
   let revokeActor = false;
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+  const fetch = spyOn(globalThis, "fetch").mockImplementation((async (
+    input: Parameters<typeof globalThis.fetch>[0],
+  ) => {
     calls++;
     const url = new URL(String(input));
     expect(url.origin).toBe("https://api.github.com");
@@ -381,7 +489,7 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
       });
     }
     throw new Error(`Unexpected fixture request: ${url.pathname}`);
-  });
+  }) as unknown as typeof globalThis.fetch);
   const bind = () =>
     app.request(`${base}/repositories`, {
       method: "POST",

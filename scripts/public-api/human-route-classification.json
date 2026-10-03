@@ -1,6 +1,5 @@
 {
   "schemaVersion": 1,
-  "issue": "OPE-647",
   "routes": [
     {
       "method": "GET",
@@ -311,7 +310,7 @@
       "method": "GET",
       "path": "/v1/integrations/atlassian/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
     },
@@ -319,7 +318,7 @@
       "method": "GET",
       "path": "/v1/integrations/fiken/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
     },
@@ -335,7 +334,7 @@
       "method": "GET",
       "path": "/v1/integrations/google-drive/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
     },
@@ -343,7 +342,7 @@
       "method": "GET",
       "path": "/v1/integrations/oauth/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
@@ -351,7 +350,7 @@
       "method": "GET",
       "path": "/v1/integrations/provider-oauth/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
     },
@@ -359,7 +358,11 @@
       "method": "GET",
       "path": "/v1/integrations/slack/callback",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session", "requireConnectOwnerAuthority"],
+      "gates": [
+        "principalKind=human_session",
+        "requireConnectOwnerAuthority",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "person_present",
       "reason": "Provider authorization and callbacks require a browser-owned consent and credential handoff."
     },
@@ -1149,7 +1152,7 @@
       "method": "GET",
       "path": "/v1/social/oauth/callback",
       "source": "apps/api/src/routes/social.ts",
-      "gates": ["requireConnectOwnerAuthority"],
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
       "class": "person_present",
       "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
     },
@@ -1420,11 +1423,13 @@
       "path": "/v1/workspaces/:workspaceId/connect/attempts",
       "source": "apps/api/src/routes/connect.ts",
       "gates": [
+        "canonicalLocalHumanSession",
         "canonicalManagedHumanSession",
         "hasVerifiedOwningUserAuthorization",
         "principalKind=human_session",
         "requireConnectOwnerAuthority",
-        "requireDelegableHumanRouteAuthorization"
+        "requireDelegableHumanRouteAuthorization",
+        "requirePersonPresentRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Noninteractive shared connection discovery/setup is scoped administration; personal and provider-consent variants keep stricter gates."
@@ -1434,9 +1439,12 @@
       "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
       "source": "apps/api/src/routes/connect.ts",
       "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
         "principalKind=human_session",
         "requireConnectOwnerAuthority",
-        "requireDelegableHumanRouteAuthorization"
+        "requireDelegableHumanRouteAuthorization",
+        "requirePersonPresentRouteAuthorization"
       ],
       "class": "organization_allowed",
       "reason": "Noninteractive shared connection discovery/setup is scoped administration; personal and provider-consent variants keep stricter gates."
@@ -1519,10 +1527,24 @@
       "reason": "Existing personal GitHub repository authority follows the exact owning user; OAuth remains a separate browser ceremony."
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/connections/:provider/oauth/native-start",
+      "source": "apps/api/src/routes/connections.ts",
+      "gates": ["requireConnectOwnerAuthority", "requirePersonPresentRouteAuthorization"],
+      "class": "person_present",
+      "reason": "This redeems provider authorization codes/credentials; independent provider consent and signed browser/state binding prevent credential or account substitution."
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "principalKind=human_session",
+        "requireLegacyOAuthActor",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1538,7 +1560,12 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/fiken/oauth/start",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireLegacyOAuthActor"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "requireLegacyOAuthActor",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1571,7 +1598,13 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/google-drive/install",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "principalKind=human_session",
+        "requireLegacyOAuthActor",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1579,7 +1612,12 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/oauth/start",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "principalKind=human_session",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1587,7 +1625,12 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections/slack-bot/install",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["requireLegacyOAuthActor"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "requireLegacyOAuthActor",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -1848,7 +1891,12 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/oauth/start",
       "source": "apps/api/src/routes/connections.ts",
-      "gates": ["principalKind=human_session"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "principalKind=human_session",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -2483,7 +2531,13 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/social/oauth/start",
       "source": "apps/api/src/routes/social.ts",
-      "gates": ["principalKind=human_session", "requireLegacyOAuthActor"],
+      "gates": [
+        "canonicalLocalHumanSession",
+        "hasVerifiedOwningUserAuthorization",
+        "principalKind=human_session",
+        "requireLegacyOAuthActor",
+        "requirePersonPresentRouteAuthorization"
+      ],
       "class": "delegable_to_user",
       "reason": "Verified user authority may initiate/read a provider flow; the authorization URL hands independent credential entry and third-party consent to the person."
     },
@@ -2922,6 +2976,55 @@
     }
   ],
   "missingGateCandidates": [
+    {
+      "method": "GET",
+      "path": "/v1/integrations/google-drive/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/integrations/atlassian/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/integrations/fiken/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/integrations/slack/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/social/oauth/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/integrations/oauth/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/integrations/provider-oauth/callback",
+      "requiredGate": "independent exact-person native-browser proof for native provider redemption",
+      "reason": "Agent-visible initiation state, PKCE and live owner ACLs do not prove independent native-browser consent; genuine stored external-origin continuations remain separately fenced.",
+      "status": "fixed_phase_2"
+    },
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/events",

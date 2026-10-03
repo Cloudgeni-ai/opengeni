@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes, createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
+import { requireAccessGrantAuthorization, stampDelegatedHumanAuthorization } from "@opengeni/core";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
@@ -20,15 +21,17 @@ import {
   refreshOAuthConnectionCredential,
   setConnectionStatus,
   updateConnection,
+  synchronizeCanonicalHumanLoginBindings,
   type DbClient,
 } from "@opengeni/db";
-import { createSignedState } from "@opengeni/github";
+import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { bindNativeProviderStart } from "../src/integrations/delegated-native-provider-handoff";
 import {
   createFikenClient,
   fikenCredentialBundle,
@@ -44,6 +47,15 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
 let oauthSettings: Settings;
+const nativeBrowsers = new Map<
+  string,
+  {
+    cookie: string;
+    flowCookies: Map<string, string>;
+    sessionId: string;
+    user: { id: string; name: string; email: string; emailVerified: boolean };
+  }
+>();
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-fiken");
@@ -195,11 +207,16 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into workspaces (account_id, name) values (${account!.id}, 'fiken ws') returning id`;
   await shared!
     .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  const [legacyPersonal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${account!.id}, 'Fiken legacy actor personal workspace') returning id`;
+  await shared!.admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${legacyPersonal!.id}, ${account!.id})`;
   await shared!.admin`
     insert into organization_memberships (
       account_id, subject_id, status, personal_workspace_id
     ) values (
-      ${account!.id}, 'subject-a', 'active', ${workspace!.id}
+      ${account!.id}, 'subject-a', 'active', ${legacyPersonal!.id}
     )`;
   for (const subjectId of ["subject-a", "subject-b"]) {
     await shared!.admin`
@@ -210,7 +227,67 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
         ${shared!.admin.json(["connections:read", "connections:write"])}
       )`;
   }
+  const nativeSubjectId = oauthSubjectId({ accountId: account!.id });
+  const nativeUserId = nativeSubjectId.slice("user:".length);
+  await shared!.admin`insert into auth_users (id, name, email, email_verified)
+    values (${nativeUserId}, 'Fiken OAuth native user', ${`${nativeUserId}@example.test`}, true)`;
+  const [personal] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${account!.id}, 'Fiken OAuth personal workspace') returning id`;
+  await shared!.admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${personal!.id}, ${account!.id})`;
+  await shared!.admin`insert into organization_memberships (
+    account_id, subject_id, role, status, personal_workspace_id
+  ) values (${account!.id}, ${nativeSubjectId}, 'member', 'active', ${personal!.id})`;
+  await shared!.admin`insert into workspace_memberships (
+    account_id, workspace_id, subject_id, subject_label, role, permissions
+  ) values (${account!.id}, ${workspace!.id}, ${nativeSubjectId}, 'Fiken OAuth user', 'member',
+    ${shared!.admin.json(["connections:read", "connections:write"])})`;
+  await shared!.admin`insert into auth_identities (id, user_id, provider_id, account_id)
+    values (${crypto.randomUUID()}, ${nativeUserId}, 'credential', ${nativeUserId})`;
+  const identity = await synchronizeCanonicalHumanLoginBindings(client.db, nativeUserId);
+  const sessionId = crypto.randomUUID();
+  await shared!.admin`insert into auth_sessions (
+    id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+  ) values (${sessionId}, ${nativeUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+    ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision})`;
+  nativeBrowsers.set(account!.id, {
+    cookie: `fiken-native-session=${sessionId}`,
+    flowCookies: new Map(),
+    sessionId,
+    user: {
+      id: nativeUserId,
+      name: "Fiken OAuth native user",
+      email: `${nativeUserId}@example.test`,
+      emailVerified: true,
+    },
+  });
   return { accountId: account!.id, workspaceId: workspace!.id };
+}
+
+function oauthSubjectId(workspace: { accountId: string }): string {
+  return `user:fiken-oauth-${workspace.accountId}`;
+}
+
+function oauthRequest(
+  workspace: { accountId: string; workspaceId: string },
+  payload: Record<string, unknown> = {},
+): Request {
+  const request = new Request(
+    `https://app.example.test/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: workspace.accountId,
+    subjectId: oauthSubjectId(workspace),
+    permissions: ["connections:read", "connections:write"],
+    workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+  });
+  return request;
 }
 
 async function bearer(
@@ -586,7 +663,12 @@ describe("FikenClient", () => {
     return {
       resolved,
       fiken: createFikenClient(
-        { db: client.db, settings, fikenFetch, authorizeProviderRequest },
+        {
+          db: client.db,
+          settings,
+          fikenFetch,
+          ...(authorizeProviderRequest ? { authorizeProviderRequest } : {}),
+        },
         resolved,
       ),
     };
@@ -915,7 +997,7 @@ describe("FikenClient", () => {
         signalEntered();
         await responseReleased;
         return Response.json({ message: "stale credential" }, { status: 401 });
-      }) as typeof globalThis.fetch;
+      }) as unknown as typeof globalThis.fetch;
       const { fiken, resolved } = await connectedClient(workspace, delayed401, {
         defaultCompanySlug: "demo-as",
       });
@@ -973,7 +1055,10 @@ describe("FikenClient", () => {
     for (const status of [429, 500, 401]) {
       const workspace = await freshWorkspace();
       const failing = (async () =>
-        Response.json({ message: "failure fixture" }, { status })) as typeof globalThis.fetch;
+        Response.json(
+          { message: "failure fixture" },
+          { status },
+        )) as unknown as typeof globalThis.fetch;
       const { fiken, resolved } = await connectedClient(workspace, failing, {
         defaultCompanySlug: "demo-as",
       });
@@ -997,7 +1082,7 @@ describe("FikenClient", () => {
       Response.json(
         { message: "Invalid request", validationMessages: ["lines[0].vatType is required"] },
         { status: 400 },
-      )) as typeof globalThis.fetch;
+      )) as unknown as typeof globalThis.fetch;
     const { fiken } = await connectedClient(workspace, failing, {
       defaultCompanySlug: "demo-as",
     });
@@ -1085,7 +1170,7 @@ describe("FikenClient", () => {
     const failing = (async () => {
       providerCalls += 1;
       return Response.json({ message: "revoked" }, { status: 401 });
-    }) as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch;
     const { fiken, resolved } = await connectedClient(workspace, failing, {
       defaultCompanySlug: "demo-as",
     });
@@ -1235,61 +1320,170 @@ describe("FikenClient", () => {
   });
 });
 
-function oauthApp(fikenFetch: typeof globalThis.fetch) {
-  return createApp({
-    settings: oauthSettings,
+function browserCookie(workspace: { accountId: string }) {
+  const browser = nativeBrowsers.get(workspace.accountId)!;
+  return [browser.cookie, ...browser.flowCookies.values()].join("; ");
+}
+
+function rememberFlowCookies(workspace: { accountId: string }, response: Response) {
+  const browser = nativeBrowsers.get(workspace.accountId)!;
+  const cookies = response.headers.getSetCookie();
+  expect(cookies.length).toBeGreaterThan(0);
+  for (const cookie of cookies) {
+    expect(cookie).toContain("HttpOnly");
+    const pair = cookie.split(";", 1)[0]!;
+    browser.flowCookies.set(pair.slice(0, pair.indexOf("=")), pair);
+  }
+}
+
+function oauthApp(
+  fikenFetch: typeof globalThis.fetch,
+  applicationSettings: Settings = oauthSettings,
+) {
+  const deps = {
+    settings: applicationSettings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
-    managedAuth: null,
+    managedAuth: {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const cookies = (headers.get("cookie") ?? "").split(";").map((value) => value.trim());
+          const browser = [...nativeBrowsers.values()].find((candidate) =>
+            cookies.includes(candidate.cookie),
+          );
+          return {
+            headers: new Headers(),
+            response: browser ? { session: { id: browser.sessionId }, user: browser.user } : null,
+          };
+        },
+      },
+    },
     fikenFetch,
-  } as never);
+  } as never;
+  const server = createApp(deps);
+  // Only hand-signed malformed parser fixtures use this endpoint; normal flows
+  // retain the cookie emitted by the independently authenticated native start.
+  server.post("/__fixture/fiken/native-bind", async (c) => {
+    const { workspaceId, state } = (await c.req.json()) as { workspaceId: string; state: string };
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const authorizationUrl = new URL("https://fiken.no/oauth/authorize");
+    authorizationUrl.searchParams.set("state", state);
+    bindNativeProviderStart(c, deps, {
+      authorization,
+      provider: "fiken",
+      authorizationUrl: authorizationUrl.toString(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    return c.body(null, 204);
+  });
+  return server;
+}
+
+async function bindParserFixture(
+  workspace: { accountId: string; workspaceId: string },
+  fetch: typeof globalThis.fetch,
+  state: string,
+) {
+  const response = await oauthApp(fetch).request("/__fixture/fiken/native-bind", {
+    method: "POST",
+    headers: { cookie: browserCookie(workspace), "content-type": "application/json" },
+    body: JSON.stringify({ workspaceId: workspace.workspaceId, state }),
+  });
+  expect(response.status, await response.clone().text()).toBe(204);
+  rememberFlowCookies(workspace, response);
 }
 
 async function startOAuth(
   workspace: { accountId: string; workspaceId: string },
   fikenFetch: typeof globalThis.fetch,
   payload: Record<string, unknown> = {},
+  applicationSettings: Settings = oauthSettings,
 ): Promise<{ status: number; authorizationUrl: URL | null; state: string | null }> {
-  const response = await oauthApp(fikenFetch).request(
-    `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
-    {
-      method: "POST",
-      headers: {
-        authorization: await bearer(workspace, "subject-a", [
-          "connections:read",
-          "connections:write",
-        ]),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    },
-  );
+  const server = oauthApp(fikenFetch, applicationSettings);
+  const response = await server.fetch(oauthRequest(workspace, payload));
   if (response.status !== 200) {
     return { status: response.status, authorizationUrl: null, state: null };
   }
   const body = (await response.json()) as { authorizationUrl: string };
-  const authorizationUrl = new URL(body.authorizationUrl);
+  const handoff = new URL(body.authorizationUrl);
+  expect(handoff.origin).toBe("https://app.example.test");
+  expect(handoff.pathname).toBe(
+    `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/native-start`,
+  );
+  expect(handoff.searchParams.has("state")).toBe(false);
+  const intent = handoff.searchParams.get("intent")!;
+  const claims = readSignedState(intent, "fiken-oauth-state-secret-for-tests")!;
+  expect(claims).toMatchObject({
+    kind: "delegated_native_provider_handoff",
+    provider: "fiken",
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: oauthSubjectId(workspace),
+  });
+  const opened = await server.request(handoff.toString(), {
+    headers: { cookie: browserCookie(workspace) },
+  });
+  if (opened.status !== 302) return { status: opened.status, authorizationUrl: null, state: null };
+  rememberFlowCookies(workspace, opened);
+  const authorizationUrl = new URL(opened.headers.get("location")!);
+  const providerState = readSignedState(
+    authorizationUrl.searchParams.get("state")!,
+    "fiken-oauth-state-secret-for-tests",
+  )!;
+  expect(providerState.nonce).not.toBe(claims.nonce);
   return {
-    status: response.status,
+    status: 200,
     authorizationUrl,
     state: authorizationUrl.searchParams.get("state"),
   };
 }
 
 async function completeOAuth(
+  workspace: { accountId: string; workspaceId: string },
   fikenFetch: typeof globalThis.fetch,
   query: Record<string, string>,
 ): Promise<URL> {
   const params = new URLSearchParams(query);
   const response = await oauthApp(fikenFetch).request(`/v1/integrations/fiken/callback?${params}`, {
     method: "GET",
+    headers: { cookie: browserCookie(workspace) },
   });
   expect(response.status).toBe(302);
   return new URL(response.headers.get("location")!);
 }
 
 describe("fiken OAuth", () => {
+  test("legacy bearer and cloned typed request cannot replace verified OAuth initiation", async () => {
+    if (!available) throw new Error("real database required");
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const server = oauthApp(provider.fetch);
+    const legacy = await server.request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, oauthSubjectId(workspace), [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+    );
+    expect(legacy.status).toBe(403);
+    const exact = oauthRequest(workspace);
+    expect((await server.fetch(exact.clone())).status).toBe(401);
+    expect((await server.fetch(exact)).status).toBe(200);
+    expect(provider.calls).toHaveLength(0);
+  });
   test("external Connect completes Fiken OAuth with an exact host return and replayable receipt", async () => {
     if (!available) throw new Error("real database required");
     const workspace = await freshWorkspace();
@@ -1379,21 +1573,14 @@ describe("fiken OAuth", () => {
   test("start requires configured client credentials", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const response = await app(fakeFiken().fetch).request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
-      {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", [
-            "connections:read",
-            "connections:write",
-          ]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(response.status).toBe(503);
+    // Typed initiation mints only a handoff; provider configuration is checked
+    // when the independent native browser starts the real consent flow.
+    const missingClientSettings = {
+      ...settings,
+      integrationsStateSecret: "fiken-oauth-state-secret-for-tests",
+    } as Settings;
+    const nativeStart = await startOAuth(workspace, fakeFiken().fetch, {}, missingClientSettings);
+    expect(nativeStart.status).toBe(503);
   });
 
   test("start builds the Fiken authorize URL with signed state", async () => {
@@ -1416,7 +1603,7 @@ describe("fiken OAuth", () => {
     const workspace = await freshWorkspace();
     const provider = fakeFiken({ companies: [fixtureCompanies()[0]!] });
     const started = await startOAuth(workspace, provider.fetch);
-    const redirected = await completeOAuth(provider.fetch, {
+    const redirected = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: started.state!,
     });
@@ -1497,12 +1684,12 @@ describe("fiken OAuth", () => {
     const workspace = await freshWorkspace();
     const provider = fakeFiken();
     const started = await startOAuth(workspace, provider.fetch);
-    const first = await completeOAuth(provider.fetch, {
+    const first = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: started.state!,
     });
     expect(first.searchParams.get("fiken")).toBe("connected");
-    const replay = await completeOAuth(provider.fetch, {
+    const replay = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: started.state!,
     });
@@ -1515,7 +1702,7 @@ describe("fiken OAuth", () => {
     const workspace = await freshWorkspace();
     const provider = fakeFiken();
     const started = await startOAuth(workspace, provider.fetch);
-    const redirected = await completeOAuth(provider.fetch, {
+    const redirected = await completeOAuth(workspace, provider.fetch, {
       error: "access_denied",
       state: started.state!,
     });
@@ -1533,11 +1720,11 @@ describe("fiken OAuth", () => {
     const foreign = createSignedState("another-deployment-secret", {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: oauthSubjectId(workspace),
       returnPath: `/workspaces/${workspace.workspaceId}/plugins`,
     });
     for (const state of ["not-a-valid-state", tampered, foreign]) {
-      const redirected = await completeOAuth(provider.fetch, {
+      const redirected = await completeOAuth(workspace, provider.fetch, {
         code: "fixture-auth-code",
         state,
       });
@@ -1558,12 +1745,12 @@ describe("fiken OAuth", () => {
       {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
-        subjectId: "subject-a",
+        subjectId: oauthSubjectId(workspace),
         returnPath: `/workspaces/${workspace.workspaceId}/plugins`,
       },
       Math.floor(Date.now() / 1000) - 601,
     );
-    const redirected = await completeOAuth(provider.fetch, {
+    const redirected = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: expired,
     });
@@ -1584,7 +1771,7 @@ describe("fiken OAuth", () => {
     const started = await startOAuth(workspace, provider.fetch, {
       connectionId: installed.body.connection!.id,
     });
-    const redirected = await completeOAuth(provider.fetch, {
+    const redirected = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: started.state!,
     });
@@ -1609,7 +1796,7 @@ describe("fiken OAuth", () => {
     const workspace = await freshWorkspace();
     const provider = fakeFiken();
     const started = await startOAuth(workspace, provider.fetch);
-    const connected = await completeOAuth(provider.fetch, {
+    const connected = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: started.state!,
     });
@@ -1657,10 +1844,11 @@ describe("fiken OAuth", () => {
     const forgedState = createSignedState("fiken-oauth-state-secret-for-tests", {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: oauthSubjectId(workspace),
       returnPath: "//evil.example/phish",
     });
-    const redirected = await completeOAuth(provider.fetch, {
+    await bindParserFixture(workspace, provider.fetch, forgedState);
+    const redirected = await completeOAuth(workspace, provider.fetch, {
       code: "fixture-auth-code",
       state: forgedState,
     });
