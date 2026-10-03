@@ -480,7 +480,7 @@ test("authority, target, replay and native-human request lanes stay fenced", asy
     ),
   ).rejects.toMatchObject({
     status: 403,
-    body: JSON.stringify({ message: "Organization administration is not authorized" }),
+    body: JSON.stringify({ message: "organization administration is not authorized" }),
   });
   expect(await f.members()).toEqual(membersBeforeNativeRevoke);
   await f.revoke();
