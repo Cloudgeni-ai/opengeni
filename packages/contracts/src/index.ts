@@ -3818,6 +3818,26 @@ export const InsightsSpendDriver = z.object({
 });
 export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
+/**
+ * Usage grouped by each root session's current project. `other` folds the
+ * projects past the listed limit; `unavailable` holds trees whose root the
+ * viewer cannot read. Rows sum to the window totals.
+ */
+export const InsightsProjectRow = z.object({
+  id: z.string().min(1),
+  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  label: z.string().min(1),
+  projects: z.number().int().nonnegative(),
+  rootSessions: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative(),
+  creditUsd: z.number().nonnegative(),
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  tokens: z.number().nonnegative(),
+  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+});
+export type InsightsProjectRow = z.infer<typeof InsightsProjectRow>;
+
 export const InsightsWarmGroupRow = z.object({
   id: z.string().min(1),
   groupId: z.string().uuid(),
@@ -3897,6 +3917,12 @@ export const InsightsModelCallRow = z.object({
 });
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
 
+export const InsightsScope = z.object({
+  rootSessionId: z.string().uuid().nullable(),
+  sessionId: z.string().uuid().nullable(),
+});
+export type InsightsScope = z.infer<typeof InsightsScope>;
+
 export const WorkspaceInsightsSnapshot = z.object({
   range: InsightsRange,
   rangeLabel: z.string().min(1),
@@ -3914,6 +3940,24 @@ export const WorkspaceInsightsSnapshot = z.object({
   series: z.array(InsightsSeriesPoint),
   depth: z.array(InsightsDepthBucket),
   drivers: z.array(InsightsSpendDriver),
+  projects: z.array(InsightsProjectRow).default([]),
+  /** Invisible chats, amounts only, grouped by opaque person key (never a session id). */
+  privateChats: z
+    .array(
+      z.object({
+        ownerKey: z.string().min(1),
+        name: z.string().nullable(),
+        you: z.boolean(),
+        calls: z.number().int().nonnegative(),
+        tokens: z.number().nonnegative(),
+        creditUsd: z.number().nonnegative(),
+        estimatedProviderUsd: z.number().nonnegative(),
+        estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+      }),
+    )
+    .max(200)
+    .default([]),
+  privateChatsTruncated: z.boolean().default(false),
   schedules: z.array(InsightsScheduleRow),
   recentCalls: z.array(InsightsModelCallRow),
   promptContributions: InsightsPromptContributions.default({
@@ -3968,6 +4012,16 @@ export const WorkspaceInsightsSnapshot = z.object({
   agentRunCap: z.number().int().positive().nullable(),
   /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
   modelFilterActive: z.boolean(),
+  /** Latest `recorded_at` among visible facts in the window; null when none were ingested. */
+  dataThrough: z.string().datetime().nullable().default(null),
+  /** Released v1 percentage computation; zero when no positive cache-input denominator exists. */
+  cacheHitPct: z.number().int().min(0).max(100).default(0),
+  scope: InsightsScope.default({ rootSessionId: null, sessionId: null }),
+  /** Root sessions with spend in the window; `drivers` holds the top slice. */
+  driverGroups: z.number().int().nonnegative().default(0),
+  driversTruncated: z.boolean().default(false),
+  facetsTruncated: z.boolean().default(false),
+  recentCallsTruncated: z.boolean().default(false),
 });
 export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
 

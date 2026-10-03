@@ -482,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // #2768 union with main 5e1876b18, Bun 1.4 Linux/x64: 2,597,895 raw
+    // and 733,267 gzip across 38 files. Include the documented 18-byte
+    // configured-URL ceiling and the existing 1.5-KiB raw allowance. Insights
+    // stays route-lazy; startup, file-count, lazy and CSS limits stay fixed.
+    wholeKibEnvelope(2_597_913, 1.5 * kib),
     // Removed-model recovery (composer notice, catalog check, default
     // preselection, refusal copy): Linux/x64 Bun 1.4 measures 2,590,762 raw.
     // Retain the established 1.5 KiB allowance; compressed caps stay fixed.
@@ -503,6 +508,14 @@ const effectiveBudgets = {
     // same browser graph: 2,592,768 raw bytes on Bun 1.4 macOS/arm64.
     // Restore the established 1.5 KiB allowance; unrelated caps stay fixed.
     wholeKibEnvelope(2_592_768, 1.5 * kib),
+    // #2768 complete-usage contracts, Bun 1.4 Linux/x64 at 5d492ac1c:
+    // 2,587,928 raw / 730,065 gzip across 39 direct-session files. The prior
+    // branch already measured 2,587,622 raw, over the 2,585,600 envelope.
+    // Insights remains route-lazy; only shared package contracts grew. Bind
+    // the exact raw graph plus the documented 18-byte configured-URL ceiling
+    // and the existing 1-KiB headroom to its whole-KiB envelope (2,589,696).
+    // Gzip and all other caps stay fixed.
+    wholeKibEnvelope(2_587_946),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
@@ -654,6 +667,9 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // The same merged graph measures 733,267 gzip bytes. Preserve the
+    // existing 1.5-KiB platform-skew allowance, with no other cap change.
+    wholeKibEnvelope(733_267, 1.5 * kib),
     // Bound the larger unchanged-main measurement documented above using
     // the established 1.5 KiB allowance; the candidate is 38 bytes smaller.
     wholeKibEnvelope(730_596, 1.5 * kib),
@@ -822,6 +838,9 @@ if (!manifest[sessionRouteKey]) {
   throw new Error(`bundle manifest is missing ${sessionRouteKey}`);
 }
 const directSessionGraph = staticGraph([...entryKeys, sessionRouteKey]);
+if (directSessionGraph.has("src/routes/insights.tsx")) {
+  throw new Error("Insights must remain lazy, outside the direct-session graph");
+}
 const directSessionMetrics = await metrics(assetPaths(directSessionGraph, true));
 const directSessionTotal = total(directSessionMetrics);
 
