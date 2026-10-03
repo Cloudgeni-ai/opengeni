@@ -6371,7 +6371,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) is the exception: when it is already connected the card is still shown, listing repositories the person can use in this chat.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
@@ -6388,7 +6388,11 @@ function registerCapabilityDiscoveryTools(
       }
       const [setup] = await setupProjections([item]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
-      if (setup.status === "ready") {
+      // GitHub is the one capability whose card stays useful once connected:
+      // it lists the shared repositories with a "Use" action that attaches one
+      // to this chat, so a ready GitHub still gets its card.
+      const githubCardWhenReady = setup.status === "ready" && item.id === "api:github-app";
+      if (setup.status === "ready" && !githubCardWhenReady) {
         return json({
           capabilityId: item.id,
           status: "ready",
@@ -6413,7 +6417,7 @@ function registerCapabilityDiscoveryTools(
           name: item.name,
           kind: item.kind,
           source: item.source,
-          action: setup.action,
+          action: setup.action ?? "connect",
           rationale,
           requiredVariables: capabilityRequiredVariables(item),
         },
@@ -6432,6 +6436,14 @@ function registerCapabilityDiscoveryTools(
         throw new Error(
           "The calling turn was replaced before the authorization request committed.",
         );
+      }
+      if (githubCardWhenReady) {
+        return json({
+          capabilityId: item.id,
+          status: "ready",
+          eventId: appended.events[0]?.id ?? null,
+          message: `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
+        });
       }
       return json({
         capabilityId: item.id,
