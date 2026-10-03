@@ -789,16 +789,40 @@ describe("Insights response contracts", () => {
       }).success,
     ).toBe(false);
     const { sources: _sources, plans: _plans, ...legacy } = response().facets;
-    expect(InsightsUsageResponse.parse({ ...response(), facets: legacy }).facets).toMatchObject({
-      sources: [],
-      plans: [],
-    });
+    const parsedLegacy = InsightsUsageResponse.parse({ ...response(), facets: legacy });
+    expect(parsedLegacy.facets.plans).toEqual([]);
+    expect(Object.hasOwn(parsedLegacy.facets, "sources")).toBe(false);
     expect(
       InsightsUsageResponse.safeParse({
         ...source,
         facets: { ...source.facets, sources: ["unknown"] },
       }).success,
     ).toBe(false);
+  });
+
+  test("response parsing never invents source/custom capability for an interim raw payload", () => {
+    const { sources: _sources, ...facets } = response().facets;
+    const legacy = { ...response(), facets };
+    const parsed = InsightsUsageResponse.parse(legacy);
+    expect(parsed.facets.sources).toBeUndefined();
+    expect(Array.isArray(parsed.facets.sources)).toBe(false);
+    expect(Object.hasOwn(parsed.facets, "sources")).toBe(false);
+    const wire = JSON.parse(JSON.stringify(parsed)) as { facets: Record<string, unknown> };
+    expect(Object.hasOwn(wire.facets, "sources")).toBe(false);
+    expect(parsed.prior).toBeNull();
+    expect(parsed.totals).toEqual(legacy.totals);
+    const knownSources: InsightsUsageSource[][] = [[], ["api", "other"]];
+    for (const sources of knownSources) {
+      const supported = InsightsUsageResponse.parse({ ...legacy, facets: { ...facets, sources } });
+      expect(Object.hasOwn(supported.facets, "sources")).toBe(true);
+      expect(Array.isArray(supported.facets.sources)).toBe(true);
+      expect(supported.facets.sources).toEqual(sources);
+    }
+    for (const sources of [null, "[]", ["unknown"], ["sdk"]]) {
+      expect(
+        InsightsUsageResponse.safeParse({ ...legacy, facets: { ...facets, sources } }).success,
+      ).toBe(false);
+    }
   });
 
   test("private project/root groups carry only the authorized owner facet key, not hidden metadata", () => {
