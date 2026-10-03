@@ -171,6 +171,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/billing/usage-models",
+      "source": "apps/api/src/routes/billing.ts",
+      "gates": ["principalKind=human_session"],
+      "class": "organization_allowed",
+      "reason": "Organization model usage requires literal billing:read authority and a scoped database actor; reading usage is not a browser ceremony."
+    },
+    {
+      "method": "GET",
       "path": "/v1/billing/usage-summary",
       "source": "apps/api/src/routes/billing.ts",
       "gates": ["principalKind=human_session"],

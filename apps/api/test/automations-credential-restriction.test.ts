@@ -210,6 +210,12 @@ function rawSetupHeaders(lane: "raw" | "service" | "asUser"): Record<string, str
   if (lane === "raw") return {};
   const externalSubjectId = "external_user:99999999-9999-4999-8999-999999999999";
   track(
+    spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+      callback({} as never),
+    ),
+  );
+  track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+  track(
     spyOn(db, "ensureExternalIdentity").mockResolvedValue({
       id: "99999999-9999-4999-8999-999999999999",
       accountId,

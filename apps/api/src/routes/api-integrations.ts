@@ -27,6 +27,7 @@ import {
 } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
+  ApiIntegrationConnectionReferenceError,
   ApiIntegrationInstallationVersionConflictError,
   buildConnectionTokenResolver,
   getApiIntegrationUninstallPreview,
@@ -332,6 +333,11 @@ export function registerApiIntegrationRoutes(
         payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
+      if (error instanceof ApiIntegrationConnectionReferenceError) {
+        throw new HTTPException(error.reason === "not_found" ? 404 : 422, {
+          message: error.reason === "not_found" ? "connection not found" : error.message,
+        });
+      }
       if (
         error instanceof IntegrationFacetBindingVersionConflictError ||
         error instanceof IntegrationFacetBindingVersionRequiredError ||

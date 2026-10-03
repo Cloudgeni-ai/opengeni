@@ -477,10 +477,10 @@ export class LazyToolRuntime {
           typeof args.limit === "number" && Number.isFinite(args.limit)
             ? Math.max(1, Math.min(40, Math.floor(args.limit)))
             : 20;
-        const tools = [...new Set(this.searchableTools(this.currentTools))]
+        const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
           .filter(isFunctionTool)
-          .filter((tool) => tool.name.startsWith(prefix))
           .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        const tools = authorizedTools.filter((tool) => tool.name.startsWith(prefix));
         const cursorIndex =
           cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
         if (cursor !== undefined && cursorIndex === -1) {
@@ -513,17 +513,33 @@ export class LazyToolRuntime {
           }
           descriptors.push(descriptor);
         }
-        return JSON.stringify({
+        const result = {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-          ...(prefix && tools.length === 0
-            ? {
-                message:
-                  "No tool names match this literal prefix. Retry tool_list without namePrefix to browse the authorized catalog; tool names can include a server namespace.",
-              }
-            : {}),
-        });
+        };
+        if (!prefix || tools.length > 0) return JSON.stringify(result);
+
+        // Preserve literal-prefix pagination. Recovery hints are descriptors
+        // from the same authorized deferred pool, never schemas or new grants.
+        const recovery = {
+          ...result,
+          message:
+            "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
+          suggestions: [] as { name: string; description: string }[],
+        };
+        for (const candidate of authorizedTools) {
+          if (!candidate.name.includes(prefix)) continue;
+          const suggestion = {
+            name: candidate.name,
+            description: Array.from(candidate.description).slice(0, 160).join(""),
+          };
+          const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
+          if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
+          recovery.suggestions.push(suggestion);
+          if (recovery.suggestions.length >= Math.min(limit, 8)) break;
+        }
+        return JSON.stringify(recovery);
       },
     }) as unknown as Tool;
   }

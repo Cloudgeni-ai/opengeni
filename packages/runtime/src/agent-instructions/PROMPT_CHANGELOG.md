@@ -43,7 +43,7 @@ Composition order (each part separated by a blank line):
      waiting and `wait_for_input`, compaction, background commands.
    - Conditional modules, in this order: `renderer_markdown`, `sandbox`,
      `connected_machine`, `repositories`, `workspace_environment`, `rig`,
-     `artifacts`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,
+     `artifacts`, `media`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,
      `attachments` (last because it varies per turn).
 3. Attempt directives, unchanged text: Codemode, code search, Git credential
    bindings.
@@ -81,6 +81,28 @@ Headings that moved or were added (layout only, not diffed):
   `# Sandbox environment`.
 
 ## Sentence edits (modular "all" vs legacy)
+
+Tool discovery and media. Deferred schemas must remain behind the existing
+search router, while modular agents need to distinguish missing disclosure
+from missing execution authority. Runtime mechanics explains ranked discovery
+and literal-prefix recovery; the new `media` capability module directs image
+and video requests to runtime/provider tools rather than integration setup.
+Disabled media removes that module. The legacy prompt remains unchanged.
+
+```diff
++ Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
++ When deferred tools are attached, use `tool_search` for one focused capability at a time; broad searches with small limits can omit a relevant tool.
++ If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
++ `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
++ Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
++ Use an attached image-generation tool when the user requests generated images or edits.
++ If it is deferred, use a focused image-generation query with `tool_search`, or request the exact `generate_image` name before concluding no image tool exists.
++ `generate_image` is a runtime tool; integration catalogs and sandbox CLI lists do not enumerate it.
++ A hosted `image_generation` tool may instead be visible directly on supported provider routes.
++ The media capability permits discovery, but does not prove a provider adapter is attached; establish availability from the current authorized tool catalog.
++ Use the returned tool schema for references and output controls; do not invent model names or provider-specific options.
++ For video, discover `get_video_generation_capabilities` and `generate_video`, read current capabilities before selecting a model, and follow the available video-generation Skill.
+```
 
 Identity. The legacy text opened with two identity statements (the contract's
 generic line and the template's OpenGeni line). The default identity keeps the
