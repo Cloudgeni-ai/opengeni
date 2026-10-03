@@ -601,15 +601,24 @@ describe("Gmail complete mailbox operations", () => {
   });
 
   test("attempt gateway settles Gmail semantic refusal and transport uncertainty truthfully", async () => {
-    for (const uncertain of [false, true]) {
+    for (const scenario of [
+      "refused",
+      "uncertain",
+      "read_failed",
+      "file_failed",
+      "result_failed",
+    ]) {
+      const uncertain = scenario === "uncertain" || scenario === "result_failed";
       const outcomes: string[] = [];
+      const providerMethods: string[] = [];
+      let fileReads = 0;
       const prepared = await prepareAgentTools(
         testSettings({
           mcpServers: [
             {
               id: "gmail",
               url: "https://gmailmcp.googleapis.com/mcp/v1",
-              allowedTools: ["create_label", "delete_label"],
+              allowedTools: ["create_label", "delete_label", "create_draft"],
               connectionRef: {
                 providerDomain: "gmailmcp.googleapis.com",
                 kind: "oauth2",
@@ -632,8 +641,14 @@ describe("Gmail complete mailbox operations", () => {
             headers: {},
             connectionId: "test-connection",
           }),
-          mcpFetchImpl: async () => {
+          mcpFetchImpl: async (_input, init) => {
+            providerMethods.push(init?.method ?? "GET");
+            if (scenario === "result_failed") return Response.json(null);
             throw new Error("synthetic lost response");
+          },
+          readGmailFile: async () => {
+            fileReads++;
+            throw new Error("synthetic filesystem unavailable");
           },
           connectorActionPolicy: {
             prepare: async () => ({ managed: true, decision: "allow" }),
@@ -649,14 +664,37 @@ describe("Gmail complete mailbox operations", () => {
           prepared.attemptToolEnvironment!.call({
             operationId,
             catalogDigest: prepared.attemptToolCatalog!.digest,
-            identity: { serverId: "gmail", toolName: uncertain ? "create_label" : "delete_label" },
-            arguments: uncertain ? { name: "Test" } : { labelId: "INBOX" },
+            identity: {
+              serverId: "gmail",
+              toolName: ["read_failed", "file_failed", "result_failed"].includes(scenario)
+                ? "create_draft"
+                : uncertain
+                  ? "create_label"
+                  : "delete_label",
+            },
+            arguments:
+              scenario === "file_failed"
+                ? {
+                    to: ["owner@example.test"],
+                    attachments: [{ file: { path: "test.bin", sha256: "0".repeat(64) } }],
+                  }
+                : scenario === "read_failed"
+                  ? { to: ["owner@example.test"], replyToMessageId: "test-message" }
+                  : scenario === "result_failed"
+                    ? { to: ["owner@example.test"] }
+                    : uncertain
+                      ? { name: "Test" }
+                      : { labelId: "INBOX" },
             caller: { kind: "codemode", subjectId: "test-owner" },
           }),
         ).rejects.toMatchObject({
           connectorActionOutcome: uncertain ? "uncertain" : "not_executed",
         });
         expect(outcomes).toEqual([uncertain ? "uncertain" : "not_executed"]);
+        expect(providerMethods).toEqual(
+          uncertain ? ["POST"] : scenario === "read_failed" ? ["GET"] : [],
+        );
+        expect(fileReads).toBe(scenario === "file_failed" ? 1 : 0);
       } finally {
         await prepared.close();
       }
