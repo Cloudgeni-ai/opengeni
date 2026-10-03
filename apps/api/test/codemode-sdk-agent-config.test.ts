@@ -20,7 +20,7 @@ function config(capabilities: AgentConfigRequest["capabilities"]): ResolvedAgent
   return resolveAgentConfig({
     creator: "api",
     request: { capabilities },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     workspace: { defaults: null, humanInputEnabled: true },
     goal: false,
   }).config!;

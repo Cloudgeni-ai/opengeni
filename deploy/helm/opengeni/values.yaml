@@ -128,8 +128,6 @@ config:
   # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
   # new top-level sessions that omit `agent` resolve { capabilities: "all" }.
   # See docs/deployment.md.
-  OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED: "false"
-  OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS: "false"
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"

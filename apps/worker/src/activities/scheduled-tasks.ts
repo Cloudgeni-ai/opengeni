@@ -21,7 +21,6 @@ import {
   TurnExecutionPolicyV1,
   type ScheduledTask,
   type ScheduledTaskRun,
-  AgentConfigError,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import {
@@ -41,7 +40,6 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
-  agentConfigMayResolve,
   applySessionAgentConfigWriteThrough,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
@@ -589,9 +587,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           creator: "scheduled",
           request: task.agentConfig.agent,
           instructions: undefined,
-          workspaceSettings: agentConfigMayResolve(settings, task.agentConfig.agent)
-            ? (await requireWorkspace(db, task.workspaceId)).settings
-            : {},
+          workspaceSettings: (await requireWorkspace(db, task.workspaceId)).settings,
           parent: null,
           goal: task.agentConfig.goal !== undefined,
         });
@@ -610,12 +606,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const status =
           error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
         if (!(error instanceof Error) || status !== 422) throw error;
-        const notEnabled =
-          error.cause instanceof AgentConfigError &&
-          error.cause.code === "agent_config_not_enabled";
         return await refuseAdmission(
           "scheduled_authority_unavailable",
-          notEnabled,
+          false,
           `scheduled agent configuration is not admissible: ${error.message}`,
         );
       }

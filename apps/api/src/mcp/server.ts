@@ -157,11 +157,7 @@ import {
   HumanInputResponseValidationError,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import {
-  agentConfigDeploymentPolicy,
-  allowedFirstPartyMcpToolsForSession,
-  codemodeWorkspaceUrl,
-} from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -206,7 +202,6 @@ import {
   workflowIdForSession,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -1515,7 +1510,6 @@ export function buildOpenGeniMcpServer(
       },
       async (args) => {
         const payload = CreateScheduledTaskRequest.parse(args);
-        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1582,7 +1576,6 @@ export function buildOpenGeniMcpServer(
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
-        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
         const patchWarnings = (task: ScheduledTask) =>
           payload.agentConfigPatch &&
           (task.runMode === "existing_session" || task.reusableSessionId)
@@ -5176,11 +5169,7 @@ function registerWorkspaceOrchestrationTools(
         sandbox: z4
           .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
           .optional(),
-        // Registered only while agent configuration is admitted, so a
-        // deployment with the switch off keeps a byte-identical tool schema.
-        ...(agentConfigDeploymentPolicy(deps.settings).admissionEnabled
-          ? { agent: sessionCreateAgentInput }
-          : {}),
+        agent: sessionCreateAgentInput,
       })
       .superRefine((value, context) => {
         if (!value.variableSetIds) return;
