@@ -187,11 +187,27 @@ export function databaseQueries(): Record<string, string> {
       'repeatedSessions',(SELECT count(*) FROM repeated),'controlUnknown',count(*) FILTER(WHERE classification='control_unknown'),
       'classifications',coalesce((SELECT jsonb_object_agg(classification,n) FROM (SELECT classification,count(*) n FROM completions GROUP BY classification) x),'{}'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM repeated ORDER BY empty_turns DESC LIMIT 100) x),'[]')) facts FROM completions`,
-    latency: `SELECT jsonb_build_object('sample',count(*),
-      'p50Seconds',percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM started_at-created_at)),
-      'p95Seconds',percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM started_at-created_at)),
-      'invalidNegativeSamples',count(*) FILTER(WHERE started_at<created_at)) facts FROM session_turns
-      WHERE started_at >= $1::timestamptz-($2::int*interval '1 minute') AND started_at<=$1::timestamptz`,
+    latency: `WITH recent AS MATERIALIZED (
+      SELECT id,workspace_id,session_id,created_at FROM session_turns
+      WHERE started_at >= $1::timestamptz-($2::int*interval '1 minute') AND started_at<=$1::timestamptz
+    ), observations AS (
+      SELECT t.created_at,first.first_started_at FROM recent t LEFT JOIN LATERAL (
+        SELECT min(e.created_at) first_started_at FROM session_events e
+        WHERE e.workspace_id=t.workspace_id AND e.session_id=t.session_id AND e.turn_id=t.id
+          AND e.type='turn.started' AND e.duplicate_of_event_id IS NULL
+      ) first ON true
+    ) SELECT jsonb_build_object(
+      'sample',count(*) FILTER(WHERE first_started_at >= $1::timestamptz-($2::int*interval '1 minute') AND first_started_at<=$1::timestamptz),
+      'p50Seconds',percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM first_started_at-created_at))
+        FILTER(WHERE first_started_at >= $1::timestamptz-($2::int*interval '1 minute') AND first_started_at<=$1::timestamptz),
+      'p95Seconds',percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM first_started_at-created_at))
+        FILTER(WHERE first_started_at >= $1::timestamptz-($2::int*interval '1 minute') AND first_started_at<=$1::timestamptz),
+      'recentLatestStartCandidates',count(*),
+      'resumedFromBeforeWindow',count(*) FILTER(WHERE first_started_at<$1::timestamptz-($2::int*interval '1 minute')),
+      'missingFirstStartEvents',count(*) FILTER(WHERE first_started_at IS NULL),
+      'futureFirstStartEvents',count(*) FILTER(WHERE first_started_at>$1::timestamptz),
+      'invalidNegativeSamples',count(*) FILTER(WHERE first_started_at<created_at),
+      'startTimestampSource','earliest_nonduplicate_turn.started_created_at') facts FROM observations`,
   };
 }
 
@@ -543,7 +559,7 @@ export async function sweep(
       recovering:
         "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Missing transition or ownership evidence is a gap, not proof of physical quiescence.",
       empty: `At least two distinct completed suspect turns in ${options.windowMinutes}m; explicit emptyFinalReply or no reply/tools. Excludes effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
-      latency: `created_at to started_at for logical turns started during the preceding ${options.windowMinutes}m, all sources; includes queue residence, excludes never-started turns. Database exact percentiles, not TTFT.`,
+      latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start events are a gap. Database exact percentiles, not TTFT.`,
     };
     let data: any;
     let url = process.env.OPENGENI_HEALTH_DATABASE_URL;
@@ -642,7 +658,12 @@ export async function sweep(
             ? ["total", "controlUnknown", "missingStatusTimestamp"]
             : name === "empty"
               ? ["sample", "suspectTurns", "repeatedSessions", "controlUnknown"]
-              : ["sample", "invalidNegativeSamples"];
+              : [
+                  "sample",
+                  "invalidNegativeSamples",
+                  "missingFirstStartEvents",
+                  "futureFirstStartEvents",
+                ];
       const invalid =
         !facts || required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0);
       const gap =
@@ -651,6 +672,8 @@ export async function sweep(
         facts.controlUnknown > 0 ||
         facts.ownerUnknown > 0 ||
         facts.missingStatusTimestamp > 0 ||
+        facts.missingFirstStartEvents > 0 ||
+        facts.futureFirstStartEvents > 0 ||
         facts.invalidNegativeSamples > 0;
       checks.push({
         id: name,

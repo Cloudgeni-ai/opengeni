@@ -82,7 +82,7 @@ describe("staging health sweep", () => {
     expect(q.empty).toContain("tool_only");
     expect(q.empty).toContain("awaiting_input");
     expect(q.empty).toContain("count(DISTINCT turn_id)>=2");
-    expect(q.latency).toContain("started_at-created_at");
+    expect(q.latency).toContain("first_started_at-created_at");
     expect(q.recovering).toContain("missingStatusTimestamp");
     expect(q.queued).not.toContain("OR finished_at");
     expect(q.recovering).not.toContain("OR finished_at");
@@ -125,7 +125,14 @@ describe("staging health sweep", () => {
           queued: { total: 0, runnable: 0, controlUnknown: 0 },
           recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
           empty: { sample: 3, suspectTurns: 0, repeatedSessions: 0, controlUnknown: 0 },
-          latency: { sample: 3, p50Seconds: 1, p95Seconds: 2, invalidNegativeSamples: 0 },
+          latency: {
+            sample: 3,
+            p50Seconds: 1,
+            p95Seconds: 2,
+            invalidNegativeSamples: 0,
+            missingFirstStartEvents: 0,
+            futureFirstStartEvents: 0,
+          },
         });
       }
       if (args.includes("pods"))
@@ -285,5 +292,40 @@ describe("staging health sweep", () => {
     expect(result.sqlRunnableCandidates).toBe(3);
     expect(result).not.toHaveProperty("runnable");
     expect(applyOwnership({ ...facts, runnable: 1 }, []).ownerUnknown).toBe(1);
+  });
+  test("first-start latency uses earliest nonduplicate durable event, not overwritten resume timestamp", () => {
+    const query = databaseQueries().latency!;
+    expect(query).toContain("min(e.created_at) first_started_at");
+    expect(query).toContain("e.type='turn.started' AND e.duplicate_of_event_id IS NULL");
+    expect(query).toContain("first_started_at-created_at");
+    expect(query).not.toContain("FROM started_at-created_at");
+    expect(query).toContain("resumedFromBeforeWindow");
+    expect(query).toContain("missingFirstStartEvents");
+  });
+  test("missing first-start event evidence is a source gap even with numeric percentiles", async () => {
+    const result = await sweep(parseArgs(["--database-secret", "reader"]), async (args) => {
+      if (args.includes("secret"))
+        return JSON.stringify({
+          data: {
+            OPENGENI_MIGRATIONS_DATABASE_URL: Buffer.from("postgres://unused").toString("base64"),
+          },
+        });
+      if (args.includes("exec"))
+        return JSON.stringify({
+          latency: {
+            sample: 3,
+            p50Seconds: 1,
+            p95Seconds: 2,
+            invalidNegativeSamples: 0,
+            missingFirstStartEvents: 1,
+            futureFirstStartEvents: 0,
+          },
+        });
+      return "{}";
+    });
+    const latency = result.checks.find((check) => check.id === "latency")!;
+    expect(latency.status).toBe("gap");
+    expect(latency.facts?.missingFirstStartEvents).toBe(1);
+    expect(latency.definition).toContain("FIRST");
   });
 });
