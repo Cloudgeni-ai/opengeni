@@ -325,6 +325,94 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+test.each([false, true])(
+  "Claude freezes its audience during setup completion (selected=%s)",
+  async (selectedBefore) => {
+    asOrganizationAdmin();
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    let finish!: (value: {
+      accountId: string;
+      connected: boolean;
+      credentialVersion: number;
+    }) => void;
+    const deferred = new Promise<{
+      accountId: string;
+      connected: boolean;
+      credentialVersion: number;
+    }>((resolve) => {
+      finish = resolve;
+    });
+    const save = mock(async () => deferred);
+    Object.assign(client, { connectOrganizationClaudeSubscriptionSetupToken: save });
+    client.getModelConnectionAccess.mockImplementation(async () => ({ policy: openPolicy }));
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Claude subscription");
+      await act(async () => button(view.container, /Use a setup token/)!.click());
+      await flush();
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Claude subscription setup token"]',
+      )!;
+      expect(input).not.toBeNull();
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "sk-ant-oat01-synthetic-fixture",
+        );
+        const propKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+        (input as any)[propKey].onChange({ target: input });
+      });
+      if (selectedBefore) {
+        const selected = [
+          ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
+        ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+        await act(async () => selected.click());
+        await flush();
+      }
+      const form = input.closest("form")!;
+      await act(async () =>
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(save).toHaveBeenCalledTimes(1);
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      expect(selected).not.toBeNull();
+      await act(async () => selected.click());
+      await flush();
+      expect(selected.getAttribute("data-state")).toBe(selectedBefore ? "checked" : "unchecked");
+      expect(selected.getAttribute("disabled")).not.toBeNull();
+      await act(async () => {
+        finish({
+          accountId: "10000000-0000-4000-8000-000000000003",
+          connected: true,
+          credentialVersion: 1,
+        });
+        await Promise.resolve();
+      });
+      await flush();
+      expect(client.updateModelConnectionAccess).toHaveBeenCalledTimes(selectedBefore ? 1 : 0);
+      if (selectedBefore)
+        expect(client.updateModelConnectionAccess).toHaveBeenCalledWith(
+          {
+            scope: "organizations",
+            scopeId: "organization-a",
+            kind: "claude_subscription",
+            connectionId: "10000000-0000-4000-8000-000000000003",
+          },
+          { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },
+        );
+      expect(lastNavigation?.search.account).toBe(
+        "org:claude:10000000-0000-4000-8000-000000000003",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  },
+);
+
 beforeAll(() => undefined);
 
 beforeEach(() => {

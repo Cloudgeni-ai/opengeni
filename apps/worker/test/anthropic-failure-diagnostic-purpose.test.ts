@@ -269,6 +269,9 @@ describe("Anthropic failure diagnostic purpose", () => {
           expect(arm.mock.calls[0]![1]).toMatchObject({
             turnId: "turn-1",
             expectedCredentialVersion: 3,
+            credentialTokenFence: expect.objectContaining({
+              observedAccessToken: "sk-ant-oat01-fixture",
+            }),
             leaseFence: { holderId: "holder-fixture", generation: 7 },
           });
           expect(arm.mock.calls[0]![1]).not.toHaveProperty("credentialQuarantine");

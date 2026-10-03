@@ -5,16 +5,22 @@ description: >-
   browser-assisted organization onboarding, a full-access setup key,
   idempotent REST/SDK workspace provisioning, agent persona and capabilities,
   product tools, approvals, schedules, webhooks, credentials and usage budgets.
-  Skills only: the coding agent uses its own browser, shell and HTTP tools;
-  no OpenGeni MCP server or plugin UI is required.
+  Uses the OpenGeni MCP tools when available, otherwise the coding agent's own
+  browser, shell and HTTP tools.
 ---
 
 # OpenGeni developer setup
 
 You are the product's coding agent. Configure OpenGeni through its public API,
 then hand off to [the embedding skill](../opengeni-client/SKILL.md). This skill
-is not a runtime Skill for the product's end-user agent. Installing the plugin
-does not install an MCP server or grant an API key.
+is not a runtime Skill for the product's end-user agent.
+
+When the `opengeni` MCP tools are available (the OpenGeni plugin connects
+them), use them to inspect and act on the user's OpenGeni organization:
+`opengeni_actions_search` finds an action, `opengeni_action_describe` shows its
+input, `opengeni_action_call` runs it. Prefer them over hand-written API calls.
+The first use opens a browser sign-in where the user chooses what the agent may
+access. The product's server still needs its own organization API key (step 2).
 
 Read [the exact REST/SDK walkthrough](references/setup-api.md) before executing
 setup. It contains the request bodies, verification calls and recovery rules.

@@ -115,6 +115,7 @@ describe("service accounts", () => {
       <ServiceAccounts
         api={{
           list: async () => [bot],
+          get: async () => ({ ...bot, activeKeyCount: 1 }),
           create: async () => bot,
           update: async () => bot,
           remove: async () => undefined,
@@ -147,6 +148,7 @@ describe("service accounts", () => {
       <ServiceAccounts
         api={{
           list: async () => [bot],
+          get: async () => ({ ...bot, activeKeyCount: 1 }),
           create: async () => bot,
           update,
           remove,

@@ -11,7 +11,12 @@ import {
   resolveModelProvider,
 } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createSessionForRequest, resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
+import {
+  createSessionForRequest,
+  resolveCatalogSettings,
+  resolveSessionAgentConfigForCreate,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createAutomationSource,
@@ -19,6 +24,7 @@ import {
   createDb,
   createScheduledTask,
   createSession,
+  requireWorkspace,
   createOrganizationModelProviderCustomModel,
   upsertOrganizationModelProviderConnection,
   createClaudeSubscriptionAccount,
@@ -1251,6 +1257,18 @@ describe("workspace Gateway custom model API", () => {
       version: number;
     };
     const idempotencyKey = crypto.randomUUID();
+    // Freeze the configuration accepted by the same public create boundary;
+    // an uninitialized legacy-null shell is not equivalent to this request.
+    const acceptedAgent = resolveSessionAgentConfigForCreate({
+      settings,
+      creator: "api",
+      request: undefined,
+      instructions: undefined,
+      workspaceSettings: (await requireWorkspace(client!.db, grant.workspaceId)).settings,
+      parent: null,
+      goal: false,
+    }).config;
+    expect(acceptedAgent).not.toBeNull();
     const shell = await createSession(client!.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1263,6 +1281,7 @@ describe("workspace Gateway custom model API", () => {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      agentConfig: acceptedAgent,
       createIdempotencyKey: idempotencyKey,
     });
     const removed = await request(`/gateway-custom-models/${customModel.id}`, {
@@ -1274,23 +1293,57 @@ describe("workspace Gateway custom model API", () => {
     });
     expect(removed.status).toBe(204);
 
+    const payload = {
+      initialMessage: "Repair this custom-model session shell",
+      resources: [],
+      model: productModelId,
+      sandboxBackend: "none",
+      idempotencyKey,
+    };
+    const [beforeConflict] = await shared.admin`
+      select metadata, agent_config, updated_at from sessions
+      where workspace_id = ${grant.workspaceId}::uuid and id = ${shell.id}::uuid`;
+    const conflict = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: { ...payload, agent: { capabilities: "none" } },
+      },
+      publicApp,
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.text()).toContain(
+      "Session create idempotency key was reused with a different request",
+    );
+    const [afterConflict] = await shared.admin`
+      select metadata, agent_config, updated_at from sessions
+      where workspace_id = ${grant.workspaceId}::uuid and id = ${shell.id}::uuid`;
+    expect(afterConflict).toEqual(beforeConflict);
+    const [uninitialized] = await shared.admin`
+      select
+        (select count(*)::int from session_events where session_id = ${shell.id}::uuid) as events,
+        (select count(*)::int from session_turns where session_id = ${shell.id}::uuid) as turns,
+        (select count(*)::int from session_workflow_wake_outbox where session_id = ${shell.id}::uuid) as wakes,
+        (select count(*)::int from usage_events where source_resource_id = ${shell.id}) as usage
+    `;
+    expect(uninitialized).toEqual({ events: 0, turns: 0, wakes: 0, usage: 0 });
+
     const repaired = await request(
       "/sessions",
       {
         method: "POST",
         permissions: ["sessions:create"],
-        body: {
-          initialMessage: "Repair this custom-model session shell",
-          resources: [],
-          model: productModelId,
-          sandboxBackend: "none",
-          idempotencyKey,
-        },
+        body: payload,
       },
       publicApp,
     );
     expect(repaired.status).toBe(202);
-    expect(await repaired.json()).toMatchObject({ id: shell.id, model: productModelId });
+    expect(await repaired.json()).toMatchObject({
+      id: shell.id,
+      model: productModelId,
+      agent: acceptedAgent,
+    });
     const [stored] = await shared.admin<Array<{ createdEvents: number; queuedTurns: number }>>`
       select
         (select count(*)::int
@@ -1304,6 +1357,10 @@ describe("workspace Gateway custom model API", () => {
             and session_id = ${shell.id}::uuid) as "queuedTurns"
     `;
     expect(stored).toEqual({ createdEvents: 1, queuedTurns: 1 });
+    const [turn] = await shared.admin`
+      select initiator_kind, initiator_subject_id from session_turns
+      where workspace_id = ${grant.workspaceId}::uuid and session_id = ${shell.id}::uuid`;
+    expect(turn).toEqual({ initiator_kind: "subject", initiator_subject_id: grant.subjectId });
   });
 
   test("admits deployment-curated workspace Gateway models without a custom row", async () => {

@@ -50,6 +50,8 @@ export type ServiceAccountsLocation = { view?: "new-service-account"; serviceAcc
 
 export type ServiceAccountsApi = {
   list: () => Promise<OrganizationServiceAccount[]>;
+  /** One service account, read fresh when its page opens. */
+  get: (id: string) => Promise<OrganizationServiceAccount>;
   create: (request: CreateOrganizationServiceAccountRequest) => Promise<OrganizationServiceAccount>;
   update: (
     id: string,
@@ -135,6 +137,23 @@ function useServiceAccounts(api: ServiceAccountsApi) {
 export function ServiceAccounts(props: ServiceAccountsProps) {
   const { api, location, onNavigate } = props;
   const { accounts, error, refresh, setAccounts } = useServiceAccounts(api);
+  // Its page reads the account fresh: keys created elsewhere change its count.
+  const [opened, setOpened] = useState<OrganizationServiceAccount | null>(null);
+  const openedId = location.serviceAccount;
+  useEffect(() => {
+    setOpened(null);
+    if (!openedId) return;
+    let live = true;
+    api
+      .get(openedId)
+      .then((account) => {
+        if (live) setOpened(account);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [api, openedId]);
 
   if (location.view === "new-service-account") {
     return (
@@ -151,16 +170,18 @@ export function ServiceAccounts(props: ServiceAccountsProps) {
     );
   }
   if (location.serviceAccount) {
-    const account = accounts?.find((each) => each.id === location.serviceAccount) ?? null;
+    const listed = accounts?.find((each) => each.id === location.serviceAccount) ?? null;
+    const account = opened?.id === location.serviceAccount ? opened : listed;
     return (
       <ServiceAccountPage
         {...props}
         account={account}
         loading={accounts === null && !error}
         onClose={() => onNavigate({})}
-        onSaved={(next) =>
-          setAccounts((accounts ?? []).map((each) => (each.id === next.id ? next : each)))
-        }
+        onSaved={(next) => {
+          setOpened(next);
+          setAccounts((accounts ?? []).map((each) => (each.id === next.id ? next : each)));
+        }}
         onDeleted={() => {
           setAccounts((accounts ?? []).filter((each) => each.id !== location.serviceAccount));
           onNavigate({});
@@ -536,7 +557,13 @@ function ServiceAccountPage({
                   title={key.name}
                   description={[
                     key.prefix,
-                    key.policy ? policySummary(key.policy) : "Full access",
+                    key.policy
+                      ? policySummary(key.policy)
+                      : key.access === "read"
+                        ? "Read only"
+                        : key.access === "developer_setup"
+                          ? "Developer setup"
+                          : "Full access",
                   ].join(" · ")}
                 />
               ))}

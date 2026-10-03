@@ -1565,11 +1565,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
   {
     "id": "discoverPlugins",
     "method": "GET",
-    "path": "/v1/workspaces",
+    "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
     "request": [],
-    "response": [
-      "Workspace"
-    ]
+    "response": []
   },
   {
     "id": "downloadEditableArtifactMaterialization",
@@ -1792,13 +1790,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/capabilities/discovery/plugins",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
     "request": [],
     "response": []
   },
@@ -4128,6 +4119,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceOpenRouterCustomModelsResponse"
+    ]
+  },
+  {
+    "id": "listWorkspaces",
+    "method": "GET",
+    "path": "/v1/workspaces",
+    "request": [],
+    "response": [
+      "Workspace"
     ]
   },
   {

@@ -1,7 +1,8 @@
 # Setup: exact REST and SDK calls
 
 Execute in this order. The coding agent uses ordinary HTTPS and its own
-computer; it does not call an OpenGeni MCP server. Requests below are checked
+computer, or the `opengeni` MCP tools when available (`opengeni_action_call`
+runs these same routes as the signed-in user). Requests below are checked
 against `apps/api/src/routes` and `packages/contracts` in this release.
 [setup-sdk.ts](setup-sdk.ts) provides corresponding SDK calls and verification.
 

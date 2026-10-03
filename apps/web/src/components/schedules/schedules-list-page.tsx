@@ -265,12 +265,16 @@ export function SchedulesListPage({
   // don't move while someone is pointing at them.
   const sorted = useMemo(() => sortSchedulesForList(list.tasks, new Date()), [list]);
   const shared = sorted.some((task) => !ownsSchedule(task, access.viewerSubjectId));
-  const columns = shared ? COLUMNS : COLUMNS.filter((column) => column.id !== "owner");
+  const narrow = useNarrow();
+  const columns = narrow
+    ? []
+    : shared
+      ? COLUMNS
+      : COLUMNS.filter((column) => column.id !== "owner");
   const empty = viewState === "empty";
   const canCreate = access.canManage;
   const canAsk = useCanCreateScheduleWithAgent(workspaceId);
   const ask = useCreateWithOpenGeni(workspaceId);
-  const narrow = useNarrow();
 
   return (
     <>
@@ -377,7 +381,18 @@ export function SchedulesListPage({
                     own: perms.own,
                     workspaceId,
                   })}
-                  description={scheduleWords(task.schedule, clock).short}
+                  description={
+                    narrow ? (
+                      <>
+                        {task.status === "active" && task.schedule.type !== "manual"
+                          ? "Next "
+                          : null}
+                        <NextRunValue task={task} now={clock} />
+                      </>
+                    ) : (
+                      scheduleWords(task.schedule, clock).short
+                    )
+                  }
                   cells={{
                     next: <NextRunValue task={task} now={clock} />,
                     last: <LastRunValue state={lastRunState(list.lastRuns, task.id)} />,

@@ -50,6 +50,7 @@ export function ClaudeSignInPage({
   reconnectAccountId,
   reconnectCredentialVersion,
   scopeChoice,
+  onPendingChange,
 }: {
   state: Pick<
     ProviderConnectionView,
@@ -74,6 +75,7 @@ export function ClaudeSignInPage({
   reconnectAccountId?: string | undefined;
   reconnectCredentialVersion?: number | undefined;
   scopeChoice?: { scopeName: string; onChange(value: "workspace" | "user"): void } | undefined;
+  onPendingChange?: ((pending: boolean) => void) | undefined;
 }) {
   const target = state.accessTarget;
   const scopeId = target.organizationId ?? target.workspaceId!;
@@ -93,8 +95,9 @@ export function ClaudeSignInPage({
     active.current = true;
     return () => {
       active.current = false;
+      onPendingChange?.(false);
     };
-  }, []);
+  }, [onPendingChange]);
   useEffect(() => {
     if (attempt) codeInput.current?.focus();
   }, [attempt]);
@@ -132,7 +135,11 @@ export function ClaudeSignInPage({
         legacy ? "Connect Claude subscription" : attempt ? "Complete sign-in" : "Sign in to Claude"
       }
       pendingLabel={attempt && !legacy ? "Connecting…" : "Starting sign-in…"}
-      onPendingChange={setPending}
+      onPendingChange={(value) => {
+        if (!active.current) return;
+        setPending(value);
+        onPendingChange?.(value);
+      }}
       submitDisabled={
         !state.canManageConnection ||
         Boolean(blockedReason) ||

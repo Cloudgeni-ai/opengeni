@@ -1290,19 +1290,28 @@ async function resolveDelegatedHumanAccessContext(
     throw new HTTPException(403, { message: "delegated native person authority is unavailable" });
   }
   const verifiedPermissions = [...proof.permissions];
+  // The person's own role expands as usual; the connection's access setting is
+  // literal, and so is the result: workspace:admin in a Custom setting is never
+  // a wildcard for the permissions the person left out.
   const intersectWorkspacePermissions = (permissions: Permission[]) =>
-    Permission.options.filter(
-      (permission) =>
-        hasPermission(permissions, permission) && hasPermission(verifiedPermissions, permission),
+    explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasPermission(permissions, permission) &&
+          hasPermission(verifiedPermissions, permission, "explicit"),
+      ),
     );
   const accountGrant: AccountGrant = {
     ...accounts[0]!,
-    // Organization/billing authority must be literal on BOTH sides. A
-    // workspace:admin ceiling is never an account:admin or billing grant.
-    permissions: Permission.options.filter(
-      (permission) =>
-        hasLiteralPermission(accounts[0]!.permissions, permission) &&
-        hasLiteralPermission(verifiedPermissions, permission),
+    // Organization/billing authority must be literal on BOTH sides, and so is
+    // the result: a workspace:admin entry here never reads as account:admin or
+    // billing to a later permission check.
+    permissions: explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasLiteralPermission(accounts[0]!.permissions, permission) &&
+          hasLiteralPermission(verifiedPermissions, permission),
+      ),
     ),
   };
   const workspaceGrants = live.workspaceGrants
@@ -1314,6 +1323,7 @@ async function resolveDelegatedHumanAccessContext(
     .map((grant) => ({
       ...grant,
       permissions: intersectWorkspacePermissions(grant.permissions),
+      permissionMode: "explicit" as const,
     }));
   // Proof-bearing authority cannot be changed in place and then reused as if
   // the resolver had authenticated a different subject, scope or ceiling.

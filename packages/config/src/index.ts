@@ -263,6 +263,10 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // API application pool only. Managed auth owns its separate pool; readiness
+  // reuses the application handle. Keep the historical default for existing
+  // deployments and let operators budget this per process with replica counts.
+  apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -3413,6 +3417,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
