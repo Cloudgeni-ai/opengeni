@@ -5,7 +5,6 @@ import { UsageDashboard } from "@/components/insights/usage-dashboard";
 import {
   nextUsageSearch,
   parseUsageSearch,
-
   type UsageSearch,
 } from "@/components/insights/usage-search";
 import { WorkspaceActivity } from "@/components/insights/workspace-activity";
@@ -153,4 +152,3 @@ export function InsightsRoute({
     </ContentPage>
   );
 }
-

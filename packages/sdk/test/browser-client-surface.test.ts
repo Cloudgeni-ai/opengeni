@@ -34,6 +34,10 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Keep the existing summary/workspace reads available to SDK callers after
+  // Insights moved to getOrganizationModelUsage.
+  "getOrganizationUsageSummary",
+  "getOrganizationUsageWorkspacePage",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
