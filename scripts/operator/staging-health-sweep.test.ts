@@ -15,9 +15,39 @@ import {
   safeDatabaseErrorCode,
   boundedRun,
   OWNER_PAGE_SIZE,
+  LATENCY_TAIL_LIMIT,
+  validLatencyTail,
   type OwnerObservation,
   type Run,
 } from "./staging-health-sweep";
+
+function latencyFixture() {
+  const tail = [2, 1, 1].map((latency_seconds, index) => ({
+    turn_id: `tail${index}`,
+    session_id: `session${index}`,
+    workspace_id: "w",
+    source: "user",
+    trigger_event_id: `trigger${index}`,
+    trigger_kind: "user.message",
+    accepted_at: "2026-10-03T10:59:57Z",
+    first_started_at: `2026-10-03T10:59:${57 + latency_seconds}Z`,
+    latest_started_at: "2026-10-03T10:59:59Z",
+    latency_seconds,
+  }));
+  return {
+    sample: 3,
+    p50Seconds: 1,
+    p95Seconds: 2,
+    invalidNegativeSamples: 0,
+    missingFirstStartEvents: 0,
+    futureFirstStartEvents: 0,
+    validTailSamples: 3,
+    tailLimit: LATENCY_TAIL_LIMIT,
+    tailReturned: tail.length,
+    missingTailTriggerEvidence: 0,
+    tail,
+  };
+}
 
 function healthyRun(
   overrides: {
@@ -50,14 +80,7 @@ function healthyRun(
           controlUnknown: 0,
           missingCompletionEvidence: 0,
         },
-        latency: {
-          sample: 3,
-          p50Seconds: 1,
-          p95Seconds: 2,
-          invalidNegativeSamples: 0,
-          missingFirstStartEvents: 0,
-          futureFirstStartEvents: 0,
-        },
+        latency: latencyFixture(),
         ...overrides.database,
       });
     if (args.includes("pods"))
@@ -229,14 +252,7 @@ describe("staging health sweep", () => {
             controlUnknown: 0,
             missingCompletionEvidence: 0,
           },
-          latency: {
-            sample: 3,
-            p50Seconds: 1,
-            p95Seconds: 2,
-            invalidNegativeSamples: 0,
-            missingFirstStartEvents: 0,
-            futureFirstStartEvents: 0,
-          },
+          latency: latencyFixture(),
         });
       }
       if (args.includes("pods"))
@@ -425,12 +441,8 @@ describe("staging health sweep", () => {
       if (args.includes("exec"))
         return JSON.stringify({
           latency: {
-            sample: 3,
-            p50Seconds: 1,
-            p95Seconds: 2,
-            invalidNegativeSamples: 0,
+            ...latencyFixture(),
             missingFirstStartEvents: 1,
-            futureFirstStartEvents: 0,
           },
         });
       return "{}";
@@ -456,6 +468,54 @@ describe("staging health sweep", () => {
       expect(memory.status).toBe("gap");
       expect(memory).not.toHaveProperty("facts");
     }
+  });
+  test("latency tails are bounded, identified and preserve accepted-to-first boundaries", () => {
+    const facts = latencyFixture();
+    expect(validLatencyTail(facts)).toBe(true);
+    expect(validLatencyTail({ ...facts, tailReturned: 4 })).toBe(false);
+    expect(validLatencyTail({ ...facts, tailLimit: 100 })).toBe(false);
+    expect(
+      validLatencyTail({
+        ...facts,
+        validTailSamples: 100,
+        tail: Array(11).fill(facts.tail[0]),
+        tailReturned: 11,
+      }),
+    ).toBe(false);
+    for (const patch of [
+      { turn_id: "" },
+      { accepted_at: "bad" },
+      { latency_seconds: -1 },
+      { latency_seconds: 999 },
+      { first_started_at: "2026-10-03T10:59:56Z" },
+    ]) {
+      expect(
+        validLatencyTail({
+          ...facts,
+          tail: [{ ...facts.tail[0], ...patch }, ...facts.tail.slice(1)],
+        }),
+      ).toBe(false);
+    }
+  });
+  test("missing tail trigger evidence is an explicit gap retaining IDs and percentiles", async () => {
+    const facts = latencyFixture();
+    const latency = {
+      ...facts,
+      missingTailTriggerEvidence: 1,
+      tail: [{ ...facts.tail[0], trigger_kind: null }, ...facts.tail.slice(1)],
+    };
+    expect(validLatencyTail(latency)).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { latency } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "latency")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.p95Seconds).toBe(2);
+    expect(check.facts?.tail).toEqual(latency.tail);
+    expect(result.exitCode).toBe(2);
+    expect(textResult(result)).not.toContain("trigger0");
   });
   test("missing traffic comparison is an explicit gap with numerator/denominator facts", async () => {
     for (const counts of [
@@ -780,7 +840,7 @@ describe("staging health sweep", () => {
         [{ workspace_id: "w", workspace_state: "active" }],
       );
       const query = (
-        name: "queued" | "queuedInventory" | "recovering" | "empty",
+        name: "queued" | "queuedInventory" | "recovering" | "empty" | "latency",
         fixtures: string[],
         pages: Parameters<typeof databaseQueries>[0] = {},
       ) => {
@@ -789,7 +849,7 @@ describe("staging health sweep", () => {
           "WITH RECURSIVE " +
           fixtures.join(",") +
           "," +
-          productionQuery.replace(/^WITH RECURSIVE /, "")
+          productionQuery.replace(/^WITH(?: RECURSIVE)? /, "")
         );
       };
       const queueTables = [
@@ -901,6 +961,79 @@ describe("staging health sweep", () => {
           inventoryOffset: 20,
         }),
       };
+      const normalTurns = Array.from({ length: 15 }, (_, index) => ({
+        id: `lat${String(index).padStart(2, "0")}`,
+        workspace_id: "w",
+        session_id: "latency-session",
+        source: index % 2 ? "api" : "user",
+        trigger_event_id: `trigger-lat${String(index).padStart(2, "0")}`,
+        created_at: "2026-10-03T12:50:00Z",
+        started_at: "2026-10-03T12:59:00Z",
+      }));
+      const latencyTurns = [
+        ...normalTurns,
+        ...["old-resume", "missing-start", "duplicate-only", "negative", "future"].map((id) => ({
+          id,
+          workspace_id: "w",
+          session_id: "latency-session",
+          source: "system",
+          trigger_event_id: `trigger-${id}`,
+          created_at:
+            id === "old-resume"
+              ? "2026-10-03T12:00:00Z"
+              : id === "negative"
+                ? "2026-10-03T12:55:00Z"
+                : "2026-10-03T12:50:00Z",
+          started_at: "2026-10-03T12:59:00Z",
+        })),
+      ];
+      const event = (
+        id: string,
+        turn_id: string,
+        created_at: string,
+        duplicate_of_event_id: string | null = null,
+      ) => ({
+        id,
+        workspace_id: "w",
+        session_id: "latency-session",
+        turn_id,
+        type: "turn.started",
+        created_at,
+        duplicate_of_event_id,
+      });
+      const latencyEvents = [
+        ...latencyTurns
+          .filter((turn) => turn.id !== "lat14")
+          .map((turn) => ({
+            ...event(turn.trigger_event_id, turn.id, turn.created_at),
+            type: "user.message",
+            payload: { prompt: "never emit fixture prompt", token: "never emit fixture token" },
+          })),
+        ...normalTurns.flatMap((turn, index) => [
+          event(`first-${turn.id}`, turn.id, `2026-10-03T12:50:${String(index).padStart(2, "0")}Z`),
+          event(`resume-${turn.id}`, turn.id, "2026-10-03T12:59:00Z"),
+          event(`duplicate-${turn.id}`, turn.id, "2026-10-03T12:40:00Z", `first-${turn.id}`),
+        ]),
+        event("old-first", "old-resume", "2026-10-03T12:20:00Z"),
+        event("old-latest", "old-resume", "2026-10-03T12:59:00Z"),
+        event("only-duplicate", "duplicate-only", "2026-10-03T12:51:00Z", "original"),
+        event("negative-first", "negative", "2026-10-03T12:54:00Z"),
+        event("future-first", "future", "2026-10-03T13:01:00Z"),
+        { ...event("foreign-workspace", "lat13", "2026-10-03T12:49:00Z"), workspace_id: "other" },
+        { ...event("foreign-session", "lat12", "2026-10-03T12:49:00Z"), session_id: "other" },
+      ];
+      const latency = query("latency", [
+        table(
+          "session_turns",
+          "id text,workspace_id text,session_id text,source text,trigger_event_id text,created_at timestamptz,started_at timestamptz",
+          latencyTurns,
+        ),
+        table(
+          "session_events",
+          "id text,workspace_id text,session_id text,turn_id text,type text,created_at timestamptz,duplicate_of_event_id text,payload jsonb",
+          latencyEvents,
+        ),
+      ]);
       const empty = query("empty", [
         sessions([{ id: "completed", status: "idle" }]),
         control,
@@ -961,7 +1094,7 @@ describe("staging health sweep", () => {
             url,
             now: "2026-10-03T13:00:00Z",
             windowMinutes: 30,
-            queries: { queued, queuedInventory, empty, ...pageQueries },
+            queries: { queued, queuedInventory, empty, latency, ...pageQueries },
           }),
         ),
       );
@@ -1026,6 +1159,28 @@ describe("staging health sweep", () => {
       expect(result.empty.sample).toBe(3);
       expect(result.empty.missingCompletionEvidence).toBe(2);
       expect(result.empty.repeatedSessions).toBe(0);
+      expect(result.latency.code).toBeUndefined();
+      expect(result.latency).not.toHaveProperty("gap");
+      expect(result.latency.sample).toBe(16);
+      expect(result.latency.p50Seconds).toBeCloseTo(6.5);
+      expect(result.latency.p95Seconds).toBeCloseTo(13.25);
+      expect(result.latency.validTailSamples).toBe(15);
+      expect(result.latency.tailReturned).toBe(LATENCY_TAIL_LIMIT);
+      expect(result.latency.tail.map((row: any) => row.turn_id)).toEqual(
+        Array.from({ length: 10 }, (_, index) => `lat${String(14 - index).padStart(2, "0")}`),
+      );
+      expect(result.latency.tail[0].accepted_at).toStartWith("2026-10-03T12:50:00");
+      expect(result.latency.tail[0].first_started_at).toStartWith("2026-10-03T12:50:14");
+      expect(result.latency.tail[0].latest_started_at).toStartWith("2026-10-03T12:59:00");
+      expect(result.latency.tail[0].latency_seconds).toBe(14);
+      expect(result.latency.tail[0].trigger_kind).toBeNull();
+      expect(result.latency.missingTailTriggerEvidence).toBe(1);
+      expect(result.latency.resumedFromBeforeWindow).toBe(1);
+      expect(result.latency.missingFirstStartEvents).toBe(2);
+      expect(result.latency.futureFirstStartEvents).toBe(1);
+      expect(result.latency.invalidNegativeSamples).toBe(1);
+      expect(validLatencyTail(result.latency)).toBe(true);
+      expect(JSON.stringify(result.latency)).not.toContain("never emit");
     },
     30000,
   );
