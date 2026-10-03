@@ -124,12 +124,8 @@ the sender’s human independently of connections. [Details](run-lifecycle.md).
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.
 
-`runAgentTurn` is non-retryable and attempt-fenced: retry settlement, not unknown
-effects. Unknown Modal Starts retain exact invocation/writer fences in tool results;
-only pre-dispatch proof permits recovery.
-Server-producer expiry receipts fence late turn/input materialization under the
-session lock; [validation/recovery fences](run-lifecycle.md).
-Accepted-policy [compatibility/recovery](run-lifecycle.md).
+`runAgentTurn` is non-retryable and attempt-fenced: retry settlement, never
+unknown effects ([fences and recovery](run-lifecycle.md)).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares prepared prefixes with both Responses compaction modes; Chat retains
