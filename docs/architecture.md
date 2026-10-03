@@ -1380,6 +1380,10 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Connected Machine canaries [embed matching helpers](../scripts/bake-agent.sh).
+The install API refuses partial baked targets. Embedded helpers precede adjacent
+downloads. See [distribution](deployment.md#agent-binary-distribution).
+
 Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
 
 Linux managed-browser cleanup and recovery share exact profile/executable and
