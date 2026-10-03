@@ -214,20 +214,21 @@ function webRules(
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {
       if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {
+        // A drawn disc: the text bullet glyph renders noticeably smaller than
+        // the browser's list-disc marker at the same line height.
+        const disc = 5.5;
         return (
           <View key={node.key} style={{ flexDirection: "row", marginBottom: 4 }}>
-            <Text
-              accessible={false}
-              style={{
-                width: 20,
-                lineHeight: line,
-                fontSize: 19,
-                color: theme.colors["fg-subtle"],
-                textAlign: "center",
-              }}
-            >
-              •
-            </Text>
+            <View accessible={false} style={{ width: 20, height: line, alignItems: "center", justifyContent: "center" }}>
+              <View
+                style={{
+                  width: disc,
+                  height: disc,
+                  borderRadius: disc / 2,
+                  backgroundColor: theme.colors["fg-subtle"],
+                }}
+              />
+            </View>
             <View style={{ flex: 1, minWidth: 0 }}>{children}</View>
           </View>
         );
