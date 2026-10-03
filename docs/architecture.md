@@ -1572,7 +1572,10 @@ helper UUID/cursors.
 
 Legacy retained Modal commands, whatever their health, use the existing drain once
 the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
-wait or pending request; they settle lost with a notice. Command backoff never
+wait or pending request; they settle lost with a notice. A recovering turn under
+an effective pause does not retain the machine once physical writers have
+quiesced and the idle window has elapsed; workspace capture precedes stop,
+while turn history and pause state survive. Command backoff never
 suppresses rotation's provider-lifecycle checks. Set that window to `0` to disable
 new idle-command enrollment; provider-deadline containment and already enrolled
 drains remain active. Details: `docs/run-lifecycle.md`.
