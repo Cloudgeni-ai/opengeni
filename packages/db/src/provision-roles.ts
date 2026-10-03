@@ -2207,6 +2207,13 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.organization_signup_use_cases') IS NOT NULL THEN
+      -- A signup answer is reachable only through its record capability, so a
+      -- stored answer can be neither rewritten nor read for another tenant.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',
       'validate_mcp_account_bindings(jsonb,jsonb)',

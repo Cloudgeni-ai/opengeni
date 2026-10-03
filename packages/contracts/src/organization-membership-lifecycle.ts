@@ -437,6 +437,12 @@ export type RetryOrganizationUserSetupDeliveryRequest = z.infer<
 export const CompleteSelfServiceOrganizationSetupRequest = z.object({
   organizationName: z.string().trim().min(1).max(120),
   operationId: z.string().uuid(),
+  /**
+   * The signup answer to "How do you want to use Opengeni?": add AI agents to
+   * a product (`embed`) or run agents in the cloud (`cloud`). Stored once per
+   * person and organization; the first answer wins.
+   */
+  useCase: z.enum(["embed", "cloud"]).optional(),
 });
 export type CompleteSelfServiceOrganizationSetupRequest = z.infer<
   typeof CompleteSelfServiceOrganizationSetupRequest

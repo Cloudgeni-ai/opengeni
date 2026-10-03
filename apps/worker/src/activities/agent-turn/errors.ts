@@ -231,6 +231,13 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
+    const milliseconds = Number(
+      headerValue(value.headers, "retry-after-ms") ??
+        headerValue(value.responseHeaders, "retry-after-ms") ??
+        headerValue(body?.headers, "retry-after-ms") ??
+        undefined,
+    );
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.ceil(milliseconds);
     const directSeconds = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
@@ -892,7 +899,7 @@ function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
@@ -1059,9 +1066,15 @@ export function agentRunFailurePayload(
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);
   if (anthropic) {
+    const authenticationRejected =
+      anthropic.status === 401 &&
+      (error === anthropic ||
+        (error instanceof Error && (error as Error & { status?: unknown }).status === 401));
     return {
       ...failure,
-      code: failure.code ?? anthropic.code,
+      code:
+        failure.code ??
+        (authenticationRejected ? "anthropic_authentication_error" : anthropic.code),
       retryable: failure.retryable ?? false,
       ...(anthropic.detail ? { detail: anthropic.detail } : {}),
       ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
@@ -1426,6 +1439,14 @@ function baseAgentRunFailurePayload(
   // the finite same-turn budget can succeed. Fail the turn promptly with a
   // distinct code so the client can offer another model; ordinary short rate
   // limits fall through to the retryable branch below.
+  if (status === 402 && code === "anthropic_billing_error") {
+    return {
+      error: "Claude could not bill this request. Check the account's billing and payment details.",
+      code: "provider_billing_error",
+      retryable: false,
+      ...(message ? { detail: message } : {}),
+    };
+  }
   const quota = classifyProviderQuotaExhaustionError(error);
   if (quota) {
     return {
@@ -1438,8 +1459,9 @@ function baseAgentRunFailurePayload(
   }
   if (
     status === 429 ||
-    code === "rate_limit_exceeded" ||
-    /(?:too many requests|rate.?limit|\b429\b)/i.test(message)
+    ((status === undefined || !Number.isFinite(status)) &&
+      (code === "rate_limit_exceeded" ||
+        /(?:too many requests|rate.?limit|\b429\b)/i.test(message)))
   ) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",

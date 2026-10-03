@@ -56,11 +56,13 @@ import {
 } from "./browser-account-race-diagnostics";
 import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -2033,7 +2035,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         }),
       ]);
       await continueAsAccount.click();
-      await page.getByRole("heading", { name: "Create your organization" }).waitFor({
+      await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor({
         timeout: 30_000,
       });
     } catch (error) {
@@ -2053,6 +2055,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         { cause: error },
       );
     }
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();

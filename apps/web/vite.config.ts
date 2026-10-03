@@ -443,6 +443,15 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // The provider logos and connect list are shared by the Models
+              // pages and the post-signup model step. Pin them apart from
+              // settings-pages so onboarding never loads the settings surface.
+              name: "provider-connect-list",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-(?:mark|connect-list)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Keep customer model setup in its own lazy feature boundary.
               name: "customer-model-setup",
               test: /apps[\\/]web[\\/]src[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,

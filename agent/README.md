@@ -75,6 +75,12 @@ pages or guarantee graceful completion for a permanently stuck controller.
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
+  Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
+  authenticates its archive against a SHA-256 pinned in the script before execution,
+  then verifies the agent with the existing signing key. No verifier is installed
+  on the host. `OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL` may point to a mirror of those
+  exact archives; it cannot override their checksum pins.
   [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at

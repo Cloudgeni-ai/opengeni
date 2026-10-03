@@ -99,6 +99,7 @@ import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
+export * from "./organization-signup-use-cases";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -41627,6 +41628,16 @@ export async function acceptSessionHumanInputResponse(
           }
         }
         if (request.status !== "pending") {
+          // A timeout that lost the first-writer race has nothing left to expire.
+          // It does not acknowledge a human response or repair historical receipts.
+          if (input.expireOnly) {
+            return {
+              action: "conflict",
+              request: mapSessionHumanInputRequest(request),
+              events: [],
+              workflowWakeRevision: null,
+            } as const;
+          }
           let event = await humanInputResponseEventForRequest(tx as unknown as Database, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,

@@ -69,6 +69,11 @@ import {
   reachesWorkspace,
   type OrgCodexPlaces,
 } from "@/components/models/organization-codex-models";
+import {
+  ProviderConnectList,
+  providerPaymentSummary,
+  type ProviderConnectChoice,
+} from "@/components/models/provider-connect-list";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
   SuperGrokAccessPage,
@@ -148,7 +153,11 @@ export function useOrganizationModelAccounts({
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
   const orgId = organizationId ?? "";
-  const orgCodex = useOrganizationCodexSubscriptions({ client, organizationId: orgId, enabled });
+  const orgCodex = useOrganizationCodexSubscriptions({
+    client,
+    organizationId: orgId,
+    enabled,
+  });
   const orgGrok = useSuperGrokSubscriptions({
     client,
     organizationId: orgId,
@@ -236,7 +245,10 @@ export function WorkspaceModelsPageBody({
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
   const scope = useMemo(
-    () => ({ anchorWorkspaceId, workspaceId: workspacePage ? workspaceId : undefined }),
+    () => ({
+      anchorWorkspaceId,
+      workspaceId: workspacePage ? workspaceId : undefined,
+    }),
     [anchorWorkspaceId, workspaceId, workspacePage],
   );
   const nav = useModelsNavigation(scope, { account, view });
@@ -250,8 +262,16 @@ export function WorkspaceModelsPageBody({
   const here = useMemo(() => ({ id: workspaceId, personal }), [workspaceId, personal]);
 
   /* This workspace's view of every provider. */
-  const codex = useCodexSubscriptions({ client, workspaceId, canManage: canManageConnections });
-  const grok = useSuperGrokSubscriptions({ client, workspaceId, canManage: canManageConnections });
+  const codex = useCodexSubscriptions({
+    client,
+    workspaceId,
+    canManage: canManageConnections,
+  });
+  const grok = useSuperGrokSubscriptions({
+    client,
+    workspaceId,
+    canManage: canManageConnections,
+  });
   const workspaceGateway = (id: GatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
@@ -315,11 +335,19 @@ export function WorkspaceModelsPageBody({
     backToList,
   };
   const codexPool: OrganizationCodexPool | null = organizationAdmin
-    ? { codex: orgCodex, workspace: here, openAccount: orgCodexPlaces.openAccount }
+    ? {
+        codex: orgCodex,
+        workspace: here,
+        openAccount: orgCodexPlaces.openAccount,
+      }
     : null;
   const grokPool: OrganizationSuperGrokPool | null =
     organizationAdmin && !orgGrok.unavailable
-      ? { grok: orgGrok, workspace: here, openAccount: orgGrokPlaces.openAccount }
+      ? {
+          grok: orgGrok,
+          workspace: here,
+          openAccount: orgGrokPlaces.openAccount,
+        }
       : null;
 
   const key = accountKeyOf(account);
@@ -940,7 +968,10 @@ function OrganizationGatewayRow({
   workspaceName: string;
   onOpen: () => void;
 }) {
-  const access = useConnectionAccess({ ...state.accessTarget, enabled: state.connected });
+  const access = useConnectionAccess({
+    ...state.accessTarget,
+    enabled: state.connected,
+  });
   const reaches = state.connected ? reachesWorkspace(access.data, workspace) : null;
   return (
     <ProviderConnectionRow
@@ -974,7 +1005,10 @@ function OrganizationGatewayPage({
   onConnect: () => void;
   onEditAccess: () => void;
 }) {
-  const access = useConnectionAccess({ ...state.accessTarget, enabled: state.connected });
+  const access = useConnectionAccess({
+    ...state.accessTarget,
+    enabled: state.connected,
+  });
   return (
     <ProviderConnectionPage
       state={state}
@@ -1231,20 +1265,13 @@ export function ConnectPickerPage({
   onOpenConnected?: ((provider: GatewayId) => void) | undefined;
 }) {
   const keysSkipPersonal = target === "organization" && personal;
-  const choices: {
-    id: ConnectChoice;
-    title: string;
-    summary: string;
-    note?: string | undefined;
-    connected?: boolean;
-    unavailable?: string | undefined;
-  }[] = [
+  const choices: ProviderConnectChoice[] = [
     ...(codexAvailable
       ? [
           {
             id: "codex" as const,
             title: "Codex",
-            summary: "Pay with your ChatGPT plan",
+            summary: providerPaymentSummary("codex", "Codex"),
             note: codexNote,
           },
         ]
@@ -1254,7 +1281,7 @@ export function ConnectPickerPage({
           {
             id: "supergrok" as const,
             title: "SuperGrok",
-            summary: "Pay with your SuperGrok plan",
+            summary: providerPaymentSummary("supergrok", "SuperGrok"),
             unavailable:
               grok === "not_enabled"
                 ? "Not enabled on this server"
@@ -1272,7 +1299,7 @@ export function ConnectPickerPage({
             summary:
               id === "anthropic" || id === "claude_subscription"
                 ? gateways[id]!.config.summary
-                : `Pay per token through ${gateways[id]!.config.title}`,
+                : providerPaymentSummary(id, gateways[id]!.config.title),
             note: keysSkipPersonal ? "Not used in Personal workspaces" : undefined,
             connected: gateways[id]!.connected,
           }),
@@ -1293,37 +1320,18 @@ export function ConnectPickerPage({
             description="Only people who can manage connections can add an account."
           />
         ) : (
-          <RowList label="Providers" flush>
-            {choices.map((choice) =>
-              choice.unavailable ? (
-                <ListRow
-                  key={choice.id}
-                  disabled
-                  leading={<ProviderTile provider={choice.id} size="lg" />}
-                  title={choice.title}
-                  meta={[choice.summary]}
-                  indicator={{ kind: "unavailable", label: choice.unavailable }}
-                />
-              ) : (
-                <ListRow
-                  key={choice.id}
-                  leading={<ProviderTile provider={choice.id} size="lg" />}
-                  title={choice.title}
-                  meta={[choice.summary, choice.connected ? "Already connected" : choice.note]}
-                  indicator="open"
-                  onOpen={() =>
-                    choice.connected &&
-                    (choice.id === "vercel" ||
-                      choice.id === "openrouter" ||
-                      choice.id === "anthropic" ||
-                      choice.id === "claude_subscription")
-                      ? onOpenConnected?.(choice.id)
-                      : onPick(choice.id)
-                  }
-                />
-              ),
-            )}
-          </RowList>
+          <ProviderConnectList
+            choices={choices}
+            onOpen={(choice) =>
+              choice.connected &&
+              (choice.id === "vercel" ||
+                choice.id === "openrouter" ||
+                choice.id === "anthropic" ||
+                choice.id === "claude_subscription")
+                ? onOpenConnected?.(choice.id)
+                : onPick(choice.id as ConnectChoice)
+            }
+          />
         )}
       </div>
     </DetailPage>

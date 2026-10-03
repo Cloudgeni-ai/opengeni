@@ -88,7 +88,15 @@ for (const unsupported of [true, false]) {
       ]);
       const picker = page.getByRole("button", { name: "Model and effort", exact: true });
       await picker.waitFor();
-      expect(await banner.locator("details").count()).toBe(0);
+      const details = banner.locator("details");
+      expect(await details.count()).toBe(unsupported ? 0 : 1);
+      if (!unsupported) {
+        expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+        expect(await details.locator("p").textContent()).toBe("Connection interrupted.");
+        expect(await banner.locator("span").first().textContent()).toBe(
+          "The session stopped unexpectedly.",
+        );
+      }
       expect(await banner.getByRole("button", { name: /Choose/ }).count()).toBe(0);
       if (unsupported) {
         expect(await banner.textContent()).toBe(

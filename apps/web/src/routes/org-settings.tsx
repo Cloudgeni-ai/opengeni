@@ -5,7 +5,7 @@
 // use are hidden from the rail (lib/organization-settings-access.ts).
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, UserPlusIcon } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type { ReturnTo } from "@/lib/return-to";
@@ -52,6 +52,11 @@ import {
 } from "@/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@/types";
 
+const CheckoutCreditsCelebration = lazy(async () => {
+  const module = await import("@/components/credits/checkout-credits-celebration");
+  return { default: module.CheckoutCreditsCelebration };
+});
+
 const OrganizationDeveloperIntegrations = lazy(async () => {
   const module = await import("@/components/workspace-developer-settings");
   return { default: module.OrganizationDeveloperIntegrations };
@@ -78,6 +83,7 @@ function takeCheckoutReturn(outcome: string): boolean {
 export function OrgSettingsRoute({
   workspaceId,
   checkout,
+  checkoutSession,
   section: requestedSection,
   modelsAccount,
   modelsView,
@@ -92,6 +98,8 @@ export function OrgSettingsRoute({
   /** Developer: the webhook or provider page, or form, that is open. */
   developer?: DeveloperLocation | undefined;
   checkout?: "success" | "cancelled";
+  /** Stripe's session id on a same-tab return; its credits are celebrated once they land. */
+  checkoutSession?: string | undefined;
   section?: OrganizationAdminSection;
   /** Models: the account page that is open. */
   modelsAccount?: string | undefined;
@@ -178,9 +186,12 @@ export function OrgSettingsRoute({
         .catch(() => undefined);
     }
     if (checkout === "success") {
-      toast.success("Payment received", {
-        description: "Your credits will appear shortly.",
-      });
+      // With the session id, the celebration below names the real amount.
+      if (!checkoutSession) {
+        toast.success("Payment received", {
+          description: "Your credits will appear shortly.",
+        });
+      }
     } else {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
@@ -190,7 +201,9 @@ export function OrgSettingsRoute({
       search: requestedSection ? { section: requestedSection } : {},
       replace: true,
     });
-  }, [checkout, navigate, requestedSection, workspaceId]);
+  }, [checkout, checkoutSession, navigate, requestedSection, workspaceId]);
+  // Kept past the URL cleanup above, which drops the session id right away.
+  const [celebratedCheckout] = useState(() => checkoutSession ?? null);
 
   const createWorkspace = useCallback(
     async (name: string, operationId: string): Promise<string | null> => {
@@ -279,6 +292,17 @@ export function OrgSettingsRoute({
     // A workspace's budget page brings its own back link and title too.
     (section === "billing" && Boolean(returnTo || workspace));
 
+  const checkoutCelebration =
+    celebratedCheckout && accountId && canReadBilling ? (
+      <Suspense fallback={null}>
+        <CheckoutCreditsCelebration
+          client={client}
+          accountId={accountId}
+          checkoutSessionId={celebratedCheckout}
+        />
+      </Suspense>
+    ) : null;
+
   return (
     <OrganizationDirectoryProvider
       key={identityKey}
@@ -293,6 +317,7 @@ export function OrgSettingsRoute({
       onCreateWorkspace={createWorkspace}
       onDeleteWorkspace={deleteWorkspace}
     >
+      {checkoutCelebration}
       <OrganizationSettingsFrame
         workspaceId={workspaceId}
         fallbackLabel={fallbackLabel}

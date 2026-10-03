@@ -608,6 +608,9 @@ makes that change explicit.
 Computer frames fit the dock while preserving their proportions. Resizing or
 reopening the dock refits the visible image without changing capture resolution
 or the coordinates sent to the computer.
+Desktop opens a whole screen by default. Multiple screens use a compact screen
+selector; app controls and window views are available from **Advanced**. Explicit
+view choices survive refreshes while the target remains available.
 
 Desktop IME candidates and their selection keys stay local; only committed text is sent.
 

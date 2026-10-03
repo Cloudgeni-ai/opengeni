@@ -664,9 +664,17 @@ const effectiveBudgets = {
     // Linux/x64 CI measures 2,575,385 raw on main 6a9731344. Keep the
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
     wholeKibEnvelope(2_575_385, 1.5 * kib),
+    // The post-signup model step reuses the Models provider list (ListRow and
+    // logo tiles). None of its code joins this graph, but entry-aware chunk
+    // merging regroups shared primitives: Bun 1.4 macOS/arm64 measures
+    // 2,604,402 raw / 735,237 gzip (merged main 8f191fed7 measures 2,602,600
+    // raw on the same machine). Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(2_604_402, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // The same onboarding provider-list graph measures 735,237 gzip bytes.
+    wholeKibEnvelope(735_237, 1.5 * kib),
     // The same merged graph measures 733,267 gzip bytes. Preserve the
     // existing 1.5-KiB platform-skew allowance, with no other cap change.
     wholeKibEnvelope(733_267, 1.5 * kib),

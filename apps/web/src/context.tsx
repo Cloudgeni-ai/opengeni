@@ -2504,6 +2504,17 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  // Onboarding may finish in a chat it opened (developer setup); go there
+  // while access revalidates, so the app opens on that chat.
+  const completeOrganizationOnboarding = useCallback(
+    (destination?: { workspaceId: string; sessionId: string }) => {
+      if (destination) {
+        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
+      }
+      revalidatePrincipalAccess();
+    },
+    [navigate, revalidatePrincipalAccess],
+  );
   async function refreshPrincipalAccess(): Promise<boolean> {
     if (!clientConfig || !authReady) return false;
     let acceptedPrincipal = principalTransitionIdentity.current;
@@ -2910,7 +2921,7 @@ export function RootRouteComponent() {
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
+        onComplete={completeOrganizationOnboarding}
       />
     ) : (
       <Suspense fallback={<LoadingPanel />}>
@@ -2930,7 +2941,7 @@ export function RootRouteComponent() {
             );
           }}
           onSignOut={handleManagedSignOut}
-          onComplete={revalidatePrincipalAccess}
+          onComplete={completeOrganizationOnboarding}
         />
       </Suspense>
     )
