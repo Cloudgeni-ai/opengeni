@@ -1855,6 +1855,8 @@ cannot establish that provenance or impersonate a different session/author.
 
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
+Gate writes with the native tool approval (an API Integration write left at `approvalMode: "ask"`, or the session MCP `requireApproval` list), never with agent instructions that ask the user a yes/no question through `request_human_input` before writing. A native approval shows the exact tool and arguments with Approve/Reject, cannot be bypassed by the model, and resumes the same call; a custom question is only a prompt the model may skip.
+
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.
 
 ## Rotation and failure
@@ -2853,6 +2855,16 @@ radius and current theme using the shipped stylesheet, scoped `--og-*` tokens
 and supported theme/density/label hooks. Keep UI-owned copy free of OpenGeni
 branding; source quotations and user/assistant content are not UI labels. Verify
 the installed error-copy API separately, not just the heading/placeholder.
+
+`OpenGeniChat` and `SessionConversation` follow the host theme by default: an
+enclosing `data-og-theme`, then `class="dark"`/`data-theme` on `<html>` or
+`<body>`, the host's `color-scheme`, then the page background. Do not wire the
+OS `prefers-color-scheme` into them; pass `theme="light" | "dark"` only to force
+one. Their backgrounds and cards derive from the host background
+(`surface="host"`), so mount them without a wrapper panel color; customized
+`--og-color-*` tokens are kept. End users see a Stop control only while a
+response runs (no Pause), and no model picker unless the host opts in
+(`modelPicker` or `createSessionProxyHandler({ modelSelection: true })`).
 
 Stock mode uses the shipped components and `compiled.css` without extra host
 cosmetic CSS. The quality target is simple, polished and smooth at desktop

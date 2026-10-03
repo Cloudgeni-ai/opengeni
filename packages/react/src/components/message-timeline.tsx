@@ -260,6 +260,12 @@ export type MessageTimelineProps = {
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /**
+   * Hide the floating "Back to your message" pill while the timeline viewport
+   * is shorter than this (px), e.g. a narrow embed above a decision card.
+   * Defaults to 0 (always available).
+   */
+  questionNavMinViewportHeight?: number | undefined;
   /** Composer draft quotes currently attached to the next send. */
   draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
   /** Open the composer review list for one numbered draft badge. */
@@ -547,6 +553,7 @@ export function MessageTimeline({
   turnSummary,
   autoFollow = true,
   onAnnotate,
+  questionNavMinViewportHeight = 0,
   draftAnnotations,
   onDraftAnnotationSelect,
   hasOlder = false,
@@ -746,6 +753,9 @@ export function MessageTimeline({
   const resizeFollowRafRef = useRef<number | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
+  const questionNavMinViewportRef = useRef(questionNavMinViewportHeight);
+  questionNavMinViewportRef.current = questionNavMinViewportHeight;
+  const scheduleQuestionNavRef = useRef<() => void>(() => {});
   // Unpinned is not the same as away from the tip: focusing a control in the
   // conversation (Copy, a connection card) hands the view to the reader while
   // they are still at the bottom. Offer the jump only once there is something
@@ -1335,10 +1345,17 @@ export function MessageTimeline({
     questionNavFrameRef.current = requestFrame(() => {
       questionNavFrameRef.current = null;
       const node = scrollRef.current;
-      const next = node ? readQuestionNav(node) : null;
+      // A short viewport (a narrow embed above a decision card) has no room
+      // for a floating pill that would cover the very rows being read.
+      // clientHeight <= 1 is pre-layout/headless, not a short viewport.
+      const roomy =
+        node !== null &&
+        (node.clientHeight <= 1 || node.clientHeight >= questionNavMinViewportRef.current);
+      const next = node && roomy ? readQuestionNav(node) : null;
       setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
     });
   }, [readableTurns]);
+  scheduleQuestionNavRef.current = scheduleQuestionNav;
   useEffect(
     () => () => {
       if (questionNavFrameRef.current != null) {
@@ -1976,6 +1993,9 @@ export function MessageTimeline({
         if (!current) {
           return;
         }
+        // A viewport that shrank below the pill's minimum hides it now, not
+        // on the next scroll.
+        if (questionNavMinViewportRef.current > 0) scheduleQuestionNavRef.current();
         requestOlderIfUnderfilled(current);
         if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
           return;

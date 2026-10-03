@@ -203,6 +203,8 @@ export type SessionProxyHandlerOptions = {
    * the saved policy unchanged as an integrity fence, not a new selection: the
    * API atomically checks the saved revision/content or replays the original
    * receipt. Hide the composer's model picker to match. Defaults to true.
+   * Pass `true` explicitly to also show end users the stock model picker
+   * (`SessionConversation`/`OpenGeniChat` hide it unless asked).
    */
   modelSelection?: boolean | undefined;
   /** SSE heartbeat interval. Defaults to 15 seconds. */
@@ -426,7 +428,12 @@ export function createSessionProxyHandler(
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
             sandboxFiles: sandboxFilesEnabled,
             ...(artifacts ? { artifacts } : {}),
-            ...(modelSelection ? {} : { modelSelection: false }),
+            // Explicit true also tells stock UIs to offer end users the model picker.
+            ...(modelSelection
+              ? options.modelSelection === true
+                ? { modelSelection: true }
+                : {}
+              : { modelSelection: false }),
           });
         }
         return errorJson(404, "route_not_allowed", "Not found.");

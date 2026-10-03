@@ -352,6 +352,8 @@ describe("readable per-turn rows", () => {
       await flush();
       const trigger = statusTrigger(r.container);
       expect(trigger.textContent).toMatch(/^Waiting for you/);
+      // One live waiting status: the header, not also a "waiting on you" divider.
+      expect(r.container.textContent).not.toContain("waiting on you");
       await r.rerender(
         <MessageTimeline
           events={[

@@ -246,6 +246,8 @@ cannot establish that provenance or impersonate a different session/author.
 
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
+Gate writes with the native tool approval (an API Integration write left at `approvalMode: "ask"`, or the session MCP `requireApproval` list), never with agent instructions that ask the user a yes/no question through `request_human_input` before writing. A native approval shows the exact tool and arguments with Approve/Reject, cannot be bypassed by the model, and resumes the same call; a custom question is only a prompt the model may skip.
+
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.
 
 ## Rotation and failure
