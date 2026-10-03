@@ -118,6 +118,9 @@ latency defaults to `standard`.
 
 `runAgentTurn` is non-retryable and attempt-fenced: retry settlement, never
 unknown effects ([fences and recovery](run-lifecycle.md)).
+Structured PostgreSQL outages escape executing activities into the existing
+exact-attempt DB-only recovery lane, not terminal turn failure or old-attempt
+tool replay; physical/inference settlement gates remain independent.
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares prepared prefixes with both Responses compaction modes; Chat retains

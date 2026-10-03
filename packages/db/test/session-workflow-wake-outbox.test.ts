@@ -1,8 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { and, eq, sql } from "drizzle-orm";
-import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { and, DrizzleQueryError, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import {
+  readTurnExecutionPolicyV1,
+  TurnExecutionPolicyV1,
+  TURN_EXECUTION_POLICY_METADATA_KEY,
+} from "@opengeni/contracts";
+import { acquireSharedTestDatabase, waitFor, type SharedTestDatabase } from "@opengeni/testing";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
+import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";
+import type { PostClaimDatabaseRecoveryDetail } from "../../../apps/worker/src/activities/types";
+import postgres from "postgres";
 import {
   bootstrapWorkspace,
   blockSessionWorkBeforeAttemptClaim,
@@ -23,11 +31,13 @@ import {
   getSessionTurn,
   getSession,
   initializeSessionStartAtomically,
+  installOrReadTurnExecutionPolicyForAttempt,
   listSessionEvents,
   listSessionTurns,
   markSessionWorkflowWakeDelivered,
   markSessionWorkflowWakeFailed,
   markSessionAttemptQuiesced,
+  reconcileSessionAttemptQuiescence,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   requestSessionTurnRecovery,
@@ -144,6 +154,225 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test.each([false, true])(
+    "a restricted own-client server 57P01 recovers the same turn; authoritative Pause wins (%s)",
+    async (paused) => {
+      const ctx = await fixture();
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      await send(ctx, "retain the accepted turn across database failover");
+      const attemptId = crypto.randomUUID();
+      const workflowId = `session-${sessionId}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId,
+        dispatchId,
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error("Missing original owner");
+      await installOrReadTurnExecutionPolicyForAttempt(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+        policyForAbsent: TurnExecutionPolicyV1.parse({
+          schemaVersion: 1,
+          productModelId: "scripted-model",
+          requestedModelId: null,
+          modelSource: "deployment",
+          reasoningEffort: "low",
+          reasoningSource: "deployment",
+          providerId: "scripted-provider",
+          upstreamModelId: "scripted-upstream",
+          wireApi: "responses",
+          credentialSource: { kind: "deployment", mechanism: "api_key" },
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+          definitionVersion: `sha256:${"a".repeat(64)}`,
+        }),
+      });
+      const beforeWake = await wakeRow(workspaceId, sessionId);
+      const [beforeAuthority] = await shared.admin`
+        select initiating_human_subject_id, trigger_event_id, metadata
+        from session_turns where id = ${claim.turn.id} and workspace_id = ${workspaceId}
+      `;
+      if (!beforeAuthority) throw new Error("Missing accepted authority");
+
+      // PostgreSQL, not a fabricated Error/message, supplies the allowed
+      // SQLSTATE through this dedicated restricted ORM client. This is a
+      // classification/control regression, not a live failover claim.
+      const applicationName = `outage-fixture-${crypto.randomUUID()}`;
+      const isolated = postgres(shared.appUrl, {
+        max: 1,
+        connection: { application_name: applicationName },
+      });
+      let error: unknown;
+      try {
+        await drizzle(isolated)
+          .execute(sql`do $$ begin
+            raise exception using errcode = '57P01', message = 'own-client outage fixture';
+          end $$`)
+          .catch((cause) => {
+            error = cause;
+          });
+      } finally {
+        await isolated.end({ timeout: 1 });
+      }
+      expect(error).toBeInstanceOf(DrizzleQueryError);
+      expect((error as DrizzleQueryError).cause).toMatchObject({ code: "57P01" });
+      const failure = postClaimDatabaseRecoveryFailure({
+        error,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        executionGeneration: claim.turn.executionGeneration,
+        requireDatabaseProvenance: true,
+      });
+      expect(failure?.type).toBe("OpenGeniPostClaimDatabaseRecovery");
+      if (!failure) throw new Error("Missing structured database outage handoff");
+      if (paused) await pauseWorkspace(ctx);
+      const activities = createSessionStateActivities(
+        async () => ({ db: client.db, bus: {}, settings: {}, observability: {} }) as any,
+        {
+          publishDurableSessionEvents: async () => undefined,
+          countQueuedTurns: async () => 0,
+          recordTurnsQueuedGauge: () => undefined,
+        },
+      );
+      const input = {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        workflowId,
+        attemptId,
+        retryDelayMs: 1000,
+        postClaimDatabaseRecovery: failure.details?.[0] as PostClaimDatabaseRecoveryDetail,
+      };
+      expect(await activities.failSessionAttempt(input)).toEqual({
+        action: paused ? "stale" : "recovering",
+      });
+      expect(
+        (await listSessionEvents(client.db, workspaceId, sessionId)).some(
+          (event) => event.type === "turn.failed",
+        ),
+      ).toBe(false);
+      if (paused) {
+        expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+          attemptId,
+        );
+        return;
+      }
+      expect(await activities.failSessionAttempt(input)).toEqual({ action: "stale" });
+      expect((await wakeRow(workspaceId, sessionId))!.wakeRevision).toBeGreaterThan(
+        beforeWake!.wakeRevision,
+      );
+      expect(await peekSessionWork(client.db, workspaceId, sessionId)).toMatchObject({
+        kind: "cancellation-wait",
+        attemptId,
+      });
+      expect(
+        await reconcileSessionAttemptQuiescence(client.db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          temporalWorkflowId: workflowId,
+          temporalWorkflowRunId: workflowRunId,
+          temporalActivityId: dispatchId,
+          activitySettled: true,
+        }),
+      ).toMatchObject({ action: "quiesced" });
+      const successor = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(successor).toMatchObject({
+        action: "claimed",
+        turn: {
+          id: claim.turn.id,
+          triggerEventId: claim.turn.triggerEventId,
+          executionGeneration: claim.turn.executionGeneration + 1,
+        },
+      });
+      const [afterAuthority] = await shared.admin`
+        select initiating_human_subject_id, trigger_event_id, metadata
+        from session_turns where id = ${claim.turn.id} and workspace_id = ${workspaceId}
+      `;
+      if (!afterAuthority) throw new Error("Missing successor authority");
+      expect(afterAuthority.initiating_human_subject_id).toBe(
+        beforeAuthority.initiating_human_subject_id,
+      );
+      expect(afterAuthority.trigger_event_id).toBe(beforeAuthority.trigger_event_id);
+      expect(afterAuthority.metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(
+        beforeAuthority.metadata[TURN_EXECUTION_POLICY_METADATA_KEY],
+      );
+      expect(await activities.failSessionAttempt(input)).toEqual({ action: "stale" });
+    },
+    30_000,
+  );
+
+  test("a real restricted connection termination stays outside the running-turn closed allowlist", async () => {
+    // Kill only this exact dedicated fixture connection. postgres.js reports
+    // CONNECTION_CLOSED here; never rename it to an allowed code or infer a
+    // server SQLSTATE/exit proof that was not actually returned.
+    const applicationName = `excluded-outage-fixture-${crypto.randomUUID()}`;
+    const isolated = postgres(shared.appUrl, {
+      max: 1,
+      connection: { application_name: applicationName },
+    });
+    let error: unknown;
+    try {
+      const [owner] = await isolated`select pg_backend_pid() as pid`;
+      if (!owner) throw new Error("Missing dedicated fixture connection");
+      const pending = drizzle(isolated)
+        .execute(sql`select pg_sleep(5)`)
+        .catch((cause) => {
+          error = cause;
+        });
+      await waitFor(
+        async () => {
+          const [active] = await shared.admin`
+            select state from pg_stat_activity where pid = ${owner.pid}
+              and application_name = ${applicationName} and datname = current_database()
+          `;
+          return active?.state === "active";
+        },
+        { timeoutMs: 1000, intervalMs: 5 },
+      );
+      const [terminated] = await shared.admin`
+        select pg_terminate_backend(pid) as terminated from pg_stat_activity
+        where pid = ${owner.pid} and application_name = ${applicationName}
+          and datname = current_database() and usename = ${new URL(shared.appUrl).username}
+      `;
+      expect(terminated?.terminated).toBe(true);
+      await pending;
+    } finally {
+      await isolated.end({ timeout: 1 });
+    }
+    expect(error).toBeInstanceOf(DrizzleQueryError);
+    expect((error as DrizzleQueryError).cause).toMatchObject({ code: "CONNECTION_CLOSED" });
+    const identity = {
+      error,
+      turnId: crypto.randomUUID(),
+      triggerEventId: crypto.randomUUID(),
+      executionGeneration: 1,
+    };
+    expect(
+      postClaimDatabaseRecoveryFailure({ ...identity, requireDatabaseProvenance: true }),
+    ).toBeNull();
+    expect(postClaimDatabaseRecoveryFailure(identity)?.type).toBe(
+      "OpenGeniPostClaimDatabaseRecovery",
+    );
+  }, 30_000);
+
   test.each([
     "client-only",
     "unrelated-producer",
