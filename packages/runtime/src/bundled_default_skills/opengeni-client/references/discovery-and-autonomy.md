@@ -82,10 +82,11 @@ Write every question the way the end user talks about their own product. Never
 use internal terms such as "on-demand", "learning across chats", "shape",
 "capabilities" or "visibility". Only ask about what applies:
 
-- **Who can see a chat:** only the person who started it (`chats: "private"`),
-  their whole team (`"shared"`), or each user gets a fully separate space
-  (`"isolated"`). Choose the workspace mapping from the actual sharing boundary;
-  private chats alone do not require a workspace per person.
+- **Who can see a chat:** only the person who started it (`chats: "private"`)
+  or their whole team (`"shared"`). Offer only these two. Choosing
+  `"isolated"` or any other workspace mapping is your decision from the actual
+  sharing boundary, never a question; private chats alone do not require a
+  workspace per person.
 - **What the agent may do:** only look things up (read-only), or also make
   changes. Name the actual things ("read your analytics", "can't change
   websites or users"). Confirm writes separately, only when they are part of
