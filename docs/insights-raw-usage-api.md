@@ -1,6 +1,6 @@
 # Insights unified DB API checkpoint
 
-Migration `0601_insights_raw_usage_api.sql` is rolling and independent of the
+Migration `0602_insights_raw_usage_api.sql` is rolling and independent of the
 unfinished daily-rollup migration. It adds nullable captured class annotations
 and two scoped read capabilities. Released readers, authorization policies,
 permission checks, billing writes, pricing/catalog definitions and ledger rows

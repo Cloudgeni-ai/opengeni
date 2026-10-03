@@ -44,7 +44,7 @@ let accountId: string,
   privateId: string,
   deletedId: string,
   subjectId: string;
-const migrationName = "0601_insights_raw_usage_api.sql";
+const migrationName = "0602_insights_raw_usage_api.sql";
 const now = new Date("2026-09-14T12:00:00Z");
 const actor = <T>(fn: () => Promise<T>, id = subjectId) =>
   withSessionRlsActorContext({ subjectId: id }, fn);
