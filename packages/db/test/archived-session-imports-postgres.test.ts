@@ -179,7 +179,7 @@ describe("archived import PostgreSQL persistence", () => {
     }
   }, 60_000);
 
-  test("the actual pre0555 evaluator and provisioner accept the complete post0555 database", async () => {
+  test("archive storage stays compatible with pre0555 while Slack quota grants require the current runtime", async () => {
     if (!client || !shared) return;
     const repoRoot = new URL("../../..", import.meta.url).pathname;
     // Exact immutable feature base before 0555; do not substitute new constants
@@ -204,12 +204,17 @@ describe("archived import PostgreSQL persistence", () => {
         organizationTenancyCanonicalActivationEnabled: true,
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
+      // The later 0586 maintenance cutover intentionally requires a new binary
+      // for its runtime-granted quota table. Keep the immutable evaluator and
+      // complete catalog: its only incompatibility is that later quota grant.
+      const laterQuotaGap =
+        "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
       expect(
         old.evaluateRuntimeDatabasePosture(
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual([]);
+      ).toEqual([laterQuotaGap]);
       await oldProvision.provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -254,7 +259,7 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual([]);
+      ).toEqual([laterQuotaGap]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

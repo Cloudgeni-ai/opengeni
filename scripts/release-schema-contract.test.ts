@@ -143,530 +143,539 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0596_managed_auth_new_signups_switch.sql",
+          (migration) => migration.path === "0597_slack_api_rate_limits.sql",
         )
-          ? "0596_managed_auth_new_signups_switch.sql"
+          ? "0597_slack_api_rate_limits.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0595_organization_signup_use_cases.sql",
+                (migration) => migration.path === "0596_managed_auth_new_signups_switch.sql",
               )
-            ? "0595_organization_signup_use_cases.sql"
+            ? "0596_managed_auth_new_signups_switch.sql"
             : sourceContract.migrations.some(
-                  (migration) => migration.path === "0594_organization_usage_hash_join.sql",
-                  "0595_organization_signup_use_cases.sql",
+                  (migration) => migration.path === "0595_organization_signup_use_cases.sql",
                 )
-              ? "0594_organization_usage_hash_join.sql"
+              ? "0595_organization_signup_use_cases.sql"
               : sourceContract.migrations.some(
-                    (migration) => migration.path === "0593_insights_private_ledger_filter.sql",
+                    (migration) => migration.path === "0594_organization_usage_hash_join.sql",
+                    "0595_organization_signup_use_cases.sql",
                   )
-                ? "0593_insights_private_ledger_filter.sql"
+                ? "0594_organization_usage_hash_join.sql"
                 : sourceContract.migrations.some(
-                      (migration) =>
-                        migration.path === "0592_insights_claude_subscription_payers.sql",
+                      (migration) => migration.path === "0593_insights_private_ledger_filter.sql",
                     )
-                  ? "0592_insights_claude_subscription_payers.sql"
+                  ? "0593_insights_private_ledger_filter.sql"
                   : sourceContract.migrations.some(
-                        (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
+                        (migration) =>
+                          migration.path === "0592_insights_claude_subscription_payers.sql",
                       )
-                    ? "0591_insights_aggregate_query_plans.sql"
+                    ? "0592_insights_claude_subscription_payers.sql"
                     : sourceContract.migrations.some(
                           (migration) =>
-                            migration.path === "0590_complete_insights_usage_amounts.sql",
+                            migration.path === "0591_insights_aggregate_query_plans.sql",
                         )
-                      ? "0590_complete_insights_usage_amounts.sql"
+                      ? "0591_insights_aggregate_query_plans.sql"
                       : sourceContract.migrations.some(
-                            (migration) => migration.path === "0589_organization_model_usage.sql",
+                            (migration) =>
+                              migration.path === "0590_complete_insights_usage_amounts.sql",
                           )
-                        ? "0589_organization_model_usage.sql"
+                        ? "0590_complete_insights_usage_amounts.sql"
                         : sourceContract.migrations.some(
-                              (migration) =>
-                                migration.path === "0588_insights_scoped_fact_projection.sql",
+                              (migration) => migration.path === "0589_organization_model_usage.sql",
                             )
-                          ? "0588_insights_scoped_fact_projection.sql"
+                          ? "0589_organization_model_usage.sql"
                           : sourceContract.migrations.some(
                                 (migration) =>
-                                  migration.path === "0587_workflow_wake_session_lock_order.sql",
+                                  migration.path === "0588_insights_scoped_fact_projection.sql",
                               )
-                            ? "0587_workflow_wake_session_lock_order.sql"
+                            ? "0588_insights_scoped_fact_projection.sql"
                             : sourceContract.migrations.some(
                                   (migration) =>
-                                    migration.path === "0586_private_sessions_fleet_activation.sql",
+                                    migration.path === "0587_workflow_wake_session_lock_order.sql",
                                 )
-                              ? "0586_private_sessions_fleet_activation.sql"
+                              ? "0587_workflow_wake_session_lock_order.sql"
                               : sourceContract.migrations.some(
                                     (migration) =>
-                                      migration.path === "0585_session_attention_cursor.sql",
+                                      migration.path ===
+                                      "0586_private_sessions_fleet_activation.sql",
                                   )
-                                ? "0585_session_attention_cursor.sql"
+                                ? "0586_private_sessions_fleet_activation.sql"
                                 : sourceContract.migrations.some(
                                       (migration) =>
-                                        migration.path === "0584_agent_instruction_size_parity.sql",
+                                        migration.path === "0585_session_attention_cursor.sql",
                                     )
-                                  ? "0584_agent_instruction_size_parity.sql"
+                                  ? "0585_session_attention_cursor.sql"
                                   : sourceContract.migrations.some(
                                         (migration) =>
                                           migration.path ===
-                                          "0583_session_tenancy_operator_permission.sql",
+                                          "0584_agent_instruction_size_parity.sql",
                                       )
-                                    ? "0583_session_tenancy_operator_permission.sql"
+                                    ? "0584_agent_instruction_size_parity.sql"
                                     : sourceContract.migrations.some(
                                           (migration) =>
                                             migration.path ===
-                                            "0582_scheduled_setup_policy_identity.sql",
+                                            "0583_session_tenancy_operator_permission.sql",
                                         )
-                                      ? "0582_scheduled_setup_policy_identity.sql"
+                                      ? "0583_session_tenancy_operator_permission.sql"
                                       : sourceContract.migrations.some(
                                             (migration) =>
                                               migration.path ===
-                                              "0581_lifecycle_backfill_read_organization_memberships.sql",
+                                              "0582_scheduled_setup_policy_identity.sql",
                                           )
-                                        ? "0581_lifecycle_backfill_read_organization_memberships.sql"
+                                        ? "0582_scheduled_setup_policy_identity.sql"
                                         : sourceContract.migrations.some(
                                               (migration) =>
                                                 migration.path ===
-                                                "0580_lifecycle_backfill_read_enrollments.sql",
+                                                "0581_lifecycle_backfill_read_organization_memberships.sql",
                                             )
-                                          ? "0580_lifecycle_backfill_read_enrollments.sql"
+                                          ? "0581_lifecycle_backfill_read_organization_memberships.sql"
                                           : sourceContract.migrations.some(
                                                 (migration) =>
                                                   migration.path ===
-                                                  "0579_lifecycle_backfill_read_slack_bot_user_links.sql",
+                                                  "0580_lifecycle_backfill_read_enrollments.sql",
                                               )
-                                            ? "0579_lifecycle_backfill_read_slack_bot_user_links.sql"
+                                            ? "0580_lifecycle_backfill_read_enrollments.sql"
                                             : sourceContract.migrations.some(
                                                   (migration) =>
                                                     migration.path ===
-                                                    "0578_lifecycle_backfill_read_preferences.sql",
+                                                    "0579_lifecycle_backfill_read_slack_bot_user_links.sql",
                                                 )
-                                              ? "0578_lifecycle_backfill_read_preferences.sql"
+                                              ? "0579_lifecycle_backfill_read_slack_bot_user_links.sql"
                                               : sourceContract.migrations.some(
                                                     (migration) =>
                                                       migration.path ===
-                                                      "0577_lifecycle_backfill_read_skill_source_bindings.sql",
+                                                      "0578_lifecycle_backfill_read_preferences.sql",
                                                   )
-                                                ? "0577_lifecycle_backfill_read_skill_source_bindings.sql"
+                                                ? "0578_lifecycle_backfill_read_preferences.sql"
                                                 : sourceContract.migrations.some(
                                                       (migration) =>
                                                         migration.path ===
-                                                        "0576_lifecycle_backfill_read_scheduled_tasks.sql",
+                                                        "0577_lifecycle_backfill_read_skill_source_bindings.sql",
                                                     )
-                                                  ? "0576_lifecycle_backfill_read_scheduled_tasks.sql"
+                                                  ? "0577_lifecycle_backfill_read_skill_source_bindings.sql"
                                                   : sourceContract.migrations.some(
                                                         (migration) =>
                                                           migration.path ===
-                                                          "0575_lifecycle_backfill_read_connections.sql",
+                                                          "0576_lifecycle_backfill_read_scheduled_tasks.sql",
                                                       )
-                                                    ? "0575_lifecycle_backfill_read_connections.sql"
+                                                    ? "0576_lifecycle_backfill_read_scheduled_tasks.sql"
                                                     : sourceContract.migrations.some(
                                                           (migration) =>
                                                             migration.path ===
-                                                            "0574_lifecycle_backfill_read_credit_ledger_entries.sql",
+                                                            "0575_lifecycle_backfill_read_connections.sql",
                                                         )
-                                                      ? "0574_lifecycle_backfill_read_credit_ledger_entries.sql"
+                                                      ? "0575_lifecycle_backfill_read_connections.sql"
                                                       : sourceContract.migrations.some(
                                                             (migration) =>
                                                               migration.path ===
-                                                              "0573_lifecycle_backfill_read_model_provider_operations.sql",
+                                                              "0574_lifecycle_backfill_read_credit_ledger_entries.sql",
                                                           )
-                                                        ? "0573_lifecycle_backfill_read_model_provider_operations.sql"
+                                                        ? "0574_lifecycle_backfill_read_credit_ledger_entries.sql"
                                                         : sourceContract.migrations.some(
                                                               (migration) =>
                                                                 migration.path ===
-                                                                "0572_lifecycle_backfill_read_model_provider_connections.sql",
+                                                                "0573_lifecycle_backfill_read_model_provider_operations.sql",
                                                             )
-                                                          ? "0572_lifecycle_backfill_read_model_provider_connections.sql"
+                                                          ? "0573_lifecycle_backfill_read_model_provider_operations.sql"
                                                           : sourceContract.migrations.some(
                                                                 (migration) =>
                                                                   migration.path ===
-                                                                  "0571_lifecycle_backfill_read_xai_credentials.sql",
+                                                                  "0572_lifecycle_backfill_read_model_provider_connections.sql",
                                                               )
-                                                            ? "0571_lifecycle_backfill_read_xai_credentials.sql"
+                                                            ? "0572_lifecycle_backfill_read_model_provider_connections.sql"
                                                             : sourceContract.migrations.some(
                                                                   (migration) =>
                                                                     migration.path ===
-                                                                    "0570_lifecycle_backfill_read_codex_credentials.sql",
+                                                                    "0571_lifecycle_backfill_read_xai_credentials.sql",
                                                                 )
-                                                              ? "0570_lifecycle_backfill_read_codex_credentials.sql"
+                                                              ? "0571_lifecycle_backfill_read_xai_credentials.sql"
                                                               : sourceContract.migrations.some(
                                                                     (migration) =>
                                                                       migration.path ===
-                                                                      "0569_lifecycle_backfill_read_additional_organization_receipts.sql",
+                                                                      "0570_lifecycle_backfill_read_codex_credentials.sql",
                                                                   )
-                                                                ? "0569_lifecycle_backfill_read_additional_organization_receipts.sql"
+                                                                ? "0570_lifecycle_backfill_read_codex_credentials.sql"
                                                                 : sourceContract.migrations.some(
                                                                       (migration) =>
                                                                         migration.path ===
-                                                                        "0568_lifecycle_backfill_read_setup_receipts.sql",
+                                                                        "0569_lifecycle_backfill_read_additional_organization_receipts.sql",
                                                                     )
-                                                                  ? "0568_lifecycle_backfill_read_setup_receipts.sql"
+                                                                  ? "0569_lifecycle_backfill_read_additional_organization_receipts.sql"
                                                                   : sourceContract.migrations.some(
                                                                         (migration) =>
                                                                           migration.path ===
-                                                                          "0567_usage_analytics_connection_triggers.sql",
+                                                                          "0568_lifecycle_backfill_read_setup_receipts.sql",
                                                                       )
-                                                                    ? "0567_usage_analytics_connection_triggers.sql"
+                                                                    ? "0568_lifecycle_backfill_read_setup_receipts.sql"
                                                                     : sourceContract.migrations.some(
                                                                           (migration) =>
                                                                             migration.path ===
-                                                                            "0566_usage_analytics_credit_ledger_triggers.sql",
+                                                                            "0567_usage_analytics_connection_triggers.sql",
                                                                         )
-                                                                      ? "0566_usage_analytics_credit_ledger_triggers.sql"
+                                                                      ? "0567_usage_analytics_connection_triggers.sql"
                                                                       : sourceContract.migrations.some(
                                                                             (migration) =>
                                                                               migration.path ===
-                                                                              "0565_usage_analytics_presence_and_facts.sql",
+                                                                              "0566_usage_analytics_credit_ledger_triggers.sql",
                                                                           )
-                                                                        ? "0565_usage_analytics_presence_and_facts.sql"
+                                                                        ? "0566_usage_analytics_credit_ledger_triggers.sql"
                                                                         : sourceContract.migrations.some(
                                                                               (migration) =>
                                                                                 migration.path ===
-                                                                                "0564_browser_deadline_checkpoints.sql",
+                                                                                "0565_usage_analytics_presence_and_facts.sql",
                                                                             )
-                                                                          ? "0564_browser_deadline_checkpoints.sql"
+                                                                          ? "0565_usage_analytics_presence_and_facts.sql"
                                                                           : sourceContract.migrations.some(
                                                                                 (migration) =>
                                                                                   migration.path ===
-                                                                                  "0563_accepted_preference_snapshot_recovery.sql",
+                                                                                  "0564_browser_deadline_checkpoints.sql",
                                                                               )
-                                                                            ? "0563_accepted_preference_snapshot_recovery.sql"
+                                                                            ? "0564_browser_deadline_checkpoints.sql"
                                                                             : sourceContract.migrations.some(
                                                                                   (migration) =>
                                                                                     migration.path ===
-                                                                                    "0562_realtime_connection_accounts.sql",
+                                                                                    "0563_accepted_preference_snapshot_recovery.sql",
                                                                                 )
-                                                                              ? "0562_realtime_connection_accounts.sql"
+                                                                              ? "0563_accepted_preference_snapshot_recovery.sql"
                                                                               : sourceContract.migrations.some(
                                                                                     (migration) =>
                                                                                       migration.path ===
-                                                                                      "0561_scheduled_session_agent_identity.sql",
+                                                                                      "0562_realtime_connection_accounts.sql",
                                                                                   )
-                                                                                ? "0561_scheduled_session_agent_identity.sql"
+                                                                                ? "0562_realtime_connection_accounts.sql"
                                                                                 : sourceContract.migrations.some(
                                                                                       (migration) =>
                                                                                         migration.path ===
-                                                                                        "0560_archived_session_imports.sql",
+                                                                                        "0561_scheduled_session_agent_identity.sql",
                                                                                     )
-                                                                                  ? "0560_archived_session_imports.sql"
+                                                                                  ? "0561_scheduled_session_agent_identity.sql"
                                                                                   : sourceContract.migrations.some(
                                                                                         (
                                                                                           migration,
                                                                                         ) =>
                                                                                           migration.path ===
-                                                                                          "0559_session_agent_config.sql",
+                                                                                          "0560_archived_session_imports.sql",
                                                                                       )
-                                                                                    ? "0559_session_agent_config.sql"
+                                                                                    ? "0560_archived_session_imports.sql"
                                                                                     : sourceContract.migrations.some(
                                                                                           (
                                                                                             migration,
                                                                                           ) =>
                                                                                             migration.path ===
-                                                                                            "0558_external_membership_removal_owner_rls.sql",
+                                                                                            "0559_session_agent_config.sql",
                                                                                         )
-                                                                                      ? "0558_external_membership_removal_owner_rls.sql"
+                                                                                      ? "0559_session_agent_config.sql"
                                                                                       : sourceContract.migrations.some(
                                                                                             (
                                                                                               migration,
                                                                                             ) =>
                                                                                               migration.path ===
-                                                                                              "0557_member_collaborator_permissions_backfill.sql",
+                                                                                              "0558_external_membership_removal_owner_rls.sql",
                                                                                           )
-                                                                                        ? "0557_member_collaborator_permissions_backfill.sql"
+                                                                                        ? "0558_external_membership_removal_owner_rls.sql"
                                                                                         : sourceContract.migrations.some(
                                                                                               (
                                                                                                 migration,
                                                                                               ) =>
                                                                                                 migration.path ===
-                                                                                                "0556_member_collaborator_permissions_backfill_index.sql",
+                                                                                                "0557_member_collaborator_permissions_backfill.sql",
                                                                                             )
-                                                                                          ? "0556_member_collaborator_permissions_backfill_index.sql"
+                                                                                          ? "0557_member_collaborator_permissions_backfill.sql"
                                                                                           : sourceContract.migrations.some(
                                                                                                 (
                                                                                                   migration,
                                                                                                 ) =>
                                                                                                   migration.path ===
-                                                                                                  "0555_member_collaborator_permissions.sql",
+                                                                                                  "0556_member_collaborator_permissions_backfill_index.sql",
                                                                                               )
-                                                                                            ? "0555_member_collaborator_permissions.sql"
+                                                                                            ? "0556_member_collaborator_permissions_backfill_index.sql"
                                                                                             : sourceContract.migrations.some(
                                                                                                   (
                                                                                                     migration,
                                                                                                   ) =>
                                                                                                     migration.path ===
-                                                                                                    "0554_video_allowance_refunds.sql",
+                                                                                                    "0555_member_collaborator_permissions.sql",
                                                                                                 )
-                                                                                              ? "0554_video_allowance_refunds.sql"
+                                                                                              ? "0555_member_collaborator_permissions.sql"
                                                                                               : sourceContract.migrations.some(
                                                                                                     (
                                                                                                       migration,
                                                                                                     ) =>
                                                                                                       migration.path ===
-                                                                                                      "0553_non_model_debit_attribution.sql",
+                                                                                                      "0554_video_allowance_refunds.sql",
                                                                                                   )
-                                                                                                ? "0553_non_model_debit_attribution.sql"
+                                                                                                ? "0554_video_allowance_refunds.sql"
                                                                                                 : sourceContract.migrations.some(
                                                                                                       (
                                                                                                         migration,
                                                                                                       ) =>
                                                                                                         migration.path ===
-                                                                                                        "0552_usage_allowances.sql",
+                                                                                                        "0553_non_model_debit_attribution.sql",
                                                                                                     )
-                                                                                                  ? "0552_usage_allowances.sql"
+                                                                                                  ? "0553_non_model_debit_attribution.sql"
                                                                                                   : sourceContract.migrations.some(
                                                                                                         (
                                                                                                           migration,
                                                                                                         ) =>
                                                                                                           migration.path ===
-                                                                                                          "0550_organization_oauth_pending_states.sql",
+                                                                                                          "0552_usage_allowances.sql",
                                                                                                       )
-                                                                                                    ? "0550_organization_oauth_pending_states.sql"
+                                                                                                    ? "0552_usage_allowances.sql"
                                                                                                     : sourceContract.migrations.some(
                                                                                                           (
                                                                                                             migration,
                                                                                                           ) =>
                                                                                                             migration.path ===
-                                                                                                            "0549_claude_subscription_usage.sql",
+                                                                                                            "0550_organization_oauth_pending_states.sql",
                                                                                                         )
-                                                                                                      ? "0549_claude_subscription_usage.sql"
+                                                                                                      ? "0550_organization_oauth_pending_states.sql"
                                                                                                       : sourceContract.migrations.some(
                                                                                                             (
                                                                                                               migration,
                                                                                                             ) =>
                                                                                                               migration.path ===
-                                                                                                              "0548_lost_sandbox_group_continuity.sql",
+                                                                                                              "0549_claude_subscription_usage.sql",
                                                                                                           )
-                                                                                                        ? "0548_lost_sandbox_group_continuity.sql"
+                                                                                                        ? "0549_claude_subscription_usage.sql"
                                                                                                         : sourceContract.migrations.some(
                                                                                                               (
                                                                                                                 migration,
                                                                                                               ) =>
                                                                                                                 migration.path ===
-                                                                                                                "0546_organization_integration_primitives.sql",
+                                                                                                                "0548_lost_sandbox_group_continuity.sql",
                                                                                                             )
-                                                                                                          ? "0546_organization_integration_primitives.sql"
+                                                                                                          ? "0548_lost_sandbox_group_continuity.sql"
                                                                                                           : sourceContract.migrations.some(
                                                                                                                 (
                                                                                                                   migration,
                                                                                                                 ) =>
                                                                                                                   migration.path ===
-                                                                                                                  "0545_workspace_claude_models.sql",
+                                                                                                                  "0546_organization_integration_primitives.sql",
                                                                                                               )
-                                                                                                            ? "0545_workspace_claude_models.sql"
+                                                                                                            ? "0546_organization_integration_primitives.sql"
                                                                                                             : sourceContract.migrations.some(
                                                                                                                   (
                                                                                                                     migration,
                                                                                                                   ) =>
                                                                                                                     migration.path ===
-                                                                                                                    "0544_claude_model_connections.sql",
+                                                                                                                    "0545_workspace_claude_models.sql",
                                                                                                                 )
-                                                                                                              ? "0544_claude_model_connections.sql"
+                                                                                                              ? "0545_workspace_claude_models.sql"
                                                                                                               : sourceContract.migrations.some(
                                                                                                                     (
                                                                                                                       migration,
                                                                                                                     ) =>
                                                                                                                       migration.path ===
-                                                                                                                      "0543_organization_usage_personal_workspaces.sql",
+                                                                                                                      "0544_claude_model_connections.sql",
                                                                                                                   )
-                                                                                                                ? "0543_organization_usage_personal_workspaces.sql"
+                                                                                                                ? "0544_claude_model_connections.sql"
                                                                                                                 : sourceContract.migrations.some(
                                                                                                                       (
                                                                                                                         migration,
                                                                                                                       ) =>
                                                                                                                         migration.path ===
-                                                                                                                        "0542_task_note_root_lock_mode.sql",
+                                                                                                                        "0543_organization_usage_personal_workspaces.sql",
                                                                                                                     )
-                                                                                                                  ? "0542_task_note_root_lock_mode.sql"
+                                                                                                                  ? "0543_organization_usage_personal_workspaces.sql"
                                                                                                                   : sourceContract.migrations.some(
                                                                                                                         (
                                                                                                                           migration,
                                                                                                                         ) =>
                                                                                                                           migration.path ===
-                                                                                                                          "0541_usage_event_workspace_lock_order.sql",
+                                                                                                                          "0542_task_note_root_lock_mode.sql",
                                                                                                                       )
-                                                                                                                    ? "0541_usage_event_workspace_lock_order.sql"
+                                                                                                                    ? "0542_task_note_root_lock_mode.sql"
                                                                                                                     : sourceContract.migrations.some(
                                                                                                                           (
                                                                                                                             migration,
                                                                                                                           ) =>
                                                                                                                             migration.path ===
-                                                                                                                            "0540_external_workspace_member_permission_updates.sql",
+                                                                                                                            "0541_usage_event_workspace_lock_order.sql",
                                                                                                                         )
-                                                                                                                      ? "0540_external_workspace_member_permission_updates.sql"
+                                                                                                                      ? "0541_usage_event_workspace_lock_order.sql"
                                                                                                                       : sourceContract.migrations.some(
                                                                                                                             (
                                                                                                                               migration,
                                                                                                                             ) =>
                                                                                                                               migration.path ===
-                                                                                                                              "0539_scheduled_admission_refusals.sql",
+                                                                                                                              "0540_external_workspace_member_permission_updates.sql",
                                                                                                                           )
-                                                                                                                        ? "0539_scheduled_admission_refusals.sql"
+                                                                                                                        ? "0540_external_workspace_member_permission_updates.sql"
                                                                                                                         : sourceContract.migrations.some(
                                                                                                                               (
                                                                                                                                 migration,
                                                                                                                               ) =>
                                                                                                                                 migration.path ===
-                                                                                                                                "0537_slack_interaction_start_message_line.sql",
+                                                                                                                                "0539_scheduled_admission_refusals.sql",
                                                                                                                             )
-                                                                                                                          ? "0537_slack_interaction_start_message_line.sql"
+                                                                                                                          ? "0539_scheduled_admission_refusals.sql"
                                                                                                                           : sourceContract.migrations.some(
                                                                                                                                 (
                                                                                                                                   migration,
                                                                                                                                 ) =>
                                                                                                                                   migration.path ===
-                                                                                                                                  "0536_workspace_integration_primitives.sql",
+                                                                                                                                  "0537_slack_interaction_start_message_line.sql",
                                                                                                                               )
-                                                                                                                            ? "0536_workspace_integration_primitives.sql"
+                                                                                                                            ? "0537_slack_interaction_start_message_line.sql"
                                                                                                                             : sourceContract.migrations.some(
                                                                                                                                   (
                                                                                                                                     migration,
                                                                                                                                   ) =>
                                                                                                                                     migration.path ===
-                                                                                                                                    "0535_slack_file_upload_operations.sql",
+                                                                                                                                    "0536_workspace_integration_primitives.sql",
                                                                                                                                 )
-                                                                                                                              ? "0535_slack_file_upload_operations.sql"
+                                                                                                                              ? "0536_workspace_integration_primitives.sql"
                                                                                                                               : sourceContract.migrations.some(
                                                                                                                                     (
                                                                                                                                       migration,
                                                                                                                                     ) =>
                                                                                                                                       migration.path ===
-                                                                                                                                      "0534_scheduled_admission_diagnostics.sql",
+                                                                                                                                      "0535_slack_file_upload_operations.sql",
                                                                                                                                   )
-                                                                                                                                ? "0534_scheduled_admission_diagnostics.sql"
+                                                                                                                                ? "0535_slack_file_upload_operations.sql"
                                                                                                                                 : sourceContract.migrations.some(
                                                                                                                                       (
                                                                                                                                         migration,
                                                                                                                                       ) =>
                                                                                                                                         migration.path ===
-                                                                                                                                        "0533_turn_surface_analytics.sql",
+                                                                                                                                        "0534_scheduled_admission_diagnostics.sql",
                                                                                                                                     )
-                                                                                                                                  ? "0533_turn_surface_analytics.sql"
+                                                                                                                                  ? "0534_scheduled_admission_diagnostics.sql"
                                                                                                                                   : sourceContract.migrations.some(
                                                                                                                                         (
                                                                                                                                           migration,
                                                                                                                                         ) =>
                                                                                                                                           migration.path ===
-                                                                                                                                          "0532_product_lifecycle_fact_export.sql",
+                                                                                                                                          "0533_turn_surface_analytics.sql",
                                                                                                                                       )
-                                                                                                                                    ? "0532_product_lifecycle_fact_export.sql"
+                                                                                                                                    ? "0533_turn_surface_analytics.sql"
                                                                                                                                     : sourceContract.migrations.some(
                                                                                                                                           (
                                                                                                                                             migration,
                                                                                                                                           ) =>
                                                                                                                                             migration.path ===
-                                                                                                                                            "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+                                                                                                                                            "0532_product_lifecycle_fact_export.sql",
                                                                                                                                         )
-                                                                                                                                      ? "0531_session_attach_sandbox_environment_default_variable_sets.sql"
+                                                                                                                                      ? "0532_product_lifecycle_fact_export.sql"
                                                                                                                                       : sourceContract.migrations.some(
                                                                                                                                             (
                                                                                                                                               migration,
                                                                                                                                             ) =>
                                                                                                                                               migration.path ===
-                                                                                                                                              "0530_scheduled_slack_bot_messages.sql",
+                                                                                                                                              "0531_session_attach_sandbox_environment_default_variable_sets.sql",
                                                                                                                                           )
-                                                                                                                                        ? "0530_scheduled_slack_bot_messages.sql"
+                                                                                                                                        ? "0531_session_attach_sandbox_environment_default_variable_sets.sql"
                                                                                                                                         : sourceContract.migrations.some(
                                                                                                                                               (
                                                                                                                                                 migration,
                                                                                                                                               ) =>
                                                                                                                                                 migration.path ===
-                                                                                                                                                "0529_slack_interaction_session_defaults_line.sql",
+                                                                                                                                                "0530_scheduled_slack_bot_messages.sql",
                                                                                                                                             )
-                                                                                                                                          ? "0529_slack_interaction_session_defaults_line.sql"
+                                                                                                                                          ? "0530_scheduled_slack_bot_messages.sql"
                                                                                                                                           : sourceContract.migrations.some(
                                                                                                                                                 (
                                                                                                                                                   migration,
                                                                                                                                                 ) =>
                                                                                                                                                   migration.path ===
-                                                                                                                                                  "0528_system_update_outbox_claim_order.sql",
+                                                                                                                                                  "0529_slack_interaction_session_defaults_line.sql",
                                                                                                                                               )
-                                                                                                                                            ? "0528_system_update_outbox_claim_order.sql"
+                                                                                                                                            ? "0529_slack_interaction_session_defaults_line.sql"
                                                                                                                                             : sourceContract.migrations.some(
                                                                                                                                                   (
                                                                                                                                                     migration,
                                                                                                                                                   ) =>
                                                                                                                                                     migration.path ===
-                                                                                                                                                    "0527_session_attention_excludes_commentary.sql",
+                                                                                                                                                    "0528_system_update_outbox_claim_order.sql",
                                                                                                                                                 )
-                                                                                                                                              ? "0527_session_attention_excludes_commentary.sql"
+                                                                                                                                              ? "0528_system_update_outbox_claim_order.sql"
                                                                                                                                               : sourceContract.migrations.some(
                                                                                                                                                     (
                                                                                                                                                       migration,
                                                                                                                                                     ) =>
                                                                                                                                                       migration.path ===
-                                                                                                                                                      "0526_automatic_checkpoint_discontinuity.sql",
+                                                                                                                                                      "0527_session_attention_excludes_commentary.sql",
                                                                                                                                                   )
-                                                                                                                                                ? "0526_automatic_checkpoint_discontinuity.sql"
+                                                                                                                                                ? "0527_session_attention_excludes_commentary.sql"
                                                                                                                                                 : sourceContract.migrations.some(
                                                                                                                                                       (
                                                                                                                                                         migration,
                                                                                                                                                       ) =>
                                                                                                                                                         migration.path ===
-                                                                                                                                                        "0525_attached_browser_opaque_generations.sql",
+                                                                                                                                                        "0526_automatic_checkpoint_discontinuity.sql",
                                                                                                                                                     )
-                                                                                                                                                  ? "0525_attached_browser_opaque_generations.sql"
+                                                                                                                                                  ? "0526_automatic_checkpoint_discontinuity.sql"
                                                                                                                                                   : sourceContract.migrations.some(
                                                                                                                                                         (
                                                                                                                                                           migration,
                                                                                                                                                         ) =>
                                                                                                                                                           migration.path ===
-                                                                                                                                                          "0524_codex_plan_entitlement.sql",
+                                                                                                                                                          "0525_attached_browser_opaque_generations.sql",
                                                                                                                                                       )
-                                                                                                                                                    ? "0524_codex_plan_entitlement.sql"
+                                                                                                                                                    ? "0525_attached_browser_opaque_generations.sql"
                                                                                                                                                     : sourceContract.migrations.some(
                                                                                                                                                           (
                                                                                                                                                             migration,
                                                                                                                                                           ) =>
                                                                                                                                                             migration.path ===
-                                                                                                                                                            "0523_modal_provider_create_fence.sql",
+                                                                                                                                                            "0524_codex_plan_entitlement.sql",
                                                                                                                                                         )
-                                                                                                                                                      ? "0523_modal_provider_create_fence.sql"
+                                                                                                                                                      ? "0524_codex_plan_entitlement.sql"
                                                                                                                                                       : sourceContract.migrations.some(
                                                                                                                                                             (
                                                                                                                                                               migration,
                                                                                                                                                             ) =>
                                                                                                                                                               migration.path ===
-                                                                                                                                                              "0522_scoped_machine_update_status.sql",
+                                                                                                                                                              "0523_modal_provider_create_fence.sql",
                                                                                                                                                           )
-                                                                                                                                                        ? "0522_scoped_machine_update_status.sql"
+                                                                                                                                                        ? "0523_modal_provider_create_fence.sql"
                                                                                                                                                         : sourceContract.migrations.some(
                                                                                                                                                               (
                                                                                                                                                                 migration,
                                                                                                                                                               ) =>
                                                                                                                                                                 migration.path ===
-                                                                                                                                                                "0521_verified_signup_trial_runtime_switch.sql",
+                                                                                                                                                                "0522_scoped_machine_update_status.sql",
                                                                                                                                                             )
-                                                                                                                                                          ? "0521_verified_signup_trial_runtime_switch.sql"
+                                                                                                                                                          ? "0522_scoped_machine_update_status.sql"
                                                                                                                                                           : sourceContract.migrations.some(
                                                                                                                                                                 (
                                                                                                                                                                   migration,
                                                                                                                                                                 ) =>
                                                                                                                                                                   migration.path ===
-                                                                                                                                                                  "0520_session_code_search_frozen.sql",
+                                                                                                                                                                  "0521_verified_signup_trial_runtime_switch.sql",
                                                                                                                                                               )
-                                                                                                                                                            ? "0520_session_code_search_frozen.sql"
+                                                                                                                                                            ? "0521_verified_signup_trial_runtime_switch.sql"
                                                                                                                                                             : sourceContract.migrations.some(
                                                                                                                                                                   (
                                                                                                                                                                     migration,
                                                                                                                                                                   ) =>
                                                                                                                                                                     migration.path ===
-                                                                                                                                                                    "0519_session_recovery_backlog_excludes_paused.sql",
+                                                                                                                                                                    "0520_session_code_search_frozen.sql",
                                                                                                                                                                 )
-                                                                                                                                                              ? "0519_session_recovery_backlog_excludes_paused.sql"
+                                                                                                                                                              ? "0520_session_code_search_frozen.sql"
                                                                                                                                                               : sourceContract.migrations.some(
                                                                                                                                                                     (
                                                                                                                                                                       migration,
                                                                                                                                                                     ) =>
                                                                                                                                                                       migration.path ===
-                                                                                                                                                                      "0518_member_connection_read_backfill.sql",
+                                                                                                                                                                      "0519_session_recovery_backlog_excludes_paused.sql",
                                                                                                                                                                   )
-                                                                                                                                                                ? "0518_member_connection_read_backfill.sql"
+                                                                                                                                                                ? "0519_session_recovery_backlog_excludes_paused.sql"
                                                                                                                                                                 : sourceContract.migrations.some(
                                                                                                                                                                       (
                                                                                                                                                                         migration,
                                                                                                                                                                       ) =>
                                                                                                                                                                         migration.path ===
-                                                                                                                                                                        "0515_autonomous_learning_defaults.sql",
+                                                                                                                                                                        "0518_member_connection_read_backfill.sql",
                                                                                                                                                                     )
-                                                                                                                                                                  ? "0515_autonomous_learning_defaults.sql"
-                                                                                                                                                                  : "0514_failed_session_variable_set_attach.sql",
+                                                                                                                                                                  ? "0518_member_connection_read_backfill.sql"
+                                                                                                                                                                  : sourceContract.migrations.some(
+                                                                                                                                                                        (
+                                                                                                                                                                          migration,
+                                                                                                                                                                        ) =>
+                                                                                                                                                                          migration.path ===
+                                                                                                                                                                          "0515_autonomous_learning_defaults.sql",
+                                                                                                                                                                      )
+                                                                                                                                                                    ? "0515_autonomous_learning_defaults.sql"
+                                                                                                                                                                    : "0514_failed_session_variable_set_attach.sql",
       );
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
     }
@@ -904,6 +913,9 @@ describe("release schema contract", () => {
     );
     const managedAuthNewSignupsSwitch = completeSourceContract.migrations.some(
       (migration) => migration.path === "0596_managed_auth_new_signups_switch.sql",
+    );
+    const slackApiRateLimits = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0597_slack_api_rate_limits.sql",
     );
     const privateSessionsFleetActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0586_private_sessions_fleet_activation.sql",
@@ -1193,6 +1205,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (slackApiRateLimits ? 1 : 0) +
         (insightsScopedFactProjection ? 1 : 0) +
         (organizationModelUsage ? 1 : 0) +
         (completeInsightsUsageAmounts ? 1 : 0) +
@@ -1805,6 +1818,7 @@ describe("release schema contract", () => {
       ...(managedAuthNewSignupsSwitch
         ? { latestMigration: "0596_managed_auth_new_signups_switch.sql" }
         : {}),
+      ...(slackApiRateLimits ? { latestMigration: "0597_slack_api_rate_limits.sql" } : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1893,6 +1907,7 @@ describe("release schema contract", () => {
             "0594_organization_usage_hash_join.sql",
             "0595_organization_signup_use_cases.sql",
             "0596_managed_auth_new_signups_switch.sql",
+            "0597_slack_api_rate_limits.sql",
           ].includes(migration.path),
       ),
     };
@@ -3204,226 +3219,232 @@ describe("release schema contract", () => {
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
       unfilteredSourceContract.migrations.some(
-        (migration) => migration.path === "0596_managed_auth_new_signups_switch.sql",
+        (migration) => migration.path === "0597_slack_api_rate_limits.sql",
       )
-        ? "0596_managed_auth_new_signups_switch.sql"
+        ? "0597_slack_api_rate_limits.sql"
         : unfilteredSourceContract.migrations.some(
-              (migration) => migration.path === "0595_organization_signup_use_cases.sql",
+              (migration) => migration.path === "0596_managed_auth_new_signups_switch.sql",
             )
-          ? "0595_organization_signup_use_cases.sql"
+          ? "0596_managed_auth_new_signups_switch.sql"
           : unfilteredSourceContract.migrations.some(
-                (migration) => migration.path === "0594_organization_usage_hash_join.sql",
-                "0595_organization_signup_use_cases.sql",
+                (migration) => migration.path === "0595_organization_signup_use_cases.sql",
               )
-            ? "0594_organization_usage_hash_join.sql"
+            ? "0595_organization_signup_use_cases.sql"
             : unfilteredSourceContract.migrations.some(
-                  (migration) => migration.path === "0593_insights_private_ledger_filter.sql",
+                  (migration) => migration.path === "0594_organization_usage_hash_join.sql",
+                  "0595_organization_signup_use_cases.sql",
                 )
-              ? "0593_insights_private_ledger_filter.sql"
+              ? "0594_organization_usage_hash_join.sql"
               : unfilteredSourceContract.migrations.some(
-                    (migration) =>
-                      migration.path === "0592_insights_claude_subscription_payers.sql",
+                    (migration) => migration.path === "0593_insights_private_ledger_filter.sql",
                   )
-                ? "0592_insights_claude_subscription_payers.sql"
+                ? "0593_insights_private_ledger_filter.sql"
                 : unfilteredSourceContract.migrations.some(
-                      (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
+                      (migration) =>
+                        migration.path === "0592_insights_claude_subscription_payers.sql",
                     )
-                  ? "0591_insights_aggregate_query_plans.sql"
+                  ? "0592_insights_claude_subscription_payers.sql"
                   : unfilteredSourceContract.migrations.some(
-                        (migration) =>
-                          migration.path === "0590_complete_insights_usage_amounts.sql",
+                        (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
                       )
-                    ? "0590_complete_insights_usage_amounts.sql"
+                    ? "0591_insights_aggregate_query_plans.sql"
                     : unfilteredSourceContract.migrations.some(
-                          (migration) => migration.path === "0589_organization_model_usage.sql",
+                          (migration) =>
+                            migration.path === "0590_complete_insights_usage_amounts.sql",
                         )
-                      ? "0589_organization_model_usage.sql"
+                      ? "0590_complete_insights_usage_amounts.sql"
                       : unfilteredSourceContract.migrations.some(
-                            (migration) =>
-                              migration.path === "0588_insights_scoped_fact_projection.sql",
+                            (migration) => migration.path === "0589_organization_model_usage.sql",
                           )
-                        ? "0588_insights_scoped_fact_projection.sql"
+                        ? "0589_organization_model_usage.sql"
                         : unfilteredSourceContract.migrations.some(
                               (migration) =>
-                                migration.path === "0587_workflow_wake_session_lock_order.sql",
+                                migration.path === "0588_insights_scoped_fact_projection.sql",
                             )
-                          ? "0587_workflow_wake_session_lock_order.sql"
+                          ? "0588_insights_scoped_fact_projection.sql"
                           : unfilteredSourceContract.migrations.some(
                                 (migration) =>
-                                  migration.path === "0586_private_sessions_fleet_activation.sql",
+                                  migration.path === "0587_workflow_wake_session_lock_order.sql",
                               )
-                            ? "0586_private_sessions_fleet_activation.sql"
+                            ? "0587_workflow_wake_session_lock_order.sql"
                             : unfilteredSourceContract.migrations.some(
                                   (migration) =>
-                                    migration.path === "0585_session_attention_cursor.sql",
+                                    migration.path === "0586_private_sessions_fleet_activation.sql",
                                 )
-                              ? "0585_session_attention_cursor.sql"
+                              ? "0586_private_sessions_fleet_activation.sql"
                               : unfilteredSourceContract.migrations.some(
                                     (migration) =>
-                                      migration.path === "0584_agent_instruction_size_parity.sql",
+                                      migration.path === "0585_session_attention_cursor.sql",
                                   )
-                                ? "0584_agent_instruction_size_parity.sql"
+                                ? "0585_session_attention_cursor.sql"
                                 : unfilteredSourceContract.migrations.some(
                                       (migration) =>
-                                        migration.path ===
-                                        "0583_session_tenancy_operator_permission.sql",
+                                        migration.path === "0584_agent_instruction_size_parity.sql",
                                     )
-                                  ? "0583_session_tenancy_operator_permission.sql"
+                                  ? "0584_agent_instruction_size_parity.sql"
                                   : unfilteredSourceContract.migrations.some(
                                         (migration) =>
                                           migration.path ===
-                                          "0582_scheduled_setup_policy_identity.sql",
+                                          "0583_session_tenancy_operator_permission.sql",
                                       )
-                                    ? "0582_scheduled_setup_policy_identity.sql"
+                                    ? "0583_session_tenancy_operator_permission.sql"
                                     : unfilteredSourceContract.migrations.some(
                                           (migration) =>
                                             migration.path ===
-                                            "0581_lifecycle_backfill_read_organization_memberships.sql",
+                                            "0582_scheduled_setup_policy_identity.sql",
                                         )
-                                      ? "0581_lifecycle_backfill_read_organization_memberships.sql"
+                                      ? "0582_scheduled_setup_policy_identity.sql"
                                       : unfilteredSourceContract.migrations.some(
                                             (migration) =>
                                               migration.path ===
-                                              "0580_lifecycle_backfill_read_enrollments.sql",
+                                              "0581_lifecycle_backfill_read_organization_memberships.sql",
                                           )
-                                        ? "0580_lifecycle_backfill_read_enrollments.sql"
+                                        ? "0581_lifecycle_backfill_read_organization_memberships.sql"
                                         : unfilteredSourceContract.migrations.some(
                                               (migration) =>
                                                 migration.path ===
-                                                "0579_lifecycle_backfill_read_slack_bot_user_links.sql",
+                                                "0580_lifecycle_backfill_read_enrollments.sql",
                                             )
-                                          ? "0579_lifecycle_backfill_read_slack_bot_user_links.sql"
+                                          ? "0580_lifecycle_backfill_read_enrollments.sql"
                                           : unfilteredSourceContract.migrations.some(
                                                 (migration) =>
                                                   migration.path ===
-                                                  "0578_lifecycle_backfill_read_preferences.sql",
+                                                  "0579_lifecycle_backfill_read_slack_bot_user_links.sql",
                                               )
-                                            ? "0578_lifecycle_backfill_read_preferences.sql"
+                                            ? "0579_lifecycle_backfill_read_slack_bot_user_links.sql"
                                             : unfilteredSourceContract.migrations.some(
                                                   (migration) =>
                                                     migration.path ===
-                                                    "0577_lifecycle_backfill_read_skill_source_bindings.sql",
+                                                    "0578_lifecycle_backfill_read_preferences.sql",
                                                 )
-                                              ? "0577_lifecycle_backfill_read_skill_source_bindings.sql"
+                                              ? "0578_lifecycle_backfill_read_preferences.sql"
                                               : unfilteredSourceContract.migrations.some(
                                                     (migration) =>
                                                       migration.path ===
-                                                      "0576_lifecycle_backfill_read_scheduled_tasks.sql",
+                                                      "0577_lifecycle_backfill_read_skill_source_bindings.sql",
                                                   )
-                                                ? "0576_lifecycle_backfill_read_scheduled_tasks.sql"
+                                                ? "0577_lifecycle_backfill_read_skill_source_bindings.sql"
                                                 : unfilteredSourceContract.migrations.some(
                                                       (migration) =>
                                                         migration.path ===
-                                                        "0575_lifecycle_backfill_read_connections.sql",
+                                                        "0576_lifecycle_backfill_read_scheduled_tasks.sql",
                                                     )
-                                                  ? "0575_lifecycle_backfill_read_connections.sql"
+                                                  ? "0576_lifecycle_backfill_read_scheduled_tasks.sql"
                                                   : unfilteredSourceContract.migrations.some(
                                                         (migration) =>
                                                           migration.path ===
-                                                          "0574_lifecycle_backfill_read_credit_ledger_entries.sql",
+                                                          "0575_lifecycle_backfill_read_connections.sql",
                                                       )
-                                                    ? "0574_lifecycle_backfill_read_credit_ledger_entries.sql"
+                                                    ? "0575_lifecycle_backfill_read_connections.sql"
                                                     : unfilteredSourceContract.migrations.some(
                                                           (migration) =>
                                                             migration.path ===
-                                                            "0573_lifecycle_backfill_read_model_provider_operations.sql",
+                                                            "0574_lifecycle_backfill_read_credit_ledger_entries.sql",
                                                         )
-                                                      ? "0573_lifecycle_backfill_read_model_provider_operations.sql"
+                                                      ? "0574_lifecycle_backfill_read_credit_ledger_entries.sql"
                                                       : unfilteredSourceContract.migrations.some(
                                                             (migration) =>
                                                               migration.path ===
-                                                              "0572_lifecycle_backfill_read_model_provider_connections.sql",
+                                                              "0573_lifecycle_backfill_read_model_provider_operations.sql",
                                                           )
-                                                        ? "0572_lifecycle_backfill_read_model_provider_connections.sql"
+                                                        ? "0573_lifecycle_backfill_read_model_provider_operations.sql"
                                                         : unfilteredSourceContract.migrations.some(
                                                               (migration) =>
                                                                 migration.path ===
-                                                                "0571_lifecycle_backfill_read_xai_credentials.sql",
+                                                                "0572_lifecycle_backfill_read_model_provider_connections.sql",
                                                             )
-                                                          ? "0571_lifecycle_backfill_read_xai_credentials.sql"
+                                                          ? "0572_lifecycle_backfill_read_model_provider_connections.sql"
                                                           : unfilteredSourceContract.migrations.some(
                                                                 (migration) =>
                                                                   migration.path ===
-                                                                  "0570_lifecycle_backfill_read_codex_credentials.sql",
+                                                                  "0571_lifecycle_backfill_read_xai_credentials.sql",
                                                               )
-                                                            ? "0570_lifecycle_backfill_read_codex_credentials.sql"
+                                                            ? "0571_lifecycle_backfill_read_xai_credentials.sql"
                                                             : unfilteredSourceContract.migrations.some(
                                                                   (migration) =>
                                                                     migration.path ===
-                                                                    "0569_lifecycle_backfill_read_additional_organization_receipts.sql",
+                                                                    "0570_lifecycle_backfill_read_codex_credentials.sql",
                                                                 )
-                                                              ? "0569_lifecycle_backfill_read_additional_organization_receipts.sql"
+                                                              ? "0570_lifecycle_backfill_read_codex_credentials.sql"
                                                               : unfilteredSourceContract.migrations.some(
                                                                     (migration) =>
                                                                       migration.path ===
-                                                                      "0568_lifecycle_backfill_read_setup_receipts.sql",
+                                                                      "0569_lifecycle_backfill_read_additional_organization_receipts.sql",
                                                                   )
-                                                                ? "0568_lifecycle_backfill_read_setup_receipts.sql"
+                                                                ? "0569_lifecycle_backfill_read_additional_organization_receipts.sql"
                                                                 : unfilteredSourceContract.migrations.some(
                                                                       (migration) =>
                                                                         migration.path ===
-                                                                        "0567_usage_analytics_connection_triggers.sql",
+                                                                        "0568_lifecycle_backfill_read_setup_receipts.sql",
                                                                     )
-                                                                  ? "0567_usage_analytics_connection_triggers.sql"
+                                                                  ? "0568_lifecycle_backfill_read_setup_receipts.sql"
                                                                   : unfilteredSourceContract.migrations.some(
                                                                         (migration) =>
                                                                           migration.path ===
-                                                                          "0566_usage_analytics_credit_ledger_triggers.sql",
+                                                                          "0567_usage_analytics_connection_triggers.sql",
                                                                       )
-                                                                    ? "0566_usage_analytics_credit_ledger_triggers.sql"
+                                                                    ? "0567_usage_analytics_connection_triggers.sql"
                                                                     : unfilteredSourceContract.migrations.some(
                                                                           (migration) =>
                                                                             migration.path ===
-                                                                            "0565_usage_analytics_presence_and_facts.sql",
+                                                                            "0566_usage_analytics_credit_ledger_triggers.sql",
                                                                         )
-                                                                      ? "0565_usage_analytics_presence_and_facts.sql"
+                                                                      ? "0566_usage_analytics_credit_ledger_triggers.sql"
                                                                       : unfilteredSourceContract.migrations.some(
                                                                             (migration) =>
                                                                               migration.path ===
-                                                                              "0564_browser_deadline_checkpoints.sql",
+                                                                              "0565_usage_analytics_presence_and_facts.sql",
                                                                           )
-                                                                        ? "0564_browser_deadline_checkpoints.sql"
+                                                                        ? "0565_usage_analytics_presence_and_facts.sql"
                                                                         : unfilteredSourceContract.migrations.some(
                                                                               (migration) =>
                                                                                 migration.path ===
-                                                                                "0563_accepted_preference_snapshot_recovery.sql",
+                                                                                "0564_browser_deadline_checkpoints.sql",
                                                                             )
-                                                                          ? "0563_accepted_preference_snapshot_recovery.sql"
+                                                                          ? "0564_browser_deadline_checkpoints.sql"
                                                                           : unfilteredSourceContract.migrations.some(
                                                                                 (migration) =>
                                                                                   migration.path ===
-                                                                                  "0562_realtime_connection_accounts.sql",
+                                                                                  "0563_accepted_preference_snapshot_recovery.sql",
                                                                               )
-                                                                            ? "0562_realtime_connection_accounts.sql"
+                                                                            ? "0563_accepted_preference_snapshot_recovery.sql"
                                                                             : unfilteredSourceContract.migrations.some(
                                                                                   (migration) =>
                                                                                     migration.path ===
-                                                                                    "0561_scheduled_session_agent_identity.sql",
+                                                                                    "0562_realtime_connection_accounts.sql",
                                                                                 )
-                                                                              ? "0561_scheduled_session_agent_identity.sql"
+                                                                              ? "0562_realtime_connection_accounts.sql"
                                                                               : unfilteredSourceContract.migrations.some(
                                                                                     (migration) =>
                                                                                       migration.path ===
-                                                                                      "0560_archived_session_imports.sql",
+                                                                                      "0561_scheduled_session_agent_identity.sql",
                                                                                   )
-                                                                                ? "0560_archived_session_imports.sql"
+                                                                                ? "0561_scheduled_session_agent_identity.sql"
                                                                                 : unfilteredSourceContract.migrations.some(
                                                                                       (migration) =>
                                                                                         migration.path ===
-                                                                                        "0559_session_agent_config.sql",
+                                                                                        "0560_archived_session_imports.sql",
                                                                                     )
-                                                                                  ? "0559_session_agent_config.sql"
+                                                                                  ? "0560_archived_session_imports.sql"
                                                                                   : unfilteredSourceContract.migrations.some(
                                                                                         (
                                                                                           migration,
                                                                                         ) =>
                                                                                           migration.path ===
-                                                                                          "0558_external_membership_removal_owner_rls.sql",
+                                                                                          "0559_session_agent_config.sql",
                                                                                       )
-                                                                                    ? "0558_external_membership_removal_owner_rls.sql"
-                                                                                    : unfilteredSourceContract.migrations.at(
-                                                                                        -1,
-                                                                                      )?.path,
+                                                                                    ? "0559_session_agent_config.sql"
+                                                                                    : unfilteredSourceContract.migrations.some(
+                                                                                          (
+                                                                                            migration,
+                                                                                          ) =>
+                                                                                            migration.path ===
+                                                                                            "0558_external_membership_removal_owner_rls.sql",
+                                                                                        )
+                                                                                      ? "0558_external_membership_removal_owner_rls.sql"
+                                                                                      : unfilteredSourceContract.migrations.at(
+                                                                                          -1,
+                                                                                        )?.path,
     );
     const meaningfulAttention = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0503_session_meaningful_attention.sql",
@@ -3700,6 +3721,7 @@ describe("release schema contract", () => {
       "0594_organization_usage_hash_join.sql",
       "0595_organization_signup_use_cases.sql",
       "0596_managed_auth_new_signups_switch.sql",
+      "0597_slack_api_rate_limits.sql",
     ]);
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
       (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
@@ -4244,6 +4266,7 @@ describe("release schema contract", () => {
       "0594_organization_usage_hash_join.sql",
       "0595_organization_signup_use_cases.sql",
       "0596_managed_auth_new_signups_switch.sql",
+      "0597_slack_api_rate_limits.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

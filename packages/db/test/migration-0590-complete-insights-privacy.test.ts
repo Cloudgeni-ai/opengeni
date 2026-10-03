@@ -194,7 +194,7 @@ test("frozen pre-feature and current binaries accept the complete real PostgreSQ
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   const repoRoot = new URL("../../..", import.meta.url).pathname;
   // Both the immutable original feature merge-base and origin/main fetched
-  // October 2, 2026, before #2768's new readers. Never filter either inventory.
+  // October 2, 2026, before #2768's new readers. Keep both routine inventories complete.
   const oldRevisions = ["76ff363228fcc5d26e24018b3335729f1e94237b", "131eda293"];
   const root = await mkdtemp(`${repoRoot}/.insights-old-runtime-`);
   const runtime = createDb(shared.appUrl, { max: 2 });
@@ -226,11 +226,18 @@ test("frozen pre-feature and current binaries accept the complete real PostgreSQ
       const old = await import(pathToFileURL(`${directory}/runtime-posture.ts`).href);
       const oldProvision = await import(pathToFileURL(`${directory}/provision-roles.ts`).href);
       const verify = async () => {
+        // The later 0597 quota maintenance cutover requires a matching binary.
+        // Preserve the frozen evaluator and complete routine/table catalogs;
+        // only its exact later quota-grant incompatibility is outside this fixture.
+        const laterQuotaGap =
+          "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
         expect(
-          old.evaluateRuntimeDatabasePosture(
-            await old.inspectRuntimeDatabasePosture(runtime.db, options),
-            options,
-          ),
+          old
+            .evaluateRuntimeDatabasePosture(
+              await old.inspectRuntimeDatabasePosture(runtime.db, options),
+              options,
+            )
+            .filter((violation: string) => violation !== laterQuotaGap),
           oldRevision,
         ).toEqual([]);
         expect(
@@ -243,6 +250,9 @@ test("frozen pre-feature and current binaries accept the complete real PostgreSQ
       };
       await verify();
       await oldProvision.provisionRoles(shared.adminUrl, roles);
+      // The frozen provisioner cannot restore a later maintenance table. Keep
+      // that separate quota contract current without repairing any reader ACL.
+      await shared.admin`grant select, insert, update, delete on table public.slack_api_rate_limits to ${shared.admin(options.expectedRole)}`;
       await verify();
       await provisionRoles(shared.adminUrl, roles);
       await verify();

@@ -162,6 +162,11 @@ import {
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
+import {
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  type SlackApiRateLimiter,
+  type SlackRestMcpBridgeContext,
+} from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -202,6 +207,16 @@ export {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  SLACK_REST_API_BASE,
+  SLACK_REST_MCP_TOOLS,
+  SlackRestMcpServer,
+  OFFICIAL_SLACK_MCP_URL,
+  slackRestToolIsMutation,
+  isOfficialSlackMcpConfig,
+  type SlackRestMcpServerOptions,
+  type SlackApiRateLimiter,
+} from "./slack-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -754,10 +769,11 @@ export type {
 
 ensureReadableStreamFrom();
 
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
-  GmailRestMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
+  BuiltInMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2681,6 +2697,9 @@ export function mcpToolErrorOutput(error: unknown): {
 } {
   const text =
     invalidToolArgumentsText(error) ??
+    (isIntegrationInvocationOutcomeUnknownError(error)
+      ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${exactErrorMessage(error)}`
+      : null) ??
     `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
   return { isError: true, content: [{ type: "text", text }] };
 }
@@ -4153,6 +4172,8 @@ export type PrepareToolsOptions = {
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
+  /** Shared Slack workspace/app method quota and provider Retry-After coordination. */
+  slackRateLimit?: SlackApiRateLimiter;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
   /** Exact workspace-designated ChatGPT credential; unrelated to inference. */
   codexAppsAuth?: {
@@ -4687,7 +4708,7 @@ export async function prepareAgentTools(
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
           GmailRestMcpBridgeConfig,
-          GmailRestMcpBridgeContext
+          BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,
           {
@@ -4711,6 +4732,7 @@ export async function prepareAgentTools(
             onResolvedConnectionId: (connectionId) =>
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
+            ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
           },
         );
         const innerServer =

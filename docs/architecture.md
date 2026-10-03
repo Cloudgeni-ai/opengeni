@@ -1181,21 +1181,16 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 
 ### 6.5 Deployment, docs, scripts, and tests
 
-- `deploy/helm/opengeni` owns the Helm chart for OpenGeni services and
-  integration resources.
-- `deploy/terraform/` contains cloud-specific infrastructure roots;
-  `deploy/stacks/` wraps external dependencies.
-- `docs/` contains current topic docs and point-in-time records; its canonical
-  index is [`README.md`](README.md).
-- `docs-site/` is the public documentation site (Mintlify; published at
-  docs.opengeni.ai from `main`, subdirectory `/docs-site`). It is product-facing
-  and links to `docs/` for engineering detail rather than restating it.
-- `scripts/` owns development, static checks, release mechanics, deployment
-  helpers, and operator-only utilities.
-- `test/` contains integration, end-to-end, and live suites; package-local
-  tests stay with their owners.
-- `docker/sandbox.Dockerfile` is the stock headless sandbox image;
-  `docker/desktop.Dockerfile` is the desktop/browser image.
+- `deploy/helm/opengeni`: Helm services and integration resources.
+- `deploy/terraform/`: cloud infrastructure roots; `deploy/stacks/`: external
+  dependency wrappers.
+- `docs/`: topic docs and point-in-time records, indexed by [`README.md`](README.md).
+- `docs-site/`: public Mintlify docs at docs.opengeni.ai, published from
+  `main:/docs-site`; product-facing pages link to engineering docs in `docs/`.
+- `scripts/`: development, static checks, release, deployment and operator utilities.
+- `test/`: integration, end-to-end and live suites; package tests remain local.
+- `docker/sandbox.Dockerfile`: stock headless sandbox;
+  `docker/desktop.Dockerfile`: desktop/browser image.
 
 ---
 
@@ -1680,35 +1675,31 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 ## 11. Build, test, and release
 
-Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
+Toolchains: Bun/strict TypeScript and Cargo (Rust agent/relay).
+Unit tests/typechecking need no infrastructure; integration, end-to-end, browser,
+artifact-runtime and live lanes declare services/credentials.
 
-Toolchains: Bun/strict TypeScript; Cargo for the Rust agent/relay.
-Unit tests and typechecking are infrastructure-free; integration, end-to-end,
-browser, artifact-runtime, and live lanes explicitly add required services/credentials.
+Manifests, Changesets, CI and release scripts govern evidence-bound npm, image,
+Helm and Rust publication with retained source identity. Web builds target both CPUs.
+`reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
-Evidence-bound publication covers npm packages, container images, Helm,
-Rust agent, and retained source identity. Manifests, Changesets, CI,
-and release scripts own closure/procedure. Web assets compile natively for both CPU targets.
-
-Commands:
-[`../AGENTS.md`](../AGENTS.md) and [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 Toolchain: [`toolchain.md`](toolchain.md).
 
 ---
 
 ## 12. Deployment
 
-Typed `@opengeni/deployment` profiles derive standalone/embedded deployments'
-validated environment requirements, preflights, stack plans, and runtime artifacts.
+Typed `@opengeni/deployment` profiles derive validated standalone/embedded
+environments, preflights, stack plans and runtime artifacts.
 
-Helm owns application components and integration resources; cloud Terraform
-roots/stack wrappers compose external infrastructure. Bundled Postgres, Temporal,
-NATS, and object-storage templates serve development, CI, conformance, or documented
-single-machine fixtures—not production defaults.
+Helm owns applications/integrations; cloud Terraform roots/stack wrappers compose
+external infrastructure. Bundled Postgres, Temporal, NATS and storage templates
+serve development, CI, conformance and documented single-machine fixtures.
+They are not production defaults.
 
-Procedures, provider requirements, activation boundaries, and recovery:
-[`deployment.md`](deployment.md). Advanced host ports/in-process composition:
-[`embedding.md`](embedding.md).
+Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).
+Host ports/in-process composition: [`embedding.md`](embedding.md).
 
 ---
 
@@ -1781,6 +1772,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |

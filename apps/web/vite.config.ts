@@ -88,13 +88,13 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod is a dependency-free runtime shared by the contracts schemas
-              // and app modules. Keep it in its own chunk: entry-aware merging
-              // can otherwise co-locate app code that reads contracts constants
-              // at module scope with Zod, creating a chunk cycle in which that
-              // code evaluates before the contracts chunk has initialized.
+              // Zod and the pure Skill receipt schemas initialize before the
+              // contracts barrel reads them. Keep them outside shared app chunks
+              // that import the barrel back: otherwise its SkillWriteReceipt
+              // consumer can evaluate before that schema exists. Co-locating
+              // these leaves also avoids an extra initial graph request.
               name: "zod-runtime",
-              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/]skills\.ts$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },

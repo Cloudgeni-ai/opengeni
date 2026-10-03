@@ -1164,7 +1164,20 @@ describe("first-party MCP tool visibility policy", () => {
     );
 
     const broad = registeredToolNames(server);
-    expect(broad).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
+    expect(broad).toEqual(
+      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter((name) => name !== "slack_bot_search").sort(),
+    );
+    // Generic agent calls cannot supply Slack's trusted interaction action token,
+    // even after an approved deployment enables full Slack access.
+    for (const slackAccessMode of ["limited", "full"] as const) {
+      const routeDeps = deps();
+      routeDeps.settings = testSettings({ slackAccessMode });
+      const searchSelection = buildOpenGeniMcpServer(
+        routeDeps,
+        grant([...Permission.options], ["slack_bot_search"]),
+      );
+      expect(registeredToolNames(searchSelection)).not.toContain("slack_bot_search");
+    }
     expect(broad).not.toContain("slack_bot_post_message");
     expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
     expect(broad).not.toContain("files_get_download_url");

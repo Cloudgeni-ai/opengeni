@@ -1,3 +1,8 @@
+import {
+  normalizeSlackScopes,
+  OPENGENI_SLACK_REST_USER_SCOPES,
+  slackRestMcpToolsForScopes,
+} from "@opengeni/contracts/slack-rest-mcp";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
@@ -105,6 +110,16 @@ export type OAuthProviderProfile = {
   extraAuthorizeParams?: Readonly<Record<string, string>>;
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
+  /** Reviewed local bridge grant normalization and token verification. Catalog profiles cannot supply code. */
+  normalizeGrantedScopes?: (scopes: readonly string[] | string) => string[];
+  reportedScopesRequired?: boolean;
+  localToolVerification?: {
+    url: string;
+    /** Distinguish a rejected OAuth grant from a temporary verification failure. */
+    isRejectedGrant?: (payload: Record<string, unknown>) => boolean;
+    validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
+    toolsForScopes: (scopes: readonly string[]) => Array<{ name: string; description?: string }>;
+  };
 };
 
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
@@ -144,6 +159,31 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     skipInLocalTest: true,
   },
   sendResourceParameter: true,
+  requestedScopes: OPENGENI_SLACK_REST_USER_SCOPES,
+  normalizeGrantedScopes: normalizeSlackScopes,
+  reportedScopesRequired: true,
+  localToolVerification: {
+    url: "https://slack.com/api/auth.test",
+    isRejectedGrant: (payload) =>
+      payload.ok === false &&
+      ["invalid_auth", "not_authed", "token_revoked", "account_inactive", "token_expired"].includes(
+        typeof payload.error === "string" ? payload.error : "",
+      ),
+    validateIdentity: (payload) => {
+      if (
+        payload.ok !== true ||
+        typeof payload.team_id !== "string" ||
+        !payload.team_id ||
+        typeof payload.user_id !== "string" ||
+        !payload.user_id ||
+        payload.bot_id
+      ) {
+        throw new Error("Slack account verification failed");
+      }
+      return { slackTeamId: payload.team_id, slackUserId: payload.user_id };
+    },
+    toolsForScopes: slackRestMcpToolsForScopes,
+  },
 };
 
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {

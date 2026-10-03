@@ -78,6 +78,10 @@
       "types": "./src/slack-bot-scopes.ts",
       "default": "./src/slack-bot-scopes.ts"
     },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
+    },
     "./google-drive": {
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"

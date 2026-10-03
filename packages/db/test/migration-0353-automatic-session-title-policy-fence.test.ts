@@ -979,6 +979,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "slack_api_rate_limits",
       "tool_gateway_approval_capabilities",
       "workspace_codex_subscription_preferences",
       "workspace_gateway_custom_models",
