@@ -396,6 +396,36 @@ describe("Insights query contracts", () => {
     }
   });
 
+  test("custom dates accept exactly 370 days and reject 371 in both query scopes and responses", () => {
+    const dates = { from: "2026-01-01", to: "2027-01-05" };
+    const window = resolveInsightsUsageCustomWindow(dates);
+    expect(Date.parse(window.windowEnd) - Date.parse(window.windowStart)).toBe(370 * 86_400_000);
+    expect(window.bucket).toBe("day");
+    for (const schema of [
+      WorkspaceInsightsUsageQuery,
+      OrganizationInsightsUsageQuery,
+      WorkspaceInsightsCallsQuery,
+      OrganizationInsightsCallsQuery,
+    ]) {
+      expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(true);
+      expect(schema.safeParse({ range: "custom", ...dates, to: "2027-01-06" }).success).toBe(false);
+    }
+    expect(() => resolveInsightsUsageCustomWindow({ ...dates, to: "2027-01-06" })).toThrow();
+    expect(
+      InsightsUsageResponse.safeParse({ ...response(), range: "custom", ...window }).success,
+    ).toBe(true);
+    const duration = 371 * 86_400_000;
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...response(),
+        range: "custom",
+        ...window,
+        windowEnd: new Date(Date.parse(window.windowStart) + duration).toISOString(),
+        priorWindowStart: new Date(Date.parse(window.windowStart) - duration).toISOString(),
+      }).success,
+    ).toBe(false);
+  });
+
   test("custom dates reject incomplete, reversed, unreal, instant, array and unrepresentable windows", () => {
     for (const query of [
       { range: "custom" },
