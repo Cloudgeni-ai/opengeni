@@ -72,13 +72,17 @@ async function listFiles(roots: string[]): Promise<string[]> {
   throw new Error("Unable to list source files: neither rg nor git ls-files is available");
 }
 
+function spawnFileListCommand(command: string[]) {
+  return Bun.spawn(command, {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
 async function runFileListCommand(command: string[]): Promise<string | null> {
-  let proc: ReturnType<typeof Bun.spawn>;
+  let proc: ReturnType<typeof spawnFileListCommand>;
   try {
-    proc = Bun.spawn(command, {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    proc = spawnFileListCommand(command);
   } catch (error) {
     if (
       error &&
@@ -108,7 +112,31 @@ function normalizeFileList(stdout: string): string[] {
     .filter((line) => line && !line.includes("/node_modules/"));
 }
 
-function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {
+// The organization MCP server is a distinct, explicitly admitted endpoint, not
+// the deleted unscoped workspace tool gateway. Keep its exact leaf reference
+// confined to its implementation, organization UI, SDK, generated inventory
+// and end-to-end test.
+// Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
+const organizationMcpSurfaceFiles = new Set([
+  "apps/api/src/mcp-oauth.ts",
+  "apps/api/src/organization-mcp.ts",
+  "apps/api/test/organization-mcp-e2e.test.ts",
+  "apps/web/src/App.tsx",
+  "apps/web/src/components/organization-access/organization-connected-agents.tsx",
+  "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
+  "packages/sdk/src/client.ts",
+  "packages/sdk/src/site-browser-runtime.gen.ts",
+  "scripts/public-api/surface.gen.json",
+]);
+
+function withoutOrganizationMcpEndpoint(file: string, text: string): string {
+  if (!organizationMcpSurfaceFiles.has(file.replace(/\\/g, "/"))) {
+    return text;
+  }
+  return text.replace(/\/v1\/mcp(?=["'`\s)\\\]]|$)/g, "");
+}
+
+export function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {
   if (!isSourceLike(file)) {
     return;
   }
@@ -121,7 +149,8 @@ function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding
     /["'`]\/v1\/github\/app(?:\/|["'`])/,
     /["'`]\/v1\/github\/repositories(?:\/|["'`])/,
   ];
-  if (forbidden.some((pattern) => pattern.test(text))) {
+  const operationalText = withoutOrganizationMcpEndpoint(file, text);
+  if (forbidden.some((pattern) => pattern.test(operationalText))) {
     out.push({
       file,
       message:
@@ -201,6 +230,9 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Generated organization MCP action metadata likewise records, never serves,
+  // the billing route; calls dispatch through the canonical route's own guards.
+  "apps/api/src/mcp/action-catalog.gen.ts",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {
@@ -228,7 +260,7 @@ function checkGithubWebhookAdvertising(file: string, text: string, out: Finding[
   }
 }
 
-function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
+export function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   if (!isSourceLike(file)) {
     return;
   }
@@ -237,8 +269,11 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) =>
     url.includes("opengeni") ? url : "",
   );
+  const defaultText = withoutOrganizationMcpEndpoint(file, withoutForeignUrls);
   if (
-    withoutForeignUrls.includes("/v1/mcp") &&
+    // A different route such as the organization sign-in request endpoint
+    // /v1/mcp-connections is not an unscoped MCP gateway default.
+    /\/v1\/mcp(?![\w-])/.test(defaultText) &&
     !text.includes("/v1/workspaces/{workspaceId}/mcp") &&
     !text.includes("/v1/workspaces/${workspaceId}/mcp")
   ) {
