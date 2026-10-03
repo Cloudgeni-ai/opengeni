@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CONTROL_CTE,
+  CANONICAL_RUNNER,
   DATABASE_RUNNER,
   databaseQueries,
   errorComparison,
@@ -9,6 +10,9 @@ import {
   podFacts,
   sweep,
   textResult,
+  applyOwnership,
+  ownerClassification,
+  safeDatabaseErrorCode,
   type Run,
 } from "./staging-health-sweep";
 
@@ -80,6 +84,8 @@ describe("staging health sweep", () => {
     expect(q.empty).toContain("count(DISTINCT turn_id)>=2");
     expect(q.latency).toContain("started_at-created_at");
     expect(q.recovering).toContain("missingStatusTimestamp");
+    expect(q.queued).not.toContain("OR finished_at");
+    expect(q.recovering).not.toContain("OR finished_at");
   });
   test("unavailable sources remain explicit gaps without leaking errors", async () => {
     const result = await sweep(parseArgs([]), async () => {
@@ -90,6 +96,15 @@ describe("staging health sweep", () => {
     expect(result.checks.every((c) => c.status === "gap")).toBe(true);
     expect(JSON.stringify(result)).not.toContain("secret");
     expect(textResult(result)).toContain("GAP queued");
+  });
+  test("extracts Bun SQLSTATE errno and wrapped database codes without returning raw errors", () => {
+    expect(safeDatabaseErrorCode({ code: "ERR_POSTGRES_SERVER_ERROR", errno: "57014" })).toBe(
+      "57014",
+    );
+    expect(safeDatabaseErrorCode({ cause: { errno: "42703" } })).toBe("42703");
+    expect(safeDatabaseErrorCode({ code: "postgres://user:secret@host" })).toBe("unavailable");
+    expect(safeDatabaseErrorCode(new Error("postgres://user:secret@host"))).toBe("unavailable");
+    expect(safeDatabaseErrorCode(null)).toBe("unavailable");
   });
   test("collects healthy sources, records all metrics, and passes credentials through stdin only", async () => {
     const now = new Date("2026-10-03T11:00:00Z");
@@ -153,6 +168,7 @@ describe("staging health sweep", () => {
       });
     };
     const result = await sweep(options, run, now);
+    expect(result.schemaVersion).toBe("opengeni.staging-health-sweep.v2");
     expect(result.exitCode).toBe(0);
     expect(result.checks.map((c) => c.id)).toEqual([
       "api-error-rate",
@@ -210,5 +226,64 @@ describe("staging health sweep", () => {
           : "{}";
     const result = await sweep(parseArgs([]), run, new Date("2026-10-03T11:00:00Z"));
     expect(result.checks.find((c) => c.id === "api-memory")?.status).toBe("gap");
+  });
+  test("canonical observer uses exact read APIs, always rolls back, and offers no wake/recovery services", () => {
+    expect(CANONICAL_RUNNER).toContain("evaluateSessionControl(tx");
+    expect(CANONICAL_RUNNER).toContain("activities.peekSessionWork");
+    expect(CANONICAL_RUNNER).toContain("runId:ref.workflowRunId");
+    expect(CANONICAL_RUNNER).toContain("a.activityId===ref.activityId");
+    expect(CANONICAL_RUNNER).toContain("throw rollback");
+    expect(CANONICAL_RUNNER).toContain("rollbackProven=error===rollback");
+    expect(CANONICAL_RUNNER).not.toContain("signalWithStart");
+    expect(CANONICAL_RUNNER).not.toContain("requestSessionTurnRecovery");
+    expect(CANONICAL_RUNNER).not.toContain("wakeSessionWorkflow:");
+  });
+  test("pending exact owner is not stranded; settled owner is only a candidate, unknown owner is a gap", () => {
+    const observation = {
+      session_id: "s",
+      workspace_id: "w",
+      state: "active" as const,
+      kind: "attempt-owned",
+      turnId: "t",
+      attemptId: "a",
+      executionGeneration: 1,
+      activityRef: { workflowId: "wf", workflowRunId: "run", activityId: "activity" },
+    };
+    expect(ownerClassification({ ...observation, ownerActivityState: "pending" })).toBe(
+      "active_owner",
+    );
+    expect(ownerClassification({ ...observation, ownerActivityState: "settled" })).toBe(
+      "settled_owner_candidate",
+    );
+    expect(ownerClassification({ ...observation, ownerActivityState: "unknown" })).toBe("unknown");
+    expect(
+      ownerClassification({ ...observation, ownerActivityState: "settled", activityRef: null }),
+    ).toBe("unknown");
+  });
+  test("canonical pause, input wait, admission block, and stopping settlement exclude age-only findings", () => {
+    const base = { session_id: "s", workspace_id: "w", state: "active" as const, settlement: null };
+    expect(ownerClassification({ ...base, state: "paused", kind: "runnable" })).toBe("paused");
+    expect(ownerClassification({ ...base, kind: "input-wait" })).toBe("input-wait");
+    expect(ownerClassification({ ...base, kind: "admission-blocked" })).toBe("admission-blocked");
+    expect(ownerClassification({ ...base, kind: "runnable", settlement: "stopping" })).toBe(
+      "settlement_wait",
+    );
+    expect(ownerClassification({ ...base, kind: "runnable" })).toBe("runnable_candidate");
+  });
+  test("ownership coverage is fail closed when capped lists or observations omit candidates", () => {
+    const facts = {
+      total: 3,
+      runnable: 3,
+      excluded: {},
+      sessions: [{ session_id: "s", workspace_id: "w", reason: "runnable" }],
+    };
+    const result = applyOwnership(facts, [
+      { session_id: "s", workspace_id: "w", state: "active", settlement: null, kind: "runnable" },
+    ]);
+    expect(result.actionable).toBe(1);
+    expect(result.ownerUnknown).toBe(2);
+    expect(result.sqlRunnableCandidates).toBe(3);
+    expect(result).not.toHaveProperty("runnable");
+    expect(applyOwnership({ ...facts, runnable: 1 }, []).ownerUnknown).toBe(1);
   });
 });

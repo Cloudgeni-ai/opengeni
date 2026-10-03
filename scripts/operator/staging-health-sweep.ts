@@ -21,7 +21,7 @@ export interface Check {
   gap?: string;
 }
 export interface SweepResult {
-  schemaVersion: "opengeni.staging-health-sweep.v1";
+  schemaVersion: "opengeni.staging-health-sweep.v2";
   observedAt: string;
   durationMs: number;
   context: string;
@@ -77,10 +77,10 @@ export function parseArgs(args: string[]): SweepOptions {
 
 // Canonical revision-aware inherited pause semantics: session-control.ts discovery projection.
 // Only candidate paths are visited. Cycles/depth overflow fail closed rather than report active.
-export const CONTROL_CTE = `WITH RECURSIVE targets AS MATERIALIZED (
+export function controlCte(includeRecentTurns: boolean): string {
+  return `WITH RECURSIVE targets AS MATERIALIZED (
   SELECT id,workspace_id FROM sessions WHERE status IN ('queued','recovering')
-  UNION SELECT session_id,workspace_id FROM session_turns WHERE status='queued'
-    OR finished_at >= $1::timestamptz - ($2::int * interval '1 minute')
+  ${includeRecentTurns ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE finished_at >= $1::timestamptz - ($2::int * interval '1 minute')" : ""}
 ), candidates AS MATERIALIZED (
   SELECT s.id,s.workspace_id,s.parent_session_id,s.direct_control_state,s.direct_pause_revision,
     s.subtree_run_override_revision,s.status,s.input_wait_until,s.created_at
@@ -108,10 +108,26 @@ export const CONTROL_CTE = `WITH RECURSIVE targets AS MATERIALIZED (
       (SELECT 1 FROM path p WHERE p.target_id=s.id AND p.subtree_run_override_revision>w.workspace_pause_revision))) paused
   FROM candidates s LEFT JOIN workspace_inference_controls w ON w.workspace_id=s.workspace_id
 )`;
+}
+
+export const CONTROL_CTE = controlCte(true);
+
+export function safeDatabaseErrorCode(error: unknown): string {
+  let candidate = error;
+  for (let depth = 0; depth < 3; depth++) {
+    if (!candidate || typeof candidate !== "object") break;
+    const value = candidate as { errno?: unknown; code?: unknown; cause?: unknown };
+    for (const code of [value.errno, value.code]) {
+      if (typeof code === "string" && /^[A-Z0-9]{5}$/.test(code)) return code;
+    }
+    candidate = value.cause;
+  }
+  return "unavailable";
+}
 
 export function databaseQueries(): Record<string, string> {
   return {
-    queued: `${CONTROL_CTE}, overdue AS (
+    queued: `${controlCte(false)}, overdue AS (
       SELECT s.id session_id,s.workspace_id,coalesce(q.oldest,s.created_at) queued_at,
         CASE WHEN NOT c.valid THEN 'control_unknown' WHEN s.status IN ('cancelled','failed') THEN 'terminal'
           WHEN c.paused THEN 'paused'
@@ -122,12 +138,12 @@ export function databaseQueries(): Record<string, string> {
       FROM candidates s JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT min(created_at) oldest FROM session_turns t
         WHERE t.session_id=s.id AND t.workspace_id=s.workspace_id AND t.status='queued') q ON true
-      WHERE (q.oldest IS NOT NULL OR s.status='queued') AND coalesce(q.oldest,s.created_at)<$1::timestamptz-interval '2 minutes'
+      WHERE s.status='queued' AND coalesce(q.oldest,s.created_at)<$1::timestamptz-interval '2 minutes'
     ) SELECT jsonb_build_object('total',count(*),'runnable',count(*) FILTER(WHERE reason='runnable'),
       'controlUnknown',count(*) FILTER(WHERE reason='control_unknown'),
       'excluded',coalesce((SELECT jsonb_object_agg(reason,n) FROM (SELECT reason,count(*) n FROM overdue WHERE reason!='runnable' GROUP BY reason) x),'{}'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,reason FROM overdue ORDER BY queued_at LIMIT 100) x),'[]')) facts FROM overdue`,
-    recovering: `${CONTROL_CTE}, recoveries AS (
+    recovering: `${controlCte(false)}, recoveries AS (
       SELECT s.id session_id,s.workspace_id,r.since,c.paused,c.valid FROM candidates s
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT e.created_at since FROM session_events e WHERE e.session_id=s.id AND e.workspace_id=s.workspace_id
@@ -181,6 +197,7 @@ export function databaseQueries(): Record<string, string> {
 
 // Code and credential are sent via stdin, not process argv, files, or logs.
 export const DATABASE_RUNNER = `import {SQL} from 'bun';
+const safeDatabaseErrorCode=${safeDatabaseErrorCode.toString()};
 const input=await Bun.stdin.json();const db=new SQL(input.url,{max:1,connectionTimeout:5});const result={};
 try {
  for(const [name,query] of Object.entries(input.queries)) {
@@ -189,11 +206,175 @@ try {
    await tx.unsafe('SET LOCAL row_security=off');
    const roles=await tx.unsafe('SELECT rolsuper OR rolbypassrls global FROM pg_roles WHERE rolname=current_user');
    if(!roles[0]?.global) throw new Error('global_read_role_required');
-   return (await tx.unsafe(query,[input.now,input.windowMinutes]))[0].facts;
+   const parameters=['empty','latency'].includes(name)?[input.now,input.windowMinutes]:[input.now];
+   return (await tx.unsafe(query,parameters))[0].facts;
   }); } catch(error) { result[name]={gap:'database_query_failed_or_global_read_role_unavailable',
-    code: typeof error.code==='string' && /^[A-Z0-9]{5}$/.test(error.code) ? error.code : 'unavailable'}; }
+    code:safeDatabaseErrorCode(error)}; }
  }
 } finally {await db.close();} console.log(JSON.stringify(result));`;
+
+// Canonical peek requires FOR SHARE, which PostgreSQL prohibits in READ ONLY.
+// The observer invokes only SELECT-based APIs; its entire transaction always rolls back.
+// Inject only read services, suppress gauge refresh, and never provide a wake/recovery port.
+export const CANONICAL_RUNNER = `
+import {createDb,evaluateSessionControl} from '/app/packages/db/src/index.ts';
+import {getSettings,temporalConnectionOptions} from '/app/packages/config/src/index.ts';
+import {createSessionStateActivities} from '/app/apps/worker/src/activities/session-state.ts';
+import {temporalActivityLeaseSettled,temporalWorkflowExecutionNotFound} from '/app/apps/worker/src/index.ts';
+import {Connection} from '@temporalio/client';
+import {sql} from 'drizzle-orm';
+const safeDatabaseErrorCode=${safeDatabaseErrorCode.toString()};
+const input=await Bun.stdin.json();const client=createDb(input.url,{max:2});
+const settings=getSettings();let connection=null;const observations=[];
+const rollback=new Error('health_observer_rollback');
+try {
+ const [role]=await client.db.execute(sql.raw('SELECT rolsuper OR rolbypassrls AS global FROM pg_roles WHERE rolname=current_user'));
+ if(!role?.global) throw new Error('global_read_role_required');
+ try {connection=await Connection.connect({...temporalConnectionOptions(settings),connectTimeout:3000});}catch{}
+ const inspect=async(ref)=>{
+  if(!connection) throw new Error('temporal_unavailable');
+  let description;
+  try {description=await connection.withDeadline(Date.now()+2000,()=>connection.workflowService.describeWorkflowExecution({
+   namespace:settings.temporalNamespace,execution:{workflowId:ref.workflowId,runId:ref.workflowRunId}}));}
+  catch(error){if(temporalWorkflowExecutionNotFound(error))return 'settled';throw error;}
+  return temporalActivityLeaseSettled(description.pendingActivities?.find(a=>a.activityId===ref.activityId))?'settled':'pending';
+ };
+ await Promise.all(input.targets.map(async(target)=>{
+  let result={session_id:target.session_id,workspace_id:target.workspace_id,gap:'canonical_observation_unavailable'};
+  let rollbackProven=false;let errorCode='unavailable';
+  try {await client.db.transaction(async(tx)=>{
+   await tx.execute(sql.raw("SET LOCAL statement_timeout='3000ms'"));
+   await tx.execute(sql.raw("SET LOCAL lock_timeout='1000ms'"));
+   const control=await evaluateSessionControl(tx,target.workspace_id,target.session_id,{lock:'none'});
+   const activities=createSessionStateActivities(async()=>({db:tx,observability:{warn(){}},inspectSessionAttemptActivity:inspect}),
+    {countQueuedTurns:async()=>0,recordTurnsQueuedGauge:()=>{}});
+   const peek=await activities.peekSessionWork({workspaceId:target.workspace_id,sessionId:target.session_id});
+   result={session_id:target.session_id,workspace_id:target.workspace_id,state:control.state,
+    settlement:control.settlement,kind:peek.kind,ownerActivityState:peek.ownerActivityState??null,
+    turnId:peek.turnId??null,attemptId:peek.attemptId??null,executionGeneration:peek.executionGeneration??null,
+    activityRef:peek.activityRef?{workflowId:peek.activityRef.workflowId,workflowRunId:peek.activityRef.workflowRunId,
+      activityId:peek.activityRef.activityId,quiesced:peek.activityRef.quiesced}:null};
+   throw rollback;
+  },{isolationLevel:'read committed'});}catch(error){rollbackProven=error===rollback;
+   const code=safeDatabaseErrorCode(error);
+   if(code!=='unavailable')errorCode=code;
+   else if(['TypeError','SessionControlInvariantError','SessionControlBusyError'].includes(error?.name))errorCode=error.name;
+   else if(typeof error?.message==='string'){
+    if(error.message.includes('still owned by attempt'))errorCode='attempt_ownership_inconsistent';
+    else if(error.message.includes('terminal active turn'))errorCode='terminal_active_turn';
+    else if(error.message.includes('missing active turn'))errorCode='missing_active_turn';
+   }
+  }
+  observations.push(rollbackProven?result:{session_id:target.session_id,workspace_id:target.workspace_id,gap:'canonical_observation_unavailable',code:errorCode});
+ }));
+}finally{await connection?.close();await client.close();}
+console.log(JSON.stringify(observations));`;
+
+export interface OwnerObservation {
+  session_id: string;
+  workspace_id: string;
+  state?: "active" | "paused";
+  settlement?: unknown;
+  kind?: string;
+  ownerActivityState?: "pending" | "settled" | "unknown" | null;
+  turnId?: string | null;
+  attemptId?: string | null;
+  executionGeneration?: number | null;
+  activityRef?: {
+    workflowId: string;
+    workflowRunId: string;
+    activityId: string;
+    quiesced?: boolean;
+  } | null;
+  gap?: string;
+  code?: string;
+}
+
+export function ownerClassification(observation: OwnerObservation | undefined): string {
+  if (!observation || observation.gap || !["active", "paused"].includes(observation.state ?? ""))
+    return "unknown";
+  if (observation.state === "paused") return "paused";
+  if (observation.kind === "attempt-owned") {
+    const ref = observation.activityRef;
+    if (
+      !observation.turnId ||
+      !observation.attemptId ||
+      !Number.isSafeInteger(observation.executionGeneration) ||
+      !ref?.workflowId ||
+      !ref.workflowRunId ||
+      !ref.activityId
+    )
+      return "unknown";
+    if (observation.ownerActivityState === "pending") return "active_owner";
+    if (observation.ownerActivityState === "settled") return "settled_owner_candidate";
+    return "unknown";
+  }
+  if (observation.kind === "runnable")
+    return observation.settlement === null ? "runnable_candidate" : "settlement_wait";
+  if (
+    [
+      "admission-blocked",
+      "capacity-wait",
+      "sandbox-lifecycle-wait",
+      "approval-wait",
+      "approval-pending",
+      "input-wait",
+      "idle",
+      "interruption-pending",
+      "cancellation-wait",
+    ].includes(observation.kind ?? "")
+  )
+    return observation.kind!;
+  return "unknown";
+}
+
+export function applyOwnership(facts: any, observations: OwnerObservation[], recovering = false) {
+  const rows = Array.isArray(facts.sessions) ? facts.sessions : [];
+  const targets = rows.filter(
+    (row: any) => recovering || ["runnable", "behind_active_turn"].includes(row.reason),
+  );
+  let ownerUnknown = 0;
+  let actionable = 0;
+  const classifications: Record<string, number> = {};
+  const ownership = targets.map((row: any) => {
+    const observation = observations.find(
+      (o) => o.session_id === row.session_id && o.workspace_id === row.workspace_id,
+    );
+    const classification = ownerClassification(observation);
+    if (classification === "unknown") ownerUnknown++;
+    if (["runnable_candidate", "settled_owner_candidate"].includes(classification)) actionable++;
+    classifications[classification] = (classifications[classification] ?? 0) + 1;
+    return {
+      session_id: row.session_id,
+      workspace_id: row.workspace_id,
+      classification,
+      ...(observation && !observation.gap ? { observation } : {}),
+      ...(observation?.gap
+        ? { gap: "canonical_observation_unavailable", code: observation.code ?? "unavailable" }
+        : {}),
+    };
+  });
+  // A capped SQL list cannot certify candidates outside its sample.
+  const omitted = recovering
+    ? Math.max(0, facts.total - rows.length)
+    : Math.max(0, facts.runnable - rows.filter((row: any) => row.reason === "runnable").length) +
+      Math.max(
+        0,
+        (facts.excluded?.behind_active_turn ?? 0) -
+          rows.filter((row: any) => row.reason === "behind_active_turn").length,
+      );
+  const { runnable, ...otherFacts } = facts;
+  return {
+    ...otherFacts,
+    ...(recovering ? {} : { sqlRunnableCandidates: runnable }),
+    actionable,
+    ownerUnknown: ownerUnknown + omitted,
+    ownershipClassifications: classifications,
+    ownership,
+    ownershipDefinition:
+      "Canonical control and double-peek owner revalidation; exact Temporal workflow run/activity metadata. Age is triage, never quiescence or permission to recover.",
+  };
+}
 
 export function memoryBytes(value: string): number {
   const m = /^([0-9.]+)([KMGTPE]i|[kMGTPE]|m)?$/.exec(value);
@@ -358,15 +539,15 @@ export async function sweep(
   const database = async () => {
     const definitions: Record<string, string> = {
       queued:
-        "Sessions with a queued turn older than 120s (or never-claimed queued session age); excludes effective pauses, live waits, and active predecessors; first 100 oldest listed.",
+        "Sessions whose durable status is queued, older than 120s since earliest queued turn (or initial creation); excludes historical queued-turn rows in nonqueued sessions. Canonical control.peekSessionWork and exact Temporal owner metadata classify candidates; missing ownership evidence is a gap. First 100 oldest listed; at most 20 canonical targets.",
       recovering:
-        "Recovering sessions older than 300s since latest durable recovering status event, excluding effective pauses; missing timestamps are gaps.",
+        "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Missing transition or ownership evidence is a gap, not proof of physical quiescence.",
       empty: `At least two distinct completed suspect turns in ${options.windowMinutes}m; explicit emptyFinalReply or no reply/tools. Excludes effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
       latency: `created_at to started_at for logical turns started during the preceding ${options.windowMinutes}m, all sources; includes queue residence, excludes never-started turns. Database exact percentiles, not TTFT.`,
     };
     let data: any;
+    let url = process.env.OPENGENI_HEALTH_DATABASE_URL;
     try {
-      let url = process.env.OPENGENI_HEALTH_DATABASE_URL;
       if (options.databaseSecret) {
         const s = JSON.parse(
           await run([
@@ -409,11 +590,54 @@ export async function sweep(
     } catch {
       data = {};
     }
+    const queueRows = Array.isArray(data.queued?.sessions)
+      ? data.queued.sessions.filter((row: any) =>
+          ["runnable", "behind_active_turn"].includes(row.reason),
+        )
+      : [];
+    const recoveryRows = Array.isArray(data.recovering?.sessions) ? data.recovering.sessions : [];
+    const targets = [
+      ...new Map(
+        [...queueRows, ...recoveryRows].map((row: any) => [
+          `${row.workspace_id}:${row.session_id}`,
+          row,
+        ]),
+      ).values(),
+    ].slice(0, 20);
+    let observations: OwnerObservation[] = [];
+    if (url && targets.length) {
+      try {
+        const value = JSON.parse(
+          await run(
+            [
+              ...k,
+              "-n",
+              options.namespace,
+              "exec",
+              "-i",
+              options.dbPod,
+              "--",
+              "bun",
+              "-e",
+              CANONICAL_RUNNER,
+            ],
+            JSON.stringify({ url, targets }),
+          ),
+        );
+        if (!Array.isArray(value)) throw new Error("invalid canonical observations");
+        observations = value;
+      } catch {
+        /* Missing ownership evidence remains an explicit gap below. */
+      }
+    }
+    if (data.queued && !data.queued.gap) data.queued = applyOwnership(data.queued, observations);
+    if (data.recovering && !data.recovering.gap)
+      data.recovering = applyOwnership(data.recovering, observations, true);
     for (const [name, definition] of Object.entries(definitions)) {
       const facts = data[name];
       const required =
         name === "queued"
-          ? ["total", "runnable", "controlUnknown"]
+          ? ["total", "sqlRunnableCandidates", "controlUnknown"]
           : name === "recovering"
             ? ["total", "controlUnknown", "missingStatusTimestamp"]
             : name === "empty"
@@ -425,6 +649,7 @@ export async function sweep(
         invalid ||
         facts.gap ||
         facts.controlUnknown > 0 ||
+        facts.ownerUnknown > 0 ||
         facts.missingStatusTimestamp > 0 ||
         facts.invalidNegativeSamples > 0;
       checks.push({
@@ -434,16 +659,26 @@ export async function sweep(
           ? "gap"
           : (
                 name === "queued"
-                  ? facts.runnable > 0
+                  ? facts.actionable > 0
                   : name === "empty"
                     ? facts.repeatedSessions > 0
                     : name === "recovering"
-                      ? facts.total > 0
+                      ? facts.actionable > 0
                       : false
               )
             ? "finding"
             : "ok",
         ...(facts && !facts.gap && !invalid ? { facts } : {}),
+        ...(facts?.gap
+          ? {
+              facts: {
+                sourceErrorCode:
+                  typeof facts.code === "string" && /^[A-Z0-9]{5}$/.test(facts.code)
+                    ? facts.code
+                    : "unavailable",
+              },
+            }
+          : {}),
         ...(gap ? { gap: "database_source_or_control_evidence_unavailable" } : {}),
       });
     }
@@ -491,7 +726,7 @@ export async function sweep(
   await Promise.all([kube, memory, database(), errorRates]);
   checks.sort((a, b) => a.id.localeCompare(b.id));
   return {
-    schemaVersion: "opengeni.staging-health-sweep.v1",
+    schemaVersion: "opengeni.staging-health-sweep.v2",
     observedAt: now.toISOString(),
     durationMs: Math.round(performance.now() - started),
     context: options.context,
@@ -512,7 +747,15 @@ export function textResult(result: SweepResult): string {
       const facts = c.facts
         ? Object.fromEntries(
             Object.entries(c.facts).filter(
-              ([key]) => !["sessions", "containers", "samples", "coverage"].includes(key),
+              ([key]) =>
+                ![
+                  "sessions",
+                  "containers",
+                  "samples",
+                  "coverage",
+                  "ownership",
+                  "ownershipDefinition",
+                ].includes(key),
             ),
           )
         : { gap: c.gap };
