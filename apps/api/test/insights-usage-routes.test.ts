@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type AccessContext, type Permission } from "@opengeni/contracts";
 import type {
   InsightsUsageMeasures,
   InsightsUsageResponse,
@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import {
   insightsQueryParameters,
   insightsUsageCoalesceKey,
+  organizationInsightsScope,
   registerInsightsUsageRoutes,
 } from "../src/routes/insights-usage";
 
@@ -206,9 +207,10 @@ describe("unified Insights route discipline", () => {
     expect(read.mock.calls[0]![1]).toMatchObject({
       accountId,
       workspaceId,
+      detailsWorkspaceIds: [workspaceId],
       query: {
         range: "90d",
-        provider: ["anthropic", "openai"],
+        provider: ["anthropic", "openai", "anthropic"],
         model: ["openrouter/vendor/model"],
         seriesGroups: false,
         groupBy: "model",
@@ -247,13 +249,64 @@ describe("unified Insights route discipline", () => {
     expect(usage.mock.calls[0]![1]).toMatchObject({
       accountId,
       workspaceId: null,
+      detailsWorkspaceIds: [],
+      detailsSharedWorkspaces: false,
       query: { workspaceId: [workspaceId] },
     });
     expect(calls.mock.calls[0]![1]).toMatchObject({
       accountId,
       workspaceId: null,
+      detailsWorkspaceIds: [],
+      detailsSharedWorkspaces: false,
       query: { workspaceId: [workspaceId] },
     });
+  });
+
+  test("metadata authority requires same-actor workspace read grants, not account or credential claims", () => {
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId: "user:reader",
+      accountGrants: [{ accountId, subjectId: "user:reader", permissions: ["account:admin"] }],
+      workspaceGrants: [
+        { accountId, workspaceId, subjectId: "user:reader", permissions: ["billing:read"] },
+        {
+          accountId,
+          workspaceId: crypto.randomUUID(),
+          subjectId: "user:other",
+          permissions: ["workspace:admin"],
+        },
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          subjectId: "user:reader",
+          permissions: ["sessions:read"],
+        },
+      ],
+      defaultAccountId: accountId,
+      defaultWorkspaceId: workspaceId,
+      credential: {
+        kind: "organization_api_key",
+        access: "full",
+        accountId,
+        workspaceId: null,
+        effectiveWorkspacePermissions: ["workspace:admin"],
+        note: "Informational only",
+      },
+    };
+    expect(organizationInsightsScope(context, accountId)).toEqual({
+      accountId,
+      workspaceId: null,
+      detailsWorkspaceIds: [],
+      detailsSharedWorkspaces: false,
+    });
+    context.workspaceGrants[0]!.permissions = ["sessions:read"];
+    expect(organizationInsightsScope(context, accountId).detailsWorkspaceIds).toEqual([
+      workspaceId,
+    ]);
+    context.workspaceGrants[0]!.permissions = ["workspace:admin"];
+    expect(organizationInsightsScope(context, accountId).detailsWorkspaceIds).toEqual([
+      workspaceId,
+    ]);
   });
 
   test("sharing keys distinguish actors, scopes, every filter and calls cursors", () => {
@@ -268,6 +321,16 @@ describe("unified Insights route discipline", () => {
       ),
       insightsUsageCoalesceKey(scope, { range: "90d", provider: ["a"] }, "actor:a"),
       insightsUsageCoalesceKey(scope, { range: "week", provider: ["b"] }, "actor:a"),
+      insightsUsageCoalesceKey(
+        { ...scope, detailsWorkspaceIds: [workspaceId] },
+        { range: "week", provider: ["a"] },
+        "actor:a",
+      ),
+      insightsUsageCoalesceKey(
+        { ...scope, detailsSharedWorkspaces: true },
+        { range: "week", provider: ["a"] },
+        "actor:a",
+      ),
       insightsUsageCoalesceKey(
         scope,
         { range: "week", provider: ["a"], cursor: "page2" },

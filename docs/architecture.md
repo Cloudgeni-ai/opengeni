@@ -1053,10 +1053,15 @@ usage still requires `workspace:admin`; organization usage still requires
 `billing:read`. Organization amount authority never grants individual call or
 session access. Exact UTC ranges, repeated filters, groups, payer totals,
 token-knownness coverage and a nullable prior window share one query contract.
-Charged totals remain authoritative debits, while list totals are recorded
-provider estimates across all payers. Missing historical cache-write counters
-and per-class cost snapshots remain unknown, not zero or repriced using today's
-catalog. The prior cache denominator is exposed separately so an empty prior
+Charged totals follow actual debit-ledger amounts, not nominal usage prices
+that can exceed a balance-clipped debit. List totals are recorded provider
+estimates across all payers. Forward list class snapshots are captured only
+when supported by the recorded counters and price context. Eligible historical
+calls allocate their fixed recorded estimate using catalog-rate token weights,
+with per-call micro conservation and an explicit approximation flag; allocation
+never changes a recorded total. Missing counters, totals or rates remain unknown,
+not invented zeroes. Reasoning is a subset of output, never an extra cost class.
+The prior cache denominator is exposed separately so an empty prior
 window cannot appear to have a cache-hit comparison.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,

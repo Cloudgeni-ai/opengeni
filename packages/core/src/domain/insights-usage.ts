@@ -11,6 +11,10 @@ export type InsightsQueryScope = {
   accountId: string;
   /** null means organization scope; it does not grant workspace/session access. */
   workspaceId: string | null;
+  /** Server-verified metadata authority; billing permission alone supplies none. */
+  detailsWorkspaceIds?: readonly string[];
+  /** Existing organization service-key authority applies only to shared workspaces. */
+  detailsSharedWorkspaces?: boolean;
 };
 
 export async function getInsightsUsage(

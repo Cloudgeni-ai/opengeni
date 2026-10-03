@@ -6,8 +6,11 @@ import {
   WorkspaceInsightsCallsQuery,
   WorkspaceInsightsUsageQuery,
 } from "@opengeni/contracts/insights-usage";
+import type { AccessContext } from "@opengeni/contracts";
 import {
+  accountScopedApiKeyWorkspaceAuthority,
   getInsightsUsage,
+  hasPermission,
   listInsightsCalls,
   requireAccessContext,
   requireAccessGrant,
@@ -35,7 +38,40 @@ export function insightsUsageCoalesceKey(
   query: unknown,
   actor: string | null,
 ): string {
-  return JSON.stringify([scope.accountId, scope.workspaceId, query, actor]);
+  return JSON.stringify([
+    scope.accountId,
+    scope.workspaceId,
+    [...(scope.detailsWorkspaceIds ?? [])].sort(),
+    scope.detailsSharedWorkspaces === true,
+    query,
+    actor,
+  ]);
+}
+
+/** Reuse canonical read grants, never infer session access from billing authority. */
+export function organizationInsightsScope(
+  context: AccessContext,
+  accountId: string,
+): InsightsQueryScope {
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  return {
+    accountId,
+    workspaceId: null,
+    detailsWorkspaceIds: [
+      ...new Set(
+        context.workspaceGrants
+          .filter(
+            (grant) =>
+              grant.accountId === accountId &&
+              grant.subjectId === context.subjectId &&
+              hasPermission(grant.permissions, "sessions:read"),
+          )
+          .map((grant) => grant.workspaceId),
+      ),
+    ].sort(),
+    detailsSharedWorkspaces:
+      authority?.accountId === accountId && hasPermission(authority.permissions, "sessions:read"),
+  };
 }
 
 export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -47,7 +83,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = WorkspaceInsightsUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
-    const scope = { accountId: grant.accountId, workspaceId };
+    const scope = { accountId: grant.accountId, workspaceId, detailsWorkspaceIds: [workspaceId] };
     // The API's workspace middleware already binds/revalidates this grant's RLS actor.
     const response = await usage.run(
       insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
@@ -62,7 +98,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = WorkspaceInsightsCallsQuery.safeParse(insightsQueryParameters(c.req.queries()));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
-    const scope = { accountId: grant.accountId, workspaceId };
+    const scope = { accountId: grant.accountId, workspaceId, detailsWorkspaceIds: [workspaceId] };
     const response = await calls.run(
       insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
       () => listInsightsCalls(deps.db, { ...scope, query: parsed.data }),
@@ -78,7 +114,7 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       insightsQueryParameters(c.req.queries()),
     );
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
-    const scope = { accountId, workspaceId: null };
+    const scope = organizationInsightsScope(context, accountId);
     const response = await withBillingUsageActor(deps, context, accountId, () =>
       usage.run(
         insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
@@ -96,8 +132,8 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       insightsQueryParameters(c.req.queries()),
     );
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
-    const scope = { accountId, workspaceId: null };
-    // Billing permission is amounts authority only; DB call readers still enforce actor visibility.
+    const scope = organizationInsightsScope(context, accountId);
+    // Call readers intersect these canonical grants with current actor visibility.
     const response = await withBillingUsageActor(deps, context, accountId, () =>
       calls.run(
         insightsUsageCoalesceKey(scope, parsed.data, currentSessionRlsActorIdentityKey()),
