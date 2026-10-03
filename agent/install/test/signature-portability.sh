@@ -18,7 +18,7 @@ sha256() {
 }
 
 # A minimal PATH: hide installed minisign/rsign, retain ordinary system tools.
-for tool in sh mkdir rm cat dd wc cmp sed awk cut grep basename base64 chmod tar unzip curl wget timeout sha256sum shasum; do
+for tool in sh mkdir rm cat dd wc cmp sed awk cut grep basename base64 chmod tar gzip unzip curl wget timeout sha256sum shasum; do
   location="$(command -v "$tool" || true)"
   [ -z "$location" ] || ln -s "$location" "$WORK/tools/$tool"
 done
