@@ -11,7 +11,7 @@ name: Agent CI
 # macOS leg.
 
 on:
-  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore with OPE-652.
+  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore after the launch window.
   push:
     branches:
       - main

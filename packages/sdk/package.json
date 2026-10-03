@@ -146,6 +146,10 @@
       "types": "./src/session-proxy.ts",
       "default": "./src/session-proxy.ts"
     },
+    "./tool-auth": {
+      "types": "./src/tool-auth.ts",
+      "default": "./src/tool-auth.ts"
+    },
     "./next": {
       "types": "./src/adapters/next.ts",
       "default": "./src/adapters/next.ts"
@@ -177,6 +181,7 @@
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",

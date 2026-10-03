@@ -102,7 +102,8 @@ export type UsageFacets = {
   workspaces: Array<{ id: string; name: string; personal: boolean }>;
   providers: string[];
   models: Array<{ provider: string; model: string }>;
-  payers: UsagePayerId[];
+  /** Payer ids; unknown values are ignored by the UI. */
+  payers: string[];
   projects: Array<{ id: string; name: string }>;
   people: Array<{ key: string; name: string | null; you: boolean }>;
   schedules: Array<{ id: string; name: string }>;
@@ -259,3 +260,23 @@ export function addMeasures(target: UsageMeasures, source: UsageMeasures): Usage
 export function sumMeasures(rows: readonly UsageMeasures[]): UsageMeasures {
   return rows.reduce((total, row) => addMeasures(total, row), emptyMeasures());
 }
+
+/*
+ * Drift guard (types only, nothing ships): the shared contract
+ * (`@opengeni/contracts/insights-usage`) must stay assignable to the shapes
+ * this dashboard reads.
+ */
+type AssertAssignable<_T extends true> = true;
+export type UsageContractGuard = [
+  AssertAssignable<
+    import("@opengeni/contracts/insights-usage").InsightsUsageResponse extends Omit<
+      UsageResponse,
+      "capabilities"
+    >
+      ? true
+      : false
+  >,
+  AssertAssignable<
+    import("@opengeni/contracts/insights-usage").InsightsCall extends UsageCall ? true : false
+  >,
+];

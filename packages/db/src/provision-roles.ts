@@ -7,6 +7,7 @@ import {
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
+  SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -1688,76 +1689,12 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(
-      format(
-        '%I.create_xai_subscription_credential(uuid,uuid,text,text,text,text,text,text,text,timestamptz)',
-        ${literal(schema)}
-      )
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES.map(literal).join(", ")}] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     IF to_regprocedure(
       format(
         '%I.resolve_session_attempt_personal_resources(uuid,uuid,uuid)',

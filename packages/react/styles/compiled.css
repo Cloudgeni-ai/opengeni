@@ -1032,6 +1032,23 @@
 .og-root :where(button, input[type="button"], input[type="submit"], input[type="reset"]) {
     appearance: button;
   }
+.og-root :where(ul, ol, menu) {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+.og-root :where(li, p, blockquote, figure, dl, dd, pre, h1, h2, h3, h4, h5, h6) {
+    margin: 0;
+    padding: 0;
+    font-size: inherit;
+    line-height: inherit;
+  }
+.og-root :where(h1, h2, h3, h4, h5, h6) {
+    font-weight: inherit;
+  }
+.og-root, .og-root :where(*, ::before, ::after) {
+    box-sizing: border-box;
+  }
 @keyframes og-expand {
   from {
     height: 0;
@@ -1607,9 +1624,6 @@
 :where(.og-root).bottom-3,:where(.og-root) .bottom-3 {
     bottom: calc(var(--spacing) * 3);
   }
-:where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
-    bottom: calc(var(--spacing) * 4);
-  }
 :where(.og-root).bottom-full,:where(.og-root) .bottom-full {
     bottom: 100%;
   }
@@ -1621,6 +1635,9 @@
   }
 :where(.og-root).left-2,:where(.og-root) .left-2 {
     left: calc(var(--spacing) * 2);
+  }
+:where(.og-root).isolate,:where(.og-root) .isolate {
+    isolation: isolate;
   }
 :where(.og-root).z-0,:where(.og-root) .z-0 {
     z-index: 0;
@@ -1786,6 +1803,9 @@
   }
 :where(.og-root).mr-2,:where(.og-root) .mr-2 {
     margin-right: calc(var(--spacing) * 2);
+  }
+:where(.og-root).mr-auto,:where(.og-root) .mr-auto {
+    margin-right: auto;
   }
 :where(.og-root).mb-0,:where(.og-root) .mb-0 {
     margin-bottom: calc(var(--spacing) * 0);
@@ -2365,6 +2385,12 @@
   }
 :where(.og-root).flex-\[1_1_5rem\],:where(.og-root) .flex-\[1_1_5rem\] {
     flex: 1 1 5rem;
+  }
+:where(.og-root).flex-\[2\],:where(.og-root) .flex-\[2\] {
+    flex: 2;
+  }
+:where(.og-root).flex-\[3\],:where(.og-root) .flex-\[3\] {
+    flex: 3;
   }
 :where(.og-root).flex-shrink,:where(.og-root) .flex-shrink {
     flex-shrink: 1;
@@ -3106,6 +3132,12 @@
   }
 :where(.og-root).bg-black,:where(.og-root) .bg-black {
     background-color: var(--color-black);
+  }
+:where(.og-root).bg-black\/25,:where(.og-root) .bg-black\/25 {
+    background-color: color-mix(in srgb, #000 25%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-black) 25%, transparent);
+    }
   }
 :where(.og-root).bg-black\/45,:where(.og-root) .bg-black\/45 {
     background-color: color-mix(in srgb, #000 45%, transparent);
@@ -4859,6 +4891,11 @@
       padding-bottom: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).empty\:hidden,:where(.og-root) .empty\:hidden {
+    &:empty {
+      display: none;
+    }
+  }
 :where(.og-root).focus-within\:border-og-accent\/50,:where(.og-root) .focus-within\:border-og-accent\/50 {
     &:focus-within {
       border-color: var(--og-color-accent);
@@ -6178,6 +6215,11 @@
       }
     }
   }
+:where(.og-root).pointer-coarse\:top-13,:where(.og-root) .pointer-coarse\:top-13 {
+    @media (pointer: coarse) {
+      top: calc(var(--spacing) * 13);
+    }
+  }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {
     @media (pointer: coarse) {
       margin-inline: calc(19px * -1);
@@ -6286,6 +6328,30 @@
 :where(.og-root).pointer-coarse\:opacity-100,:where(.og-root) .pointer-coarse\:opacity-100 {
     @media (pointer: coarse) {
       opacity: 100%;
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:absolute,:where(.og-root) .pointer-coarse\:before\:absolute {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        position: absolute;
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-inset-1\.5,:where(.og-root) .pointer-coarse\:before\:-inset-1\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset: calc(var(--spacing) * -1.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:content-\[\'\'\],:where(.og-root) .pointer-coarse\:before\:content-\[\'\'\] {
+    @media (pointer: coarse) {
+      &::before {
+        --tw-content: '';
+        content: var(--tw-content);
+      }
     }
   }
 :where(.og-root).pointer-coarse\:after\:-inset-2\.5,:where(.og-root) .pointer-coarse\:after\:-inset-2\.5 {

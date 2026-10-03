@@ -430,6 +430,35 @@ describe("interaction contracts", () => {
     ).toBe(false);
   });
 
+  test("defaults old RFB attachments to view only and preserves explicit input scope", () => {
+    const attachment = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+      stream: {
+        kind: "direct_rfb",
+        url: "wss://computer.example.test/rfb",
+        protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+      },
+    };
+    for (const inputAllowed of [undefined, false, true]) {
+      const parsed = ComputerSessionAttachment.parse({
+        ...attachment,
+        stream: { ...attachment.stream, ...(inputAllowed === undefined ? {} : { inputAllowed }) },
+      });
+      expect(parsed.stream.kind).toBe("direct_rfb");
+      if (parsed.stream.kind === "direct_rfb")
+        expect(parsed.stream.inputAllowed).toBe(inputAllowed === true);
+    }
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...attachment,
+        stream: { ...attachment.stream, inputAllowed: "true" },
+      }).success,
+    ).toBe(false);
+  });
+
   test("binds controller computer commands and receipts to durable causal authority", () => {
     expect(
       ComputerActionCommand.parse({

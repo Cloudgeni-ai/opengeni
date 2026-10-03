@@ -1,8 +1,6 @@
-import { CalendarIcon, LockIcon, Trash2Icon } from "lucide-react";
+import { CalendarIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ModelTile } from "@/components/model-identity";
-import { OpenGeniCreditsTile, ProviderTile } from "@/components/models/provider-mark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -14,7 +12,6 @@ import {
   type RowListColumn,
   type RowListSort,
 } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { ReasonTooltip } from "@/components/ui/disabled-reason";
 import { SECTION_TITLE_CLASS } from "@/components/ui/section";
@@ -35,7 +32,6 @@ import {
   catalogLabels,
   modelDisplayName,
   providerDisplayName,
-  type MarkId,
   type ModelLabelSource,
 } from "./model-display";
 import { StackedBarChart, type ChartBucket, type ChartSeries } from "./usage-chart";
@@ -46,6 +42,7 @@ import {
   type UsageFilterField,
   type UsageGroupBy,
   type UsageMeasures,
+  type UsagePayerId,
   type UsageResponse,
   type UsageScope,
 } from "./usage-contract";
@@ -412,7 +409,9 @@ function FilterBar(props: {
   );
   push(
     "payer",
-    facets.payers.map((p) => ({ ids: [p], label: payerName(p) })),
+    facets.payers
+      .filter((p): p is UsagePayerId => (PAYER_IDS as readonly string[]).includes(p))
+      .map((p) => ({ ids: [p], label: payerName(p) })),
   );
   push(
     "projectId",
@@ -982,19 +981,6 @@ function sortValue(row: BreakdownRow, column: SortColumn): number | string {
   return row.measures.tokensTotal !== undefined ? -1 : row.measures.tokens[column];
 }
 
-function RowMark(props: {
-  mark: MarkId;
-  modelId?: string | undefined;
-  kind: BreakdownRow["kind"];
-}) {
-  if (props.modelId) return <ModelTile model={props.modelId} />;
-  if (props.kind === "private") return <LogoTile icon={<LockIcon />} />;
-  if (props.kind === "deleted") return <LogoTile icon={<Trash2Icon />} />;
-  if (props.mark === "opengeni") return <OpenGeniCreditsTile />;
-  if (props.mark) return <ProviderTile provider={props.mark} />;
-  return null;
-}
-
 function BreakdownPanel(props: {
   usage: UsageResponse;
   rows: readonly BreakdownRow[];
@@ -1011,11 +997,6 @@ function BreakdownPanel(props: {
   const { usage, rows } = props;
   const [sort, setSort] = useState<RowListSort>({ column: "cost", direction: "desc" });
   const groupBy = usage.groupBy;
-  const marks =
-    groupBy === "model" ||
-    groupBy === "provider" ||
-    groupBy === "payer" ||
-    rows.some((row) => row.kind === "private" || row.kind === "deleted");
   const sorted = useMemo(() => {
     const column = sort.column as SortColumn;
     const direction = sort.direction === "asc" ? 1 : -1;
@@ -1112,11 +1093,6 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
-                  leading={
-                    marks ? (
-                      <RowMark mark={row.mark} modelId={row.modelId} kind={row.kind} />
-                    ) : undefined
-                  }
                   title={row.label}
                   titleAddon={
                     row.you ? <span className="text-xs text-fg-subtle">You</span> : undefined
@@ -1327,11 +1303,8 @@ function RecentCalls(props: {
             ]}
             cells={{
               model: (
-                <span className="inline-flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-                  <ModelTile model={call.model} size="sm" />
-                  <span className="truncate">
-                    {modelDisplayName(call.provider, call.model, props.labels)}
-                  </span>
+                <span className="block min-w-0 truncate text-sm text-fg-muted">
+                  {modelDisplayName(call.provider, call.model, props.labels)}
                 </span>
               ),
               input: <Quiet>{call.tokens ? formatCount(inputTotal(call.tokens)) : "—"}</Quiet>,

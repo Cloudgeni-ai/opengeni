@@ -162,7 +162,7 @@ export type ActivityServices = ControlActivityServices &
 
 export type CodexCapacityWaitRef = {
   /** Absent only for Temporal histories written before provider-tagged waits. */
-  provider?: "codex" | "xai";
+  provider?: "codex" | "xai" | "claude";
   waiterId: string;
   generation: number;
   nextCheckAt: string;
@@ -184,7 +184,7 @@ export type ReconcileCodexCapacityWaitInput = {
   generation: number;
   cause: "timer" | "signal" | "queue" | "recovery";
   /** Absent only for Codex waits and pre-provider-tagged workflow histories. */
-  provider?: "codex" | "xai";
+  provider?: "codex" | "xai" | "claude";
 };
 
 export type ReconcileCodexCapacityWaitResult =
@@ -486,6 +486,7 @@ export type DispatchScheduledTaskRunResult =
         | "rig_version_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
+        | "atlassian_native_retired"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -602,5 +603,5 @@ export type RunAgentTurnResult =
   | ClaimedRunAgentTurnResult
   | {
       status: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };

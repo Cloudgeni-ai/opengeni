@@ -1,3 +1,13 @@
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "./claude-provider-account-authority";
+export {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
@@ -1113,6 +1123,10 @@ export function currentAgentLearningToolSelection(
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  // Keep historical policies parseable without advertising native API execution.
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
@@ -8473,7 +8487,7 @@ export const ChildWaitingCapacityPayload = z
     type: z.literal("child_waiting_capacity"),
     childSessionId: z.string().uuid(),
     childTurnId: z.string().uuid(),
-    provider: z.enum(["codex", "xai"]),
+    provider: z.enum(["codex", "xai", "claude"]),
     nextCheckAt: z.string().nullable(),
   })
   .passthrough();
@@ -10301,7 +10315,11 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .nullable()
       .default(null),
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
+    claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.default(
+      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+    ),
     xaiAuthoritySubjectId: z.string().min(1).nullable(),
+    claudeAuthoritySubjectId: z.string().min(1).nullable().default(null),
     connectionAuthoritySubjectId: z.string().min(1).nullable(),
     triggerInitiator: TurnInitiator,
     agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
@@ -13579,6 +13597,7 @@ export const SessionEventType = z.enum([
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   // Compact, attempt-fenced user-visible worker preparation checkpoints. The
   // payload phase is a closed enum and terminal events carry durationMs; no
@@ -13956,6 +13975,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.context.compaction.skipped",
     "session.context.cleared",
     "turn.recovery.requested",
+    "turn.dispatch.expired",
     "session.queue.history",
     "sandbox.box.snapshot",
     "workspace.revision.captured",
@@ -16533,6 +16553,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
       decision: z.enum(["approve", "reject"]),
       message: z.string().optional(),
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
   z.object({
@@ -16541,6 +16563,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
     payload: z.object({
       requestId: z.string().uuid(),
       response: SubmitHumanInputResponseRequest,
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
 ]);
@@ -17640,7 +17664,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("connected_subscription"),
-          provider: z.enum(["codex", "xai"]),
+          provider: z.enum(["codex", "xai", "claude"]),
         })
         .strict(),
       z
@@ -18390,6 +18414,7 @@ export function evaluateWorkspaceModelPolicy(
 
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
+export * from "./claude-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";

@@ -256,6 +256,7 @@ function rfbAttachment(targetId: string): ComputerSessionAttachment {
     targetId,
     stream: {
       kind: "direct_rfb",
+      inputAllowed: true,
       url: "wss://computer.example.test/v1/rfb",
       protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.super-secret"],
     },
@@ -2101,6 +2102,56 @@ describe("ComputerViewer", () => {
 });
 
 describe("ComputerViewer input reliability", () => {
+  test.each([undefined, false, true])(
+    "requires explicit attachment input scope for RFB (%p)",
+    async (inputAllowed) => {
+      const priorWebSocket = globalThis.WebSocket;
+      globalThis.WebSocket = class extends EventTarget {
+        static CONNECTING = 0;
+        static CLOSED = 3;
+        readyState = 0;
+        binaryType = "arraybuffer";
+        close() {
+          this.readyState = 3;
+        }
+      } as unknown as typeof WebSocket;
+      const currentSession = computerSession();
+      const currentTarget = target();
+      const client = fakeClient({
+        listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+        getComputerSession: async () => currentSession,
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        }),
+        observeComputerTarget: async () => observation(currentTarget),
+        attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+          const rfbGrantAttachment = rfbAttachment(request.targetId);
+          if (rfbGrantAttachment.stream.kind === "direct_rfb") {
+            if (inputAllowed === undefined)
+              delete (rfbGrantAttachment.stream as Partial<typeof rfbGrantAttachment.stream>)
+                .inputAllowed;
+            else rfbGrantAttachment.stream.inputAllowed = inputAllowed;
+          }
+          return rfbGrantAttachment;
+        },
+      });
+      const rendered = await renderComponent(
+        <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      );
+      try {
+        await flush(40);
+        const desktop = rendered.container.querySelector("[data-opengeni-desktop]");
+        expect(desktop).not.toBeNull();
+        expect(desktop!.hasAttribute("data-in-control")).toBe(inputAllowed === true);
+      } finally {
+        await rendered.unmount();
+        globalThis.WebSocket = priorWebSocket;
+      }
+    },
+  );
+
   test("keeps an RFB desktop view-only when native input is unavailable", async () => {
     const priorWebSocket = globalThis.WebSocket;
     // noVNC owns its socket; keep this component check on a disconnected fixture.

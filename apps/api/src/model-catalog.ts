@@ -38,6 +38,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
     model.providerId === "workspace-claude-subscription" ||
+    model.providerId === "organization-claude-subscription" ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
     model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
       ? undefined
@@ -55,7 +56,8 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     anonymousProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription"
+    model.providerId === "workspace-claude-subscription" ||
+    model.providerId === "organization-claude-subscription"
       ? { provider: model.providerId, providerLabel: model.providerLabel }
       : model.providerId === OPENROUTER_PROVIDER_ID
         ? { provider: "openrouter", providerLabel: "OpenRouter" }

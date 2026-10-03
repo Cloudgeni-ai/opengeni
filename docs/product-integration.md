@@ -823,6 +823,40 @@ may return them. If the agent needs current product state or must mutate product
 records, expose a tenant-scoped tool surface instead of copying the product's
 database into OpenGeni or embedding long-lived credentials in a prompt.
 
+### Your own tools as the signed-in user (Node)
+
+A Node backend that already mounts the session proxy gets per-user product
+tools from one option. Build the MCP endpoint with any MCP library (the
+official `@modelcontextprotocol/sdk` or `mcp-handler`), call
+`verifyToolRequest` first, and scope every tool to the returned user:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve, createSession, // unchanged
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // public HTTPS, reachable by OpenGeni
+    approvals: { ask: ["rename_post"] }, // writes wait for the user's approval
+  },
+});
+
+// app/api/mcp: verify, then run tools for that user only.
+const { user, tenant } = await verifyToolRequest(request); // throws ToolRequestError (401)
+```
+
+On every session the `createSession` hook creates, the proxy attaches the
+server as a per-session `mcpServers` entry with an HS256 bearer token for the
+user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
+explicit list). It rotates that token through `mcpCredentialUpdates` on every
+send, steer, composer submit, approval decision, and human-input answer, only
+for sessions that carry this exact server, and only when the chat's creator acts
+(tools act as the creator, also in shared chats). Tokens last 24 hours by default.
+The signing key is derived from `OPENGENI_API_KEY` (or an explicit `secret` on
+both sides; `deriveToolTokenKey()` gives non-Node verifiers that key); `aud` is
+the full tool URL, which `OPENGENI_TOOL_SERVER_URL` can supply to both sides.
+List write tools in `approvals.ask`. Members need `mcp_servers:attach`. A non-Node tool server
+verifies the same documented JWT (`docs-site/integrate/your-data.mdx`); runnable
+reference: [`examples/tool-server`](../examples/tool-server/README.md).
+
 ### Existing APIs without MCP
 
 A customer that has suitable APIs does not need to build an MCP server first.

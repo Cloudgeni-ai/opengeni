@@ -45,7 +45,14 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
     ["packages/contracts", ["./browser-storage", "./allowance-refusal", "./usage-allowances"]],
     [
       "packages/sdk",
-      ["./site", "./browser", "./allowance-refusal", "./workspace-integrations", "./session-proxy"],
+      [
+        "./site",
+        "./browser",
+        "./allowance-refusal",
+        "./workspace-integrations",
+        "./session-proxy",
+        "./tool-auth",
+      ],
     ],
     ["packages/react", ["./connect", "./sites", "./connect.css"]],
   ] as const) {

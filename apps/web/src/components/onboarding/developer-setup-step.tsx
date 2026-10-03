@@ -40,7 +40,7 @@ type KeyState =
 /**
  * "Add AI agents to my product", after the organization and model steps. The
  * signed-in owner's click on that path is what creates the organization's
- * scoped Developer setup key, once, and shows it only here. From there the
+ * full-access setup key, once, and shows it only here. From there the
  * person either lets Opengeni implement the integration in a new "Opengeni
  * setup" workspace, or uses their own coding agent: copy the key into the
  * product's server-only env, then copy a prompt that names that variable.
@@ -137,7 +137,7 @@ export function DeveloperSetupStep({
           .createVariableSet(workspaceId, {
             scope: "workspace",
             name: DEVELOPER_SETUP_VARIABLE_SET_NAME,
-            description: "The Developer setup API key from signup, for the setup chat's sandbox.",
+            description: "The full-access setup API key from signup, for the setup chat's sandbox.",
             variables: [{ name: DEVELOPER_SETUP_KEY_VARIABLE, value: token }],
           })
           .then(
@@ -284,7 +284,7 @@ export function DeveloperSetupStep({
                   <code translate="no" className="font-mono text-fg">
                     {CODING_AGENT_KEY_VARIABLE}
                   </code>
-                  . Shown only here. It expires in 30 days and can't create other keys.
+                  . Shown only here. It has full access and expires in 30 days.
                 </p>
               </li>
               <li className="grid gap-2">

@@ -126,6 +126,7 @@ describe("OpenGeniChat", () => {
         workspaceId={WORKSPACE_ID}
         sessionId={sessions[0]!.id}
         conversationProps={{
+          modelPicker: true,
           modelPickerProps: {
             groupPresentation: {
               opengeni_credits: {
@@ -236,6 +237,62 @@ describe("OpenGeniChat", () => {
       );
     } finally {
       await view.unmount();
+    }
+  });
+});
+
+describe("OpenGeniChat theme follows the host", () => {
+  test("a light host page gets a light chat blended into its background", async () => {
+    const { client } = listClient();
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    const view = await renderComponent(<OpenGeniChat client={client} workspaceId={WORKSPACE_ID} />);
+    try {
+      await flush(50);
+      const root = view.container.querySelector<HTMLElement>("[data-og-chat]")!;
+      expect(root.getAttribute("data-og-theme")).toBe("light");
+      expect(root.style.getPropertyValue("--og-color-canvas")).toBe("rgb(255 255 255)");
+    } finally {
+      await view.unmount();
+      document.body.style.backgroundColor = "";
+    }
+  });
+
+  test("an explicit theme wins and surface='theme' keeps the stock surfaces", async () => {
+    const { client } = listClient();
+    document.documentElement.classList.add("dark");
+    const view = await renderComponent(
+      <OpenGeniChat client={client} workspaceId={WORKSPACE_ID} theme="light" surface="theme" />,
+    );
+    try {
+      await flush(50);
+      const root = view.container.querySelector<HTMLElement>("[data-og-chat]")!;
+      expect(root.getAttribute("data-og-theme")).toBe("light");
+      expect(root.style.getPropertyValue("--og-color-canvas")).toBe("");
+    } finally {
+      await view.unmount();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
+  test("the nested conversation inherits the chat's resolution", async () => {
+    const { client } = listClient();
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        defaultSessionId="aaaaaaaa-0000-4000-8000-000000000001"
+      />,
+    );
+    try {
+      await flush(80);
+      const conversation = view.container.querySelector<HTMLElement>("[data-og-conversation]")!;
+      expect(conversation).not.toBeNull();
+      expect(conversation.hasAttribute("data-og-theme")).toBe(false);
+      expect(conversation.style.getPropertyValue("--og-color-canvas")).toBe("");
+    } finally {
+      await view.unmount();
+      document.body.style.backgroundColor = "";
     }
   });
 });

@@ -1,4 +1,8 @@
 import {
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+} from "@opengeni/db";
+import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -8,6 +12,11 @@ import {
   resolveFirstPartyMcpToolPolicy,
   type Settings,
 } from "@opengeni/config";
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianSource,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import type {
   AccessGrant,
   KnowledgeSourceSyncAction,
@@ -21,6 +30,7 @@ import type {
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
   XaiProviderAccountAuthoritySnapshotV1,
+  ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -202,9 +212,7 @@ export function scheduledConnectionSurfaceEligibility(
       tools.includes("editable_artifact_export_status") &&
       permissions.includes("artifacts:read") &&
       permissions.includes("artifacts:publish"),
-    atlassianEnabled:
-      tools.some((tool) => tool.startsWith("atlassian_")) &&
-      permissions.includes("connections:read"),
+    atlassianEnabled: false,
   };
 }
 
@@ -460,6 +468,18 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
+  const claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 =
+    creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          input.db,
+          input.grant.workspaceId,
+          creationInitiator.actor.sessionId,
+          creationInitiator.actor.turnId,
+        )
+      : await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(input.db, {
+          workspaceId: input.grant.workspaceId,
+          subjectId: input.grant.subjectId,
+        });
   const beforeCreateCommit =
     input.payload.runMode !== "existing_session"
       ? workspaceCustomModelCommitGuard({
@@ -488,6 +508,7 @@ export async function createValidatedScheduledTask(input: {
         createdByActor: creationInitiator.actor ?? null,
         ...(captureLinkAuthority ? { captureLinkAuthority } : {}),
         xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,
@@ -763,6 +784,8 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    if (isRetiredNativeAtlassianTask(input.task))
+      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1142,6 +1165,11 @@ export async function validatedScheduledTaskUpdate(input: {
   }
   const update: UpdateScheduledTaskInput = {};
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  if (
+    isRetiredNativeAtlassianTask(input.existing) &&
+    (input.payload.status === "active" || requestedKnowledgeSource)
+  )
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   const existingKnowledgeSource = scheduledTaskKnowledgeSource(input.existing);
   // Editing an ordinary source task's prompt/settings must not orphan its
   // connector binding. Deleting the task is the explicit source-disable path.
@@ -1669,6 +1697,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   grant: AccessGrant;
   action: KnowledgeSourceSyncAction;
 }): Promise<void> {
+  if (isRetiredNativeAtlassianSource(input.action))
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   if (input.action.initiatingSubjectId !== input.grant.subjectId) {
     throw new HTTPException(403, {
       message: "knowledge source sync must preserve the exact initiating subject",

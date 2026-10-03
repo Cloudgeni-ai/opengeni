@@ -829,7 +829,11 @@ permits numeric-PID fallback or another possibly dispatched helper Start.
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Preparation-independent
+terminal model response does not join that background work. Configured agents
+decide router visibility from authorized pending server identities without
+joining preparation. Once exposed, that router stays in the request tool prefix
+even if background discovery returns no tools; an already-settled empty catalog
+does not introduce a router. Preparation-independent
 tools such as `skill_read` execute without joining it. Other local
 function calls join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and
@@ -1150,8 +1154,20 @@ session lock and adopts the selected machine-input batch's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
-and terminal settlement must match that attempt. A typed schedule-to-start
-timeout is the only no-attempt recovery case because its activity never ran.
+and terminal settlement must match that attempt. A heartbeat timeout can occur
+before the activity commits its attempt, as can a schedule-to-start timeout.
+Recovery records a durable `turn.dispatch.expired` receipt for that exact
+attempt id under the same session lock used by claim. Its server-owned
+`producer_id = opengeni:dispatch-retired:<attemptId>`, `producer_seq = 1`, and
+null client-event id keep it separate from caller-controlled operation keys.
+Claim requires the exact scope, event type and strict attempt/timeout payload;
+duplicate recovery validates and reuses the same receipt without advancing the
+cursor twice. A conflicting server receipt fails rather than forging expiry.
+If timeout wins, a late activity cannot create an owner or consume pending
+input; a new dispatch may
+claim the preserved work. If claim wins, recovery closes that exact attempt
+through the existing generation and physical-writer fences. Repeated timeout
+recovery is idempotent, and Temporal settlement alone never revokes an owner.
 
 Raw SDK tool call, result, and approval items are normalized to protocol JSON
 before they enter the attempt-fenced `session_pending_tool_calls` receipt
@@ -2589,7 +2605,7 @@ runs for it and the box would stay up until the provider deadline kills it
 uncaptured. One rule contains such commands, independent of command health:
 running, still draining output, stopping, unobservable, or repeatedly failing
 observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migration 0547,
+`list_command_containment_candidates(limit, idle window)` from migrations 0547/0599,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -2602,10 +2618,10 @@ workspace control fence and the process -> admission -> lease row locks:
 - no holder other than those process holders, and no unsettled admission other
   than their parent admissions;
 - in every session of the sandbox group and every session owning a process on
-  the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
+  the lease: no open turn (`queued`, `running`, `requires_action`,
   `waiting_capacity`, which includes a pending approval or human-input request),
-  no non-closed attempt, no pending quiescence (unsettled interruption or
-  undrained attempt writer). A `wait_for_input` that has not been superseded,
+  no unpaused recovering turn, no non-closed attempt, no pending quiescence
+  (unsettled interruption or undrained attempt writer). A `wait_for_input` that has not been superseded,
   and unclaimed machine input that will start a turn (pending immediate system
   updates other than command results; child lifecycle notices only with an
   active goal), are idle-clock facts: the window runs from the wait's deadline
@@ -2613,6 +2629,11 @@ workspace control fence and the process -> admission -> lease row locks:
   running, since the agent registered it for background work it is
   deliberately waiting on, while input or a timeout settlement that a paused
   session can never deliver cannot pin the box until the provider deadline;
+- a recovering turn under an effective session, ancestor or workspace pause
+  does not pin the box. The inventory admits it for inspection; exact enrollment
+  resolves current pause and resume overrides under the workspace control fence.
+  The existing drain saves the workspace before stopping commands. The paused
+  turn, history and control state survive for a later cold restore;
 - the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
   (default 30 minutes; it must exceed the idle grace and, when explicit, stay
   below the rotation lead, and it must leave the reaper period plus the drain
@@ -3482,7 +3503,15 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. A definite path miss answering a read-only first routed sandbox
+critical path. The historical `model_sdk_serialization` phase is Codex-only:
+it runs from the worker checkpoint immediately before `runtime.runStream` to
+the Codex `transport_entry` callback. It includes SDK runner/tool/input
+preparation, not just JSON serialization CPU time. When reported,
+`model_prepare_runner_before_mcp_tools` spans the runtime observer's start to
+the beginning of its first MCP tools snapshot; waiting for deferred catalog
+preparation inside tool resolution therefore appears in this runner gap.
+These spans overlap model-request preparation and must not be added to it.
+A definite path miss answering a read-only first routed sandbox
 operation (usually repository skill discovery listing an absent
 `.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
 completed; the per-operation sandbox metric keeps its separate `not_found`

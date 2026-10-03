@@ -1,3 +1,4 @@
+import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
@@ -1705,3 +1706,29 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
+
+/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
+export function classifyClaudeCredentialFailure(
+  error: unknown,
+): (XaiCredentialFailure & { requestId?: string }) | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired)
+      return { kind: "auth", cooldownMs: null };
+    if (current instanceof AnthropicRequestError && current.status === 401)
+      return {
+        kind: "auth",
+        cooldownMs: null,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    if (current instanceof AnthropicRequestError && current.status === 429)
+      return {
+        kind: "rate_limit",
+        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    current = current.cause;
+  }
+  return null;
+}

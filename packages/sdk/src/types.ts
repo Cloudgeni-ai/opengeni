@@ -2085,6 +2085,7 @@ export const SESSION_EVENT_TYPES = [
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   "turn.startup.phase.started",
   "turn.startup.phase.completed",
@@ -3562,7 +3563,7 @@ export type ModelCapabilitiesV1 = {
 
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" | "xai" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
 
@@ -4249,7 +4250,8 @@ export type ClientConfig = {
   /**
    * `false` when a host's session proxy fixes the model policy
    * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
-   * model picker. OpenGeni itself omits it.
+   * model picker; `true` when the host explicitly offers end users model
+   * choice (embedded stock UIs then show the picker). OpenGeni itself omits it.
    */
   modelSelection?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
@@ -8426,6 +8428,8 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 
@@ -8435,6 +8439,8 @@ export type UserHumanInputResponseEventInput = {
   payload: {
     requestId: string;
     response: SubmitHumanInputResponseRequest;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 

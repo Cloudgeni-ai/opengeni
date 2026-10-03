@@ -223,7 +223,11 @@ export class LazyToolRuntime {
   }
 
   async prepareConditionalRouter(): Promise<void> {
-    if (this.conditionalRouter) await this.ensurePrepared();
+    // Router visibility already accounts for authorized pending server IDs.
+    // Joining their catalog here would put background MCP setup back on the
+    // first-request path for configured agents. Tool demand still joins the
+    // exact preparation fence; settled empty catalogs keep the router hidden.
+    if (this.conditionalRouter && !this.hasPendingPreparation()) await this.ensurePrepared();
   }
 
   visibleControlTools(): Tool[] {

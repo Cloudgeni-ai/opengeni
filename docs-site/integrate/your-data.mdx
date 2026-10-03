@@ -6,14 +6,89 @@ icon: "database"
 
 The agent reaches your product through tools you expose. OpenGeni calls them on the agent's behalf; your API authorizes every call. There are two main ways to do it:
 
-| Use                        | When                                                                                                                       |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **Per-session MCP server** | The agent should act as the signed-in user, with a short-lived token you mint for each session                             |
-| **OpenAPI Integration**    | You already have an HTTP API. Describe the operations the agent may use; OpenGeni compiles them into tools for a workspace |
+| Use                                      | When                                                                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Your tools with the proxy (Node)**     | Your backend mounts the session proxy. One `toolServer` option attaches your MCP server as the signed-in user              |
+| **Per-session MCP server (any backend)** | The agent should act as the signed-in user, with a short-lived token you mint and rotate yourself                          |
+| **OpenAPI Integration**                  | You already have an HTTP API. Describe the operations the agent may use; OpenGeni compiles them into tools for a workspace |
 
-Either way, the tool must also be **selected** in the session's `tools`. Nothing reaches the agent unless you select it.
+Nothing reaches the agent unless the session selects it. The proxy's `toolServer` and a per-session `mcpServers` entry select themselves; workspace integrations need `tools`.
 
-## Per-session MCP server with a per-user token
+## Your tools with the proxy (Node)
+
+Build an MCP endpoint with any MCP library and let the session proxy handle the rest: it attaches the endpoint to every chat the user starts, mints a short-lived token for the user your `resolve` hook authenticated, and refreshes it on every message, approval, and answer. You verify it in one call.
+
+<Steps>
+  <Step title="Let users attach the tool server">
+    Add `mcp_servers:attach` to the permissions you grant during [onboarding](/embed-manually).
+  </Step>
+  <Step title="Add toolServer to the proxy">
+    ```ts
+    createSessionProxyHandler(og, {
+      resolve, // unchanged: the token carries the user and tenant it returns
+      createSession,
+      toolServer: {
+        url: "https://app.example.com/api/mcp", // public HTTPS: OpenGeni calls it
+        approvals: { ask: ["rename_post"] }, // list your write tools: the user approves each call
+      },
+    });
+    ```
+
+    Or set `OPENGENI_TOOL_SERVER_URL` once and omit `url`: both the proxy and `verifyToolRequest` read it. Tools not listed in `approvals.ask` run without asking (`ask: true` gates every tool). Tokens last 24 hours and refresh on every message, approval, and answer. Tools act as the user who started the chat, also in a shared chat. The token is signed with a key derived from `OPENGENI_API_KEY`; nothing else to configure.
+
+  </Step>
+  <Step title="Serve your tools, scoped to the verified user">
+    With the official MCP SDK (`bun add @modelcontextprotocol/sdk zod`):
+
+    ```ts
+    import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+    import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+    import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+    import { z } from "zod";
+
+    export async function mcp(request: Request): Promise<Response> {
+      let user: string;
+      try {
+        ({ user } = await verifyToolRequest(request)); // checks aud = OPENGENI_TOOL_SERVER_URL; or pass { audience }
+      } catch (error) {
+        if (error instanceof ToolRequestError) return error.toResponse(); // 401
+        throw error;
+      }
+      const server = new McpServer({ name: "acme", version: "1.0.0" });
+      server.registerTool("search_posts", { description: "Search the user's posts", inputSchema: { query: z.string() } },
+        async ({ query }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.search(user, query)) }] }));
+      server.registerTool("rename_post", { description: "Rename one of the user's posts", inputSchema: { id: z.string(), title: z.string() } },
+        async ({ id, title }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.rename(user, id, title)) }] }));
+      const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+      await server.connect(transport);
+      return await transport.handleRequest(request);
+    }
+    ```
+
+    Mount it next to the proxy: in Next.js, `export const POST = mcp; export const GET = mcp;` in `app/api/mcp/route.ts`; in Express, `app.all("/api/mcp", toNodeMiddleware(mcp))` from `@opengeni/sdk/express`; in Hono, `app.all("/api/mcp", toHonoHandler(mcp))`. With `mcp-handler` or another library, call `verifyToolRequest(request)` before it handles the request.
+
+    Scope every query to the verified `user` (and `tenant`). A record id the model sends is only a lookup key: `rename_post` must refuse a post that user does not own.
+
+  </Step>
+</Steps>
+
+A runnable Express version, with a cloudflared tunnel and an end-to-end script, is in [`examples/tool-server`](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/tool-server).
+
+<Accordion title="How the token works (verify it from Python, Rails, Go...)">
+  It is a standard HS256 JWT in `Authorization: Bearer`. Claims: `iss` `"opengeni-session-proxy"`, `aud` the exact tool server URL, `sub` the user id `resolve` returned, optional `tenant`, `workspace_id`, `source`, `iat`, `exp` (24 hours by default, `ttlSeconds` to change). Print the signing key once on the Node side with `await deriveToolTokenKey()` from `@opengeni/sdk/tool-auth` and store it as `OPENGENI_TOOL_TOKEN_KEY` in the other service; never give it the organization key.
+
+```python
+key = bytes.fromhex(os.environ["OPENGENI_TOOL_TOKEN_KEY"])
+claims = jwt.decode(token, key, algorithms=["HS256"], issuer="opengeni-session-proxy",
+                    audience="https://app.example.com/api/mcp")  # PyJWT
+user, tenant = claims["sub"], claims.get("tenant")
+```
+
+</Accordion>
+
+## Per-session MCP server with a per-user token (any backend)
+
+Without the Node proxy (for example a [Django or Rails proxy](/integrate/proxy-from-any-backend)), attach the server and rotate its token yourself.
 
 <Steps>
   <Step title="Allow users to attach an MCP server">
@@ -101,7 +176,7 @@ Integrations belong to a workspace, so every session in that workspace can selec
 
 ## Reachability
 
-MCP servers, OpenAPI document URLs, and the API an integration calls must be public HTTPS URLs the OpenGeni deployment can reach. You can also pass the OpenAPI document inline (`kind: "openapi_document"`); the API it describes must still be reachable. For local development, expose your server with a tunnel such as `cloudflared tunnel --url http://localhost:4101` or `ngrok http 4101`.
+MCP servers, OpenAPI document URLs, and the API an integration calls must be public HTTPS URLs the OpenGeni deployment can reach. You can also pass the OpenAPI document inline (`kind: "openapi_document"`); the API it describes must still be reachable. For local development, expose your server with a tunnel and use its URL as `toolServer.url`: `cloudflared tunnel --url http://localhost:4101` prints a `https://<name>.trycloudflare.com` address (or use `ngrok http 4101`).
 
 ## Keep the tool surface small
 

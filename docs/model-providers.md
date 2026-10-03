@@ -1265,12 +1265,88 @@ deployment uses Data Zone or another SKU whose rates differ from the built-in
 Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
+Insights comparisons use `configuredModelListPricingSchedules` and
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
+Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+project reviewed upstream rates
+onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
+product routes without adding comparison-only prices to debit authority or
+changing frozen execution-definition hashes, including bare built-in models.
+New bare rates require a configured model on the official OpenAI API route;
+custom proxies and Azure do not inherit them by matching a model name.
+Registry prices and explicit
+product-ID overrides still win. External metering never becomes a credit debit.
+
+Forward fact writers may use `calculateModelListUsageCostSnapshot` with
+`priceContextKnown: true` only after establishing the request's price provenance
+(including geography and service tier). Its nullable `listByClassMicros`
+contains integer `uncachedInput`, `cacheRead`, `cacheWrite`, and `output` costs
+summing to **upstream** `providerCostMicros`, before markup. The separate
+`creditCostMicros` remains an equivalent-credit comparison, not charged-class
+attribution. Existing debit/totals-only helpers keep their result shapes.
+
+Class snapshots require observed input/output/read/write counters on every
+provider request. Positive native Claude writes additionally require preserved
+`inputTokensDetails.cache_write_tokens_5m` and `cache_write_tokens_1h` counters
+whose sum equals `cache_write_tokens`. Reviewed native default rates support
+mixed TTLs; a single explicit override supports only its declared TTL, not an
+inferred second price. Unknown counters, TTL, dedicated positive-class prices,
+or latency modifiers produce a null split. Fractional latency scaling uses
+deterministic largest-remainder rounding to preserve the total and sets
+`listByClassApprox: true`. Gateway-reported scalar cost has no authoritative
+class attribution and must retain a null split in the writer. Never run this
+forward helper to reprice historical facts lacking captured class costs.
+
+For explicitly approximate historical attribution, use
+`allocateRecordedModelListCostByClass(settings, model, usage, recordedProviderCostMicros)`.
+It returns a nullable four-class split and `listByClassApprox: true` for every
+eligible allocation, including known zero. The caller supplies the stored
+`estimated_provider_cost_micros`; the helper never recalculates that total,
+`listMicros`, priced-call coverage, credits, or actual charges. Current reviewed
+class rates are **weights only**, multiplied by observed class tokens without
+per-class rounding. Integer-only BigInt largest-remainder allocation preserves
+the supplied total exactly; ties resolve in uncached-input/read/write/output order.
+
+Every input/output/read/write counter must be observed. Missing/invalid counters,
+unpriced models, or unavailable positive-class rates keep the split null, even
+when the recorded total is zero. Known zero/free costs can return zero classes;
+zero total weights cannot explain a positive stored cost. Per-request input tiers
+are used when retained; aggregate-only historical input tiers remain approximate.
+Historical cache-write weights use the selected schedule's single TTL rate, not
+an assertion about the original request's TTL. Reasoning remains inside observed
+output, never an extra cost class. Rollups must sum only eligible class coverage
+and must not present that covered portion as all priced usage. This allocation
+does not relax the forward snapshot's provenance or TTL-knownness requirements.
+
+The added Standard rates were reviewed on 2026-10-03 against
+[OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[xAI model pricing](https://docs.x.ai/developers/models/grok-4.7),
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), and
+the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
+[OpenRouter](https://openrouter.ai/api/v1/models) catalogs. GPT-6.1 Sol uses a
+5% cache-read rate and the exclusive 272K long-context boundary; native Grok
+4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
+Gateway's separate greater-than-200K schedule must not replace the native one.
+The reviewed native Claude models have no
+long-context premium. Claude 1-hour native cache writes use 2x base input,
+rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
+has an explicit zero list price, not an unknown price.
+
+Unknown future models, alternate/custom endpoints, unpinned Gateway custom
+routes, and Azure SKU-specific rates are not inferred from similar names. Use
+an exact provider-reported cost or an explicit reviewed operator price for
+these cases. This audit is bounded to the supported code catalog and reviewed
+native profiles; it does not read or mutate a deployed catalog or reprice old
+usage facts.
+
 ### Price audit (llm-prices canary)
 
-OpenGeni debit authority is the hand-maintained
-`defaultModelPricing` map in `packages/config/src/index.ts` (plus registry /
-`OPENGENI_MODEL_PRICING_JSON` overrides). Do not generate that map from an
-external feed.
+OpenGeni debit authority is the unchanged hand-maintained `defaultModelPricing`
+map in `packages/config/src/index.ts` (plus registry /
+`OPENGENI_MODEL_PRICING_JSON` overrides). New comparison-only rates live in
+`reviewedModelListPricing` and reach callers only through provider-gated list
+resolution. The canary inspects both tables without promoting comparison rates
+to debit authority. Do not generate either map from an external feed.
 
 When you add a billed model or want to verify list rates are still current:
 
@@ -1279,8 +1355,8 @@ bun run check:model-pricing
 ```
 
 That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
-compares Standard short- and long-context rates for the allow-listed GPT-5.6
-product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+compares Standard short- and long-context rates for the allow-listed GPT-6.1,
+GPT-6, and GPT-5.6 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
 Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific
@@ -1405,7 +1481,7 @@ are disabled, and subscription setup is hidden from model settings. Stored crede
 are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
 
 Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
-:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under
 `workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
 `organization-anthropic/` and `organization-claude-subscription/`. Custom models use
@@ -1549,18 +1625,34 @@ provider readings when available.
 Sign-in attempts reuse encrypted, expiring OAuth pending states. They bind the exact
 human, browser session, scope and current connection generation. The one-use code
 is spent once; a committed connection has a secret-free, generation-fenced replay
-receipt. Authority is freshly checked after exchange, before native connection writes.
+receipt. Authority is freshly checked after exchange, before individual account writes.
 Organization attempts require organization administration and are not readable from
 a shared workspace's runtime scope.
 
-`packages/db/src/claude-subscription-tokens.ts` serializes renewal across replicas,
+`packages/db/src/claude-subscription-account-tokens.ts` resolves the selected account;
+shared subscription repositories serialize renewal across replicas,
 re-reads the captured generation and writes only encrypted token material. Renewal
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
 dispatch, including title and compaction requests; replacement credentials are never
 lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
-the previously captured token is never used as a fallback. Claude currently has
-one connection per scope and no Codex-style account pool or quota failover.
+the previously captured token is never used as a fallback. Claude supports multiple independent accounts in workspace, organization and
+explicit private user pools. Account rows, naming, primary selection, rotation
+settings and access policy reuse the Codex/SuperGrok settings experience. Browser
+sign-in discovers the provider account UUID, email and plan; setup tokens remain
+inference-only and do not expose profile details. Replacing a token targets one
+exact account generation and preserves its access policy.
+
+The worker reuses SuperGrok's scoped account selection, credential leases and
+durable same-turn capacity wait/resume protocol. Quotas and cooldowns apply to
+the exact upstream model: an Opus restriction need not block Sonnet. A manual
+pin or primary-only pool never silently borrows another subscription. Typed
+401 authentication failures permit one serialized rejected-token renewal per
+account generation on the accepted turn; persistent authentication failures
+require reconnect. Typed 429 refusals record the exact response/token/model
+and wait or select another permitted account. Permission, suspension, safety,
+validation and ambiguous transport errors never rotate the pool. Tool results
+and conversation history remain on the same accepted logical turn.
 Catalog loading is offline, so Claude renewal failures do not
 block turns using another provider. Invalid refresh grants require sign-in again;
 transient failures retain credentials and existing usage readings.

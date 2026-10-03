@@ -1,3 +1,8 @@
+import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+import {
+  ATLASSIAN_NATIVE_RETIRED_REASON,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -348,6 +353,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
+        if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            ATLASSIAN_NATIVE_RETIRED_REASON,
+          );
+          return scheduledRunTerminalResult(ATLASSIAN_NATIVE_RETIRED_REASON);
+        }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
           return await replayScheduledTaskDispatch({
@@ -416,6 +430,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
+      if (isRetiredNativeAtlassianTask(task))
+        return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
         return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
       }
@@ -931,6 +947,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       const taskXaiProviderAccountAuthoritySnapshot =
         await getScheduledTaskXaiProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
+      const taskClaudeProviderAccountAuthoritySnapshot =
+        await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -971,7 +989,43 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           "scheduled authority classes have different causal humans",
         );
       }
-      const causalHumanSubjectId = taskAuthoritySubjectId ?? xaiAuthoritySubjectId;
+      const claudeAuthoritySubjectId =
+        taskClaudeProviderAccountAuthoritySnapshot.scope === "user" && task.ownerSubjectId
+          ? task.ownerSubjectId
+          : null;
+      if (
+        taskClaudeProviderAccountAuthoritySnapshot.scope === "user" &&
+        !claudeAuthoritySubjectId
+      ) {
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled user-scoped Claude authority has no causal human",
+        );
+      }
+      if (
+        claudeAuthoritySubjectId &&
+        taskAuthoritySubjectId &&
+        claudeAuthoritySubjectId !== taskAuthoritySubjectId
+      ) {
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled authority classes have different causal humans",
+        );
+      }
+      const causalHumanSubjectId =
+        taskAuthoritySubjectId ?? xaiAuthoritySubjectId ?? claudeAuthoritySubjectId;
+      if (
+        xaiAuthoritySubjectId &&
+        claudeAuthoritySubjectId &&
+        xaiAuthoritySubjectId !== claudeAuthoritySubjectId
+      )
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "scheduled subscription pools have different causal humans",
+        );
       if (
         task.agentConfig.knowledgeSource &&
         causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
@@ -1119,7 +1173,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           causalHumanSubjectId,
           causalHumanAuthority: taskRevisionAuthority,
           xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+          claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
           xaiAuthoritySubjectId,
+          claudeAuthoritySubjectId,
           connectionAuthoritySubjectId: taskConnectionAuthoritySubjectId,
           triggerInitiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
           agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey ?? null,
@@ -1347,6 +1403,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 rigVersionId: frozenRigVersionId,
                 personalConnectionDelegations: [],
                 initialXaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+                initialClaudeProviderAccountAuthoritySnapshot:
+                  taskClaudeProviderAccountAuthoritySnapshot,
                 maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
                 frozenNestedAgentDepthPolicy: {
                   effectiveMaxNestedAgentDepth:
@@ -1640,10 +1698,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   task.createdBy.kind === "subject"
                     ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
                     : {}),
+                  ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+                claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -1771,10 +1831,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   task.createdBy.kind === "subject"
                     ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
                     : {}),
+                  ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
                 mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
+                claudeProviderAccountAuthoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
               async (tx, wakeEventId, _updateId, rejectionReason) => {
@@ -2071,6 +2133,8 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
+    return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }
@@ -2400,6 +2464,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       personalConnectionDelegations: [],
       initialXaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
+      initialClaudeProviderAccountAuthoritySnapshot:
+        input.acceptedExecution.claudeProviderAccountAuthoritySnapshot,
       maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
       frozenNestedAgentDepthPolicy: {
         effectiveMaxNestedAgentDepth:
@@ -2661,11 +2727,16 @@ async function recoverBoundScheduledTaskDispatch(input: {
         ...(input.acceptedExecution.xaiAuthoritySubjectId
           ? { xaiAuthoritySubjectId: input.acceptedExecution.xaiAuthoritySubjectId }
           : {}),
+        ...(input.acceptedExecution.claudeAuthoritySubjectId
+          ? { claudeAuthoritySubjectId: input.acceptedExecution.claudeAuthoritySubjectId }
+          : {}),
       },
       personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
       mcpAccountBindings: input.acceptedExecution.mcpAccountBindings ?? null,
       xaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
+      claudeProviderAccountAuthoritySnapshot:
+        input.acceptedExecution.claudeProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,
     },
     async (tx, wakeEventId, _updateId, rejectionReason) => {

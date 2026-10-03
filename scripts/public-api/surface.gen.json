@@ -331,6 +331,99 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/claude/accounts",
+      "sdk": [
+        "OpenGeniClient.listOrganizationClaudeSubscriptionAccounts"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateOrganizationClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setOrganizationClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshOrganizationClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectOrganizationClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/claude/settings",
+      "sdk": [
+        "OpenGeniClient.setOrganizationClaudeSubscriptionRotationSettings"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionPoolSettings"
+      ]
+    },
+    {
       "method": "DELETE",
       "path": "/v1/organizations/:organizationId/credential-provider",
       "sdk": [
@@ -624,7 +717,9 @@
       "sdk": [
         "OpenGeniClient.startOrganizationClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -2097,6 +2192,103 @@
       ],
       "response": [
         "Channel"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts",
+      "sdk": [
+        "OpenGeniClient.listClaudeSubscriptionAccounts",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccountsResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.disconnectClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId",
+      "sdk": [
+        "OpenGeniClient.renameClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionAccount"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/activate",
+      "sdk": [
+        "OpenGeniClient.activateClaudeSubscriptionAccount"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/allocator",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionAccountAllocator"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage",
+      "sdk": [
+        "OpenGeniClient.getClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/:accountId/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshClaudeSubscriptionAccountUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/claude/accounts/setup-token",
+      "sdk": [
+        "OpenGeniClient.connectClaudeSubscriptionSetupToken"
+      ],
+      "request": [
+        "ClaudeSubscriptionSetupTokenRequest"
+      ],
+      "response": [
+        "ClaudeSubscriptionOAuthCompleteResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/claude/settings",
+      "sdk": [
+        "OpenGeniClient.setClaudeSubscriptionRotationSettings",
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": [
+        "SubscriptionPoolSettings"
       ]
     },
     {
@@ -4749,7 +4941,9 @@
       "sdk": [
         "OpenGeniClient.startWorkspaceClaudeSubscriptionOAuth"
       ],
-      "request": [],
+      "request": [
+        "ClaudeSubscriptionOAuthStartRequest"
+      ],
       "response": [
         "ClaudeSubscriptionOAuthStartResponse"
       ]
@@ -7756,6 +7950,7 @@
       "turn.cancelled",
       "turn.capacity_waiting",
       "turn.completed",
+      "turn.dispatch.expired",
       "turn.event.rejected_late",
       "turn.failed",
       "turn.queued",
@@ -10123,6 +10318,44 @@
         "$.workspaceId": "string!"
       }
     },
+    "ClaudeSubscriptionAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.active": "boolean!",
+        "$.allocatorEnabled": "boolean!",
+        "$.allocatorUpdatedAt": "string! null",
+        "$.allocatorVersion": "integer!",
+        "$.email": "string! null",
+        "$.expiresAt": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.lastError": "string! null",
+        "$.lastRefreshAt": "string! null",
+        "$.plan": "string! null",
+        "$.scope": "ref(VariableSetScope)!",
+        "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
+        "$.subject": "string!",
+        "$.usage": "ref(ClaudeSubscriptionUsage)?",
+        "$.version": "integer!"
+      }
+    },
+    "ClaudeSubscriptionAccountsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ClaudeSubscriptionAccount)",
+        "$.activeAccountId": "string! null",
+        "$.organizationId": "string!",
+        "$.settings": "ref(SubscriptionPoolSettings)!",
+        "$.source": "ref(VariableSetScope)!"
+      }
+    },
     "ClaudeSubscriptionOAuthCompleteRequest": {
       "io": [
         "input"
@@ -10139,8 +10372,20 @@
       ],
       "shape": {
         "$": "object",
+        "$.accountId": "string!",
         "$.connected": "const!=[\"true\"]",
-        "$.credentialVersion": "integer!"
+        "$.credentialVersion": "integer!",
+        "$.scope": "ref(VariableSetScope)!"
+      }
+    },
+    "ClaudeSubscriptionOAuthStartRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
     "ClaudeSubscriptionOAuthStartResponse": {
@@ -10152,6 +10397,19 @@
         "$.attemptId": "string!",
         "$.authorizationUrl": "string!",
         "$.expiresAt": "string!"
+      }
+    },
+    "ClaudeSubscriptionSetupTokenRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedCredentialVersion": "integer?",
+        "$.label": "string? null",
+        "$.reconnectAccountId": "string?",
+        "$.scope": "enum?=[\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.token": "string!"
       }
     },
     "ClaudeSubscriptionUsage": {
@@ -10934,6 +11192,7 @@
         "$|kind=direct_websocket.protocols[]": "string",
         "$|kind=direct_websocket.url": "string!",
         "$|kind=direct_rfb": "object",
+        "$|kind=direct_rfb.inputAllowed": "boolean!",
         "$|kind=direct_rfb.kind": "const!=[\"\\\"direct_rfb\\\"\"]",
         "$|kind=direct_rfb.protocols": "array!",
         "$|kind=direct_rfb.protocols[]": "string",
@@ -16723,7 +16982,7 @@
         "$|kind=deployment.mechanism": "enum!=[\"\\\"api_key\\\"\",\"\\\"azure_ad_bearer\\\"\"]",
         "$|kind=connected_subscription": "object",
         "$|kind=connected_subscription.kind": "const!=[\"\\\"connected_subscription\\\"\"]",
-        "$|kind=connected_subscription.provider": "enum!=[\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
+        "$|kind=connected_subscription.provider": "enum!=[\"\\\"claude\\\"\",\"\\\"codex\\\"\",\"\\\"xai\\\"\"]",
         "$|kind=workspace_connection": "object",
         "$|kind=workspace_connection.kind": "const!=[\"\\\"workspace_connection\\\"\"]",
         "$|kind=workspace_connection.mechanism": "const!=[\"\\\"api_key\\\"\"]",
@@ -20202,7 +20461,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.dispatch.expired\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -21662,6 +21921,17 @@
         "$.replay": "boolean!",
         "$.routing": "ref(SessionPromptRouting)!",
         "$.turn": "ref(SessionTurn)!"
+      }
+    },
+    "SubscriptionPoolSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.activeCredentialId": "string! null",
+        "$.rotationEnabled": "boolean!",
+        "$.rotationStrategy": "const!=[\"\\\"sharded\\\"\"]"
       }
     },
     "SupersedePreferenceRegistryRequest": {
@@ -25139,9 +25409,12 @@
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
       "Chats": "type",
+      "ClaudeSubscriptionAccount": "value",
+      "ClaudeSubscriptionAccountsResponse": "value",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
+      "ClaudeSubscriptionSetupTokenRequest": "value",
       "ClaudeSubscriptionUsage": "type",
       "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
@@ -26117,6 +26390,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
+      "SessionProxyToolServer": "type",
       "SessionQueueMutationResponse": "type",
       "SessionQueueSnapshot": "type",
       "SessionRealtimeEndReason": "type",
@@ -26212,6 +26486,8 @@
       "SubmitComposerDraftResponse": "type",
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
+      "SubscriptionAccountSummary": "value",
+      "SubscriptionPoolSettings": "value",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",
       "SuperGrokAccountsResponse": "type",
@@ -26248,6 +26524,9 @@
       "ToolGatewayIdentity": "type",
       "ToolGatewayResult": "type",
       "ToolRef": "type",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
       "TranscribeAudioInput": "type",
       "TranscribeAudioResponse": "type",
       "TranscriptionAdapter": "type",
@@ -26350,6 +26629,8 @@
       "VerifyPersonalGitHubRepositorySelectionsRequest": "type",
       "VerifyPublicGitHubRepositoryRefRequest": "type",
       "VerifyPublicGitHubRepositoryRefResponse": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type",
       "verifyWebhookEvent": "value",
       "VideoArtifactPlaybackSource": "type",
       "VideoGenerationAspectRatio": "type",
@@ -27322,7 +27603,8 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
-      "SessionProxySiteHtmlTooLargeError": "value"
+      "SessionProxySiteHtmlTooLargeError": "value",
+      "SessionProxyToolServer": "type"
     },
     "@opengeni/sdk/site": {
       "createOpenGeniSiteClient": "value",
@@ -27370,6 +27652,20 @@
       "WorkspaceIdOptions": "type",
       "WorkspaceIdResolverOptions": "type",
       "WorkspaceIdTarget": "type"
+    },
+    "@opengeni/sdk/tool-auth": {
+      "deriveToolTokenKey": "value",
+      "mintToolToken": "value",
+      "resolveToolTokenSecret": "value",
+      "TOOL_SERVER_URL_ENV": "value",
+      "TOOL_TOKEN_DEFAULT_TTL_SECONDS": "value",
+      "TOOL_TOKEN_ISSUER": "value",
+      "TOOL_TOKEN_KEY_LABEL": "value",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type"
     },
     "@opengeni/sdk/usage-allowances": {
       "AllowanceExhaustedRefusal": "type",
@@ -27859,6 +28155,7 @@
       "SessionConnectionRequest": "value",
       "SessionConnectionRequestProps": "type",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionDisplayTitle": "value",
       "SessionEventsConnectionState": "type",
@@ -28359,7 +28656,9 @@
       "ComposerModelPickerProps": "type",
       "ComposerPauseButtonProps": "type",
       "ComposerRootProps": "type",
+      "ComposerRunControl": "type",
       "ComposerSendButtonProps": "type",
+      "ComposerStopButtonProps": "type",
       "ComposerSubmitBlocker": "type",
       "ComposerSubmitMode": "type",
       "ComposerSurfaceProps": "type",
@@ -28398,6 +28697,7 @@
       "Root": "value",
       "SendButton": "value",
       "Status": "value",
+      "StopButton": "value",
       "Surface": "value",
       "useChatComposer": "value",
       "useChatComposerController": "value",
@@ -28856,6 +29156,7 @@
       "SessionCommands": "value",
       "SessionCommandsPanel": "value",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionLinkResolver": "value",
       "SessionList": "value",
@@ -29229,9 +29530,11 @@
       "acknowledgeStream",
       "actInBrowser",
       "actInComputer",
+      "activateClaudeSubscriptionAccount",
       "activateCodexAccount",
       "activateCodexRealtimeConnection",
       "activateCompanyProfileRevision",
+      "activateOrganizationClaudeSubscriptionAccount",
       "activateOrganizationSuperGrokAccount",
       "activatePreferenceRegistryRevision",
       "activateRigVersion",
@@ -29280,6 +29583,8 @@
       "completeWorkspaceClaudeSubscriptionOAuth",
       "configureIntegrationFacet",
       "configureOrganizationRecoveryPolicy",
+      "connectClaudeSubscriptionSetupToken",
+      "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
       "controlSession",
       "correctPreferenceRegistry",
@@ -29358,8 +29663,10 @@
       "disableCapability",
       "disableOrganizationRecoveryPolicy",
       "discardTranscriptionRecording",
+      "disconnectClaudeSubscriptionAccount",
       "disconnectCodexAccount",
       "disconnectGoogleDriveConnection",
+      "disconnectOrganizationClaudeSubscriptionAccount",
       "disconnectOrganizationSuperGrokAccount",
       "disconnectPersonalGitHub",
       "disconnectSocialConnection",
@@ -29402,6 +29709,7 @@
       "getBrowserIdentity",
       "getBrowserSession",
       "getBrowserTargetState",
+      "getClaudeSubscriptionAccountUsage",
       "getClientConfig",
       "getCompanyProfileAgentPolicy",
       "getCompanyProfileRevision",
@@ -29428,6 +29736,7 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationClaudeSubscriptionAccountUsage",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationModelUsage",
@@ -29511,6 +29820,7 @@
       "listBrowserTargets",
       "listCapabilities",
       "listChannels",
+      "listClaudeSubscriptionAccounts",
       "listCodexAccounts",
       "listCompanyProfile",
       "listComputerSessions",
@@ -29539,6 +29849,7 @@
       "listOpenGeniSlackReactionChannels",
       "listOrganizationAdministrationMembers",
       "listOrganizationApiKeys",
+      "listOrganizationClaudeSubscriptionAccounts",
       "listOrganizationInvitations",
       "listOrganizationInvitationsForOrganization",
       "listOrganizationMembers",
@@ -29635,7 +29946,9 @@
       "reconnectPersonalGitHub",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
+      "refreshClaudeSubscriptionAccountUsage",
       "refreshCodexUsage",
+      "refreshOrganizationClaudeSubscriptionAccountUsage",
       "refreshOrganizationClaudeSubscriptionUsage",
       "refreshScheduledTaskAccess",
       "refreshWorkspaceClaudeSubscriptionUsage",
@@ -29646,7 +29959,9 @@
       "removeIntegrationFacet",
       "removeWorkspaceMember",
       "removeWorkspaceSkill",
+      "renameClaudeSubscriptionAccount",
       "renameCodexAccount",
+      "renameOrganizationClaudeSubscriptionAccount",
       "renameOrganizationSuperGrokAccount",
       "renameSuperGrokAccount",
       "reorderChannels",
@@ -29691,9 +30006,13 @@
       "sendEvent",
       "sendMessage",
       "setAtlassianLifecycle",
+      "setClaudeSubscriptionAccountAllocator",
+      "setClaudeSubscriptionRotationSettings",
       "setCodexAccountAllocator",
       "setCodexRotationSettings",
       "setEnvironmentVariable",
+      "setOrganizationClaudeSubscriptionAccountAllocator",
+      "setOrganizationClaudeSubscriptionRotationSettings",
       "setOrganizationSuperGrokAccountAllocator",
       "setOrganizationSuperGrokRotationSettings",
       "setSuperGrokAccountAllocator",
@@ -29898,6 +30217,10 @@
     "SiteAuthConnectionResource": [
       "get",
       "update"
+    ],
+    "ToolRequestError": [
+      "status",
+      "toResponse"
     ]
   }
 }

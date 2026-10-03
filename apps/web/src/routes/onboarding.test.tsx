@@ -1497,9 +1497,10 @@ describe("organization onboarding UI", () => {
       expect(createOrganizationApiKey.mock.calls[0]).toEqual([
         "preview-organization",
         {
-          name: "Developer setup",
-          description: "Created at signup to add Opengeni agents to your product.",
-          access: "developer_setup",
+          name: "Setup (full access)",
+          description:
+            "Created at signup so an agent can set up Opengeni in your product end to end.",
+          access: "full",
           expiresAt: expect.any(String),
         },
       ]);
@@ -1510,7 +1511,7 @@ describe("organization onboarding UI", () => {
         ) - Date.now();
       expect(keyLifetimeMs).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
       expect(keyLifetimeMs).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000);
-      expect(container.textContent).toContain("It expires in 30 days");
+      expect(container.textContent).toContain("expires in 30 days");
       // Shown once, in its own copy step; the prompt never carries it.
       expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(token);
       expect(container.textContent).toContain("1. Copy your key");

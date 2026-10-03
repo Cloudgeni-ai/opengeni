@@ -719,7 +719,7 @@ describe("readable per-turn grouping", () => {
     ).toHaveLength(2);
   });
 
-  test("a new approval after resumed work remains waiting and retains both status landmarks", () => {
+  test("a new approval after resumed work remains waiting; only the resolved wait keeps a landmark", () => {
     sequence = 0;
     const groups = fold([
       event("turn.started", {}),
@@ -729,9 +729,13 @@ describe("readable per-turn grouping", () => {
       event("session.status.changed", { status: "requires_action" }),
     ]);
     expect(workRows(groups)[0]).toMatchObject({ work: { waiting: { label: "Waiting for you" } } });
-    expect(
-      groups.filter((group) => group.kind === "item" && group.item.kind === "session-status"),
-    ).toHaveLength(2);
+    // The live wait is carried by the header alone; the earlier, resolved wait
+    // stays as its "work resumed" landmark.
+    const statuses = groups.filter(
+      (group) => group.kind === "item" && group.item.kind === "session-status",
+    );
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ item: { resolvedAt: expect.any(String) } });
   });
 
   test("failure stays on its own work row and scheduled input stays visible", () => {

@@ -206,6 +206,11 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         causalHumanSubjectId: subjectId,
         causalHumanAuthority,
         xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeProviderAccountAuthoritySnapshot: {
+          version: 1 as const,
+          scope: "workspace" as const,
+        },
+        claudeAuthoritySubjectId: null,
         xaiAuthoritySubjectId: null,
         connectionAuthoritySubjectId: null,
         triggerInitiator: { kind: "service", subjectId: "scheduler" },

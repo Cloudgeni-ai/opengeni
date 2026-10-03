@@ -1,5 +1,3 @@
-import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connection";
-import { refreshClaudeSubscriptionUsage } from "../claude-subscription-usage";
 import { claudeProviderId } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
@@ -10,7 +8,6 @@ import {
   OrganizationProviderCustomModelsResponse,
   RevokeOrganizationModelProviderConnectionRequest,
   UpsertOrganizationModelProviderConnectionRequest,
-  ClaudeSubscriptionUsage,
 } from "@opengeni/contracts";
 import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -24,7 +21,6 @@ import {
   retireOrganizationModelProviderCustomModel,
   revokeOrganizationModelProviderConnection,
   upsertOrganizationModelProviderConnection,
-  readClaudeSubscriptionUsage,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -112,6 +108,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     c.header("cache-control", "private, no-store");
     const organizationId = parseOrganizationId(c.req.param("organizationId"));
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    if (c.req.param("providerKind") === "claude_subscription")
+      throw new HTTPException(410, { message: "Claude subscriptions use individual accounts." });
     const connection = await getOrganizationModelProviderConnection(deps.db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -134,17 +132,13 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
     };
   }
   app.get(usagePath, async (c) => {
-    const input = await usageScope(c);
-    return c.json(ClaudeSubscriptionUsage.parse(await readClaudeSubscriptionUsage(deps.db, input)));
+    await usageScope(c);
+    throw new HTTPException(410, { message: "Check usage on the individual Claude account." });
   });
   app.post(`${usagePath}/refresh`, async (c) => {
     requireSameOriginBrowserMutation(c, deps);
-    const input = await usageScope(c);
-    return c.json(
-      ClaudeSubscriptionUsage.parse(
-        await refreshClaudeSubscriptionUsage(deps.db, deps.settings, input),
-      ),
-    );
+    await usageScope(c);
+    throw new HTTPException(410, { message: "Check usage on the individual Claude account." });
   });
 
   app.put("/v1/organizations/:organizationId/model-providers/:providerKind", async (c) => {
@@ -158,25 +152,17 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       "invalid organization model provider connection",
     );
     const kind = providerKind(c.req.param("providerKind"));
+    if (kind === "claude_subscription")
+      throw new HTTPException(410, { message: "Claude subscriptions use individual accounts." });
     if (kind === "anthropic" && !/^sk-ant-api[0-9]+-\S+$/.test(payload.apiKey))
       throw new HTTPException(422, {
         message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
       });
-    if (kind === "claude_subscription" && !/^sk-ant-oat[0-9]+-\S+$/.test(payload.apiKey))
-      throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
-    if (kind !== "claude_subscription" && payload.claudeIdentity)
+    if (payload.claudeIdentity)
       throw new HTTPException(422, {
         message: "Claude identity is only valid for subscription connections.",
       });
-    const credential =
-      kind === "claude_subscription"
-        ? prepareClaudeSubscriptionCredential(
-            deps.settings,
-            "organization:" + organizationId,
-            payload.apiKey,
-            payload.claudeIdentity,
-          )
-        : payload.apiKey;
+    const credential = payload.apiKey;
     try {
       const connection = await upsertOrganizationModelProviderConnection(deps.db, {
         organizationId,
@@ -209,6 +195,8 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       "invalid organization model provider disconnect",
     );
     try {
+      if (c.req.param("providerKind") === "claude_subscription")
+        throw new HTTPException(410, { message: "Claude subscriptions use individual accounts." });
       const connection = await revokeOrganizationModelProviderConnection(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,

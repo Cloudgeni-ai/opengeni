@@ -1519,6 +1519,8 @@ async function createScheduledTaskRun(
           : null),
       causalHumanAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+      claudeAuthoritySubjectId: null,
       xaiAuthoritySubjectId: null,
       connectionAuthoritySubjectId: null,
       triggerInitiator: { kind: "service", subjectId: "scheduler" },

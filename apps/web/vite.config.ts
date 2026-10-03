@@ -287,6 +287,17 @@ export default defineConfig({
               priority: 17,
             },
             {
+              // Payment and organization-identity glyphs are lazy-only, but
+              // CreditCard also appears in new-chat and credit prompts. Keep
+              // these leaves separate from settings implementations so those
+              // consumers do not load management pages. Explicit grouping also
+              // prevents entry-aware merging with eager shared session glyphs.
+              name: "payment-identity-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // Keep settings-only implementations in one explicit lazy unit.
               // Recursive consumer-aware grouping can otherwise pair one
               // shared primitive with these routes and make the complete

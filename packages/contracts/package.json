@@ -70,6 +70,10 @@
       "types": "./src/organization-model-usage.ts",
       "default": "./src/organization-model-usage.ts"
     },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -101,6 +105,10 @@
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"
+    },
+    "./atlassian-native-retirement": {
+      "types": "./src/atlassian-native-retirement.ts",
+      "default": "./src/atlassian-native-retirement.ts"
     },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",

@@ -97,6 +97,7 @@ const withheldMigrationNames = [
   // Installs inventory read policies with the session-tenancy fence helper
   // from withheld 0345; replay after it.
   "0547_idle_command_containment.sql",
+  "0599_paused_recovery_command_containment.sql",
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",

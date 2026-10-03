@@ -1,3 +1,4 @@
+import { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 import { subscriptionAccountShardIndex, selectSubscriptionAccount } from "@opengeni/config";
 import { assignedConnectionDefault, connectionModelAllowed } from "./model-connection-access";
 import { heartbeatSubscriptionCredentialLeaseUntil as heartbeatPoolCredentialLeaseUntil } from "./subscription-credential-leases";
@@ -6,13 +7,18 @@ import {
   XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshot,
 } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { inArray, and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { rawRows, withWorkspaceSubjectRls } from "./database";
+import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
 
 import type { SubscriptionPoolTables } from "./subscription-pool-schema";
+
+export type SubscriptionAccountCapacity = {
+  available: boolean;
+  resetsAt: Date | null;
+};
 
 /** Shared subscription account lifecycle, selection, leases, pins and wake writes. */
 export function createSubscriptionAccountRepository<Secret, Settings>(options: {
@@ -26,6 +32,18 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   parseSecret: (value: string) => Secret;
   accessToken: (secret: Secret) => string | undefined;
   refreshToken: (secret: Secret) => string | undefined;
+  /** OAuth renewal can preserve the account generation; explicit replacement never does. */
+  refreshIncrementsVersion?: boolean;
+  metadataIncrementsVersion?: boolean;
+  /** One provider-specific quota read for the already-authorized pool. Missing rows fail closed. */
+  readCapacity?: (
+    db: Database,
+    input: {
+      candidates: readonly { id: string; version: number; exhaustedUntil: Date | null }[];
+      upstreamModelId: string;
+      now: Date;
+    },
+  ) => Promise<ReadonlyMap<string, SubscriptionAccountCapacity>>;
 }) {
   const { provider, label, tables } = options;
   type SubscriptionAccountAuthorityScope = "workspace" | "user" | "organization";
@@ -70,6 +88,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     holderId: string | null;
     generation: number | null;
     leasedUntil: Date | null;
+    nextCheckAt?: Date | null;
     accounts: SubscriptionAccountMetadata[];
   };
 
@@ -339,6 +358,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       workspaceId: string;
       subjectId: string;
       credentialId?: string | null;
+      expectedCredentialVersion?: number;
+      expectedProviderAccountId?: string | null;
       authoritySnapshot?: SubscriptionAuthoritySnapshot;
       scope?: Exclude<SubscriptionAccountAuthorityScope, "organization">;
       encryptionKey: Uint8Array;
@@ -369,7 +390,32 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
           });
         }
       }
-      return await createSubscriptionCredential(db, input);
+      try {
+        return await createSubscriptionCredential(db, input);
+      } catch (error) {
+        // Two completed sign-ins can discover the same provider identity before
+        // either insert commits. The unique owner/scope identity remains truth;
+        // retry only that exact visible identity after the losing transaction rolls back.
+        let cause: unknown = error;
+        let uniqueConflict = false;
+        for (let depth = 0; depth < 6 && cause instanceof Error; depth++) {
+          if ("code" in cause && cause.code === "23505") uniqueConflict = true;
+          cause = cause.cause;
+        }
+        if (!uniqueConflict || !input.providerAccountId) throw error;
+        const existing = await findCredentialByProviderIdentity(db, {
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          scope: input.scope ?? "workspace",
+          providerAccountId: input.providerAccountId,
+        });
+        if (!existing) throw error;
+        return await upsertSubscriptionCredential(db, {
+          ...input,
+          credentialId: existing.credentialId,
+          authoritySnapshot: existing.authoritySnapshot,
+        });
+      }
     }
     if (!input.authoritySnapshot) {
       throw new Error("Existing " + label + " credentials require their frozen authority snapshot");
@@ -390,8 +436,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         ${JSON.stringify(snapshot)}::jsonb
       )`,
         );
-        if (!authorized[0])
-          throw new Error(label + " provider-account authority is no longer active");
+        if (!authorized[0]) throw new SubscriptionAccountChangedError();
         const [row] = await scopedDb
           .update(tables.credentials)
           .set({
@@ -400,6 +445,14 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             label: input.label ?? null,
             accountEmail: input.accountEmail ?? null,
             planType: input.planType ?? null,
+            ...(options.readCapacity
+              ? {
+                  exhaustedUntil: null,
+                  quotaUsedPercent: null,
+                  quotaResetAt: null,
+                  quotaCheckedAt: null,
+                }
+              : {}),
             expiresAt: input.expiresAt ?? null,
             lastRefreshAt: new Date(),
             status: "active",
@@ -407,9 +460,23 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             version: sql`${tables.credentials.version} + 1`,
             updatedAt: new Date(),
           })
-          .where(eq(tables.credentials.id, credentialId))
+          .where(
+            and(
+              eq(tables.credentials.id, credentialId),
+              ...(input.expectedCredentialVersion === undefined
+                ? []
+                : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
+              ...(input.expectedProviderAccountId === undefined
+                ? []
+                : [
+                    input.expectedProviderAccountId === null
+                      ? isNull(tables.credentials.providerAccountId)
+                      : eq(tables.credentials.providerAccountId, input.expectedProviderAccountId),
+                  ]),
+            ),
+          )
           .returning(credentialMetadataColumns);
-        if (!row) throw new Error(label + " credential update lost its authority fence");
+        if (!row) throw new SubscriptionAccountChangedError();
         return {
           account: subscriptionAccountMetadataFromRow(row),
           authoritySnapshot: snapshot,
@@ -482,6 +549,38 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
+  /** Metadata for one frozen pool; never substitutes another owner's pool. */
+  async function listSubscriptionAccountsMetadataForAuthority(
+    db: Database,
+    input: {
+      workspaceId: string;
+      subjectId: string;
+      authoritySnapshot: SubscriptionAuthoritySnapshot;
+    },
+  ): Promise<SubscriptionAccountMetadata[]> {
+    const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
+    return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+      const owner = await resolvePoolOwnerMembershipId(tx, {
+        ...input,
+        authoritySnapshot: snapshot,
+      });
+      const rows = await tx
+        .select(credentialMetadataColumns)
+        .from(tables.credentials)
+        .where(
+          and(
+            subscriptionCredentialWorkspacePredicate(input.workspaceId),
+            eq(tables.credentials.authorityScope, snapshot.scope),
+            owner === null
+              ? isNull(tables.credentials.ownerOrganizationMembershipId)
+              : eq(tables.credentials.ownerOrganizationMembershipId, owner),
+          ),
+        )
+        .orderBy(asc(tables.credentials.createdAt), asc(tables.credentials.id));
+      return rows.map(subscriptionAccountMetadataFromRow);
+    });
+  }
+
   /**
    * Metadata-only readiness check for the subscription model catalog.
    *
@@ -516,6 +615,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       workspaceId: string;
       subjectId: string;
       authoritySnapshot: SubscriptionAuthoritySnapshot;
+      modelId?: string;
+      upstreamModelId?: string;
     },
   ): Promise<boolean> {
     if (!options.isEnabled(settings)) return false;
@@ -562,10 +663,12 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         ]);
         const activeCredentialId = rotation?.activeCredentialId ?? null;
         const now = new Date();
+        const eligibleAccounts =
+          options.readCapacity && !input.upstreamModelId
+            ? accounts.filter((account) => account.status === "active" && account.allocatorEnabled)
+            : await eligibleSubscriptionAccounts(scopedDb, accounts, { ...input, now });
         const eligible = (account: SubscriptionCredentialMetadataRow) =>
-          account.status === "active" &&
-          account.allocatorEnabled &&
-          (!account.exhaustedUntil || account.exhaustedUntil <= now);
+          eligibleAccounts.some((row) => row.id === account.id);
         if (rotation?.rotationEnabled !== false) {
           return accounts.some(eligible);
         }
@@ -858,7 +961,10 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
           .update(tables.credentials)
           .set({
             label: input.label,
-            version: sql`${tables.credentials.version} + 1`,
+            version:
+              options.metadataIncrementsVersion === false
+                ? tables.credentials.version
+                : sql`${tables.credentials.version} + 1`,
             updatedAt: new Date(),
           })
           .where(
@@ -902,35 +1008,42 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     );
   }
 
-  async function materializeSubscriptionCredentialForRun(
+  /** Recheck the exact accepted pool before reading a credential or its telemetry. */
+  async function withAuthorizedSubscriptionCredential<T>(
     db: Database,
     input: {
       workspaceId: string;
       subjectId: string;
       credentialId: string;
       authoritySnapshot: SubscriptionAuthoritySnapshot;
-      encryptionKey: Uint8Array;
+      lock?: boolean;
     },
-  ): Promise<SubscriptionCredentialForRun> {
+    use: (
+      db: Database,
+      row: SubscriptionCredentialMetadataRow & {
+        accountId: string;
+        credentialEncrypted: string;
+      },
+    ) => Promise<T>,
+  ): Promise<T> {
     const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
     return await withWorkspaceSubjectRls(
       db,
       input.workspaceId,
       input.subjectId,
       async (scopedDb) => {
-        const rows = await rawRows<{ id: string }>(
+        const authorized = await rawRows<{ id: string }>(
           scopedDb,
           sql`select id from ${sql.identifier("revalidate_xai_subscription_authority".replace("xai", provider))}(
-        ${input.workspaceId}::uuid,
-        ${input.subjectId},
-        ${input.credentialId}::uuid,
-        ${JSON.stringify(snapshot)}::jsonb
-      )`,
+          ${input.workspaceId}::uuid, ${input.subjectId}, ${input.credentialId}::uuid,
+          ${JSON.stringify(snapshot)}::jsonb)`,
         );
-        if (!rows[0]) throw new Error(label + " provider-account authority is no longer active");
-        const [row] = await scopedDb
+        if (!authorized[0])
+          throw new Error(label + " provider-account authority is no longer active");
+        const query = scopedDb
           .select({
             ...credentialMetadataColumns,
+            accountId: tables.credentials.accountId,
             credentialEncrypted: tables.credentials.credentialEncrypted,
           })
           .from(tables.credentials)
@@ -942,22 +1055,116 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             ),
           )
           .limit(1);
+        const [row] = await (input.lock ? query.for("update") : query);
         if (!row) throw new Error(label + " credential is unavailable");
-        return {
-          ...subscriptionAccountMetadataFromRow(row),
-          secret: parseSecret(
-            decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted),
-          ),
-          authoritySnapshot: snapshot,
-        };
+        return await use(scopedDb, row);
       },
     );
+  }
+
+  async function materializeSubscriptionCredentialForRun(
+    db: Database,
+    input: {
+      workspaceId: string;
+      subjectId: string;
+      credentialId: string;
+      authoritySnapshot: SubscriptionAuthoritySnapshot;
+      encryptionKey: Uint8Array;
+    },
+  ): Promise<SubscriptionCredentialForRun> {
+    const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
+    return await withAuthorizedSubscriptionCredential(db, input, async (_db, row) => ({
+      ...subscriptionAccountMetadataFromRow(row),
+      secret: parseSecret(decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted)),
+      authoritySnapshot: snapshot,
+    }));
   }
 
   type SubscriptionSerializedCredentialRefreshResult = {
     credential: SubscriptionCredentialForRun;
     refreshed: boolean;
   };
+
+  async function subscriptionAccountCapacity<Row extends SubscriptionCredentialMetadataRow>(
+    db: Database,
+    candidates: readonly Row[],
+    input: { modelId?: string; upstreamModelId?: string; now: Date },
+  ): Promise<{ eligible: Row[]; capacity: ReadonlyMap<string, SubscriptionAccountCapacity> }> {
+    const allowed = candidates.filter(
+      (candidate) =>
+        (input.modelId === undefined ||
+          connectionModelAllowed(candidate.allowedModelIds, input.modelId)) &&
+        candidate.status === "active" &&
+        candidate.allocatorEnabled,
+    );
+    let capacity: ReadonlyMap<string, SubscriptionAccountCapacity>;
+    if (!options.readCapacity) {
+      capacity = new Map(
+        allowed.map((candidate) => [
+          candidate.id,
+          {
+            available: !candidate.exhaustedUntil || candidate.exhaustedUntil <= input.now,
+            resetsAt:
+              candidate.exhaustedUntil && candidate.exhaustedUntil > input.now
+                ? candidate.exhaustedUntil
+                : null,
+          },
+        ]),
+      );
+    } else {
+      if (!input.upstreamModelId?.trim())
+        throw new Error(label + " quota selection requires an upstream model id");
+      capacity =
+        allowed.length === 0
+          ? new Map()
+          : await options.readCapacity(db, {
+              candidates: allowed.map(({ id, version, exhaustedUntil }) => ({
+                id,
+                version,
+                exhaustedUntil,
+              })),
+              upstreamModelId: input.upstreamModelId,
+              now: input.now,
+            });
+    }
+    return {
+      eligible: allowed.filter((candidate) => capacity.get(candidate.id)?.available === true),
+      capacity,
+    };
+  }
+
+  async function eligibleSubscriptionAccounts<Row extends SubscriptionCredentialMetadataRow>(
+    db: Database,
+    candidates: readonly Row[],
+    input: { modelId?: string; upstreamModelId?: string; now: Date },
+  ): Promise<Row[]> {
+    return (await subscriptionAccountCapacity(db, candidates, input)).eligible;
+  }
+
+  function nextCapacityCheckAt(input: {
+    candidates: readonly { id: string }[];
+    capacity: ReadonlyMap<string, SubscriptionAccountCapacity>;
+    rotationEnabled: boolean;
+    activeCredentialId: string | null;
+    pinnedCredentialId?: string | null;
+    pinSource?: "manual" | "policy" | null;
+    now: Date;
+  }): Date | null {
+    const candidates =
+      input.pinnedCredentialId && input.pinSource !== "policy"
+        ? input.candidates.filter((candidate) => candidate.id === input.pinnedCredentialId)
+        : input.rotationEnabled
+          ? input.candidates
+          : input.candidates.filter((candidate) => candidate.id === input.activeCredentialId);
+    const deadlines = candidates
+      .map((candidate) => input.capacity.get(candidate.id))
+      .filter(
+        (capacity) =>
+          capacity?.available === false && capacity.resetsAt && capacity.resetsAt > input.now,
+      )
+      .map((capacity) => capacity!.resetsAt!.getTime());
+    return deadlines.length ? new Date(Math.min(...deadlines)) : null;
+  }
 
   /**
    * Refresh one connected account under a database row lock.
@@ -1003,81 +1210,146 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
         if (!authorized[0])
           throw new Error(label + " provider-account authority is no longer active");
 
-        const [row] = await scopedDb
-          .select({
-            ...credentialMetadataColumns,
-            credentialEncrypted: tables.credentials.credentialEncrypted,
-          })
-          .from(tables.credentials)
-          .where(
-            and(
-              eq(tables.credentials.accountId, input.accountId),
-              subscriptionCredentialWorkspacePredicate(input.workspaceId),
-              eq(tables.credentials.id, input.credentialId),
-              eq(tables.credentials.status, "active"),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!row) throw new Error(label + " credential is unavailable");
-
-        const currentSecret = parseSecret(
-          decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted),
-        );
-        const current: SubscriptionCredentialForRun = {
-          ...subscriptionAccountMetadataFromRow(row),
-          secret: currentSecret,
-          authoritySnapshot: snapshot,
-        };
-        if (
-          options.accessToken(currentSecret) !== input.observedAccessToken ||
-          options.refreshToken(currentSecret) !== input.observedRefreshToken
-        ) {
-          return { credential: current, refreshed: false };
-        }
-
-        const next = await input.refresh(current);
-        assertSecret(next.secret);
-        const credentialEncrypted = encryptEnvironmentValue(
-          input.encryptionKey,
-          JSON.stringify(next.secret),
-        );
-        const [updated] = await scopedDb
-          .update(tables.credentials)
-          .set({
-            credentialEncrypted,
-            expiresAt: next.expiresAt,
-            lastRefreshAt: new Date(),
-            status: "active",
-            lastError: null,
-            version: sql`${tables.credentials.version} + 1`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(tables.credentials.accountId, input.accountId),
-              subscriptionCredentialWorkspacePredicate(input.workspaceId),
-              eq(tables.credentials.id, input.credentialId),
-            ),
-          )
-          .returning(credentialMetadataColumns);
-        if (!updated) throw new Error(label + " credential refresh lost its authority fence");
-        return {
-          credential: {
-            ...subscriptionAccountMetadataFromRow(updated),
-            secret: next.secret,
-            authoritySnapshot: snapshot,
-          },
-          refreshed: true,
-        };
+        return await refreshSubscriptionCredentialInTransaction(scopedDb, input, snapshot);
       },
     );
+  }
+
+  async function refreshSubscriptionCredentialInTransaction(
+    scopedDb: Database,
+    input: {
+      accountId: string;
+      workspaceId: string | null;
+      subjectId: string;
+      credentialId: string;
+      authoritySnapshot: SubscriptionAuthoritySnapshot;
+      encryptionKey: Uint8Array;
+      observedAccessToken: string | undefined;
+      observedRefreshToken: string | undefined;
+      refresh: (current: SubscriptionCredentialForRun) => Promise<{
+        secret: SubscriptionCredentialSecret;
+        expiresAt: Date | null;
+      }>;
+    },
+    snapshot: SubscriptionAuthoritySnapshot,
+  ): Promise<SubscriptionSerializedCredentialRefreshResult> {
+    const [row] = await scopedDb
+      .select({
+        ...credentialMetadataColumns,
+        credentialEncrypted: tables.credentials.credentialEncrypted,
+      })
+      .from(tables.credentials)
+      .where(
+        and(
+          eq(tables.credentials.accountId, input.accountId),
+          input.workspaceId === null
+            ? and(
+                isNull(tables.credentials.workspaceId),
+                eq(tables.credentials.authorityScope, "organization"),
+              )
+            : subscriptionCredentialWorkspacePredicate(input.workspaceId),
+          eq(tables.credentials.id, input.credentialId),
+          eq(tables.credentials.status, "active"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(label + " credential is unavailable");
+
+    const currentSecret = parseSecret(
+      decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted),
+    );
+    const current: SubscriptionCredentialForRun = {
+      ...subscriptionAccountMetadataFromRow(row),
+      secret: currentSecret,
+      authoritySnapshot: snapshot,
+    };
+    if (
+      options.accessToken(currentSecret) !== input.observedAccessToken ||
+      options.refreshToken(currentSecret) !== input.observedRefreshToken
+    ) {
+      return { credential: current, refreshed: false };
+    }
+
+    const next = await input.refresh(current);
+    assertSecret(next.secret);
+    const credentialEncrypted = encryptEnvironmentValue(
+      input.encryptionKey,
+      JSON.stringify(next.secret),
+    );
+    const [updated] = await scopedDb
+      .update(tables.credentials)
+      .set({
+        credentialEncrypted,
+        expiresAt: next.expiresAt,
+        lastRefreshAt: new Date(),
+        status: "active",
+        lastError: null,
+        version:
+          options.refreshIncrementsVersion === false
+            ? row.version
+            : sql`${tables.credentials.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(tables.credentials.accountId, input.accountId),
+          input.workspaceId === null
+            ? and(
+                isNull(tables.credentials.workspaceId),
+                eq(tables.credentials.authorityScope, "organization"),
+              )
+            : subscriptionCredentialWorkspacePredicate(input.workspaceId),
+          eq(tables.credentials.id, input.credentialId),
+        ),
+      )
+      .returning(credentialMetadataColumns);
+    if (!updated) throw new Error(label + " credential refresh lost its authority fence");
+    return {
+      credential: {
+        ...subscriptionAccountMetadataFromRow(updated),
+        secret: next.secret,
+        authoritySnapshot: snapshot,
+      },
+      refreshed: true,
+    };
+  }
+
+  /** Organization administration and live worker authority remain separate entry points. */
+  async function refreshOrganizationSubscriptionCredentialSerialized(
+    db: Database,
+    input: {
+      accountId: string;
+      workspaceId: null;
+      subjectId: string;
+      credentialId: string;
+      authoritySnapshot: SubscriptionAuthoritySnapshot;
+      encryptionKey: Uint8Array;
+      observedAccessToken: string | undefined;
+      observedRefreshToken: string | undefined;
+      refresh: (current: SubscriptionCredentialForRun) => Promise<{
+        secret: SubscriptionCredentialSecret;
+        expiresAt: Date | null;
+      }>;
+    },
+  ): Promise<SubscriptionSerializedCredentialRefreshResult> {
+    const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
+    if (snapshot.scope !== "organization")
+      throw new Error("Organization subscription authority is required");
+    return withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (tx) => {
+      await setSubjectRlsContext(tx, input.subjectId);
+      await tx.execute(
+        sql`select get_organization_administration_overview(${input.accountId}::uuid,${input.subjectId})`,
+      );
+      return refreshSubscriptionCredentialInTransaction(tx, input, snapshot);
+    });
   }
 
   async function acquireSubscriptionCredentialLease(
     db: Database,
     input: {
       modelId?: string;
+      upstreamModelId?: string;
       accountId: string;
       workspaceId: string;
       subjectId: string;
@@ -1092,7 +1364,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     },
   ): Promise<SubscriptionCredentialLeaseResult> {
     const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
-    const now = input.now ?? new Date();
     const leaseTtlMs = input.leaseTtlMs ?? CREDENTIAL_LEASE_TTL_MS;
     if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
       throw new Error(label + " credential lease TTL must be positive");
@@ -1100,7 +1371,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     if (!input.holderId.trim()) {
       throw new Error(label + " credential lease holder id is required");
     }
-    const leasedUntil = new Date(now.getTime() + leaseTtlMs);
     return await withWorkspaceSubjectRls(
       db,
       input.workspaceId,
@@ -1145,55 +1415,50 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             .limit(1);
           if (!settings) throw new Error(label + " rotation settings are unavailable");
 
-          await tx
-            .delete(tables.credentialLeases)
-            .where(
-              and(
-                eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                lte(tables.credentialLeases.leasedUntil, now),
-              ),
-            );
-
-          const [existing] = await tx
+          // Pool and retained-lease contention must not consume the new TTL or
+          // let an expired holder keep its generation. Sample the DB clock
+          // only after both locks; explicit clocks are deterministic test input.
+          const [retained] = await tx
             .select()
             .from(tables.credentialLeases)
             .where(
               and(
                 eq(tables.credentialLeases.workspaceId, input.workspaceId),
                 eq(tables.credentialLeases.turnId, input.turnId),
-                gt(tables.credentialLeases.leasedUntil, now),
               ),
             )
             .for("update")
             .limit(1);
-          if (existing) {
-            const [updated] = await tx
-              .update(tables.credentialLeases)
-              .set({
-                holderId: input.holderId,
-                generation:
-                  existing.holderId === input.holderId
-                    ? existing.generation
-                    : existing.generation + 1,
-                leasedUntil,
-                updatedAt: now,
-              })
-              .where(eq(tables.credentialLeases.id, existing.id))
-              .returning();
-            const accounts = await tx
-              .select(credentialMetadataColumns)
-              .from(tables.credentials)
-              .where(subscriptionCredentialWorkspacePredicate(input.workspaceId));
-            return {
-              credentialId: updated!.credentialId,
-              rotationEnabled: settings.rotationEnabled,
-              reused: true,
-              holderId: updated!.holderId,
-              generation: updated!.generation,
-              leasedUntil: updated!.leasedUntil,
-              accounts: accounts.map(subscriptionAccountMetadataFromRow),
-            };
-          }
+          // Expired leases from other turns are housekeeping, never a reason
+          // to wait while holding this turn's lease/pool locks.
+          const cleanupNow = input.now ?? sql`clock_timestamp()`;
+          await tx.delete(tables.credentialLeases).where(
+            inArray(
+              tables.credentialLeases.id,
+              tx
+                .select({ id: tables.credentialLeases.id })
+                .from(tables.credentialLeases)
+                .where(
+                  and(
+                    eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                    lte(tables.credentialLeases.leasedUntil, cleanupNow),
+                  ),
+                )
+                .for("update", { skipLocked: true }),
+            ),
+          );
+          const clock = input.now
+            ? undefined
+            : await tx.execute(sql`select clock_timestamp() as observed_at`);
+          const now = input.now ?? new Date(clock![0]!.observed_at as string);
+          const existing = retained && retained.leasedUntil > now ? retained : undefined;
+          if (retained && !existing)
+            await tx
+              .delete(tables.credentialLeases)
+              .where(eq(tables.credentialLeases.id, retained.id));
+          const freshDeadline = input.now
+            ? new Date(input.now.getTime() + leaseTtlMs)
+            : sql`clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond')`;
 
           const candidates = await tx
             .select(credentialAllocationColumns)
@@ -1209,14 +1474,74 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               ),
             )
             .orderBy(asc(tables.credentials.createdAt), asc(tables.credentials.id));
-          const eligible = candidates.filter(
-            (candidate) =>
-              (input.modelId === undefined ||
-                connectionModelAllowed(candidate.allowedModelIds, input.modelId)) &&
-              candidate.status === "active" &&
-              candidate.allocatorEnabled &&
-              (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
-          );
+          const { eligible, capacity } = await subscriptionAccountCapacity(tx, candidates, {
+            ...input,
+            now,
+          });
+          const activeCredentialId =
+            snapshot.scope === "organization"
+              ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+              : settings.activeCredentialId;
+          const nextCheckAt = nextCapacityCheckAt({
+            ...input,
+            candidates,
+            capacity,
+            rotationEnabled: settings.rotationEnabled,
+            activeCredentialId,
+            now,
+          });
+          let mayReuse = Boolean(existing);
+          if (existing && options.readCapacity) {
+            const manualPinMatches =
+              !input.pinnedCredentialId ||
+              input.pinSource === "policy" ||
+              input.pinnedCredentialId === existing.credentialId;
+            const primaryMatches =
+              settings.rotationEnabled ||
+              activeCredentialId === existing.credentialId ||
+              (input.pinnedCredentialId === existing.credentialId && input.pinSource !== "policy");
+            mayReuse =
+              eligible.some((candidate) => candidate.id === existing.credentialId) &&
+              manualPinMatches &&
+              primaryMatches;
+            if (!mayReuse)
+              await tx
+                .delete(tables.credentialLeases)
+                .where(
+                  and(
+                    eq(tables.credentialLeases.id, existing.id),
+                    eq(tables.credentialLeases.holderId, existing.holderId),
+                    eq(tables.credentialLeases.generation, existing.generation),
+                  ),
+                );
+          }
+          if (existing && mayReuse) {
+            const [updated] = await tx
+              .update(tables.credentialLeases)
+              .set({
+                holderId: input.holderId,
+                generation:
+                  existing.holderId === input.holderId
+                    ? sql`CASE WHEN ${tables.credentialLeases.leasedUntil} > ${input.now ?? sql`clock_timestamp()`} THEN ${tables.credentialLeases.generation} ELSE ${tables.credentialLeases.generation} + 1 END`
+                    : existing.generation + 1,
+                leasedUntil: freshDeadline,
+                updatedAt: now,
+              })
+              .where(eq(tables.credentialLeases.id, existing.id))
+              .returning();
+
+            return {
+              credentialId: updated!.credentialId,
+              rotationEnabled: settings.rotationEnabled,
+              reused: true,
+              holderId: updated!.holderId,
+              generation: updated!.generation,
+              leasedUntil: updated!.leasedUntil,
+              nextCheckAt,
+              accounts: candidates.map(subscriptionAccountMetadataFromRow),
+            };
+          }
+
           const selected = selectSubscriptionAccount({
             sessionId: input.sessionId,
             eligible,
@@ -1236,22 +1561,10 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               holderId: null,
               generation: null,
               leasedUntil: null,
+              nextCheckAt,
               accounts: candidates.map(subscriptionAccountMetadataFromRow),
             };
           }
-          const [lease] = await tx
-            .insert(tables.credentialLeases)
-            .values({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              authorityScope: snapshot.scope,
-              ownerOrganizationMembershipId: ownerMembershipId,
-              credentialId: selected.id,
-              turnId: input.turnId,
-              holderId: input.holderId,
-              leasedUntil,
-            })
-            .returning();
           await tx
             .update(tables.credentials)
             .set({
@@ -1273,6 +1586,20 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               })
               .where(eq(tables.rotationSettings.id, settings.id));
           }
+          const [lease] = await tx
+            .insert(tables.credentialLeases)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId: ownerMembershipId,
+              credentialId: selected.id,
+              turnId: input.turnId,
+              holderId: input.holderId,
+              generation: retained ? retained.generation + 1 : 1,
+              leasedUntil: freshDeadline,
+            })
+            .returning();
           return {
             credentialId: selected.id,
             rotationEnabled: settings.rotationEnabled,
@@ -1280,6 +1607,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             holderId: lease!.holderId,
             generation: lease!.generation,
             leasedUntil: lease!.leasedUntil,
+            nextCheckAt,
             accounts: candidates.map(subscriptionAccountMetadataFromRow),
           };
         }),
@@ -1296,6 +1624,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     db: Database,
     input: {
       modelId?: string;
+      upstreamModelId?: string;
       accountId: string;
       workspaceId: string;
       subjectId: string;
@@ -1308,6 +1637,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   ): Promise<{
     credentialId: string | null;
     rotationEnabled: boolean;
+    nextCheckAt?: Date | null;
     accounts: SubscriptionAccountMetadata[];
   }> {
     const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
@@ -1361,14 +1691,22 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               ),
             )
             .orderBy(asc(tables.credentials.createdAt), asc(tables.credentials.id));
-          const eligible = candidates.filter(
-            (candidate) =>
-              (input.modelId === undefined ||
-                connectionModelAllowed(candidate.allowedModelIds, input.modelId)) &&
-              candidate.status === "active" &&
-              candidate.allocatorEnabled &&
-              (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
-          );
+          const { eligible, capacity } = await subscriptionAccountCapacity(tx, candidates, {
+            ...input,
+            now,
+          });
+          const activeCredentialId =
+            snapshot.scope === "organization"
+              ? assignedConnectionDefault(settings.activeCredentialId, candidates)
+              : settings.activeCredentialId;
+          const nextCheckAt = nextCapacityCheckAt({
+            ...input,
+            candidates,
+            capacity,
+            rotationEnabled: settings.rotationEnabled,
+            activeCredentialId,
+            now,
+          });
           const selected = selectSubscriptionAccount({
             sessionId: input.shardKey,
             eligible,
@@ -1383,6 +1721,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
           return {
             credentialId: selected?.id ?? null,
             rotationEnabled: settings.rotationEnabled,
+            nextCheckAt,
             accounts: candidates.map(subscriptionAccountMetadataFromRow),
           };
         }),
@@ -2122,6 +2461,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     createSubscriptionCredential,
     upsertSubscriptionCredential,
     listSubscriptionAccountsMetadata,
+    listSubscriptionAccountsMetadataForAuthority,
     workspaceSubscriptionActive,
     workspaceSubscriptionActiveForAuthority,
     getSubscriptionAccountMetadata,
@@ -2132,8 +2472,10 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     updateSubscriptionAllocatorEligibility,
     renameSubscriptionAccount,
     disconnectSubscriptionCredential,
+    withAuthorizedSubscriptionCredential,
     materializeSubscriptionCredentialForRun,
     refreshSubscriptionCredentialSerialized,
+    refreshOrganizationSubscriptionCredentialSerialized,
     acquireSubscriptionCredentialLease,
     selectSubscriptionCredentialForUse,
     releaseSubscriptionCredentialLease,

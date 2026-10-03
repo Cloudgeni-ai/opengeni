@@ -2,6 +2,11 @@ interface Args {
   out: string | null;
 }
 
+interface Resources {
+  requests: { cpu: string; memory: string };
+  limits: { cpu: string; memory: string };
+}
+
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   const values = renderTemporalValues(process.env);
@@ -41,12 +46,22 @@ export function renderTemporalValues(env: Record<string, string | undefined>): s
   );
   const eventsCacheTtl = durationEnv(env, "TEMPORAL_EVENTS_CACHE_TTL", "10m");
   const historyGoMemoryLimit = goMemoryLimitEnv(env, "TEMPORAL_HISTORY_GOMEMLIMIT", "768MiB");
-  const historyMemoryRequest = kubernetesQuantityEnv(
-    env,
-    "TEMPORAL_HISTORY_MEMORY_REQUEST",
-    "768Mi",
-  );
-  const historyMemoryLimit = kubernetesQuantityEnv(env, "TEMPORAL_HISTORY_MEMORY_LIMIT", "1280Mi");
+  const frontendResources = resourcesEnv(env, "FRONTEND", {
+    requests: { cpu: "200m", memory: "256Mi" },
+    limits: { cpu: "1", memory: "512Mi" },
+  });
+  const historyResources = resourcesEnv(env, "HISTORY", {
+    requests: { cpu: "250m", memory: "768Mi" },
+    limits: { cpu: "1", memory: "1280Mi" },
+  });
+  const matchingResources = resourcesEnv(env, "MATCHING", {
+    requests: { cpu: "100m", memory: "256Mi" },
+    limits: { cpu: "500m", memory: "512Mi" },
+  });
+  const workerResources = resourcesEnv(env, "WORKER", {
+    requests: { cpu: "100m", memory: "128Mi" },
+    limits: { cpu: "500m", memory: "512Mi" },
+  });
   const serviceMonitorEnabled = booleanEnv(env, "TEMPORAL_SERVICE_MONITOR_ENABLED", false);
   const tlsEnabled = booleanEnv(env, "TEMPORAL_POSTGRES_TLS_ENABLED", false);
   const tlsCaFile = env.TEMPORAL_POSTGRES_TLS_CA_FILE?.trim();
@@ -126,16 +141,14 @@ ${tlsCaMount}  replicaCount: 1
     history.eventsCacheTTL:
       - value: ${yamlScalar(eventsCacheTtl)}
         constraints: {}
-  history:
-    resources:
-      requests:
-        memory: ${yamlScalar(historyMemoryRequest)}
-      limits:
-        memory: ${yamlScalar(historyMemoryLimit)}
-    additionalEnv:
+  frontend:
+${renderResources(frontendResources)}  history:
+${renderResources(historyResources)}    additionalEnv:
       - name: GOMEMLIMIT
         value: ${yamlScalar(historyGoMemoryLimit)}
-  metrics:
+  matching:
+${renderResources(matchingResources)}  worker:
+${renderResources(workerResources)}  metrics:
     annotations:
       enabled: true
     serviceMonitor:
@@ -169,7 +182,7 @@ ${tlsCaMount}`;
 function parseArgs(rawArgs: string[]): Args {
   const out: Args = { out: null };
   for (let index = 0; index < rawArgs.length; index += 1) {
-    const value = rawArgs[index];
+    const value = rawArgs[index]!;
     if (value === "--out") {
       const next = rawArgs[index + 1];
       if (!next) {
@@ -242,10 +255,86 @@ function kubernetesQuantityEnv(
   fallback: string,
 ): string {
   const value = env[name]?.trim() || fallback;
-  if (!/^[1-9][0-9]*(?:Ki|Mi|Gi|K|M|G)$/.test(value)) {
+  if (!/^[1-9][0-9]*(?:Ki|Mi|Gi|k|M|G)$/.test(value)) {
     throw new Error(`${name} must be a positive Kubernetes memory quantity such as 512Mi`);
   }
   return value;
+}
+
+function cpuQuantityEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
+  const value = env[name]?.trim() || fallback;
+  if (
+    !/^(?:[1-9][0-9]*m|(?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?)$/.test(value) ||
+    cpuMilliUnits(value) === 0n
+  ) {
+    throw new Error(
+      `${name} must be a positive Kubernetes CPU quantity such as 500m or 1, with at most three decimal places`,
+    );
+  }
+  return value;
+}
+
+function cpuMilliUnits(value: string): bigint {
+  if (value.endsWith("m")) return BigInt(value.slice(0, -1));
+  const [cores, fraction = ""] = value.split(".");
+  return BigInt(cores!) * 1000n + BigInt(fraction.padEnd(3, "0"));
+}
+
+function memoryBytes(value: string): bigint {
+  const units: Record<string, bigint> = {
+    Ki: 1024n,
+    Mi: 1024n ** 2n,
+    Gi: 1024n ** 3n,
+    k: 1000n,
+    M: 1000n ** 2n,
+    G: 1000n ** 3n,
+  };
+  // Callers validate the quantity before comparing it, so every capture/unit exists.
+  const match = /^([1-9][0-9]*)(Ki|Mi|Gi|k|M|G)$/.exec(value)!;
+  const amount = match[1]!;
+  const unit = match[2]!;
+  return BigInt(amount) * units[unit]!;
+}
+
+function resourcesEnv(
+  env: Record<string, string | undefined>,
+  role: "FRONTEND" | "HISTORY" | "MATCHING" | "WORKER",
+  defaults: Resources,
+): Resources {
+  // TEMPORAL_<ROLE>_{CPU,MEMORY}_{REQUEST,LIMIT}; history memory names stay compatible.
+  const prefix = `TEMPORAL_${role}`;
+  const resources = {
+    requests: {
+      cpu: cpuQuantityEnv(env, `${prefix}_CPU_REQUEST`, defaults.requests.cpu),
+      memory: kubernetesQuantityEnv(env, `${prefix}_MEMORY_REQUEST`, defaults.requests.memory),
+    },
+    limits: {
+      cpu: cpuQuantityEnv(env, `${prefix}_CPU_LIMIT`, defaults.limits.cpu),
+      memory: kubernetesQuantityEnv(env, `${prefix}_MEMORY_LIMIT`, defaults.limits.memory),
+    },
+  };
+  if (cpuMilliUnits(resources.requests.cpu) > cpuMilliUnits(resources.limits.cpu)) {
+    throw new Error(`${prefix}_CPU_REQUEST must not exceed ${prefix}_CPU_LIMIT`);
+  }
+  if (memoryBytes(resources.requests.memory) > memoryBytes(resources.limits.memory)) {
+    throw new Error(`${prefix}_MEMORY_REQUEST must not exceed ${prefix}_MEMORY_LIMIT`);
+  }
+  return resources;
+}
+
+function renderResources(resources: Resources): string {
+  return `    resources:
+      requests:
+        cpu: ${JSON.stringify(resources.requests.cpu)}
+        memory: ${yamlScalar(resources.requests.memory)}
+      limits:
+        cpu: ${JSON.stringify(resources.limits.cpu)}
+        memory: ${yamlScalar(resources.limits.memory)}
+`;
 }
 
 function renderCaMount(

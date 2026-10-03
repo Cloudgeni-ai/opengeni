@@ -96,6 +96,8 @@ async function fixture() {
     causalHumanSubjectId: null,
     causalHumanAuthority: null,
     xaiProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+    claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+    claudeAuthoritySubjectId: null,
     xaiAuthoritySubjectId: null,
     connectionAuthoritySubjectId: null,
     triggerInitiator: { kind: "service" as const, subjectId: "scheduler" },

@@ -242,6 +242,66 @@ test("configured router does not expose an empty deferred server", async () => {
   ).toEqual(["request_human_input"]);
 });
 
+test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+  "configured %s router overlaps pending preparation and keeps the request tool prefix stable",
+  async (transport) => {
+    for (const hasDeferredTools of [true, false]) {
+      let releasePreparation!: () => void;
+      let prepared = false;
+      const preparation = new Promise<void>((resolve) => {
+        releasePreparation = () => {
+          prepared = true;
+          resolve();
+        };
+      });
+      const baseTool = firstPartyTool("request_human_input", "Human input");
+      const deferredTool = weatherTool();
+      const agent = agentWith(baseTool);
+      const originalGetAllTools = agent.getAllTools.bind(agent);
+      agent.getAllTools = (async (runContext: unknown) => [
+        ...(await originalGetAllTools(runContext)),
+        ...(prepared && hasDeferredTools ? [deferredTool] : []),
+      ]) as typeof agent.getAllTools;
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set([SERVER_ID]),
+        preparation,
+        new Set([SERVER_ID]),
+        new Set(),
+        undefined,
+        true,
+      );
+      const model = new ScriptedStreamingModel([
+        [finalMessage("hello")],
+        [finalMessage("hello again")],
+      ]);
+      const running = runStreamed(agent, model, runtime);
+      let outcome: string;
+      try {
+        outcome = await Promise.race([
+          running.then(() => "completed"),
+          Bun.sleep(500).then(() => "blocked"),
+        ]);
+      } finally {
+        releasePreparation();
+        await running;
+      }
+      expect(outcome).toBe("completed");
+      expect(model.requests).toHaveLength(1);
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("tool_list");
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
+        WEATHER_TOOL,
+      );
+      await runStreamed(agent, model, runtime);
+      expect(model.requests[1]!.tools).toEqual(model.requests[0]!.tools);
+      expect(runtime.inspectSearchableTools().map((candidate) => candidate.name)).toEqual(
+        hasDeferredTools ? [WEATHER_TOOL] : [],
+      );
+    }
+  },
+);
+
 describe("query-independent tool discovery", () => {
   test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
     const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);
@@ -1036,103 +1096,117 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
-  test("joins deferred preparation before an eager direct tool call", async () => {
-    let releasePreparation!: () => void;
-    const preparation = new Promise<void>((resolve) => {
-      releasePreparation = resolve;
-    });
-    let executions = 0;
-    const agent = agentWith(
-      weatherTool({
-        execute: ({ city }) => {
-          executions += 1;
-          return `clear:${city}`;
-        },
-      }),
-    );
-    const runtime = installLazyToolRuntime(
-      agent,
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      preparation,
-      new Set(),
-    );
-    const model = new ScriptedStreamingModel([
-      [
-        {
-          type: "function_call",
-          callId: "eager-direct-call",
-          name: WEATHER_TOOL,
-          arguments: JSON.stringify({ city: "Oslo" }),
-        },
-      ],
-      [finalMessage("done")],
-    ]);
+  test.each([false, true])(
+    "joins deferred preparation before an eager direct tool call (configured=%s)",
+    async (configured) => {
+      let releasePreparation!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        releasePreparation = resolve;
+      });
+      let executions = 0;
+      const agent = agentWith(
+        weatherTool({
+          execute: ({ city }) => {
+            executions += 1;
+            return `clear:${city}`;
+          },
+        }),
+      );
+      const runtime = installLazyToolRuntime(
+        agent,
+        "generic_dispatch",
+        new Set([SERVER_ID]),
+        preparation,
+        new Set(["pending"]),
+        new Set(),
+        undefined,
+        configured,
+      );
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "eager-direct-call",
+            name: WEATHER_TOOL,
+            arguments: JSON.stringify({ city: "Oslo" }),
+          },
+        ],
+        [finalMessage("done")],
+      ]);
 
-    const running = runStreamed(agent, model, runtime);
-    await Bun.sleep(0);
-    expect(executions).toBe(0);
-    const outcome = await Promise.race([
-      running.then(() => "completed" as const),
-      Bun.sleep(100).then(() => "waiting_for_preparation" as const),
-    ]);
-    expect(outcome).toBe("waiting_for_preparation");
+      const running = runStreamed(agent, model, runtime);
+      await Bun.sleep(0);
+      expect(executions).toBe(0);
+      const outcome = await Promise.race([
+        running.then(() => "completed" as const),
+        Bun.sleep(100).then(() => "waiting_for_preparation" as const),
+      ]);
+      expect(outcome).toBe("waiting_for_preparation");
+      expect(model.requests).toHaveLength(1);
 
-    releasePreparation();
-    const result = await running;
+      releasePreparation();
+      const result = await running;
 
-    expect(result.finalOutput).toBe("done");
-    expect(executions).toBe(1);
-    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
-      WEATHER_TOOL,
-      "tool_search",
-      "tool_invoke",
-      "tool_list",
-    ]);
-  });
+      expect(result.finalOutput).toBe("done");
+      expect(executions).toBe(1);
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+        WEATHER_TOOL,
+        "tool_search",
+        "tool_invoke",
+        "tool_list",
+      ]);
+    },
+  );
 
-  test("propagates deferred preparation failure before an eager direct tool executes", async () => {
-    const preparationFailure = new Error("required MCP tools/list failed");
-    let rejectPreparation!: (error: Error) => void;
-    const preparation = new Promise<void>((_resolve, reject) => {
-      rejectPreparation = reject;
-    });
-    let executions = 0;
-    const agent = agentWith(
-      weatherTool({
-        execute: ({ city }) => {
-          executions += 1;
-          return `clear:${city}`;
-        },
-      }),
-    );
-    const runtime = installLazyToolRuntime(
-      agent,
-      "generic_dispatch",
-      new Set([SERVER_ID]),
-      preparation,
-      new Set(),
-    );
-    const model = new ScriptedStreamingModel([
-      [
-        {
-          type: "function_call",
-          callId: "eager-direct-call-preparation-failure",
-          name: WEATHER_TOOL,
-          arguments: JSON.stringify({ city: "Oslo" }),
-        },
-      ],
-    ]);
+  test.each([false, true])(
+    "propagates deferred preparation failure before an eager direct tool executes (configured=%s)",
+    async (configured) => {
+      const preparationFailure = new Error("required MCP tools/list failed");
+      let rejectPreparation!: (error: Error) => void;
+      const preparation = new Promise<void>((_resolve, reject) => {
+        rejectPreparation = reject;
+      });
+      let executions = 0;
+      const agent = agentWith(
+        weatherTool({
+          execute: ({ city }) => {
+            executions += 1;
+            return `clear:${city}`;
+          },
+        }),
+      );
+      const runtime = installLazyToolRuntime(
+        agent,
+        "generic_dispatch",
+        new Set([SERVER_ID]),
+        preparation,
+        new Set(["pending"]),
+        new Set(),
+        undefined,
+        configured,
+      );
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "eager-direct-call-preparation-failure",
+            name: WEATHER_TOOL,
+            arguments: JSON.stringify({ city: "Oslo" }),
+          },
+        ],
+      ]);
 
-    const running = runStreamed(agent, model, runtime);
-    await Bun.sleep(0);
-    expect(executions).toBe(0);
+      const running = runStreamed(agent, model, runtime);
+      await Bun.sleep(10);
+      expect(executions).toBe(0);
+      expect(model.requests).toHaveLength(1);
 
-    rejectPreparation(preparationFailure);
+      rejectPreparation(preparationFailure);
 
-    await expect(running).rejects.toBe(preparationFailure);
-    expect(executions).toBe(0);
-  });
+      await expect(running).rejects.toBe(preparationFailure);
+      expect(executions).toBe(0);
+    },
+  );
 
   test("hides and searches first-party function tools without an MCP registry id", async () => {
     const firstParty = firstPartyTool(
@@ -1849,66 +1923,75 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
-  test("initial Skill index and eager reads do not wait for lazy tool preparation", async () => {
-    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
-      let release!: () => void;
-      const preparation = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let reads = 0;
-      const reader = tool({
-        name: "skill_read",
-        description: "Read selected Skill files",
-        parameters: { type: "object", properties: {}, additionalProperties: false },
-        strict: false,
-        execute: () => {
-          reads++;
-          return JSON.stringify(readSkillFiles(loadSkillManagementSkill().files));
-        },
-      }) as unknown as Tool;
-      const agent = new Agent({
-        name: "sandbox-free-skills",
-        model: "scripted",
-        instructions: formatSkillCatalog([
-          { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
-        ]),
-        tools: [reader],
-      });
-      const runtime = installLazyToolRuntime(
-        agent,
-        transport,
-        new Set(["opengeni"]),
-        preparation,
-        new Set(["opengeni"]),
-        new Set(["skill_read"]),
-      );
-      const model = new ScriptedStreamingModel([
-        [
-          {
-            type: "function_call",
-            callId: `read-${transport}`,
-            name: "skill_read",
-            arguments: "{}",
+  test.each([false, true])(
+    "initial Skill index and eager reads do not wait for lazy tool preparation (configured=%s)",
+    async (configured) => {
+      for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+        let release!: () => void;
+        const preparation = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reads = 0;
+        const reader = tool({
+          name: "skill_read",
+          description: "Read selected Skill files",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          strict: false,
+          execute: () => {
+            reads++;
+            return JSON.stringify(readSkillFiles(loadSkillManagementSkill().files));
           },
-        ],
-        [finalMessage("Read the Skill")],
-      ]);
-      const running = runStreamed(agent, model, runtime);
-      const outcome = await Promise.race([
-        running.then(() => "completed"),
-        Bun.sleep(500).then(() => "blocked"),
-      ]);
-      release();
-      await running;
-      expect(outcome).toBe("completed");
-      expect(reads).toBe(1);
-      expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
-      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
-      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
-        "load_skill",
-      );
-    }
-  });
+        }) as unknown as Tool;
+        const agent = new Agent({
+          name: "sandbox-free-skills",
+          model: "scripted",
+          instructions: formatSkillCatalog([
+            {
+              id: "builtin:opengeni-skills",
+              name: "opengeni-skills",
+              description: "Manage Skills",
+            },
+          ]),
+          tools: [reader],
+        });
+        const runtime = installLazyToolRuntime(
+          agent,
+          transport,
+          new Set(["opengeni"]),
+          preparation,
+          new Set(["opengeni"]),
+          new Set(["skill_read"]),
+          undefined,
+          configured,
+        );
+        const model = new ScriptedStreamingModel([
+          [
+            {
+              type: "function_call",
+              callId: `read-${transport}`,
+              name: "skill_read",
+              arguments: "{}",
+            },
+          ],
+          [finalMessage("Read the Skill")],
+        ]);
+        const running = runStreamed(agent, model, runtime);
+        const outcome = await Promise.race([
+          running.then(() => "completed"),
+          Bun.sleep(500).then(() => "blocked"),
+        ]);
+        release();
+        await running;
+        expect(outcome).toBe("completed");
+        expect(reads).toBe(1);
+        expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+        expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
+        expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
+          "load_skill",
+        );
+      }
+    },
+  );
 
   test("plain model output never waits for non-eager MCP preparation", async () => {
     for (const transport of ["openai_native", "generic_dispatch"] as const) {
