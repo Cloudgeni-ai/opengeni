@@ -1551,9 +1551,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             forceRefresh: true,
             observedAccessToken: receipt.token,
           },
-        ).catch((error) => {
-          if (error instanceof ClaudeSubscriptionConnectionChanged) return null;
-          throw error;
+        ).catch((refreshError) => {
+          if (refreshError instanceof ClaudeSubscriptionConnectionChanged) return null;
+          throw refreshError;
         });
         if (!credential) return await recoverChangedAccount();
         if (!("reconnectRequired" in credential) && credential.secret.token !== receipt.token) {

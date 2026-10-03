@@ -563,11 +563,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL && connection.subjectId === null
+                  : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
+                      connection.subjectId === null
                     ? "auth_needed"
-                  : connection.status === "active"
-                    ? "connected"
-                    : "auth_needed",
+                    : connection.status === "active"
+                      ? "connected"
+                      : "auth_needed",
             }),
           ];
         if (connection.metadata.credentialRole !== API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) return [];
