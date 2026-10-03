@@ -1915,33 +1915,35 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   ) {
     return [];
   }
-  // WebKit reports an accepted old-document live-events cancellation as an
-  // access-control pageerror. Never allow that text alone: the direct-race
+  // WebKit may additionally report an accepted old-document cancellation as
+  // an access-control pageerror. Never infer cancellation from that text: the direct-race
   // gate has already validated the actor transition, and every callback must
   // consume a distinct, exact-URL failed terminal accepted by the strict
   // request-failure ledger within that race's acceptance/settlement window.
-  const available = problems.acceptedRequestTerminals.map((terminal, originalIndex) => ({
-    originalIndex,
-    terminal,
-  }));
-  const candidates: Array<{ terminalIndex: number; message: string }> = [];
+  const candidates: Array<{
+    pageError: BrowserProblems["pageErrorEvidence"][number];
+    matches: Array<{ distance: number; index: number }>;
+  }> = [];
   for (const pageError of problems.pageErrorEvidence) {
     const match =
       /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
         pageError.message,
       );
     const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+    const url =
+      pathnameAndSearch === undefined ? undefined : new URL(pathnameAndSearch, input.origin);
     if (
-      pathnameAndSearch === undefined ||
+      url === undefined ||
       `http://${match?.groups?.authority}` !== input.origin ||
-      new URL(pathnameAndSearch, "http://127.0.0.1").pathname !== input.pathname ||
+      url.pathname !== input.pathname ||
+      !exactBoundedWorkspaceLiveStreamSearch(url.search) ||
       !Number.isFinite(pageError.observedAt) ||
       pageError.observedAt < input.acceptedAt
     ) {
       return [];
     }
-    const matches = available
-      .flatMap(({ terminal }, index) => {
+    const matches = problems.acceptedRequestTerminals
+      .flatMap((terminal, index) => {
         const distance = Math.abs(pageError.observedAt - terminal.observedAt);
         return terminal.terminal === "failed" &&
           terminal.origin === input.origin &&
@@ -1956,14 +1958,50 @@ function webKitLiveEventsPageErrorsForValidatedRace(
       .sort((left, right) => left.distance - right.distance || left.index - right.index);
     const nearest = matches[0];
     if (!nearest || matches[1]?.distance === nearest.distance) return [];
-    const [matched] = available.splice(nearest.index, 1);
-    if (!matched) return [];
-    candidates.push({ terminalIndex: matched.originalIndex, message: pageError.message });
+    // Do not use an ambiguous fallback edge if an augmenting path later
+    // needs to move the nearest match. Equal-distance evidence stays red.
+    candidates.push({
+      pageError,
+      matches: matches.filter(
+        (candidateMatch, index) =>
+          matches[index - 1]?.distance !== candidateMatch.distance &&
+          matches[index + 1]?.distance !== candidateMatch.distance,
+      ),
+    });
   }
-  for (const index of candidates.map(({ terminalIndex }) => terminalIndex).sort((a, b) => b - a)) {
+  // Prefer the nearest unambiguous terminal, but reassign an earlier error
+  // when it would otherwise steal a later error's only eligible terminal.
+  // Stable evidence order and a complete matching make callback delivery
+  // order irrelevant; the real ledger is untouched until all errors match.
+  const errorByTerminal = new Map<number, number>();
+  const assign = (errorIndex: number, visited: Set<number>): boolean => {
+    const candidate = candidates[errorIndex];
+    if (!candidate) return false;
+    for (const { index } of candidate.matches) {
+      if (visited.has(index)) continue;
+      visited.add(index);
+      const previousError = errorByTerminal.get(index);
+      if (previousError === undefined || assign(previousError, visited)) {
+        errorByTerminal.set(index, errorIndex);
+        return true;
+      }
+    }
+    return false;
+  };
+  const errorOrder = candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort(
+      (left, right) =>
+        left.candidate.pageError.observedAt - right.candidate.pageError.observedAt ||
+        left.candidate.pageError.message.localeCompare(right.candidate.pageError.message),
+    );
+  for (const { index } of errorOrder) {
+    if (!assign(index, new Set())) return [];
+  }
+  for (const index of [...errorByTerminal.keys()].sort((a, b) => b - a)) {
     problems.acceptedRequestTerminals.splice(index, 1);
   }
-  return candidates.map(({ message }) => message);
+  return candidates.map(({ pageError }) => pageError.message);
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -4289,6 +4327,27 @@ describe("provider-neutral browser account acceptance", () => {
     const accepted = [terminal];
     expect(match(accepted)).toEqual([message]);
     expect(accepted).toEqual([]);
+    for (const cursor of ["12", String(Number.MAX_SAFE_INTEGER)]) {
+      const validSearch = pathnameAndSearch.replace("controlAfter=0", `controlAfter=${cursor}`);
+      const validTerminal = { ...terminal, pathnameAndSearch: validSearch };
+      const validError = { ...pageError, message: message.replace(pathnameAndSearch, validSearch) };
+      const validTerminals = [validTerminal];
+      expect(match(validTerminals, [validError])).toEqual([validError.message]);
+      expect(validTerminals).toEqual([]);
+    }
+    for (const cursor of ["00", "01", "9007199254740992"]) {
+      for (const name of ["controlAfter", "interactionAfter"]) {
+        const invalidSearch = pathnameAndSearch.replace(`${name}=0`, `${name}=${cursor}`);
+        const invalidTerminal = { ...terminal, pathnameAndSearch: invalidSearch };
+        const invalidError = {
+          ...pageError,
+          message: message.replace(pathnameAndSearch, invalidSearch),
+        };
+        const rejected = [invalidTerminal];
+        expect(match(rejected, [invalidError])).toEqual([]);
+        expect(rejected).toEqual([invalidTerminal]);
+      }
+    }
     expect(match([], [pageError])).toEqual([]);
     expect(match([terminal], [pageError], "firefox")).toEqual([]);
     expect(match([terminal], [pageError], "chromium")).toEqual([]);
@@ -4338,6 +4397,52 @@ describe("provider-neutral browser account acceptance", () => {
         { ...terminal, observedAt: 200 },
       ]),
     ).toEqual([]);
+    // A delayed callback uniquely needs the later terminal. The earlier
+    // callback must not consume that terminal just because it is closer.
+    const overlappingTerminals = [
+      { ...terminal, observedAt: 1_000 },
+      { ...terminal, observedAt: 1_900 },
+    ];
+    const overlappingErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 31_500 },
+    ];
+    const overlappingScope = { ...input, acceptedAt: 1_000, settledAt: 2_000 };
+    for (const errors of [overlappingErrors, [...overlappingErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const reorderedTerminals = [...terminals];
+        expect(match(reorderedTerminals, errors, "webkit", overlappingScope)).toEqual([
+          message,
+          message,
+        ]);
+        expect(reorderedTerminals).toEqual([]);
+      }
+    }
+    const incomplete = [...overlappingTerminals];
+    expect(
+      match(
+        incomplete,
+        [...overlappingErrors, { ...pageError, observedAt: 31_501 }],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(incomplete).toEqual(overlappingTerminals);
+    const ambiguousFallback = [...overlappingTerminals, { ...terminal, observedAt: 2_000 }];
+    const ambiguousOriginal = [...ambiguousFallback];
+    expect(
+      match(
+        ambiguousFallback,
+        [
+          { ...pageError, observedAt: 1_500 },
+          { ...pageError, observedAt: 31_500 },
+          { ...pageError, observedAt: 31_950 },
+        ],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(ambiguousFallback).toEqual(ambiguousOriginal);
   });
 
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
