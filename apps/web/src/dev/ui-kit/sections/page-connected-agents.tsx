@@ -5,6 +5,7 @@ import {
   type ConnectedAgentsLocation,
 } from "@/components/organization-access/connected-agents";
 import { McpConsentPage } from "@/components/organization-access/mcp-consent-page";
+import { OrganizationApiKeysSection } from "@/components/organization-api-keys-section";
 import type { McpConnection, McpConnectionsApi } from "@/lib/mcp-connections";
 import { allOrganizationPermissions, presetPermissions } from "@/lib/organization-access";
 
@@ -14,7 +15,7 @@ import { organization, workspaces } from "../fixtures";
 // Relative to the real clock: RelativeTime counts from now.
 const PREVIEW_NOW = Date.now();
 
-const MCP_URL = `https://app.opengeni.ai/v1/organizations/${organization.id}/mcp`;
+const MCP_URL = "https://app.opengeni.ai/v1/mcp";
 
 const accessWorkspaces = workspaces.map((workspace) => ({
   id: workspace.id,
@@ -157,6 +158,29 @@ export default function PageConnectedAgentsSection() {
       >
         <PagePreview label="Claude Code" height={1100}>
           <AgentsPreview initial={CONNECTIONS} start={{ agent: CONNECTIONS[1]!.id }} />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Create an organization API key"
+        description="For servers and agents that can't sign in through a browser: the same Access and Available in, plus Developer setup."
+      >
+        <PagePreview label="Create API key" height={1250}>
+          <div className="mx-auto w-full max-w-[960px] px-6 py-8 max-sm:px-4">
+            <OrganizationApiKeysSection
+              organizationId={organization.id}
+              canManage
+              view="new-key"
+              onViewChange={() => {}}
+              listApiKeys={async () => []}
+              createApiKey={async () => {
+                throw new Error("Preview only");
+              }}
+              deleteApiKey={async () => {
+                throw new Error("Preview only");
+              }}
+              workspaces={accessWorkspaces.filter((workspace) => !workspace.personal)}
+            />
+          </div>
         </PagePreview>
       </KitBlock>
       <KitBlock

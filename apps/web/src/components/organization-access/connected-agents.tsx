@@ -217,7 +217,9 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
                 ) : undefined
               }
               description={[
-                `Acts as ${connection.connectedBy.subjectId === props.currentSubjectId ? "you" : connection.connectedBy.name}`,
+                ...(connection.connectedBy.subjectId === props.currentSubjectId
+                  ? []
+                  : [connection.connectedBy.name]),
                 policySummary(connection.policy),
                 scopeSummary(connection.policy.workspaceScope, props.workspaces),
               ].join(" · ")}
@@ -241,7 +243,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
       title="Connected agents"
       description={
         canManageAll
-          ? "Outside agents that can work in this organization, and as whom."
+          ? "Outside agents people connected to this organization."
           : "Outside agents you connected. Owners and admins see everyone's."
       }
       action={visible && visible.length > 0 ? connect : undefined}
@@ -435,12 +437,7 @@ export function ConnectedAgentPage({
             </StatusBadge>
           ) : undefined
         }
-        meta={[
-          mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`,
-          <>
-            Connected <RelativeTime date={connection.createdAt} />
-          </>,
-        ]}
+        meta={[mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`]}
         actions={
           mine || canManageAll ? (
             <MoreMenu label={`More for ${connection.clientName}`}>
@@ -459,6 +456,9 @@ export function ConnectedAgentPage({
             </DetailAsideItem>
             <DetailAsideItem label="Last used">
               {connection.lastUsedAt ? <RelativeTime date={connection.lastUsedAt} /> : "Never"}
+            </DetailAsideItem>
+            <DetailAsideItem label="Connected">
+              <RelativeTime date={connection.createdAt} />
             </DetailAsideItem>
           </DetailAside>
         }

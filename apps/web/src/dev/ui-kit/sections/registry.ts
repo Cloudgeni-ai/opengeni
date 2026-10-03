@@ -846,7 +846,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Pages",
     title: "Connected agents",
     purpose:
-      "Outside agents working in the organization over MCP: as whom, what they can do and where.",
+      "Outside agents working in the organization over MCP: whose they are, what they can do and where.",
     usedOn: "Organization settings > Developer, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
