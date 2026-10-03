@@ -47,6 +47,8 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
+import { materializeGmailFile } from "../gmail-files";
+import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
@@ -1071,6 +1073,47 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        materializeGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
+          return await materializeGmailFile(request, {
+            workspaceId: input.workspaceId,
+            storage: deps.objectStorage,
+            downloadStorage: objectStorageForSandboxDownloads(
+              runSettings,
+              deps.objectStorage,
+              deps.activeSandboxBackend ?? deps.groupBoxBackend,
+            ),
+            materialize: materializeConnectorAttachments,
+            onCleanupFailure: (key) => console.warn("[gmail] Temporary transfer cleanup requires operator retry", { objectKey: key }),
+          });
+        },
+        readGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          const access = await resolveTurnSandboxAccess(
+            sandboxState,
+            media.sdkOwnedSandboxSession,
+            "Gmail attachment filesystem is unavailable",
+          );
+          const runAs = sandboxRunAs(runSettings);
+          const channel = new SandboxChannelAService({
+            session: access.session,
+            workspaceRoot: "/workspace",
+            leaseEpoch: access.leaseEpoch,
+            ...(runAs ? { runAs } : {}),
+          });
+          const file = await channel.fsRead({
+            path: request.path,
+            maxBytes: request.maxBytes + 1,
+            encoding: "base64",
+            workspaceOnly: true,
+          });
+          const bytes = Buffer.from(file.content, "base64");
+          if (file.truncated || bytes.byteLength > request.maxBytes) throw new Error("Gmail file input exceeds the maximum size");
+          return bytes;
+        },
         refreshOwnedCommand: async (commandId) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();
