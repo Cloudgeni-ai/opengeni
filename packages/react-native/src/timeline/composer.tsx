@@ -49,8 +49,8 @@ export function SessionComposer(props: SessionComposerProps) {
   const restingBottom = Math.max(16, (props.bottomInset ?? 0) + 4);
   const offset = props.keyboardBottomOffset ?? 0;
   const lift = useAnimatedStyle(() => {
-    const height = keyboard.height.value - offset;
-    return { paddingBottom: height > 0 ? height + 8 : restingBottom };
+    const lifted = keyboard.height.value - offset;
+    return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
   });
   // Web shows the workstream control whenever the host can pause or resume.
   const showPause = Boolean(props.paused ? props.onResume : props.onPause);
@@ -71,7 +71,12 @@ export function SessionComposer(props: SessionComposerProps) {
           accessibilityLabel="Message the agent"
           value={props.value}
           onChangeText={props.onChangeText}
-          placeholder={props.placeholder ?? "Send a follow-up..."}
+          placeholder={
+            props.placeholder ??
+            (props.paused
+              ? "Message the agent — it will wait in the queue…"
+              : "Send a follow-up...")
+          }
           placeholderTextColor={c["fg-subtle"]}
           multiline
           autoFocus={props.autoFocus}
