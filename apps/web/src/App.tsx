@@ -420,6 +420,9 @@ const INSIGHTS_SEARCH_KEYS = [
   "who",
   "root",
   "sched",
+  "src",
+  "start",
+  "end",
 ] as const;
 type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
