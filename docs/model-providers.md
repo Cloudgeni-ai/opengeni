@@ -1292,6 +1292,27 @@ deterministic largest-remainder rounding to preserve the total and sets
 class attribution and must retain a null split in the writer. Never run this
 forward helper to reprice historical facts lacking captured class costs.
 
+For explicitly approximate historical attribution, use
+`allocateRecordedModelListCostByClass(settings, model, usage, recordedProviderCostMicros)`.
+It returns a nullable four-class split and `listByClassApprox: true` for every
+eligible allocation, including known zero. The caller supplies the stored
+`estimated_provider_cost_micros`; the helper never recalculates that total,
+`listMicros`, priced-call coverage, credits, or actual charges. Current reviewed
+class rates are **weights only**, multiplied by observed class tokens without
+per-class rounding. Integer-only BigInt largest-remainder allocation preserves
+the supplied total exactly; ties resolve in uncached-input/read/write/output order.
+
+Every input/output/read/write counter must be observed. Missing/invalid counters,
+unpriced models, or unavailable positive-class rates keep the split null, even
+when the recorded total is zero. Known zero/free costs can return zero classes;
+zero total weights cannot explain a positive stored cost. Per-request input tiers
+are used when retained; aggregate-only historical input tiers remain approximate.
+Historical cache-write weights use the selected schedule's single TTL rate, not
+an assertion about the original request's TTL. Reasoning remains inside observed
+output, never an extra cost class. Rollups must sum only eligible class coverage
+and must not present that covered portion as all priced usage. This allocation
+does not relax the forward snapshot's provenance or TTL-knownness requirements.
+
 The added Standard rates were reviewed on 2026-10-03 against
 [OpenAI pricing](https://developers.openai.com/api/docs/pricing),
 [xAI model pricing](https://docs.x.ai/developers/models/grok-4.7),

@@ -1960,6 +1960,13 @@ export type ModelListUsageCostSnapshot = ModelUsageCostBreakdown & {
   listByClassApprox: boolean;
 };
 
+export type ModelRecordedListCostAllocation = {
+  /** Approximate attribution of a stored upstream total, never a new price. */
+  listByClassMicros: ModelListCostClassesMicros | null;
+  /** True for every eligible historical allocation, including known zero. */
+  listByClassApprox: boolean;
+};
+
 export type StaticUsageLimitsConfig = StaticUsageLimits;
 export type EntitlementsConfig = Entitlements;
 
@@ -6572,10 +6579,91 @@ export function calculateModelListUsageCostSnapshot(
   return { providerCostMicros, creditCostMicros, listByClassMicros: classes, listByClassApprox };
 }
 
+/**
+ * Approximate class attribution of a previously recorded upstream list total.
+ * Current reviewed rates are weights only: this never recomputes that total,
+ * credits, or charges. Missing class counters/rates remain unknown. Historical
+ * cache writes use the schedule's single TTL rate, not an exact TTL assertion.
+ * Reasoning is already included in outputTokens and is never added again.
+ */
+export function allocateRecordedModelListCostByClass(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  recordedProviderCostMicros: number | null | undefined,
+): ModelRecordedListCostAllocation {
+  const unknown: ModelRecordedListCostAllocation = {
+    listByClassMicros: null,
+    listByClassApprox: false,
+  };
+  if (!knownTokenCounter(recordedProviderCostMicros)) return unknown;
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  if (!schedule) return unknown;
+  const weights = { uncachedInput: 0n, cacheRead: 0n, cacheWrite: 0n, output: 0n };
+  const entries = usage.requestUsageEntries?.length ? usage.requestUsageEntries : [usage];
+  for (const entry of entries) {
+    if (!knownTokenCounter(entry.inputTokens) || !knownTokenCounter(entry.outputTokens))
+      return unknown;
+    const cached = knownDetailTokenCounter(entry, [
+      "cached_tokens",
+      "cachedInputTokens",
+      "cached_input_tokens",
+    ]);
+    const writes = knownDetailTokenCounter(entry, ["cache_write_tokens", "cacheWriteTokens"], true);
+    if (cached === undefined || writes === undefined || cached + writes > entry.inputTokens)
+      return unknown;
+    const pricing = selectModelPricing(schedule, entry.inputTokens);
+    const counters = {
+      uncachedInput: entry.inputTokens - cached - writes,
+      cacheRead: cached,
+      cacheWrite: writes,
+      output: entry.outputTokens,
+    };
+    const rates = {
+      uncachedInput: pricing.inputMicrosPerMillionTokens,
+      cacheRead: pricing.cachedInputMicrosPerMillionTokens,
+      cacheWrite: pricing.cacheWriteMicrosPerMillionTokens,
+      output: pricing.outputMicrosPerMillionTokens,
+    };
+    for (const key of MODEL_LIST_COST_CLASS_KEYS) {
+      if (counters[key] === 0) continue;
+      const rate = rates[key];
+      if (!knownTokenCounter(rate)) return unknown;
+      // Do not round or convert weights to Number: both can distort ratios.
+      weights[key] += BigInt(counters[key]) * BigInt(rate);
+    }
+  }
+  const classes = allocateRecordedListCostWeights(weights, recordedProviderCostMicros);
+  return classes ? { listByClassMicros: classes, listByClassApprox: true } : unknown;
+}
+
 const MODEL_LIST_COST_CLASS_KEYS = ["uncachedInput", "cacheRead", "cacheWrite", "output"] as const;
 
 function sumListCostClasses(costs: ModelListCostClassesMicros): number {
   return MODEL_LIST_COST_CLASS_KEYS.reduce((total, key) => total + costs[key], 0);
+}
+
+/** Integer-only largest remainder, preserving the supplied historical total. */
+function allocateRecordedListCostWeights(
+  weights: Record<(typeof MODEL_LIST_COST_CLASS_KEYS)[number], bigint>,
+  target: number,
+): ModelListCostClassesMicros | undefined {
+  const denominator = MODEL_LIST_COST_CLASS_KEYS.reduce((total, key) => total + weights[key], 0n);
+  if (denominator === 0n) {
+    return target === 0 ? { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 } : undefined;
+  }
+  const rows = MODEL_LIST_COST_CLASS_KEYS.map((key, index) => {
+    const numerator = BigInt(target) * weights[key];
+    return { key, index, value: numerator / denominator, remainder: numerator % denominator };
+  });
+  const remaining = BigInt(target) - rows.reduce((total, row) => total + row.value, 0n);
+  const ranked = [...rows].sort((a, b) =>
+    a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1,
+  );
+  for (let index = 0; index < Number(remaining); index++) ranked[index]!.value += 1n;
+  return Object.fromEntries(
+    rows.map((row) => [row.key, Number(row.value)]),
+  ) as ModelListCostClassesMicros;
 }
 
 function knownTokenCounter(value: unknown): value is number {
