@@ -1,0 +1,12 @@
+{
+  "item_id": "phpmmcbeelfkcinjfbbggegjdcdmnnch",
+  "publisher_name": "Cloudgeni AS",
+  "category": "Tools",
+  "language": "English",
+  "visibility": "Public",
+  "distribution": "All available regions",
+  "homepage_url": "https://opengeni.ai/",
+  "support_url": "https://github.com/Cloudgeni-ai/opengeni/issues",
+  "privacy_policy_url": "https://github.com/Cloudgeni-ai/opengeni/blob/main/apps/browser-extension/PRIVACY.md",
+  "description": "Opengeni Browser connects your Chrome profile to the Opengeni machine agent installed on your computer. Let your agents inspect web pages, navigate, interact with forms, and work with your existing signed-in browser sessions.\n\nThe popup shows connection status and lets you give your Chrome profile a recognizable label. Chrome displays its debugger notification when Opengeni attaches to a tab.\n\nSetup requirements\nA separately installed and configured Opengeni machine agent and access to an Opengeni deployment are required. Installing this extension alone does not install the machine agent. Chrome-owned and other restricted pages cannot be controlled.\n\nBrowser data\nThe extension sends the profile's tab inventory, including titles and URLs, to the local machine agent. When a tab is controlled, page content, screenshots, browser events, and interaction results may be passed through that agent to your configured Opengeni deployment and model providers. Use a browser profile appropriate for the information you intend to make available to Opengeni."
+}
