@@ -14,7 +14,8 @@ import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, McpConnectionAccountSelection, ResourceRef } from "@/types";
+import { SessionGitHubCapabilityCard } from "./session-github-card";
 
 const CodexSubscriptionsCard = lazy(async () => ({
   default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
@@ -28,6 +29,10 @@ type SessionCapabilityCardProps = {
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
+  /** The chat's mounted resources, for cards that add a resource to this chat. */
+  resources?: readonly ResourceRef[] | undefined;
+  /** The composer's current connection-account choices, sent with a card's message. */
+  connectionAccounts?: (() => McpConnectionAccountSelection[]) | undefined;
 };
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
@@ -63,6 +68,19 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       }
     : props.item;
   const capability = item.capability;
+  if (capability?.id === "api:github-app") {
+    return (
+      <SessionGitHubCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        resources={props.resources}
+        connectionAccounts={props.connectionAccounts}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
@@ -96,19 +114,13 @@ function ScopedSessionCapabilityCard({
   restoreFocus = false,
 }: SessionCapabilityCardProps & { restoreFocus?: boolean }) {
   const context = useAppContext();
-  const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [githubError, setGithubError] = useState<string | null>(null);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
-  const githubInFlight = useRef(false);
-  const githubRequestSequence = useRef(0);
-  const active = useRef(true);
-  const github = recommendation.id === "api:github-app";
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card
@@ -116,81 +128,17 @@ function ScopedSessionCapabilityCard({
     const frame = requestAnimationFrame(() => opener.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [restoreFocus]);
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
-  useEffect(() => {
-    if (github && context.githubStatus) setComplete(context.githubStatus.status === "bound");
-  }, [github, context.githubStatus]);
-  useEffect(() => {
-    if (!github) return;
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted || !githubInFlight.current) return;
-      // A cancelled authorization can restore this exact React tree from the
-      // back/forward cache. Its prior request must not navigate or settle a
-      // newer attempt after the card becomes usable again.
-      githubRequestSequence.current += 1;
-      githubInFlight.current = false;
-      setBusy(false);
-      void refreshGitHub(workspaceId);
-    };
-    window.addEventListener("pageshow", onPageShow);
-    return () => window.removeEventListener("pageshow", onPageShow);
-  }, [github, refreshGitHub, workspaceId]);
   const catalogItem =
     resolvedItem ??
     context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
-    : github
-      ? capabilityLogoSource({ id: recommendation.id, logoAssetPath: null }, () => null)
-      : null;
+    : null;
   const close = () => {
     setExpanded(false);
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
-  async function connectGitHub() {
-    if (githubInFlight.current) return;
-    const requestSequence = ++githubRequestSequence.current;
-    githubInFlight.current = true;
-    setBusy(true);
-    setGithubError(null);
-    let navigating = false;
-    try {
-      const status = await context.client.getGitHubApp(workspaceId, {
-        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
-      });
-      if (!active.current || requestSequence !== githubRequestSequence.current) return;
-      if (status.status === "bound") {
-        setComplete(true);
-        void context.refreshGitHub(workspaceId);
-        return;
-      }
-      if (!status.linkUrl)
-        throw new Error(
-          status.configured
-            ? "Your account cannot manage this workspace's GitHub connection."
-            : "GitHub is not configured on this deployment.",
-        );
-      navigating = true;
-      window.location.assign(status.linkUrl);
-    } catch (failure) {
-      navigating = false;
-      if (active.current && requestSequence === githubRequestSequence.current) {
-        setGithubError(`Couldn't start GitHub setup. ${userErrorText(failure, "Try again.")}`);
-        setExpanded(true);
-      }
-    } finally {
-      if (requestSequence === githubRequestSequence.current && !navigating) {
-        githubInFlight.current = false;
-        if (active.current) setBusy(false);
-      }
-    }
-  }
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
@@ -201,42 +149,29 @@ function ScopedSessionCapabilityCard({
       skill={skill}
       expanded={expanded}
       complete={complete}
-      completeLabel={github ? "Connected to this workspace" : undefined}
       actionLabel={
-        github && busy
-          ? "Opening GitHub…"
-          : catalogItem?.enabled
-            ? "Review"
-            : skill
-              ? "Review skill"
-              : apiKey
-                ? "Add API key"
-                : `Connect ${catalogItem?.name ?? recommendation.name}`
-      }
-      opensDialog={!github}
-      note={
-        github
-          ? "Choose which account and repositories this workspace can access on GitHub."
+        catalogItem?.enabled
+          ? "Review"
           : skill
-            ? "Skill content is reviewed separately from permission to use any integration."
+            ? "Review skill"
             : apiKey
-              ? "Add credentials in the protected form, not in a chat message."
-              : "Review access before signing in. You'll return to this conversation after authorization."
+              ? "Add API key"
+              : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
-      onOpen={() => (github ? void connectGitHub() : setExpanded(true))}
+      note={
+        skill
+          ? "Skill content is reviewed separately from permission to use any integration."
+          : apiKey
+            ? "Add credentials in the protected form, not in a chat message."
+            : "Review access before signing in. You'll return to this conversation after authorization."
+      }
+      onOpen={() => setExpanded(true)}
       onClose={close}
       busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
-      {github ? (
-        <SessionGitHubSetup
-          busy={busy}
-          error={githubError}
-          onRetry={() => void connectGitHub()}
-          onClose={close}
-        />
-      ) : recommendation.id === "mcp:codex_apps" ? (
+      {recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
           busy={busy}
           setBusy={setBusy}
@@ -517,36 +452,6 @@ function SessionCapabilitySetup({
             {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Add tools
           </Button>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-function SessionGitHubSetup({
-  busy,
-  error,
-  onRetry,
-  onClose,
-}: {
-  busy: boolean;
-  error: string | null;
-  onRetry: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="space-y-3 p-6 sm:p-8">
-      <p className="text-xs leading-[1.7] text-fg-muted">
-        Choose the account and repositories to share with this workspace on GitHub, then return to
-        this conversation.
-      </p>
-      {error ? <Notice tone="failed">{error}</Notice> : null}
-      <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
-          Cancel
-        </Button>
-        <Button size="sm" disabled={busy} onClick={onRetry}>
-          {busy ? <Loader2Icon className="animate-spin" /> : null}Try again
-        </Button>
       </div>
     </div>
   );

@@ -1921,6 +1921,13 @@ function SessionChatPane(props: {
           "connections:read",
         ),
   );
+  // The card's human attach carries the composer's account choices, read at click time.
+  const connectionAccountSelections = useRef(connectionAccounts.selections);
+  connectionAccountSelections.current = connectionAccounts.selections;
+  const readConnectionAccountSelections = useCallback(
+    () => connectionAccountSelections.current,
+    [],
+  );
   const reloadSessionAfterSetup = props.onReloadSession;
   const refreshConnectionAccounts = connectionAccounts.refresh;
   const afterConnectionSetup = useCallback(async () => {
@@ -1946,6 +1953,8 @@ function SessionChatPane(props: {
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
             visibility={props.session.tenancy?.visibility ?? "workspace"}
+            resources={props.session.resources}
+            connectionAccounts={readConnectionAccountSelections}
             onConfigured={afterConnectionSetup}
           />
         </Suspense>
@@ -1957,6 +1966,8 @@ function SessionChatPane(props: {
       props.session.workspaceId,
       props.session.tenancy?.visibility,
       props.session.tenancy?.authorityEpoch,
+      props.session.resources,
+      readConnectionAccountSelections,
       afterConnectionSetup,
     ],
   );
