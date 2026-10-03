@@ -170,7 +170,21 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (resource.kind === "organization") {
       // The person picks the organization, what the agent can do and where on
       // the web app's sign-in page, which reads and answers this request.
-      const person = await requireBrowserPerson(c, deps);
+      const web = new URL(deps.settings.webBaseUrl ?? mcpOAuthIssuer(deps));
+      let person: { context: AccessContext };
+      try {
+        person = await requireBrowserPerson(c, deps);
+      } catch (error) {
+        if (!(error instanceof HTTPException) || error.status !== 401) throw error;
+        // Not signed in here yet: sign in on the web app, which returns to
+        // this exact authorization request (a same-origin path only).
+        const url = new URL(c.req.url);
+        c.header("cache-control", "no-store");
+        return c.redirect(
+          `${web.origin}/connect-agent?authorize=${encodeURIComponent(`${url.pathname}${url.search}`)}`,
+          302,
+        );
+      }
       const accountId =
         person.context.defaultAccountId ?? person.context.accountGrants[0]?.accountId;
       if (!accountId) {
@@ -193,7 +207,6 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
       c.header("cache-control", "no-store");
-      const web = new URL(deps.settings.webBaseUrl ?? mcpOAuthIssuer(deps));
       return c.redirect(
         `${web.origin}/connect-agent?request=${encodeURIComponent(requestToken)}`,
         302,

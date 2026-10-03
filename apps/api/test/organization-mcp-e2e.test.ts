@@ -119,6 +119,12 @@ describe("organization MCP server end to end", () => {
       state: "fixture-state",
     }))
       authorize.searchParams.set(key, value);
+    // Signed out: sign in on the web app first, which returns to this exact request.
+    const signedOut = await app.request(authorize.pathname + authorize.search);
+    expect(signedOut.status).toBe(302);
+    const signInUrl = new URL(signedOut.headers.get("location")!);
+    expect(signInUrl.pathname).toBe("/connect-agent");
+    expect(signInUrl.searchParams.get("authorize")).toBe(authorize.pathname + authorize.search);
     const started = await app.request(authorize.pathname + authorize.search, {
       headers: { cookie },
     });
