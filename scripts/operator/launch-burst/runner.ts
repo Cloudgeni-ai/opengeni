@@ -79,6 +79,7 @@ export async function runBurst(input: RunInput): Promise<object> {
     enrollmentStartedAt: null,
     enrollmentSettledAt: null,
     enrollmentPacingWaitMs: null,
+    enrollmentResetWaitMs: null,
     promptSentAt: null,
     sentMonoMs: null,
     acceptedMs: null,
@@ -97,10 +98,14 @@ export async function runBurst(input: RunInput): Promise<object> {
   const enrollment = {
     concurrency: intent.mode === "fresh" ? 1 : intent.count,
     gapAfterSettlementMs: intent.mode === "fresh" ? intent.freshEnrollmentGapMs : null,
+    batchSize: intent.mode === "fresh" ? intent.freshEnrollmentBatchSize : null,
+    resetCooldownMs: intent.mode === "fresh" ? intent.freshEnrollmentResetCooldownMs : null,
     startedAt: null as string | null,
     settledAt: null as string | null,
     durationMs: null as number | null,
     pacingWaitMs: 0,
+    ordinaryWaitMs: 0,
+    resetWaitMs: 0,
     dispatchReleasedAt: null as string | null,
   };
   const result = (phase: string) => ({
@@ -187,6 +192,7 @@ export async function runBurst(input: RunInput): Promise<object> {
     input.wait ??
     ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   let priorEnrollmentSettledMs: number | null = null;
+  let settledEnrollmentAttempts = 0;
   enrollment.startedAt = clock.wall();
   const enrollmentStartedMs = clock.mono();
   // Also interrupt a real mailbox wait on STOP/expiry, without overlapping reads.
@@ -214,11 +220,19 @@ export async function runBurst(input: RunInput): Promise<object> {
         if (identity.kind === "fresh") {
           sample.stage = "enrollment_pacing";
           const pacingStarted = clock.mono();
+          // Better Auth's database limiter resets only after >60 seconds idle,
+          // not a rolling minute. Every attempted pipeline consumes a batch slot.
+          const resetRequired =
+            settledEnrollmentAttempts > 0 &&
+            settledEnrollmentAttempts % intent.freshEnrollmentBatchSize === 0;
           try {
             const eligibleAt =
               priorEnrollmentSettledMs === null
                 ? pacingStarted
-                : priorEnrollmentSettledMs + intent.freshEnrollmentGapMs;
+                : priorEnrollmentSettledMs +
+                  (resetRequired
+                    ? intent.freshEnrollmentResetCooldownMs
+                    : intent.freshEnrollmentGapMs);
             for (;;) {
               await assertAdmission();
               const remaining = eligibleAt - clock.mono();
@@ -227,7 +241,10 @@ export async function runBurst(input: RunInput): Promise<object> {
             }
           } finally {
             sample.enrollmentPacingWaitMs = clock.mono() - pacingStarted;
+            sample.enrollmentResetWaitMs = resetRequired ? sample.enrollmentPacingWaitMs : 0;
             enrollment.pacingWaitMs += sample.enrollmentPacingWaitMs;
+            if (resetRequired) enrollment.resetWaitMs += sample.enrollmentPacingWaitMs;
+            else enrollment.ordinaryWaitMs += sample.enrollmentPacingWaitMs;
           }
         }
         await assertAdmission();
@@ -319,6 +336,7 @@ export async function runBurst(input: RunInput): Promise<object> {
         if (sample.enrollmentStartedAt !== null) {
           sample.enrollmentSettledAt = clock.wall();
           priorEnrollmentSettledMs = clock.mono();
+          settledEnrollmentAttempts++;
         }
       }
     });

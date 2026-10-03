@@ -8,6 +8,8 @@
   "turnTimeoutMs": 180000,
   "signupTimeoutMs": 300000,
   "freshEnrollmentGapMs": 3100,
+  "freshEnrollmentBatchSize": 20,
+  "freshEnrollmentResetCooldownMs": 61000,
   "costCapUsd": 10,
   "reservedUsdPerSession": 0.2,
   "cleanup": "request-after-terminal"

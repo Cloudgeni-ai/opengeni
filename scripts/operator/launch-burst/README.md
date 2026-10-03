@@ -65,6 +65,17 @@ at a time. `freshEnrollmentGapMs` defaults to 3100 and cannot be less than 3100.
 The gap starts **after the prior pipeline settles**, including failures, not after
 its signup request. This preserves at least 3100 ms between consecutive users'
 signup, verification and signin routes even with variable mailbox latency.
+The locked Better Auth database limiter is **inactivity-reset**, not rolling-window:
+each admitted request refreshes the per-client/per-path `lastRequest`, and a
+20-request counter resets only after **more than 60 seconds without admission**.
+Uninterrupted 3100 ms spacing alone therefore rejects the 21st enrollment.
+`freshEnrollmentBatchSize` defaults to 20 and cannot exceed 20. After every batch
+of settled pipeline **attempts**, `freshEnrollmentResetCooldownMs` replaces the
+ordinary gap with at least 61000 ms after settlement (default 61000). Failed or
+partial enrollments consume slots too; failures never reset the batch count.
+A slow pipeline does not substitute for this post-settlement cooldown. These
+counts do not reserve capacity against unrelated traffic sharing the same egress
+address: HTTP 429 remains an honest failure, with no retry or bucket evasion.
 The per-user signup deadline starts after pacing; waiting in the cohort queue
 does not consume that user's deadline. STOP and gate expiry are checked during
 pacing/mailbox waits and before release. A cutoff or expired gate blocks the whole
@@ -76,11 +87,13 @@ authorization is revalidated immediately before releasing ordinary concurrent
 session POSTs with initial prompts and fresh model/effort omitted. There is no
 earlier prompt, warm-up, credential export, persisted enrollment, or resume path.
 
-The earliest-to-final enrollment span has a pacing floor of **151.9 seconds for
-50 users / 306.9 seconds for 100**, plus the actual complete pipelines, including
+The earliest-to-final enrollment span has a default pacing floor of **267.7 seconds
+for 50 users / 538.5 seconds for 100**: 49/99 ordinary 3.1-second gaps, replacing
+two/four gaps with 61-second resets. Add the actual complete pipelines, including
 mail delivery and onboarding. This is not a signup-latency baseline or prompt TTFT.
-The aggregate `enrollment` windows/duration/pacing wait and per-user
-`enrollmentStartedAt`, `enrollmentSettledAt`, `enrollmentPacingWaitMs` are content-free
+The aggregate `enrollment` windows/duration/total pacing wait, `ordinaryWaitMs`,
+`resetWaitMs`, and per-user `enrollmentStartedAt`, `enrollmentSettledAt`,
+`enrollmentPacingWaitMs`, `enrollmentResetWaitMs` are content-free
 and separate from `signupMs` and prompt latency. A slow cohort can exceed the real
 maximum 30-minute authorization TTL and create **zero sessions** despite partial
 account enrollment. That is an honest blocked wave, not grounds to extend the
@@ -101,6 +114,12 @@ Default execution prints only intent, its canonical SHA-256, and zero remote
 requests. It does not inspect cohort credentials, invoke mailbox/checkpoint/stop
 callbacks, or fetch configuration. Offline fixtures inject an in-memory transport;
 they do not start even a loopback app/Temporal/DB/model/sandbox service.
+Rate regressions invoke the API's locked Better Auth `onRequestRateLimit` database
+consumer with the actual source rules, a pure memory adapter and virtual time;
+global fetch/preconnect are forbidden. They prove the old 21st-admission failure,
+the strict 60-second idle boundary and admitted 50/100 legacy/dual/broker cohorts.
+Session-set transactions keep their isolated protocol fixtures; they are not
+misrepresented as Better Auth HTTP limiter routes.
 
 ## Gated execution recipe — DO NOT RUN yet
 
@@ -112,7 +131,8 @@ token plus immutable message/confirmation references are operator evidence, not
 automatic gate detection. There is no approval generator in the harness.
 For a fresh wave, the **new** exact-source/intent/cohort authorization must cover
 both serial enrollment and concurrent first-turn dispatch. Its maximum 30-minute
-TTL includes both phases; the pacing field is bound by the canonical intent digest.
+TTL includes both phases; all gap, batch and cooldown fields are bound by the
+canonical intent digest. The runner cannot reauthorize or extend an expired gate.
 
 Keep private inputs/results outside the repository. Cohort schema:
 

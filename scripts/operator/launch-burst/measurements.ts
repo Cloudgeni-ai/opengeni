@@ -29,6 +29,7 @@ export type Sample = {
   enrollmentStartedAt: string | null;
   enrollmentSettledAt: string | null;
   enrollmentPacingWaitMs: number | null;
+  enrollmentResetWaitMs: number | null;
   promptSentAt: string | null;
   sentMonoMs: number | null;
   acceptedMs: number | null;

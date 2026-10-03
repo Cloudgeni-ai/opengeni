@@ -5,6 +5,8 @@ export const STAGING_ORIGIN = "https://staging.app.opengeni.ai";
 // packages/config/src/index.ts: creditsDefaultModel / creditsDefaultReasoningEffort.
 export const LUNA_MODEL = "gpt-6-luna";
 export const FRESH_ENROLLMENT_MIN_GAP_MS = 3_100;
+export const FRESH_ENROLLMENT_MAX_BATCH_SIZE = 20;
+export const FRESH_ENROLLMENT_MIN_RESET_COOLDOWN_MS = 61_000;
 export const Mode = z.enum(["plain", "sandbox", "fresh"]);
 export type Mode = z.infer<typeof Mode>;
 const Label = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/u);
@@ -26,6 +28,18 @@ export const Intent = z
       .min(FRESH_ENROLLMENT_MIN_GAP_MS)
       .max(60_000)
       .default(FRESH_ENROLLMENT_MIN_GAP_MS),
+    freshEnrollmentBatchSize: z
+      .number()
+      .int()
+      .min(1)
+      .max(FRESH_ENROLLMENT_MAX_BATCH_SIZE)
+      .default(FRESH_ENROLLMENT_MAX_BATCH_SIZE),
+    freshEnrollmentResetCooldownMs: z
+      .number()
+      .int()
+      .min(FRESH_ENROLLMENT_MIN_RESET_COOLDOWN_MS)
+      .max(600_000)
+      .default(FRESH_ENROLLMENT_MIN_RESET_COOLDOWN_MS),
     // Admission reservation, NOT a provider hard cap (see README).
     costCapUsd: z.number().positive().max(100),
     reservedUsdPerSession: z.number().positive().max(10),
@@ -182,7 +196,12 @@ export function publicPlan(intent: Intent) {
         ? {
             concurrency: 1,
             gapAfterSettlementMs: intent.freshEnrollmentGapMs,
-            minimumPacingSpanMs: (intent.count - 1) * intent.freshEnrollmentGapMs,
+            batchSize: intent.freshEnrollmentBatchSize,
+            resetCooldownMs: intent.freshEnrollmentResetCooldownMs,
+            minimumPacingSpanMs:
+              (intent.count - 1) * intent.freshEnrollmentGapMs +
+              Math.floor((intent.count - 1) / intent.freshEnrollmentBatchSize) *
+                (intent.freshEnrollmentResetCooldownMs - intent.freshEnrollmentGapMs),
             sessionsCreated: 0,
             credentials: "in-memory only; no persisted enrollment/resume",
             nextPhase:
