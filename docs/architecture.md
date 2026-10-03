@@ -130,13 +130,8 @@ the recipient's accepted settings; there is no follow-up latency reset.
 `runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
 effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
 fences; pre-dispatch proof alone permits recovery.
-Timeout recovery records a server-producer dispatch-expiry receipt even before
-its DB attempt exists; caller operation keys cannot reserve this namespace.
-Claim validates its exact scope, type, and payload. Claim and timeout serialize
-on the session: a late abandoned dispatch cannot materialize a turn or consume
-input after the recovery decision.
-Already-claimed attempts retain the existing generation and physical-writer
-recovery fences; Temporal settlement alone never revokes ownership.
+Server-producer expiry receipts fence late turn/input materialization under the
+session lock; [validation/recovery fences](run-lifecycle.md).
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
