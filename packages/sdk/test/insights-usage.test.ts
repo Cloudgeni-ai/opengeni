@@ -80,9 +80,8 @@ test("SDK signatures/type-only DTOs and custom-window options match the dedicate
   ]).toHaveLength(6);
 });
 
-function fixture() {
+function fixture(result: unknown = { fixture: "returned unchanged" }) {
   const requests: Request[] = [];
-  const result = { fixture: "returned unchanged" };
   const client = new OpenGeniClient({
     baseUrl: "https://api.example.test",
     apiKey: "test-key",
@@ -245,6 +244,104 @@ describe("expanded shared Insights SDK requests", () => {
       `/v1/workspaces/${id}/insights/calls`,
       "/v1/organizations/opaque%2Fid%3F/insights/calls",
     ]);
+  });
+
+  test("basic usage and calls requests never opt into deferred dimensions or custom windows", async () => {
+    const { client, requests } = fixture();
+    const usage: Sdk.WorkspaceInsightsUsageOptions = {
+      range: "30d",
+      groupBy: "model",
+      seriesGroups: false,
+      provider: ["anthropic", "openai"],
+    };
+    const calls: Sdk.WorkspaceInsightsCallsOptions = {
+      range: "week",
+      limit: 50,
+      cursor: "opaque+cursor/=",
+      provider: ["anthropic", "openai"],
+    };
+    await client.getWorkspaceInsightsUsage(id, usage);
+    await client.getOrganizationInsightsUsage(id, usage);
+    await client.listInsightsCalls({ kind: "workspace", workspaceId: id }, calls);
+    await client.listInsightsCalls({ kind: "organization", accountId: id }, calls);
+    for (const [index, request] of requests.entries()) {
+      const expected = index < 2 ? usage : calls;
+      const params = new URL(request.url).searchParams;
+      expect([...new Set(params.keys())].sort()).toEqual(Object.keys(expected).sort());
+      for (const [key, value] of Object.entries(expected))
+        expect(params.getAll(key)).toEqual((Array.isArray(value) ? value : [value]).map(String));
+    }
+  });
+
+  test("both usage scopes preserve an absent capability marker and zero-fact ledger prior", async () => {
+    const zeroPayer = { calls: 0, chargedMicros: 0, listMicros: 0 };
+    const empty: Contracts.InsightsUsageMeasures = {
+      calls: 0,
+      tokenKnownCalls: 0,
+      cacheKnownCalls: 0,
+      cacheWriteKnownCalls: 0,
+      listClassKnownCalls: 0,
+      tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 },
+      chargedMicros: 0,
+      listMicros: 0,
+      listByClassMicros: null,
+      listByClassApprox: false,
+      pricedCalls: 0,
+      byPayer: {
+        opengeni_credits: { ...zeroPayer },
+        subscription: { ...zeroPayer },
+        own_key: { ...zeroPayer },
+      },
+    };
+    for (const kind of ["workspace", "organization"] as const) {
+      const result: Contracts.InsightsUsageResponse = {
+        scope:
+          kind === "workspace"
+            ? { kind, accountId: id, workspaceId: secondId }
+            : { kind, accountId: id, workspaceId: null },
+        range: "week",
+        windowStart: "2026-09-28T00:00:00Z",
+        windowEnd: "2026-10-03T10:00:00Z",
+        priorWindowStart: "2026-09-21T00:00:00Z",
+        priorWindowEnd: "2026-09-26T10:00:00Z",
+        bucket: "day",
+        generatedAt: "2026-10-03T10:00:00Z",
+        dataThrough: null,
+        totals: empty,
+        prior: {
+          ...empty,
+          chargedMicros: 23,
+          byPayer: { ...empty.byPayer, opengeni_credits: { ...zeroPayer, chargedMicros: 23 } },
+        },
+        groupBy: "model",
+        groups: [],
+        groupCount: 0,
+        groupsTruncated: false,
+        series: [],
+        facets: {
+          workspaces: [],
+          providers: [],
+          models: [],
+          payers: [],
+          plans: [],
+          projects: [],
+          people: [],
+          schedules: [],
+        },
+      };
+      const { client, requests } = fixture(result);
+      const received =
+        kind === "workspace"
+          ? await client.getWorkspaceInsightsUsage(secondId)
+          : await client.getOrganizationInsightsUsage(id);
+      expect(received).toEqual(result);
+      expect(Object.hasOwn(received.facets, "sources")).toBe(false);
+      expect(Array.isArray(received.facets.sources)).toBe(false);
+      expect(received.prior?.chargedMicros).toBe(23);
+      expect(received.prior?.calls).toBe(0);
+      expect(received.prior?.tokenKnownCalls).toBe(0);
+      expect(new URL(requests[0]!.url).search).toBe("");
+    }
   });
 
   test("cancellation is forwarded separately for all methods", async () => {
