@@ -70,6 +70,10 @@
       "types": "./src/organization-model-usage.ts",
       "default": "./src/organization-model-usage.ts"
     },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
