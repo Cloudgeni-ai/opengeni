@@ -6,6 +6,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { devApiProxyTarget } from "./vite-dev-proxy";
 import { compactProtectedIndexHtml } from "./vite-index-html";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
@@ -517,11 +518,14 @@ export default defineConfig({
     port: 3000,
     // OAuth providers return to the public web origin. Match production's /v1
     // ingress routing so these callbacks reach the API instead of the SPA.
+    // When the browser talks to the API through this server
+    // (VITE_API_BASE_URL is the web origin itself, as in production where web
+    // and API share an origin), forward to the API port rather than to itself.
+    // Managed-mode browser mutations such as connecting Codex require
+    // same-origin fetch metadata, which a cross-port API never gets.
     proxy: {
       "/v1": {
-        target:
-          process.env.VITE_API_BASE_URL ||
-          `http://127.0.0.1:${process.env.OPENGENI_API_PORT || 8000}`,
+        target: devApiProxyTarget(process.env.VITE_API_BASE_URL, process.env.OPENGENI_API_PORT),
       },
     },
     ...(allowedHosts?.length ? { allowedHosts } : {}),

@@ -7,6 +7,7 @@ import { composeCodingAgentPrompt, hasAnyProductAnswer } from "@/lib/first-agent
 import {
   markOnboarding,
   onboardingJourneyStorageKey,
+  updateOnboardingJourney,
   useOnboardingJourney,
 } from "@/lib/onboarding-journey";
 import { DEVELOPMENT_WORKSPACE_NAME } from "@/lib/onboarding-paths";
@@ -38,44 +39,46 @@ export function UseOwnCodingAgentSection({
     null;
   const apiOrigin = apiOriginFor(apiBaseUrl, window.location.origin);
   const answers = journey?.firstAgent ?? null;
+  const ensureWorkspace = async (): Promise<string> => {
+    // API keys reach shared workspaces only, so the product's agent gets one,
+    // the same Development workspace first run sets up.
+    const created = await context.client.createOrganizationWorkspace(organizationId, {
+      name: DEVELOPMENT_WORKSPACE_NAME,
+      operationId: crypto.randomUUID(),
+    });
+    updateOnboardingJourney(journeyKey, (current) => ({
+      ...current,
+      developmentWorkspaceId: created.id,
+    }));
+    await context.refreshPrincipalAccess();
+    return created.id;
+  };
+  const prompt = (workspaceId: string) =>
+    answers && answers.use === "product" && hasAnyProductAnswer(answers)
+      ? composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId })
+      : buildWithOpengeniPrompt({ apiOrigin, organizationId, workspaceId });
   return (
     <Section
       title="Use your own coding agent"
       description="Claude Code, Codex or Cursor builds Opengeni into your product with one setup."
     >
-      {workspace ? (
-        <div className="py-4">
-          <OwnAgentSetup
-            organizationId={organizationId}
-            workspaceId={workspace.id}
-            canCreateApiKeys={canCreateApiKeys}
-            prompt={
-              answers && answers.use === "product" && hasAnyProductAnswer(answers)
-                ? composeCodingAgentPrompt(answers, {
-                    apiOrigin,
-                    organizationId,
-                    workspaceId: workspace.id,
-                  })
-                : buildWithOpengeniPrompt({ apiOrigin, organizationId, workspaceId: workspace.id })
-            }
-            mcpUrl={
-              context.clientConfig.mcpOAuthEnabled === true
-                ? codingAgentSetup({
-                    mcpOAuthEnabled: true,
-                    apiOrigin,
-                    workspaceId: workspace.id,
-                  }).mcpUrl
-                : null
-            }
-            firstSessionSeen={Boolean(journey?.marks.first_api_session)}
-            onMark={(mark) => markOnboarding(journeyKey, mark)}
-          />
-        </div>
-      ) : (
-        <p className="py-4 text-sm text-fg-muted">
-          Your product's agent runs in a shared workspace. Create one in Workspaces first.
-        </p>
-      )}
+      <div className="py-4">
+        <OwnAgentSetup
+          organizationId={organizationId}
+          workspaceId={workspace?.id ?? null}
+          ensureWorkspace={ensureWorkspace}
+          canCreateApiKeys={canCreateApiKeys}
+          prompt={prompt}
+          mcpUrl={
+            workspace && context.clientConfig.mcpOAuthEnabled === true
+              ? codingAgentSetup({ mcpOAuthEnabled: true, apiOrigin, workspaceId: workspace.id })
+                  .mcpUrl
+              : null
+          }
+          firstSessionSeen={Boolean(journey?.marks.first_api_session)}
+          onMark={(mark) => markOnboarding(journeyKey, mark)}
+        />
+      </div>
     </Section>
   );
 }

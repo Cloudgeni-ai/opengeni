@@ -32,6 +32,7 @@ import {
 export function OwnAgentSetup({
   organizationId,
   workspaceId,
+  ensureWorkspace,
   canCreateApiKeys,
   prompt,
   mcpUrl,
@@ -40,10 +41,13 @@ export function OwnAgentSetup({
   className,
 }: {
   organizationId: string;
-  workspaceId: string;
+  /** The shared workspace the product's agent runs in; null until there is one. */
+  workspaceId: string | null;
+  /** Creates the shared workspace on the first copy when there is none yet. */
+  ensureWorkspace?: () => Promise<string>;
   canCreateApiKeys: boolean;
-  /** What to paste into the coding agent. */
-  prompt: string;
+  /** What to paste into the coding agent, for the workspace it uses. */
+  prompt: (workspaceId: string) => string;
   /** The workspace MCP server, offered to Claude Code where coding agents can sign in. */
   mcpUrl?: string | null;
   /** The product's first chat already arrived (stop watching). */
@@ -64,6 +68,19 @@ export function OwnAgentSetup({
 
   const copySetup = async () => {
     setBusy(true);
+    let target = workspaceId;
+    try {
+      if (!target) {
+        if (!ensureWorkspace) return;
+        target = await ensureWorkspace();
+      }
+    } catch (error) {
+      toast.error("Couldn't set up a workspace for your product", {
+        description: userErrorText(error),
+      });
+      setBusy(false);
+      return;
+    }
     try {
       let key = token;
       if (!key && canCreateApiKeys) {
@@ -75,7 +92,9 @@ export function OwnAgentSetup({
         setToken(key);
         onMark("api_key");
       }
-      const ok = await clipboard.copy(codingAgentSetupBlock({ prompt, apiKey: key }));
+      const ok = await clipboard.copy(
+        codingAgentSetupBlock({ prompt: prompt(target), apiKey: key }),
+      );
       if (ok) onMark("coding_agent");
     } catch (error) {
       toast.error("Couldn't create the API key", { description: userErrorText(error) });
@@ -110,12 +129,14 @@ export function OwnAgentSetup({
             : "Paste it into Claude Code, Codex or Cursor."}
         </p>
         {token ? <SecretOnce className="mt-1" value={token} /> : null}
-        <FirstApiSessionStatus
-          state={firstSession}
-          done={firstSessionSeen}
-          workspaceId={workspaceId}
-          workspaceName={workspaceName}
-        />
+        {workspaceId ? (
+          <FirstApiSessionStatus
+            state={firstSession}
+            done={firstSessionSeen}
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
+          />
+        ) : null}
       </div>
       <Disclosure title="Show details">
         <div className="flex min-w-0 flex-col gap-4">
@@ -125,7 +146,7 @@ export function OwnAgentSetup({
           />
           <CodeBlock
             label="For your coding agent"
-            code={prompt}
+            code={prompt(workspaceId ?? "<created on first copy>")}
             wrap="words"
             copyLabel="Copy prompt"
             copyAnalytics={analyticsAction("copy_build_prompt")}

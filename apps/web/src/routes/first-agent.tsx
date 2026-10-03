@@ -624,7 +624,9 @@ function ReadyStep({
   // The balance is read once the catalog says credits are sold here.
   const checking =
     state.modelReady === null || (state.credits.sold && state.credits.loading && !credits);
-  const needsModel = !checking && !credits && state.modelReady === false && !modelStepDone;
+  // Only someone who can connect models is asked to (never an option they can't use).
+  const needsModel =
+    !checking && !credits && state.modelReady === false && state.canManageModels && !modelStepDone;
   const celebrate = !checking && !needsModel;
   const [celebrated] = useState(() => Boolean(state.journey?.marks.celebrated));
   useEffect(() => {

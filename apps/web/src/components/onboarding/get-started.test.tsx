@@ -247,6 +247,7 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const journeys = await import("@/lib/onboarding-journey");
 const { takeComposerPrefill, takeComposerSend } = await import("@/lib/composer-prefill");
 const { FirstAgentRoute } = await import("@/routes/first-agent");
+const { UseOwnCodingAgentSection } = await import("./coding-agent-section");
 const firstAgent = await import("@/lib/first-agent");
 const { FIRST_TASKS } = await import("@/lib/first-tasks");
 
@@ -814,6 +815,37 @@ describe("First run in the app", () => {
       await flush();
       expect(container.querySelector("h1")!.textContent).toBe("You're all set");
       expect(container.textContent).not.toContain("$");
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+describe("Developer settings: Use your own coding agent", () => {
+  test("without a shared workspace, the first copy creates Development and continues", async () => {
+    const writeText = mock(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { container, unmount } = await mount(
+      <UseOwnCodingAgentSection organizationId={ORG} canCreateApiKeys />,
+    );
+    try {
+      // No dead end telling them to create a workspace first.
+      expect(container.textContent).not.toContain("Create one in Workspaces");
+      expect(container.textContent).toContain(
+        "Claude Code, Codex or Cursor builds Opengeni into your product with one setup.",
+      );
+      await act(async () => button(container, "Copy setup for my coding agent").click());
+      await flush();
+      expect(createOrganizationWorkspace).toHaveBeenCalledWith(ORG, {
+        name: "Development",
+        operationId: expect.any(String),
+      });
+      const copied = writeText.mock.calls.at(-1)![0];
+      expect(copied).toContain(`workspace ${DEVELOPMENT} in organization ${ORG}`);
+      expect(copied).toContain("OPENGENI_API_KEY=ogk_hello");
+      expect(journeys.readOnboardingJourney(KEY)?.developmentWorkspaceId ?? DEVELOPMENT).toBe(
+        DEVELOPMENT,
+      );
     } finally {
       await unmount();
     }

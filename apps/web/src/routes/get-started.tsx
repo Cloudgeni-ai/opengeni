@@ -351,10 +351,10 @@ function ProductStep({ state }: { state: GetStartedState }) {
   const apiOrigin = apiOriginFor(apiBaseUrl, window.location.origin);
   const answers = state.journey?.firstAgent ?? null;
   const fromAnswers = Boolean(answers && answers.use === "product" && hasAnyProductAnswer(answers));
-  const prompt =
+  const prompt = (target: string) =>
     answers && fromAnswers
-      ? composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId })
-      : buildWithOpengeniPrompt({ apiOrigin, organizationId, workspaceId });
+      ? composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId: target })
+      : buildWithOpengeniPrompt({ apiOrigin, organizationId, workspaceId: target });
   return (
     <OwnAgentSetup
       className="mt-4 flex min-w-0 flex-col gap-4"
