@@ -126,6 +126,40 @@ function modelAcceptsTextVerbosity(upstreamModelId: string): boolean {
 }
 
 /**
+ * Ask supported reasoning Responses routes for their provider-selected summary
+ * format. This is public summary text, never private or encrypted reasoning.
+ * Codex and unverified compatible wires retain the existing detailed setting.
+ */
+export function reasoningSummaryForTurn(
+  resolvedModel: {
+    provider: {
+      id: string;
+      api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+    configured: {
+      upstreamModelId: string;
+      capabilities: { reasoning: { runnable: boolean } };
+    };
+  } | null,
+): "auto" | undefined {
+  if (
+    resolvedModel?.provider.api !== "responses" ||
+    !resolvedModel.configured.capabilities.reasoning.runnable ||
+    !modelAcceptsTextVerbosity(resolvedModel.configured.upstreamModelId)
+  ) {
+    return undefined;
+  }
+  const provider = resolvedModel.provider;
+  return provider.wireProfile === "azure-openai" ||
+    (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl))
+    ? "auto"
+    : undefined;
+}
+
+/**
  * Progressive tool disclosure is universal for supported OpenGeni turns; only
  * its contained transport differs. Codex keeps its native path, built-in direct
  * OpenAI/Azure Responses use native client tool search, and every other ordinary
