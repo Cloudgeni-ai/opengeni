@@ -746,15 +746,14 @@ destinations.
 | Turn | One accepted human, machine, goal, schedule, approval, or recovery unit | Until logically settled |
 | Attempt | One physical worker execution of a turn | Until completion, interruption, loss, or replacement |
 
-A new attempt does not imply a new prompt. A new prompt does imply a new turn.
-This distinction is the basis for safe worker-death recovery and protection
-against duplicate external effects.
+A new attempt need not mean a new prompt; a new prompt creates a new turn.
+This distinction enables worker-death recovery without duplicate external effects.
 
-Semantic naming is attempt-owned auxiliary work. Pending titles and exact-session
-policy authorize one bounded, tool-less request parallel to the main stream,
-metered separately. Normal completion joins it before atomic settlement;
+Semantic naming is attempt-owned auxiliary work: pending titles and exact-session
+policy authorize one bounded, tool-less request, parallel to the main stream and
+separately metered. Normal completion joins it before atomic settlement;
 exceptional/cancelled exits abort and join. Generic title writes lose to human
-renames. Runtimes without this seam retain serialized `set_session_title`.
+renames. Runtimes without this seam serialize `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` projects defaults;
 `packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
@@ -826,26 +825,23 @@ surfacing a pre-reservation model, limit, resource, or attachment failure, the
 retry takes the actor/key prompt-operation fence and rechecks the completed
 receipt so an overlapping committed Send or Steer is replayed exactly once.
 
-Failed sessions can be revived by new accepted work. Cancellation remains the
-terminal boundary.
+New accepted work can revive failed sessions; cancellation remains terminal.
 
-An operational database failure after an exact claim but before turn-start
-completion revalidates that immutable attempt and uses the ordinary same-turn
-recovery and bounded redispatch path. A lost claim response that later reveals
-the exact active attempt follows the same transition. Permanent database or
-state failures remain terminal, and no model, tool, or provider work is replayed
-or converted into a new queue item.
+Operational database failure after claim, before turn-start completion,
+revalidates the immutable attempt through ordinary same-turn recovery and bounded
+redispatch. A lost claim response revealing the exact active attempt follows that
+path. Permanent database/state faults remain terminal; model, tool, or provider
+work is never replayed or requeued.
 
-Transient provider recovery is bounded by a durable consecutive-failure streak,
-not lifetime failures across a long turn. A completed model request
-from the exact current attempt clears the durable streak atomically with its
-timeline event, and the worker clears its in-memory copy only after that commit;
-late attempt evidence cannot replenish the retry budget. See
+Transient provider recovery uses a durable consecutive-failure streak, not lifetime
+failures. An exact-current-attempt model completion atomically clears that streak
+with its timeline event; only then does the worker clear its in-memory copy.
+Late attempt evidence cannot replenish the retry budget. See
 [`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 
-These producers all converge on the ordinary session/turn runtime:
+All producers use the ordinary session/turn runtime:
 
 - an active **goal** creates a durable continuation obligation;
 - a **scheduled task** freezes one accepted occurrence and its execution
@@ -881,9 +877,8 @@ claim and task lifecycle locks serialize this decision. Resume never revives
 pre-pause deposits, and a delivery fence rejects updates for terminal runs even
 from old workers during a rolling deployment.
 
-None of them creates a parallel agent engine. They differ in admission and
-provenance, then use the same logical turn, attempt, event, recovery, and usage
-boundaries.
+Admission and provenance differ; logical turn, attempt, event, recovery, and
+usage boundaries remain shared. No parallel agent engine is created.
 
 Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
@@ -891,14 +886,13 @@ Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 
 ### 5.4 Approval and structured human input
 
-Tool approval and structured human input are durable interruptions. The worker
-stores enough exact protocol state to stop without pairing an unfinished call
-into model history. A response must bind to the pending request, target turn,
-execution generation, requester, and current authorization.
+Tool approval and structured human input durably interrupt execution. The worker
+retains exact protocol state without pairing unfinished calls into model history.
+Responses bind the pending request, target turn, execution generation, requester,
+and current authorization.
 
-Tool approvals are human-only. Agents may answer an authorized structured
-human-input request for another session where the agent-session authority model
-allows it, but they cannot grant themselves tool approval.
+Tool approvals are human-only. Agent-session authority may permit answering
+another session's structured human-input request, never self-approval of tools.
 
 Canonical: [`human-input.md`](human-input.md),
 [`agent-session-authority.md`](agent-session-authority.md), and
@@ -1069,8 +1063,7 @@ from source; Connected Machine agent/relay use Rust Cargo workspace
 `examples/vue-conversation/app` has its own npm lock and builds against the
 published SDK, not repository source.
 
-Package manifests and `.changeset/config.json` own publication; these lists
-describe responsibility.
+Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
 
 ### 6.1 Applications
 
@@ -1142,10 +1135,10 @@ handlers because its host owns process lifecycle.
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
 
-One agent connects independently to multiple deployments and workspaces within
-shared host containment. The relay carries terminal/desktop bytes, not durable
-session or lease state. Install `latest` may serve baked binaries; version pins
-resolve binaries/signatures from the immutable release archive.
+One agent independently connects multiple deployments/workspaces within shared
+host containment. The relay carries terminal/desktop bytes, never durable session
+or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
