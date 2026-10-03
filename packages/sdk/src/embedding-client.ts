@@ -1,6 +1,6 @@
 import { OpenGeniClient as OpenGeniArtifactClient } from "./artifact-client";
 import type { OpenGeniClientOptions } from "./client";
-import type { AddWorkspaceMemberRequest, ApiKey, UpdateOrganizationApiKeyRequest } from "./types";
+import type { AddWorkspaceMemberRequest } from "./types";
 import type {
   ExternalIdentityLink,
   BeginExternalIdentityLinkRequest,
@@ -53,27 +53,6 @@ function serializeServiceContext(context: ServiceContext): string {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
-  /** Read organization-key metadata and policy; never returns the secret token. */
-  async getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "GET",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-    );
-  }
-
-  /** Update metadata or replace the policy. Policy narrowing applies on the next request. */
-  async updateOrganizationApiKey(
-    organizationId: string,
-    apiKeyId: string,
-    request: UpdateOrganizationApiKeyRequest,
-  ): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-      request,
-    );
-  }
-
   /** Read configuration (null means no configured ceiling). Requires admin or organization-key read authority. */
   async getWorkspaceAllowance(
     workspaceId: string,

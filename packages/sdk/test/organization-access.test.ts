@@ -26,6 +26,9 @@ import {
   type OrganizationWorkspaceScope,
   type UpdateOrganizationApiKeyRequest,
 } from "../src/index";
+import { OpenGeniCoreClient } from "../src/core";
+import { OpenGeniClient as OpenGeniArtifactClient } from "../src/artifacts";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 
 const ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -59,9 +62,9 @@ function apiKey(overrides: Partial<ApiKey> = {}): ApiKey {
   };
 }
 
-function makeClient(respond: (request: Request) => Response) {
+function makeClient(respond: (request: Request) => Response, Client: typeof OpenGeniCoreClient) {
   const requests: Request[] = [];
-  const client = new OpenGeniClient({
+  const client = new Client({
     baseUrl: "https://api.example.test",
     apiKey: "ogk_fixture",
     fetch: (async (input, init) => {
@@ -73,10 +76,15 @@ function makeClient(respond: (request: Request) => Response) {
   return { client, requests };
 }
 
-describe("organization API-key requests", () => {
+describe.each([
+  ["root", OpenGeniClient],
+  ["core", OpenGeniCoreClient],
+  ["artifacts", OpenGeniArtifactClient],
+  ["document-authority", OpenGeniDocumentAuthorityClient],
+] as const)("organization API-key requests (%s)", (_entry, Client) => {
   test("GET detail returns the raw key and policy, never a token wrapper", async () => {
     const key = apiKey();
-    const { client, requests } = makeClient(() => Response.json(key));
+    const { client, requests } = makeClient(() => Response.json(key), Client);
     const result: ApiKey = await client.getOrganizationApiKey(ORGANIZATION_ID, KEY_ID);
     expect(result).toEqual(key);
     expect(result).not.toHaveProperty("token");
@@ -91,8 +99,9 @@ describe("organization API-key requests", () => {
     "create forwards the explicit %s policy without expanding its label",
     async (preset) => {
       const requestedPolicy: OrganizationAccessPolicy = { ...policy, preset };
-      const { client, requests } = makeClient(() =>
-        Response.json({ apiKey: apiKey(), token: "ogk_once" }, { status: 201 }),
+      const { client, requests } = makeClient(
+        () => Response.json({ apiKey: apiKey(), token: "ogk_once" }, { status: 201 }),
+        Client,
       );
       const input: CreateOrganizationApiKeyRequest = {
         name: "Policy key",
@@ -117,7 +126,7 @@ describe("organization API-key requests", () => {
     "PATCH preserves exactly the supplied changes: %j",
     async (input) => {
       const key = apiKey();
-      const { client, requests } = makeClient(() => Response.json(key));
+      const { client, requests } = makeClient(() => Response.json(key), Client);
       const result: ApiKey = await client.updateOrganizationApiKey(ORGANIZATION_ID, KEY_ID, input);
       expect(result).toEqual(key);
       expect(result).not.toHaveProperty("token");
@@ -137,7 +146,7 @@ describe("organization API-key requests", () => {
       workspaceScope: { kind: "all" },
       access: "full",
     });
-    const { client, requests } = makeClient(() => Response.json(key));
+    const { client, requests } = makeClient(() => Response.json(key), Client);
     const result = await client.updateOrganizationApiKey(ORGANIZATION_ID, KEY_ID, {
       name: key.name,
     });
@@ -158,7 +167,7 @@ describe("organization API-key requests", () => {
       policy: emptyPolicy,
       workspaceScope: emptyPolicy.workspaceScope,
     });
-    const { client, requests } = makeClient(() => Response.json(key));
+    const { client, requests } = makeClient(() => Response.json(key), Client);
 
     const result = await client.updateOrganizationApiKey(ORGANIZATION_ID, KEY_ID, {
       policy: emptyPolicy,
@@ -170,8 +179,9 @@ describe("organization API-key requests", () => {
   });
 
   test("a 409 PATCH conflict is surfaced without an automatic retry", async () => {
-    const { client, requests } = makeClient(() =>
-      Response.json({ error: "Organization key policy conflict" }, { status: 409 }),
+    const { client, requests } = makeClient(
+      () => Response.json({ error: "Organization key policy conflict" }, { status: 409 }),
+      Client,
     );
 
     await expect(
@@ -186,7 +196,7 @@ describe("organization API-key requests", () => {
 
   test("an uncertain PATCH is not replayed", async () => {
     let requests = 0;
-    const client = new OpenGeniClient({
+    const client = new Client({
       baseUrl: "https://api.example.test",
       fetch: (async () => {
         requests += 1;
