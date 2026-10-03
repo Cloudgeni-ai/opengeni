@@ -186,7 +186,7 @@ BEGIN
           END;
         END LOOP;
         IF p_workspace IS NULL THEN RETURN QUERY
-          SELECT jsonb_build_object('kind','service','payer','opengeni_credits','occurredAt',bucket,'m',jsonb_object_agg(key,amount))
+          SELECT jsonb_build_object('kind','restricted','payer','opengeni_credits','occurredAt',bucket,'m',jsonb_object_agg(key,amount))
           FROM(SELECT date_trunc(p_granularity,occurred_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket,
             field.key,sum(field.value::bigint)::bigint AS amount FROM opengeni_private.insights_raw_amount_inputs(a,null,p_since,p_until)
             CROSS JOIN LATERAL jsonb_each_text(m) field GROUP BY 1,field.key) unassigned GROUP BY bucket;END IF;

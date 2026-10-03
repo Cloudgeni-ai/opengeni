@@ -14,6 +14,7 @@ import {
   insightsQueryParameters,
   insightsUsageCoalesceKey,
   organizationInsightsScope,
+  insightsRawQuerySupported,
   registerInsightsUsageRoutes,
 } from "../src/routes/insights-usage";
 
@@ -111,6 +112,26 @@ function responseFor(input: Parameters<typeof core.getInsightsUsage>[1]): Insigh
 }
 
 describe("unified Insights route discipline", () => {
+  test("additive source/custom contracts cannot silently advertise or widen the interim raw implementation", () => {
+    for (const organization of [false, true])
+      for (const calls of [false, true]) {
+        expect(
+          insightsRawQuerySupported(
+            { range: "30d", provider: "openai", limit: "50" },
+            organization,
+            calls,
+          ),
+        ).toBe(true);
+        for (const query of [
+          { range: "custom", from: "2024-02-28", to: "2024-02-29" },
+          { source: "web" },
+          { plan: "unknown" },
+          { sessionId: workspaceId },
+          ...(!calls ? [{ groupBy: "source" }, { groupBy: "session" }, { groupBy: "plan" }] : []),
+        ])
+          expect(insightsRawQuerySupported(query, organization, calls)).toBe(false);
+      }
+  });
   test("registers all four endpoints and bounded route labels", () => {
     const app = readFileSync(new URL("../src/app.ts", import.meta.url), "utf8");
     expect(app).toContain("registerInsightsUsageRoutes(app, routeDeps)");

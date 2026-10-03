@@ -32,6 +32,54 @@ export function insightsQueryParameters(
   );
 }
 
+/** Frozen interim capabilities: a newer additive contract must not silently widen a raw query. */
+export function insightsRawQuerySupported(
+  query: Record<string, unknown>,
+  organization: boolean,
+  calls: boolean,
+): boolean {
+  const keys = new Set([
+    "range",
+    "provider",
+    "model",
+    "payer",
+    "projectId",
+    "person",
+    "rootSessionId",
+    "scheduleId",
+    "limit",
+    ...(organization ? ["workspaceId"] : []),
+    ...(calls ? ["cursor"] : ["groupBy", "seriesGroups"]),
+  ]);
+  if (Object.keys(query).some((key) => !keys.has(key))) return false;
+  if (
+    query.range !== undefined &&
+    !new Set(["today", "week", "month", "30d", "90d", "ytd"]).has(String(query.range))
+  )
+    return false;
+  return (
+    query.groupBy === undefined ||
+    new Set([
+      "model",
+      "provider",
+      "payer",
+      "project",
+      "rootSession",
+      "person",
+      "schedule",
+      ...(organization ? ["workspace"] : []),
+    ]).has(String(query.groupBy))
+  );
+}
+
+function rawUsageResponse(response: Awaited<ReturnType<typeof getInsightsUsage>>) {
+  const parsed = InsightsUsageResponse.parse(response);
+  // A newer contract can supply an additive default. Absence is a capability
+  // signal, so this raw implementation must not manufacture source support.
+  if (!Object.hasOwn(response.facets, "sources")) Reflect.deleteProperty(parsed.facets, "sources");
+  return parsed;
+}
+
 /** No retained result cache; the actor is part of every in-flight sharing key. */
 export function insightsUsageCoalesceKey(
   scope: InsightsQueryScope,
@@ -108,7 +156,10 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/insights/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const parsed = WorkspaceInsightsUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
+    const query = insightsQueryParameters(c.req.queries());
+    if (!insightsRawQuerySupported(query, false, false))
+      throw new HTTPException(400, { message: "unsupported interim Insights query" });
+    const parsed = WorkspaceInsightsUsageQuery.safeParse(query);
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
     const scope = {
       accountId: grant.accountId,
@@ -123,13 +174,16 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       () => getInsightsUsage(deps.db, { ...scope, query: parsed.data }),
     );
     c.header("cache-control", "private, no-store");
-    return c.json(InsightsUsageResponse.parse(response));
+    return c.json(rawUsageResponse(response));
   });
 
   app.get("/v1/workspaces/:workspaceId/insights/calls", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const parsed = WorkspaceInsightsCallsQuery.safeParse(insightsQueryParameters(c.req.queries()));
+    const query = insightsQueryParameters(c.req.queries());
+    if (!insightsRawQuerySupported(query, false, true))
+      throw new HTTPException(400, { message: "unsupported interim Insights query" });
+    const parsed = WorkspaceInsightsCallsQuery.safeParse(query);
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
     const scope = {
       accountId: grant.accountId,
@@ -149,9 +203,10 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/organizations/:accountId/insights/usage", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.param("accountId"), "billing:read");
-    const parsed = OrganizationInsightsUsageQuery.safeParse(
-      insightsQueryParameters(c.req.queries()),
-    );
+    const query = insightsQueryParameters(c.req.queries());
+    if (!insightsRawQuerySupported(query, true, false))
+      throw new HTTPException(400, { message: "unsupported interim Insights query" });
+    const parsed = OrganizationInsightsUsageQuery.safeParse(query);
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights usage query" });
     const scope = organizationInsightsScope(context, accountId);
     const response = await withBillingUsageActor(deps, context, accountId, () =>
@@ -161,15 +216,16 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
       ),
     );
     c.header("cache-control", "private, no-store");
-    return c.json(InsightsUsageResponse.parse(response));
+    return c.json(rawUsageResponse(response));
   });
 
   app.get("/v1/organizations/:accountId/insights/calls", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.param("accountId"), "billing:read");
-    const parsed = OrganizationInsightsCallsQuery.safeParse(
-      insightsQueryParameters(c.req.queries()),
-    );
+    const query = insightsQueryParameters(c.req.queries());
+    if (!insightsRawQuerySupported(query, true, true))
+      throw new HTTPException(400, { message: "unsupported interim Insights query" });
+    const parsed = OrganizationInsightsCallsQuery.safeParse(query);
     if (!parsed.success) throw new HTTPException(400, { message: "invalid Insights calls query" });
     const scope = organizationInsightsScope(context, accountId);
     // Call readers intersect these canonical grants with current actor visibility.

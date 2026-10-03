@@ -251,6 +251,15 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   });
   const org = await usage({ range: "month", groupBy: "workspace" }, true, true);
   expect(org.totals.chargedMicros).toBe(31);
+  const byWorkspace = await usage({ range: "month", groupBy: "workspace" }, true, true);
+  expect(byWorkspace.groups.find((g) => g.kind === "restricted")?.measures).toMatchObject({
+    calls: 0,
+    chargedMicros: 7,
+    tokens: { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 },
+  });
+  expect(
+    byWorkspace.groups.some((g) => g.kind === "service" && g.measures.chargedMicros === 7),
+  ).toBe(false);
 });
 
 test("frozen pre-0602 passes; serving staging retains exact existing full-catalog readiness blockers", async () => {
