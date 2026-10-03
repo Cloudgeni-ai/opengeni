@@ -265,7 +265,10 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyToolServer,
 } from "./session-proxy";
+export { ToolRequestError, verifyToolRequest } from "./tool-auth";
+export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } from "./tool-auth";
 export {
   openGeniConsolePath,
   parseOpenGeniLink,

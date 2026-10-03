@@ -127,14 +127,13 @@ const { workspace } = await og.ensureWorkspace({
 await og.addExternalWorkspaceMember(workspace.id, {
   identity: { externalId: user.id, source },
   permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control",
-    "files:upload", "files:read", "mcp_servers:attach"], // attach: per-session mcpServers
+    "files:upload", "files:read", "mcp_servers:attach"], // attach: the toolServer below
   operationId,
 });
 
 // 2. The proxy, as a Next.js App Router catch-all: app/api/opengeni/[...path]/route.ts.
 //    Express: toNodeMiddleware(createSessionProxyHandler(og, options)) from
 //    "@opengeni/sdk/express"; Hono: toHonoHandler(...) from "@opengeni/sdk/hono".
-const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
 export const dynamic = "force-dynamic";
 export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   chats: "private", // the default: each user's chats are theirs; "shared" | "isolated"
@@ -146,7 +145,7 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   },
   authorizeMutation: verifyCsrf, // the product's existing CSRF policy
   // New chats: the browser sends only the first message; the server picks the rest.
-  createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+  createSession: ({ initialMessage, idempotencyKey }) => ({
     initialMessage,
     idempotencyKey,
     agent: {
@@ -154,16 +153,24 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
       capabilities: "none", // Acme's tools, asking questions, reading Skills; nothing else
     },
     skills: productSkills, // product-owned, inline
-    mcpServers: [{ ...acme(await mintUserToken(user)), url: ACME_MCP_URL, allowedTools }],
-    tools: [{ kind: "mcp", id: "acme" }], // a per-session server must also be selected here
+    tools: [], // workspace integrations to select; the toolServer adds itself (eager)
     sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
   }),
-  // Every forwarded message: fresh per-user token and server-owned page context.
-  beforeForwardMessage: async (_message, { user }) => ({
-    mcpCredentialUpdates: [acme(await mintUserToken(user))],
+  // Acme's own tools as the signed-in user: the proxy attaches this MCP endpoint to
+  // every chat with a short-lived per-user token and refreshes it on every message,
+  // approval, and answer. Writes listed in `ask` wait for the user's approval.
+  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS), also read by verifyToolRequest.
+  toolServer: { approvals: { ask: ["update_ticket"] } }, // list the write tools
+  // Every forwarded message: server-owned page context.
+  beforeForwardMessage: () => ({
     modelContext: `Today ${new Date().toISOString().slice(0, 10)}, time zone ${tz}`,
   }),
 });
+
+// 3. Acme's MCP endpoint (app/api/mcp/route.ts), built with any MCP library; see
+//    references/data-tools-and-credentials.md. Verify first, scope every tool to `user`.
+import { verifyToolRequest } from "@opengeni/sdk/tool-auth";
+const { user, tenant } = await verifyToolRequest(request); // throws ToolRequestError (401)
 ```
 
 ```tsx
@@ -267,11 +274,12 @@ only own usage. These are post-call ceilings, not prepaid reservations.
 
 - Always pass `baseUrl` (`process.env.OPENGENI_API_BASE_URL`); the chat facade
   otherwise targets production `app.opengeni.ai`. The SDK is ESM-only.
-- A per-session `mcpServers` entry is usable only when also selected in
-  `tools: [{ kind: "mcp", id, eager? }]`, and attaching it needs
-  `mcp_servers:attach` for the acting user. MCP and OpenAPI spec URLs must be
-  public HTTPS the deployment can reach; tunnel local servers (for example
-  `cloudflared`).
+- On a Node backend, give the agent the product's own data with the proxy's
+  `toolServer` plus `verifyToolRequest`; do not hand-build token minting,
+  per-session wiring, or refresh. Attaching needs `mcp_servers:attach` for the
+  acting user. MCP and OpenAPI spec URLs must be public HTTPS the deployment can
+  reach; tunnel local servers (`cloudflared tunnel --url http://localhost:PORT`)
+  and use the tunnel URL as `toolServer.url`.
 - Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
   repository enforces a release-age policy (for example pnpm
   `minimumReleaseAge`), a just-published version may be refused: pin an older

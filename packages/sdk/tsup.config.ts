@@ -17,6 +17,7 @@ export default defineConfig({
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",
+    "src/tool-auth.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",
     "src/adapters/hono.ts",

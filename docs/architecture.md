@@ -572,20 +572,17 @@ changes need a deprecation with `Deprecation`/`Sunset` headers, at least 90
 days on the managed service, and a new major. `bun run check:public-api` and
 `bun run test:sdk-compat` enforce it in CI.
 
-Official builds expose `serverVersion` in health and client-config responses;
-there is no runtime negotiation protocol.
+Official builds expose `serverVersion` in health and client config; nothing
+negotiates at runtime.
 
 `x-opengeni-api-contract` fences only cookie-authenticated browser mutations
-(stale tabs); bearer integrations stay admitted across revisions
 ([details](product-integration.md#api-contract-revision)).
 
-An optional field that changes execution authority is not an ordinary additive
-response field. Its readers must ship first, new external writes stay behind a
-default-off admission switch until every shared-queue consumer is compatible,
-and public projections must remain safe for indefinitely open old browser
-bundles. Once admitted, upgraded readers preserve and execute the durable field
-regardless of the local admission-switch value; activation switches gate
-producers, not consumers.
+An optional field that changes execution authority is not ordinary additive
+data: readers ship first, external writes stay behind a default-off admission
+switch until every shared-queue consumer is compatible, and public projections
+stay safe for old open browser bundles. Admitted fields execute regardless of
+the local switch; activation switches gate producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
@@ -593,7 +590,8 @@ Canonical: `packages/sdk/src/`, `packages/react/src/`,
 
 `embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
 narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
-tickets, bounded streaming ([embedding](embedding.md)).
+tickets, bounded streaming, and `toolServer` tokens for `/tool-auth`
+([embedding](embedding.md)).
 
 ### 3.11 Work discovery remains advisory and permission-first
 
@@ -866,10 +864,9 @@ These producers all converge on the ordinary session/turn runtime:
   session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
-Schedules API filtering uses `sessionId`.
+Schedule indicators include authorized reusable-session targets and paused schedules; the API filters by `sessionId`.
 
-Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; runs waiting on a person and their optional timeout are in [scheduled-task-access.md](scheduled-task-access.md#runs-waiting-on-a-person).
+Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; see [runs waiting on a person](scheduled-task-access.md#runs-waiting-on-a-person).
 
 Scheduled turns inherit the session tool policy when `tools` is omitted;
 `tools: []` remains an empty override. Standalone scheduler-owned turns use a
@@ -1075,12 +1072,11 @@ Bun workspaces span `apps/*`, `examples/*`, and `packages/*`, consuming internal
 packages from source. Connected Machine agent/relay use the Rust Cargo workspace
 `agent/`.
 
-`examples/vue-conversation/app` uses its standalone npm lock outside root
-workspaces to build the non-React recipe against the published SDK, never
-repository source.
+`examples/vue-conversation/app` has its own npm lock and builds against the
+published SDK, not repository source.
 
-Package manifests and `.changeset/config.json` own exact publication
-status/entrypoints; these lists describe responsibility.
+Package manifests and `.changeset/config.json` own publication; these lists
+describe responsibility.
 
 ### 6.1 Applications
 
@@ -1089,7 +1085,7 @@ status/entrypoints; these lists describe responsibility.
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
-| `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension and its control-plane protocol; a leaf client, not session authority. [Build and store packaging](../apps/browser-extension/README.md); [privacy notice](../apps/browser-extension/PRIVACY.md) |
+| `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
@@ -1139,11 +1135,12 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/embedded-product` | `@opengeni/example-embedded-product` | Loopback-only Connect/Sites host reference: explicit actor/CSRF adapter, server-selected return URL, shared components and synthetic browser acceptance; production authentication must be supplied by the host |
+| `examples/embedded-product` | `@opengeni/example-embedded-product` | Loopback-only Connect/Sites host reference; the host supplies production auth |
 | `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
-| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
+| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone product reference (proxy, MCP, React, streams) |
+| `examples/tool-server` | `@opengeni/example-tool-server` | Proxy `toolServer` reference |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
-| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue SFC conversation; Bun same-origin session proxy, explicit host cookie/CSRF boundary, replay and decisions; [recipe](../examples/vue-conversation/README.md) |
+| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 
