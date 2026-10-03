@@ -40,7 +40,6 @@ import {
   listWorkspaceProviderCustomModels,
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
-  assertModelConnectionAllowsTurn,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
