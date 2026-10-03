@@ -36,7 +36,12 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+type UpdateKind = "child_paused" | "child_terminal_result" | "agent_message";
+
+async function fixture(
+  kinds: UpdateKind[] = ["child_paused", "child_paused"],
+  secondHuman?: string | null,
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -72,16 +77,35 @@ async function fixture() {
     createdBy: { kind: "subject", subjectId: human },
   });
   const turns: string[] = [];
+  const turnSessions: string[] = [];
   for (let position = 0; position < 2; position++) {
+    const originHuman = position === 1 && secondHuman !== undefined ? secondHuman : human;
+    const origin =
+      kinds[position] === "agent_message"
+        ? await createSession(client.db, {
+            ...scope,
+            parentSessionId: session.id,
+            initialMessage: "Delegated work",
+            resources: [],
+            metadata: {},
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            createdBy: { kind: "subject", subjectId: human },
+          })
+        : session;
     const [turn] = await shared.admin<{ id: string }[]>`
       insert into session_turns
         (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
          status, position, prompt, model, reasoning_effort, sandbox_backend,
          initiator_kind, initiator_subject_id, initiating_human_subject_id)
-      values (${scope.accountId}, ${scope.workspaceId}, ${session.id}, gen_random_uuid(),
-        ${`session-${session.id}`}, 'completed', ${position}, 'Origin', 'scripted-model',
-        'medium', 'none', 'subject', ${human}, ${human}) returning id`;
+      values (${scope.accountId}, ${scope.workspaceId}, ${origin.id}, gen_random_uuid(),
+        ${`session-${origin.id}`}, 'completed', ${position}, 'Origin', 'scripted-model',
+        'medium', 'none', ${originHuman ? "subject" : "service"},
+        ${originHuman ?? "test-service"}, ${originHuman}) returning id`;
     turns.push(turn!.id);
+    turnSessions.push(origin.id);
   }
   const host = HostMcpAcceptedAuthority.parse({
     version: 1,
@@ -140,7 +164,7 @@ async function fixture() {
     },
     permissions: ["sessions:read", "sessions:create"],
   };
-  return { ...scope, sessionId: session.id, human, turns, host, external };
+  return { ...scope, sessionId: session.id, human, turns, turnSessions, kinds, host, external };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -158,6 +182,7 @@ async function arrange(f: Fixture, authorities: Authority[]) {
       if (authority.host) {
         const snapshot = HostMcpAcceptedAuthority.parse({
           ...authority.host,
+          targetSessionId: f.turnSessions[index],
           acceptedWork: { kind: "turn", turnId },
           source:
             index === 0
@@ -168,7 +193,7 @@ async function arrange(f: Fixture, authorities: Authority[]) {
           (turn_id, server_id, account_id, workspace_id, session_id, owner_subject_id,
            binding_id, delegation_id, canonical_snapshot)
           values (${turnId}, ${snapshot.definition.serverId}, ${f.accountId}, ${f.workspaceId},
-            ${f.sessionId}, ${f.human}, ${snapshot.bindingId}, ${snapshot.delegationId}, ${tx.json(snapshot)})`;
+            ${f.turnSessions[index]!}, ${f.human}, ${snapshot.bindingId}, ${snapshot.delegationId}, ${tx.json(snapshot)})`;
       }
       if (authority.external) {
         const snapshot = authority.external;
@@ -177,38 +202,66 @@ async function arrange(f: Fixture, authorities: Authority[]) {
         }
         await tx`insert into external_link_turn_authorities
           (turn_id, account_id, workspace_id, session_id, link_id, link_revision, canonical_snapshot, source_kind)
-          values (${turnId}, ${f.accountId}, ${f.workspaceId}, ${f.sessionId},
+          values (${turnId}, ${f.accountId}, ${f.workspaceId}, ${f.turnSessions[index]!},
             ${snapshot.actor.linkId}, ${snapshot.actor.linkRevision}, ${tx.json(snapshot)}, 'direct')`;
       }
     }
   });
   const updates = [];
-  for (const turnId of f.turns) {
+  for (const [index, turnId] of f.turns.entries()) {
     const sourceId = crypto.randomUUID();
     const childSessionId = crypto.randomUUID();
-    const lineage = {
-      parentTurnId: turnId,
-      parentSessionId: f.sessionId,
-      childSessionId,
-      connectionAuthoritySubjectId: f.human,
-    };
+    const lineage =
+      f.kinds[index] === "agent_message"
+        ? {
+            callerSessionId: f.turnSessions[index]!,
+            callerTurnId: turnId,
+            callerAttemptId: crypto.randomUUID(),
+            callerExecutionGeneration: 1,
+          }
+        : {
+            parentTurnId: turnId,
+            parentSessionId: f.sessionId,
+            childSessionId,
+            connectionAuthoritySubjectId: f.human,
+          };
     await addSessionSystemUpdate(client.db, {
       accountId: f.accountId,
       workspaceId: f.workspaceId,
       sessionId: f.sessionId,
-      kind: "child_paused",
       classification: "info",
       sourceId,
       dedupeKey: sourceId,
       summary: "Child paused",
       lineage,
-      payload: {
-        type: "child_paused",
-        childSessionId,
-        operationId: crypto.randomUUID(),
-        actorKind: "agent",
-        reason: "Awaited input",
-      },
+      ...(f.kinds[index] === "agent_message"
+        ? ({
+            kind: "agent_message",
+            payload: {
+              type: "agent_message",
+              text: "Delegated result",
+              operationId: crypto.randomUUID(),
+            },
+          } as const)
+        : f.kinds[index] === "child_terminal_result"
+          ? ({
+              kind: "child_terminal_result",
+              payload: {
+                type: "child_terminal_result",
+                childSessionId,
+                status: "idle",
+              },
+            } as const)
+          : ({
+              kind: "child_paused",
+              payload: {
+                type: "child_paused",
+                childSessionId,
+                operationId: crypto.randomUUID(),
+                actorKind: "agent",
+                reason: "Awaited input",
+              },
+            } as const)),
     });
     updates.push({ sourceId, lineage });
   }
@@ -227,7 +280,7 @@ async function verify(
   // actual RLS; an unscoped worker read must not silently treat these as empty.
   const visible = await withWorkspaceSubjectRls(client.db, f.workspaceId, f.human, (tx) =>
     tx.execute(
-      sql`select turn_id from host_mcp_turn_authorities where session_id = ${f.sessionId}::uuid`,
+      sql`select turn_id from host_mcp_turn_authorities where turn_id in (${f.turns[0]}::uuid, ${f.turns[1]}::uuid)`,
     ),
   );
   expect(Array.from(visible)).toHaveLength(authorities.filter((a) => a.host).length);
@@ -260,12 +313,15 @@ async function verify(
   const inherited = await shared.admin`
     select canonical_snapshot, source_kind, source_turn_id
     from external_link_turn_authorities where turn_id = ${claim.turn.id}`;
-  if (authorities[0]!.external) {
+  const causalIndex = f.kinds.findIndex(
+    (kind, index) => kind !== "agent_message" && (index === 0 || coalesces),
+  );
+  if (causalIndex >= 0 && authorities[causalIndex]!.external) {
     expect(inherited).toMatchObject([
       {
-        canonical_snapshot: authorities[0]!.external,
+        canonical_snapshot: authorities[causalIndex]!.external,
         source_kind: "causal",
-        source_turn_id: f.turns[0],
+        source_turn_id: f.turns[causalIndex],
       },
     ]);
   } else {
@@ -275,6 +331,46 @@ async function verify(
 }
 
 describe("same-human cross-origin inbox authority under app RLS", () => {
+  test.each([
+    ["agent_message", "agent_message"],
+    ["agent_message", "child_terminal_result"],
+    ["child_terminal_result", "agent_message"],
+  ] as UpdateKind[][])(
+    "compatible %s and %s share one delivery with retained lineage",
+    async (first, second) => {
+      const f = await fixture([first, second]);
+      await verify(f, [{}, {}], true);
+    },
+  );
+
+  test("different message senders cannot borrow each other's human", async () => {
+    const f = await fixture(["agent_message", "agent_message"], `user:${crypto.randomUUID()}`);
+    await verify(f, [{}, {}], false);
+  });
+
+  test("a service-only message does not join a human result", async () => {
+    const f = await fixture(["child_paused", "agent_message"], null);
+    await verify(f, [{}, {}], false);
+  });
+
+  test("message batching resolves external and host authority on the sender session", async () => {
+    for (const kind of ["external", "host"] as const) {
+      const f = await fixture(["agent_message", "agent_message"]);
+      await verify(f, [{}, { [kind]: f[kind] }], false);
+    }
+  });
+
+  test("equivalent external authority lets a message and result share delivery", async () => {
+    const f = await fixture(["agent_message", "child_paused"]);
+    await verify(f, [{ external: f.external }, { external: f.external }], true);
+  });
+
+  test("a message naming the wrong source session keeps its own delivery", async () => {
+    const f = await fixture(["child_paused", "agent_message"]);
+    f.turnSessions[1] = f.sessionId;
+    await verify(f, [{}, {}], false);
+  });
+
   test.each([false, true])(
     "revoked linked origin cannot combine with native authority (reverse=%s)",
     async (reverse) => {

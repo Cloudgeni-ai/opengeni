@@ -165,6 +165,86 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test("interleaved helper messages and a terminal result share one compatible parent turn", async () => {
+    const grant = await fixture();
+    const parent = await activeAgent(grant);
+    const helpers = [
+      await activeAgent(grant, parent.session.id),
+      await activeAgent(grant, parent.session.id),
+    ];
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      turnId: parent.turn.id,
+      triggerEventId: parent.turn.triggerEventId,
+      attemptId: parent.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    for (const [index, helper] of helpers.entries()) {
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        sendAgentMessageInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: parent.session.id,
+          actor: helper.actor,
+          operationKey: crypto.randomUUID(),
+          text: `Helper ${index + 1} update`,
+        }),
+      );
+      if (index === 0) {
+        await addSessionSystemUpdate(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: parent.session.id,
+          kind: "child_terminal_result",
+          classification: "success",
+          sourceId: helper.session.id,
+          dedupeKey: crypto.randomUUID(),
+          summary: "Helper completed",
+          lineage: {
+            parentSessionId: parent.session.id,
+            parentTurnId: parent.turn.id,
+            childSessionId: helper.session.id,
+          },
+          payload: {
+            type: "child_terminal_result",
+            childSessionId: helper.session.id,
+            status: "idle",
+          },
+        });
+      }
+    }
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`Not claimed: ${claim.reason}`);
+    expect(claim.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    const updates = await listSessionSystemUpdatesForTurn(
+      client.db,
+      grant.workspaceId!,
+      parent.session.id,
+      claim.turn.id,
+    );
+    expect(updates.map((update) => update.kind)).toEqual([
+      "agent_message",
+      "child_terminal_result",
+      "agent_message",
+    ]);
+    expect(new Set(updates.map((update) => update.deliveredHistoryItemId)).size).toBe(1);
+    expect(updates[0]!.lineage.callerSessionId).toBe(helpers[0]!.session.id);
+    expect(updates[2]!.lineage.callerSessionId).toBe(helpers[1]!.session.id);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, parent.session.id),
+    ).toEqual([]);
+  });
+
   test("model-setting receipt survives caller replacement without undoing a newer choice", async () => {
     const grant = await fixture();
     const workspaceId = grant.workspaceId!;

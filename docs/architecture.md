@@ -110,8 +110,9 @@ attempts append ordered, exactly-once atomic history batches.
 
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
-never block inbox input. Batching preserves causal authority; messages/Steer inherit
-the sender’s human independently of connections. [Details](run-lifecycle.md).
+never block inbox input. Ordinary messages and lifecycle results batch by equivalent
+human and frozen access; Steer retains exact-caller isolation. Each update keeps its
+own lineage. [Details](run-lifecycle.md).
 
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.

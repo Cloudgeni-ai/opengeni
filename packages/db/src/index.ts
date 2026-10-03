@@ -70655,10 +70655,11 @@ function agentCommandCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "lin
 function systemUpdateCausalExecutionKey(
   update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
   causalExecutionKeys: ReadonlyMap<string, string | null>,
+  receivingSessionId: string,
 ): string | null {
   const targetTurnId = systemUpdateCausalHumanTurnId(update);
   if (targetTurnId) {
-    const human = causalExecutionKeys.get(targetTurnId);
+    const human = causalExecutionKeys.get(`${receivingSessionId}:${targetTurnId}`);
     return human ? `target-human:${human}` : `target-turn:${targetTurnId}`;
   }
   if (
@@ -70675,6 +70676,10 @@ function systemUpdateCausalExecutionKey(
   if (update.kind !== "agent_steer_instruction" && update.kind !== "agent_message") return null;
   const actor = agentCommandCausalActor(update);
   if (actor) {
+    if (update.kind === "agent_message") {
+      const human = causalExecutionKeys.get(`${actor.sessionId}:${actor.turnId}`);
+      if (human) return `target-human:${human}`;
+    }
     return `agent-command:${actor.sessionId}:${actor.turnId}:${actor.attemptId}:${actor.executionGeneration}`;
   }
   // A malformed historical agent command still owns a distinct claim. Let its
@@ -70687,6 +70692,7 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   selected: readonly T[],
   candidate: T,
   causalExecutionKeys: ReadonlyMap<string, string | null>,
+  receivingSessionId: string,
 ): boolean {
   const first = selected[0];
   if (
@@ -70697,13 +70703,19 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   }
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
-  // further authority-bearing member must have equivalent inherited authority. Agent
-  // commands use their caller identity and therefore never borrow a child/goal
-  // continuation's target-turn human.
+  // further authority-bearing member must have equivalent inherited authority.
+  // Ordinary messages resolve their exact sender turn through the same check;
+  // Steer and unresolved origins keep their existing caller isolation.
   const selectedCausalKey = selected
-    .map((update) => systemUpdateCausalExecutionKey(update, causalExecutionKeys))
+    .map((update) =>
+      systemUpdateCausalExecutionKey(update, causalExecutionKeys, receivingSessionId),
+    )
     .find((key): key is string => key !== null);
-  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate, causalExecutionKeys);
+  const candidateCausalKey = systemUpdateCausalExecutionKey(
+    candidate,
+    causalExecutionKeys,
+    receivingSessionId,
+  );
   return (
     selectedCausalKey === undefined ||
     candidateCausalKey === null ||
@@ -72285,7 +72297,13 @@ export async function claimSessionWorkForAttempt(
           const causalTurnIds = [
             ...new Set(
               candidates
-                .map(systemUpdateCausalHumanTurnId)
+                .map(
+                  (update) =>
+                    systemUpdateCausalHumanTurnId(update) ??
+                    (update.kind === "agent_message"
+                      ? (agentCommandCausalActor(update)?.turnId ?? null)
+                      : null),
+                )
                 .filter((id): id is string => id !== null),
             ),
           ];
@@ -72295,6 +72313,7 @@ export async function claimSessionWorkForAttempt(
               : await tx
                   .select({
                     id: schema.sessionTurns.id,
+                    sessionId: schema.sessionTurns.sessionId,
                     human: schema.sessionTurns.initiatingHumanSubjectId,
                     initiatorKind: schema.sessionTurns.initiatorKind,
                     initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -72305,7 +72324,7 @@ export async function claimSessionWorkForAttempt(
                       from external_link_turn_authorities a
                       where a.account_id = ${accountId}::uuid
                         and a.workspace_id = ${workspaceId}::uuid
-                        and a.session_id = ${sessionId}::uuid
+                        and a.session_id = ${schema.sessionTurns.sessionId}
                         and a.turn_id = ${schema.sessionTurns.id})`,
                   })
                   .from(schema.sessionTurns)
@@ -72313,7 +72332,6 @@ export async function claimSessionWorkForAttempt(
                     and(
                       eq(schema.sessionTurns.accountId, accountId),
                       eq(schema.sessionTurns.workspaceId, workspaceId),
-                      eq(schema.sessionTurns.sessionId, sessionId),
                       inArray(schema.sessionTurns.id, causalTurnIds),
                     ),
                   );
@@ -72345,7 +72363,6 @@ export async function claimSessionWorkForAttempt(
                       and(
                         eq(schema.hostMcpTurnAuthorities.accountId, accountId),
                         eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
-                        eq(schema.hostMcpTurnAuthorities.sessionId, sessionId),
                         eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
                         inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
                       ),
@@ -72369,7 +72386,7 @@ export async function claimSessionWorkForAttempt(
               const human =
                 turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
               return [
-                turn.id,
+                `${turn.sessionId}:${turn.id}`,
                 human
                   ? stableJson({
                       human,
@@ -72383,7 +72400,12 @@ export async function claimSessionWorkForAttempt(
           const deliverable = selectBoundedSystemUpdateBatch(
             candidates,
             (selected, candidate) =>
-              systemUpdatesCanCoalesceForExecution(selected, candidate, causalExecutionKeys),
+              systemUpdatesCanCoalesceForExecution(
+                selected,
+                candidate,
+                causalExecutionKeys,
+                sessionId,
+              ),
             true,
           );
           if (deliverable.length === 0) {

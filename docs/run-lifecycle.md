@@ -639,8 +639,10 @@ worker identity, or another member's account. See
 
 Ordinary agent messages, like Steer, inherit initiating-human identity from the
 exact admitted sender turn. Empty personal-connection selections or workspace
-provider scope do not erase that identity. Different sender attempts own separate
-causal batches; malformed historical message lineage cannot borrow another
+provider scope do not erase that identity. Ordinary messages from different sender
+attempts may share a batch with each other and lifecycle results when their exact
+originating turns resolve to the same human and frozen execution permissions.
+Steer retains exact-caller isolation; malformed historical message lineage cannot borrow another
 update's human. Genuine service-only source turns remain service-only. This
 preserves identity without expanding accepted connection selections or replacing
 the receiving session's tool configuration.
