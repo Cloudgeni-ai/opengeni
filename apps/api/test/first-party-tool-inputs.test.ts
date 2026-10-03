@@ -1,76 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import {
-  FIRST_PARTY_MCP_TOOL_NAMES,
-  Permission,
-  CreateScheduledTaskRequest,
-  type AccessGrant,
-} from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { CreateScheduledTaskRequest } from "@opengeni/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   createWorkspaceToolGateway,
   ToolGatewayInputValidationError,
 } from "@opengeni/tool-gateway";
 import * as z from "zod/v4";
-import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { assertDescribedToolInput, contractToolInput } from "../src/mcp/contract-input";
-
-const grant: AccessGrant = {
-  accountId: "11111111-1111-4111-8111-111111111111",
-  workspaceId: "22222222-2222-4222-8222-222222222222",
-  subjectId: "tool-input-test",
-  principalKind: "agent_attempt",
-  permissions: [...Permission.options],
-  metadata: {
-    sessionId: "33333333-3333-4333-8333-333333333333",
-    firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
-  },
-};
-
-async function withClient<T>(run: (client: Client) => Promise<T>) {
-  const server = buildOpenGeniMcpServer(
-    {
-      settings: testSettings({
-        sandboxBackend: "none",
-        allowedFirstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
-      }),
-      db: new Proxy(
-        {},
-        {
-          get() {
-            throw new Error("invalid input reached storage");
-          },
-        },
-      ),
-      bus: new MemoryEventBus(),
-      workflowClient: {},
-      objectStorage: null,
-      githubStateSecret: "test",
-      documentIndexer: { indexDocument: async () => undefined },
-      getDocumentServices: () => {
-        throw new Error("invalid input reached documents");
-      },
-    } as unknown as ApiRouteDeps,
-    grant,
-  );
-  return withServer(server, run);
-}
-
-async function withServer<T>(server: McpServer, run: (client: Client) => Promise<T>) {
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "tool-input-test", version: "1" });
-  await server.connect(serverTransport);
-  await client.connect(clientTransport);
-  try {
-    return await run(client);
-  } finally {
-    await client.close();
-    await server.close();
-  }
-}
+import {
+  firstPartyToolGrant as grant,
+  withFirstPartyToolClient as withClient,
+  withMcpClient as withServer,
+} from "./helpers/first-party-tool-client";
 
 describe("first-party tool input discovery and validation", () => {
   test("publishes the interval cadence through real MCP discovery", async () => {
