@@ -29,6 +29,8 @@ export interface NativeSessionScreenProps extends Omit<
     | undefined;
   /** Extra content after the question card (host recovery, banners). */
   trailing?: ReactNode;
+  /** Fixed host chrome above the timeline, inside the keyboard-avoiding area. */
+  topBar?: ReactNode;
   bottomInset?: number | undefined;
   keyboardVerticalOffset?: number | undefined;
 }
@@ -37,6 +39,7 @@ export function NativeSessionScreen({
   controller,
   composer: composerSlots,
   trailing,
+  topBar,
   bottomInset,
   keyboardVerticalOffset,
   ...timelineProps
@@ -57,6 +60,7 @@ export function NativeSessionScreen({
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={keyboardVerticalOffset ?? 0}
     >
+      {topBar}
       <MessageTimeline
         {...timelineProps}
         items={items}
