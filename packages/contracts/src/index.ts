@@ -3509,6 +3509,11 @@ export const ApiKey = z.object({
   workspaceScope: OrganizationWorkspaceScope.optional(),
   /** Legacy keys retain their historical workspace-admin wildcard. */
   permissionMode: z.enum(["legacy", "explicit"]).optional(),
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount: z
+    .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
+    .nullable()
+    .optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3542,6 +3547,8 @@ export const CreateOrganizationApiKeyRequest = z
     /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
     policy: OrganizationAccessPolicy.optional(),
+    /** The service account that holds the key; omitted creates one named after the key. */
+    serviceAccountId: z.string().uuid().optional(),
   })
   .strict()
   .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {

@@ -5157,6 +5157,11 @@ export type ApiKey = {
   workspaceScope?: OrganizationWorkspaceScope | undefined;
   /** Legacy keys retain their historical workspace-admin wildcard. */
   permissionMode?: "legacy" | "explicit" | undefined;
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount?:
+    | { id: string; name: string; role: OrganizationServiceAccountRole }
+    | null
+    | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -5187,6 +5192,8 @@ export type CreateOrganizationApiKeyRequest = {
   preset?: "developer_setup" | undefined;
   /** Explicit grants and shared-workspace scope; do not combine with legacy access/preset. */
   policy?: OrganizationAccessPolicy | undefined;
+  /** The service account that holds the key; omitted creates one named after the key. */
+  serviceAccountId?: string | undefined;
 };
 
 /** The server requires at least one change. Omitted fields stay unchanged. */
@@ -5199,6 +5206,42 @@ export type UpdateOrganizationApiKeyRequest = {
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Service accounts ----------------------------------------------------------------------------
+
+/** Up to admin, never owner. A member's keys never hold administrator permissions. */
+export type OrganizationServiceAccountRole = "admin" | "member";
+
+/** An organization identity with no person behind it; it holds organization API keys. */
+export type OrganizationServiceAccount = {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  role: OrganizationServiceAccountRole;
+  /** Keys that are not revoked, including expired ones. */
+  activeKeyCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListOrganizationServiceAccountsResponse = {
+  serviceAccounts: OrganizationServiceAccount[];
+};
+
+export type CreateOrganizationServiceAccountRequest = {
+  name: string;
+  description?: string | undefined;
+  /** Defaults to member. Only an organization administrator can choose admin. */
+  role?: OrganizationServiceAccountRole | undefined;
+};
+
+/** The server requires at least one change. Making it a member narrows its keys. */
+export type UpdateOrganizationServiceAccountRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  role?: OrganizationServiceAccountRole | undefined;
 };
 
 // --- Connected agents (organization MCP server) ------------------------------------------------

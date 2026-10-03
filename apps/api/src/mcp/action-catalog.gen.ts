@@ -938,6 +938,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationServiceAccount",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/service-accounts",
+    "request": [
+      "CreateOrganizationServiceAccountRequest"
+    ],
+    "response": [
+      "OrganizationServiceAccount"
+    ]
+  },
+  {
     "id": "createOrganizationWebhook",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/webhooks",
@@ -1287,6 +1298,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationProviderCustomModel"
     ]
+  },
+  {
+    "id": "deleteOrganizationServiceAccount",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteOrganizationWebhook",
@@ -2518,6 +2536,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationServiceAccount",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [],
+    "response": [
+      "OrganizationServiceAccount"
+    ]
+  },
+  {
     "id": "getOrganizationUsageSummary",
     "method": "GET",
     "path": "/v1/billing/usage-summary",
@@ -3725,6 +3752,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationProviderCustomModelsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationServiceAccounts",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/service-accounts",
+    "request": [],
+    "response": [
+      "ListOrganizationServiceAccountsResponse"
     ]
   },
   {
@@ -6266,6 +6302,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRetentionPolicy"
+    ]
+  },
+  {
+    "id": "updateOrganizationServiceAccount",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [
+      "UpdateOrganizationServiceAccountRequest"
+    ],
+    "response": [
+      "OrganizationServiceAccount"
     ]
   },
   {
