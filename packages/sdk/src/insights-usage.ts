@@ -4,6 +4,7 @@ import type {
   OrganizationInsightsUsageQueryInput,
   WorkspaceInsightsCallsQueryInput,
   OrganizationInsightsCallsQueryInput,
+  InsightsUsagePayer,
 } from "@opengeni/contracts/insights-usage";
 
 export type {
@@ -24,25 +25,31 @@ export type {
 
 export type WorkspaceInsightsUsageOptions = Omit<
   WorkspaceInsightsUsageQueryInput,
-  "limit" | "seriesGroups"
+  "limit" | "seriesGroups" | "payer"
 > & {
   limit?: number;
   seriesGroups?: boolean;
+  payer?: InsightsUsagePayer | InsightsUsagePayer[];
 };
 export type OrganizationInsightsUsageOptions = Omit<
   OrganizationInsightsUsageQueryInput,
-  "limit" | "seriesGroups"
+  "limit" | "seriesGroups" | "payer"
 > & {
   limit?: number;
   seriesGroups?: boolean;
+  payer?: InsightsUsagePayer | InsightsUsagePayer[];
 };
-export type WorkspaceInsightsCallsOptions = Omit<WorkspaceInsightsCallsQueryInput, "limit"> & {
+export type WorkspaceInsightsCallsOptions = Omit<
+  WorkspaceInsightsCallsQueryInput,
+  "limit" | "payer"
+> & {
   limit?: number;
+  payer?: InsightsUsagePayer | InsightsUsagePayer[];
 };
 export type OrganizationInsightsCallsOptions = Omit<
   OrganizationInsightsCallsQueryInput,
-  "limit"
-> & { limit?: number };
+  "limit" | "payer"
+> & { limit?: number; payer?: InsightsUsagePayer | InsightsUsagePayer[] };
 export type InsightsCallsScope =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "organization"; accountId: string };

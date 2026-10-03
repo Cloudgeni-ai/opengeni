@@ -38,8 +38,20 @@ export type InsightsUsageModelKey = z.infer<typeof InsightsUsageModelKey>;
 
 function repeated<T extends z.ZodType>(item: T) {
   return z
-    .union([item, z.array(item).min(1)])
-    .transform((value) => (Array.isArray(value) ? value : [value]))
+    .union([z.string(), z.array(z.string()).min(1)])
+    .transform((value, context) => {
+      const entries = (Array.isArray(value) ? value : [value]).flatMap((part) =>
+        part.split(",").map((entry) => entry.trim()),
+      );
+      const parsed = z.array(item).min(1).safeParse(entries);
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+        }
+        return z.NEVER;
+      }
+      return parsed.data;
+    })
     .optional();
 }
 
@@ -54,7 +66,8 @@ const QueryBoolean = z
   .union([z.boolean(), z.enum(["true", "false"])])
   .transform((value) => value === true || value === "true");
 
-// AND across filter fields, OR within each repeated field. No comma splitting.
+// Repeated, comma-separated, and mixed values: AND across fields, OR within a
+// field. Empty segments are rejected, never silently widened to all records.
 const Filters = {
   range: InsightsUsageRange.default("week"),
   provider: repeated(OpaqueKey),
@@ -264,8 +277,24 @@ const SeriesGroup = z
     listMicros: SafeCount,
     tokens: InsightsUsageTokens,
     calls: SafeCount,
+    byPayer: InsightsUsageMeasures.shape.byPayer,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    for (const field of ["calls", "chargedMicros", "listMicros"] as const) {
+      const total = Object.values(value.byPayer).reduce(
+        (sum, payer) => sum + BigInt(payer[field]),
+        0n,
+      );
+      if (total !== BigInt(value[field])) {
+        context.addIssue({
+          code: "custom",
+          path: ["byPayer"],
+          message: `Payer ${field} must sum to the total`,
+        });
+      }
+    }
+  });
 
 export const InsightsUsageSeriesPoint = z
   .object({

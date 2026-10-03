@@ -105,14 +105,14 @@ describe("Insights query contracts", () => {
     expect(WorkspaceInsightsUsageQuery.safeParse({ workspaceId: id }).success).toBe(false);
   });
 
-  test("normalizes single/repeated filters without splitting commas or model slashes", () => {
+  test("normalizes single/repeated filters while preserving model slashes", () => {
     const query = OrganizationInsightsUsageQuery.parse({
       workspaceId: [id, secondId],
       provider: ["openrouter", "anthropic"],
       model: ["openrouter/vendor/model/name", "anthropic/claude"],
       payer: ["opengeni_credits", "subscription", "own_key"],
       projectId: [id, "unfiled"],
-      person: "opaque,not,a,list",
+      person: "opaque:member:key",
       rootSessionId: [id, secondId],
       scheduleId: id,
       seriesGroups: "false",
@@ -120,10 +120,65 @@ describe("Insights query contracts", () => {
     });
     expect(query.workspaceId).toEqual([id, secondId]);
     expect(query.model).toEqual(["openrouter/vendor/model/name", "anthropic/claude"]);
-    expect(query.person).toEqual(["opaque,not,a,list"]);
+    expect(query.person).toEqual(["opaque:member:key"]);
     expect(query.scheduleId).toEqual([id]);
     expect(query.seriesGroups).toBe(false);
     expect(query.limit).toBe(200);
+  });
+
+  test("flattens comma-separated, repeated and mixed values for every filter", () => {
+    const values = {
+      workspaceId: [id, secondId],
+      provider: ["openrouter", "anthropic"],
+      model: ["openrouter/vendor/model/name", "anthropic/claude"],
+      payer: ["opengeni_credits", "subscription", "own_key"],
+      projectId: [id, "unfiled"],
+      person: ["opaque:one", "opaque:two"],
+      rootSessionId: [id, secondId],
+      scheduleId: [id, secondId],
+    };
+    for (const [field, entries] of Object.entries(values)) {
+      for (const value of [entries, entries.join(","), [entries.join(","), entries[0]!]]) {
+        const expected =
+          Array.isArray(value) && value[0]?.includes(",") ? [...entries, entries[0]!] : entries;
+        expect(
+          OrganizationInsightsUsageQuery.parse({ [field]: value, seriesGroups: "false" }),
+        ).toMatchObject({ [field]: expected, seriesGroups: false });
+        expect(OrganizationInsightsCallsQuery.parse({ [field]: value })).toMatchObject({
+          [field]: expected,
+        });
+      }
+    }
+  });
+
+  test("empty filters and comma segments never become an unfiltered request", () => {
+    for (const field of [
+      "workspaceId",
+      "provider",
+      "model",
+      "payer",
+      "projectId",
+      "person",
+      "rootSessionId",
+      "scheduleId",
+    ]) {
+      for (const value of [
+        "",
+        " ",
+        ",",
+        ",,",
+        [""],
+        [],
+        ["valid", ""],
+        "valid,",
+        ",valid",
+        "valid,,other",
+        "valid, ,other",
+      ]) {
+        expect(OrganizationInsightsUsageQuery.safeParse({ [field]: value }).success).toBe(false);
+        expect(OrganizationInsightsCallsQuery.safeParse({ [field]: value }).success).toBe(false);
+      }
+    }
   });
 
   test("strict boolean parsing never coerces false to true", () => {
@@ -338,7 +393,13 @@ describe("Insights response contracts", () => {
   });
 
   test("limits per-bucket groups to top six plus other", () => {
-    const group = { chargedMicros: 0, listMicros: 0, calls: 0, tokens: zeroTokens };
+    const group = {
+      chargedMicros: 0,
+      listMicros: 0,
+      calls: 0,
+      tokens: zeroTokens,
+      byPayer: { opengeni_credits: zeroPayer, subscription: zeroPayer, own_key: zeroPayer },
+    };
     const groups = Object.fromEntries(
       Array.from({ length: 6 }, (_, index) => [`g${index}`, group]),
     );
@@ -351,6 +412,35 @@ describe("Insights response contracts", () => {
     expect(
       InsightsUsageSeriesPoint.safeParse({ ...point, groups: { ...point.groups, seventh: group } })
         .success,
+    ).toBe(false);
+  });
+
+  test("mini-series group values require all payer buckets and coherent totals", () => {
+    const { calls, tokens, chargedMicros, listMicros, byPayer } = measures();
+    const group = { calls, tokens, chargedMicros, listMicros, byPayer };
+    const point = { start: "2026-10-03T00:00:00Z", measures: measures(), groups: { model: group } };
+    expect(InsightsUsageSeriesPoint.parse(point).groups?.model?.byPayer).toEqual(byPayer);
+    const { byPayer: _omitted, ...missing } = group;
+    expect(
+      InsightsUsageSeriesPoint.safeParse({ ...point, groups: { model: missing } }).success,
+    ).toBe(false);
+    expect(
+      InsightsUsageSeriesPoint.safeParse({
+        ...point,
+        groups: {
+          model: {
+            ...group,
+            byPayer: { opengeni_credits: zeroPayer, subscription: zeroPayer, own_key: zeroPayer },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    const { own_key: _missingKey, ...twoPayers } = byPayer;
+    expect(
+      InsightsUsageSeriesPoint.safeParse({
+        ...point,
+        groups: { model: { ...group, byPayer: twoPayers } },
+      }).success,
     ).toBe(false);
   });
 

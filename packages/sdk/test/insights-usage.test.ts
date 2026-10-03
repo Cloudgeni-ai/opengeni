@@ -4,6 +4,7 @@ import { OpenGeniClient } from "../src/client";
 import { OpenGeniBrowserClient as BrowserClient } from "../src/browser";
 import { OpenGeniClient as PublicClient } from "../src/index";
 import type * as Contracts from "@opengeni/contracts/insights-usage";
+import { OrganizationInsightsUsageQuery } from "@opengeni/contracts/insights-usage";
 import type * as Sdk from "@opengeni/sdk/insights-usage";
 import type { OpenGeniRequestOptions } from "../src/client";
 
@@ -122,6 +123,27 @@ describe("shared Insights SDK requests", () => {
     expect(url.searchParams.getAll("workspaceId")).toEqual([id, secondId]);
     expect(url.searchParams.get("groupBy")).toBe("workspace");
     expect(url.searchParams.get("seriesGroups")).toBe("true");
+  });
+
+  test("mixed comma and repeated SDK filters round-trip through the query contract", async () => {
+    const { client, requests } = fixture();
+    await client.getOrganizationInsightsUsage(id, {
+      workspaceId: `${id},${secondId}`,
+      provider: ["openrouter,anthropic", "codex"],
+      model: "openrouter/vendor/model/name,anthropic/claude",
+      seriesGroups: false,
+    });
+    const params = new URL(requests[0]!.url).searchParams;
+    const query = OrganizationInsightsUsageQuery.parse({
+      workspaceId: params.getAll("workspaceId"),
+      provider: params.getAll("provider"),
+      model: params.getAll("model"),
+      seriesGroups: params.get("seriesGroups"),
+    });
+    expect(query.workspaceId).toEqual([id, secondId]);
+    expect(query.provider).toEqual(["openrouter", "anthropic", "codex"]);
+    expect(query.model).toEqual(["openrouter/vendor/model/name", "anthropic/claude"]);
+    expect(query.seriesGroups).toBe(false);
   });
 
   test("calls use both scoped endpoints and encode opaque cursor losslessly", async () => {
