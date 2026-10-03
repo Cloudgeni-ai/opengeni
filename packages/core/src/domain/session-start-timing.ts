@@ -1,6 +1,18 @@
 import { withTraceContext, type Observability, type Span } from "@opengeni/observability";
 
-type SessionStartPhase = "initialize" | "event_fanout" | "workflow_wake" | "session_reload";
+type SessionStartPhase =
+  | "workspace_read"
+  | "model_catalog_initial"
+  | "default_model"
+  | "model_catalog_effective"
+  | "capability_settings"
+  | "initiator_freeze"
+  | "allowance"
+  | "shell_insert"
+  | "initialize"
+  | "event_fanout"
+  | "workflow_wake"
+  | "session_reload";
 export type SessionStartObservability = Pick<Observability, "startSpan">;
 
 /** Content-free child spans around existing work; export is never joined and
