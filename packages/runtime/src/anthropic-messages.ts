@@ -774,11 +774,11 @@ export class AnthropicMessagesModel implements Model {
             : status === 429
               ? "rate_limit_exceeded"
               : "anthropic_stream_error");
-        const message =
+        const failureMessage =
           status === undefined
             ? "Claude returned an unrecognized stream error. Automatic retries stopped."
             : `Claude stream failed (HTTP ${status})`;
-        throw Object.assign(new Error(message), {
+        throw Object.assign(new Error(failureMessage), {
           ...(status !== undefined ? { status } : {}),
           code,
           request_id: response.headers.get("request-id"),
@@ -787,7 +787,13 @@ export class AnthropicMessagesModel implements Model {
             : {},
           // Keep the structural stream wrapper stable for provider rejection
           // guards while the typed cause keeps provider text private.
-          cause: new AnthropicRequestError(message, status, code, event.error, response.headers),
+          cause: new AnthropicRequestError(
+            failureMessage,
+            status,
+            code,
+            event.error,
+            response.headers,
+          ),
         });
       }
       switch (event.type) {
