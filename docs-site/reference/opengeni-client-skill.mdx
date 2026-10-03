@@ -77,10 +77,17 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Two choices belong to the user: who can see a chat (`chats`: private, shared
-  or isolated) and whether the agent may change data. If the request or
-  repository does not settle one, ask ONE short, plain-language question with a
-  recommended answer, before building. Never ask what the repository answers.
+- Two choices belong to the user: who can see a chat (only the person who
+  started it, or their team) and whether the agent may change data. If the
+  request or repository does not settle one, ask ONE short, plain-language
+  question with a recommended answer, before building. Never ask what the
+  repository answers. How chats map to OpenGeni workspaces (including
+  `chats: "isolated"`) is your implementation decision: never offer it as an
+  option or mention OpenGeni workspaces in a question.
+- Decide local-development mechanics yourself (ports, local HTTPS, cookie
+  flags, seed data, test logins). When you test against a local app, OpenGeni
+  must reach its tool endpoint over public HTTPS, so open a temporary tunnel
+  (for example `cloudflared`) and tell the user you did; don't ask.
 - Do not ask about background work, schedules, session length or credential
   lifetime up front. Long agent sessions just work. Only when the requested
   feature itself is scheduled or runs in the background (for example "email me
@@ -99,8 +106,11 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
 `OpenGeniChat` (the user's chat list plus `SessionConversation`) from
-`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css`. For custom-branded
+embeds, theme with scoped `--og-*` tokens. For stock UI, use the shipped components
+and stylesheet without cosmetic host CSS or token overrides; see
+[Stock and host-branded appearance](references/product-shapes-and-ui.md#stock-and-host-branded-appearance).
+Import from `session-ui`, not the package root: the root also
 exports the workbench, whose editors, terminal and desktop viewer are optional
 peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped
@@ -539,6 +549,22 @@ permissions or borrowing personal resources. Use a workspace-owned Connection
 for background API/MCP access, or the product's signed workspace credential
 provider for short-lived managed-sandbox Git/cloud material. See
 [Data tools and credentials](data-tools-and-credentials.md).
+
+`firstPartyMcpTools: []` narrows the broad first-party model-visible selection;
+it does not set a zero permission ceiling. Public `createSession` rejects an
+explicit `firstPartyMcpPermissions: []` with 422, including `asService` calls.
+This recipe omits that override, preserving the top-level default worker
+permission set (or inherited policy for a child), not zero authority. Any
+intentional public permission override must be nonempty and within the
+creator's grant; do not add permissions merely to make startup succeed.
+
+Inbound automation `sessionTemplate` is a different boundary: both first-party
+arrays default to `[]`, and explicit `[]` is supported. That empty effective
+ceiling skips remote OpenGeni-delegated MCP preparation without a token or
+endpoint request. Requested first-party tools or dedicated `files`/`docs` stay
+unavailable with an `insufficient_scope` advisory. Product MCP servers,
+independent connections, host-owned local adapters and already-authorized native
+runtime mechanics keep their own authorization paths.
 
 ## Per-user tool tokens
 
@@ -1428,6 +1454,25 @@ Read response visibility from `session.tenancy?.visibility`, not
 requests; the response's tenancy projection may be absent when private-session
 support is unavailable. Absence means unknown, not `"workspace"`.
 
+Public `createSession` rejects `firstPartyMcpPermissions: []` with 422,
+including `asService` calls. `firstPartyMcpTools: []` narrows the broad
+model-visible selection, not permission authority. Omitting permissions is not
+zero authority: a top-level request retains the default worker permission set,
+and a child inherits its bounded policy. An intentional public permission
+override must be nonempty and within the creator's grant. See
+[Agent recipes](agent-recipes.md); never pad permissions merely to make startup
+succeed.
+
+Automation session templates instead default both first-party arrays to `[]`
+and support explicit empty arrays. That supported automation ceiling, or an
+already-effective internal or linked permission ceiling of `[]`, is zero
+delegated OpenGeni authority. Runtime skips remote first-party MCP preparation;
+requested first-party tools or dedicated `files`/`docs` remain absent with an
+`insufficient_scope` advisory. External-host MCP servers, host-owned local
+adapters, independent connections and already-authorized native runtime
+mechanics retain their own authority. This runtime behavior does not widen
+public `createSession` admission.
+
 `effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
 locally if your UI needs capability sections:
 
@@ -1858,6 +1903,18 @@ verify that the agent can actually inspect the target before claiming access.
 Use the returned setup action rather than guessing UI controls or requesting a
 personal token in chat. Access does not authorize deployment or broader data use.
 
+Inside an OpenGeni session, connecting the GitHub App gives the running session
+no clone, push or pull request access: Git credentials and the pull request
+tools come only with a `repository` resource attached to a session, and a
+session cannot attach one to itself. After GitHub is connected, call
+`github_repositories_list`, ask the user which repository with one single-select
+`request_human_input` question (skip it when only one is listed), then start a
+worker with `session_create` whose `resources` holds that repository's returned
+`resource` object, and do the implementation there. Give the worker the full
+task, then report its pull request link. If you cannot start a worker, ask the
+user to attach the repository with the composer's repository picker on their
+next message.
+
 Infer the OpenGeni origin and organization from authorized session/access metadata
 when possible. Verify the chosen target deployment, privacy capability, model and
 billing path before relying on them. Explain missing authority or configuration
@@ -1899,10 +1956,11 @@ Write every question the way the end user talks about their own product. Never
 use internal terms such as "on-demand", "learning across chats", "shape",
 "capabilities" or "visibility". Only ask about what applies:
 
-- **Who can see a chat:** only the person who started it (`chats: "private"`),
-  their whole team (`"shared"`), or each user gets a fully separate space
-  (`"isolated"`). Choose the workspace mapping from the actual sharing boundary;
-  private chats alone do not require a workspace per person.
+- **Who can see a chat:** only the person who started it (`chats: "private"`)
+  or their whole team (`"shared"`). Offer only these two. Choosing
+  `"isolated"` or any other workspace mapping is your decision from the actual
+  sharing boundary, never a question; private chats alone do not require a
+  workspace per person.
 - **What the agent may do:** only look things up (read-only), or also make
   changes. Name the actual things ("read your analytics", "can't change
   websites or users"). Confirm writes separately, only when they are part of
@@ -2378,8 +2436,11 @@ approval is incomplete setup, not a connected account. Discovery currently suppo
 at most 99 existing installations plus the new-install option; a larger result
 fails explicitly instead of silently selecting or dropping installations.
 
-`slack-bot` is a workspace bot installation, while `slack-personal` is the official
-personal Slack MCP authorization flow. Do not substitute one for the other.
+`slack-bot` is a workspace bot installation. `slack-personal` uses Slack user OAuth
+with OpenGeni's API-backed MCP tools for authorized conversations, recent messages
+and threads, users, and sending messages. It does not require installing the bot.
+General workspace-wide message search is unavailable. Do not substitute one flow
+for the other.
 `x` and `reddit` use the existing social-account domain and OAuth scopes. Workspace
 social setup requires workspace administration; personal setup requires a verified
 owning user. Native and host clients share callback receipts and exact returns.
@@ -2781,7 +2842,7 @@ Before calling an integration complete, verify:
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
 | Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason to replace the component. For custom-branded embeds, theme with `--og-*` tokens and density props. For stock UI, keep the shipped components and stylesheet without cosmetic host CSS or token overrides; see [Stock and host-branded appearance](#stock-and-host-branded-appearance). Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
 ## Stock and host-branded appearance
 
@@ -3235,6 +3296,18 @@ def upstream_headers(request, user_id):
             headers[name] = request.headers[name]
     return headers
 
+def relay_events(upstream, client):
+    # Event streams are long-lived and end normally (deploys, idle timeouts).
+    # Treat an upstream end, even mid-chunk, as a clean end: the SDK reconnects
+    # with Last-Event-ID. Always close the upstream when the browser leaves.
+    try:
+        yield from upstream.iter_raw()
+    except (httpx.ReadError, httpx.RemoteProtocolError, httpx.StreamClosed):
+        pass
+    finally:
+        upstream.close()
+        client.close()
+
 def opengeni_proxy(request, rest):
     user = request.user  # your auth; CsrfViewMiddleware covers POST/PUT/PATCH
     if not user.is_authenticated:
@@ -3256,7 +3329,8 @@ def opengeni_proxy(request, rest):
         client = httpx.Client(timeout=None)
         upstream = client.send(
             client.build_request("GET", url, headers=headers, params=request.GET), stream=True)
-        response = StreamingHttpResponse(upstream.iter_raw(), status=upstream.status_code,
+        response = StreamingHttpResponse(relay_events(upstream, client),
+                                         status=upstream.status_code,
                                          content_type="text/event-stream")
         response["Cache-Control"] = "no-store"
         response["X-Accel-Buffering"] = "no"
@@ -3276,7 +3350,9 @@ def opengeni_proxy(request, rest):
 ```
 
 Run it with an ASGI or threaded server so open event streams do not block other
-requests. The `ROUTES` patterns cover the allowlist; the body rules in the table
+requests. In any other framework, relay the event stream the same way: pass it
+through unbuffered, treat an upstream end as a normal end (never a 500), and
+close the upstream request when the browser disconnects. The `ROUTES` patterns cover the allowlist; the body rules in the table
 still need their few lines of checks.
 ````
 

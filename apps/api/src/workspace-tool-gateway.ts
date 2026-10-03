@@ -42,6 +42,7 @@ import {
 import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
+  buildSlackApiRateLimiter,
   lockActiveExternalOrganizationKey,
   withAccountRls,
   requireWorkspace,
@@ -360,6 +361,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       subjectId: grant.subjectId,
       credentialSubjectId: grant.subjectId,
       resolveCredential,
+      slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),
       localMcpServers,
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {

@@ -53,11 +53,18 @@ const MAX_FIELDS = 64;
 // matched exactly; wording is matched as a phrase. OpenAI's
 // `billing_hard_limit_reached` is the organization's own spending cap.
 const CREDIT_CODES = new Set([
+  "credit_balance_exhausted",
   "insufficient_credits",
   "insufficient_balance",
   "billing_hard_limit_reached",
 ]);
 const QUOTA_CODES = new Set(["insufficient_quota"]);
+const MONTHLY_CODES = new Set([
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+  "enforced_spend_limit_reached",
+]);
 const CREDIT_TEXT =
   /\binsufficient[ _](?:credits?|balance|funds)\b|\bcredit balance is too low\b|\brequires more credits\b|\bout of credits\b|\bused all (?:of )?(?:your |the )?(?:available )?credits\b|\bspending limit\b|\bbilling[ _]hard[ _]limit\b|\breached your specified api usage limits?\b/;
 
@@ -172,19 +179,30 @@ export function classifyProviderQuotaExhaustion(
   // Only a rate-limit or payment refusal can be quota exhaustion. Every other
   // status keeps its existing classification (a 5xx is transient, other 4xx
   // are already terminal request faults).
-  if (status !== null && status !== 429 && status !== 402) return null;
-
   const hasCode = (codes: ReadonlySet<string>) => fields.some((value) => codes.has(value.trim()));
+  // Native Claude marks a general billing/payment refusal separately. A 402
+  // does not prove that this account has exhausted its credit allowance.
+  if (fields.some((value) => value.trim() === "anthropic_billing_error")) return null;
+  // Claude's configured spend cap is a documented HTTP 400 exception. Only
+  // the adapter's explicit spend marker admits it; ordinary validation stays
+  // terminal request failure even if its text mentions quota or rate limits.
+  const claudeSpendCap = fields.some((value) => value.trim() === "enforced_spend_limit_reached");
+  if (status !== null && status !== 429 && status !== 402 && !(status === 400 && claudeSpendCap)) {
+    return null;
+  }
   const creditCode = hasCode(CREDIT_CODES);
   const quotaCode = hasCode(QUOTA_CODES);
+  const monthlyCode = hasCode(MONTHLY_CODES);
   const rateShaped = status === 429 || RATE_TEXT.test(text);
   // A statusless error must still look like a provider refusal; free text such
   // as a sandbox "Disk quota exceeded" is not model-provider evidence.
-  if (status === null && !rateShaped && !creditCode && !quotaCode) return null;
+  if (status === null && !rateShaped && !creditCode && !quotaCode && !monthlyCode) return null;
 
   // Payment Required and account credit/billing exhaustion never clear by
   // waiting, whatever retry hint accompanies them.
-  if (status === 402 || creditCode || CREDIT_TEXT.test(text)) return { scope: "credits" };
+  if (status === 402 || creditCode) return { scope: "credits" };
+  if (monthlyCode) return { scope: "monthly" };
+  if (CREDIT_TEXT.test(text)) return { scope: "credits" };
   if (quotaCode) return { scope: "quota" };
 
   const hint = evidence.retryAfterMs ?? providerMessageRetryHintMs(text);

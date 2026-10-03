@@ -114,7 +114,13 @@ export function WorkspaceManagementShell({
       currentPage={currentPage}
       currentScope={rail.scopeOf(location)}
       page={page}
-      layout={location.kind === "page" ? "page" : "settings"}
+      layout={
+        location.kind === "page" ||
+        // Organization Insights is a wide dashboard, like the workspace one.
+        (location.kind === "organization" && rail.organizationSection === "insights")
+          ? "page"
+          : "settings"
+      }
       notice={
         organizationManagementOnly || location.kind === "organization" ? undefined : (
           <WorkspacePausedBanner workspaceId={workspaceId} />

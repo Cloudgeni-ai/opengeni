@@ -8,7 +8,10 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../src/http/api-error";
 import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
-import { authorizeSlackSharedImageRead } from "../src/integrations/slack-bot";
+import {
+  SlackBotProviderError,
+  authorizeSlackSharedImageRead,
+} from "../src/integrations/slack-bot";
 import {
   registerSlackInteractionRoutes,
   isSlackInfoCommand,
@@ -18,6 +21,7 @@ import {
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
   slackInvocationModelContext,
+  loadSlackInvocationMessageContext,
   slackReactionInboxEntry,
   slackReactionTaskText,
   slackAdmissionFailureText,
@@ -676,5 +680,66 @@ describe("Slack event classification and safe projection", () => {
     ]) {
       expect(isSlackInfoCommand(text)).toBe(false);
     }
+  });
+});
+
+describe("Optional Slack invocation history", () => {
+  const entry = { slackChannelId: "C_TEST", slackThreadTs: "1.000", slackMessageTs: "2.000" };
+
+  test.each(["http_429", "rate_limited", "ratelimited"])(
+    "known invocation survives %s and explains that history is unavailable",
+    async (code) => {
+      const client = {
+        threadReplies: async () => {
+          throw new SlackBotProviderError(code, 60_000);
+        },
+        channelHistory: async () => {
+          throw new Error("Unexpected channel history request");
+        },
+      };
+      const context = await loadSlackInvocationMessageContext(client, entry);
+      expect(context).toEqual({
+        messages: [],
+        nextCursor: null,
+        kind: "thread",
+        unavailable: "rate_limited",
+      });
+      expect(slackInvocationModelContext(entry.slackMessageTs, context)).toContain(
+        "Work from the invocation text; ask the user for any missing context",
+      );
+    },
+  );
+
+  test.each(["invalid_auth", "not_in_channel", "missing_scope", "transport_error"])(
+    "history authority or provider failure %s is never silently omitted",
+    async (code) => {
+      const client = {
+        threadReplies: async () => {
+          throw new SlackBotProviderError(code);
+        },
+        channelHistory: async () => {
+          throw new Error("Unexpected channel history request");
+        },
+      };
+      await expect(loadSlackInvocationMessageContext(client, entry)).rejects.toThrow(code);
+    },
+  );
+
+  test("a failed shared-read authorization remains authoritative", async () => {
+    const denied = new Error("Shared Slack read authority changed");
+    const client = {
+      threadReplies: async (input: { authorizeRead?: () => Promise<void> }) => {
+        await input.authorizeRead?.();
+        throw new SlackBotProviderError("http_429");
+      },
+      channelHistory: async () => {
+        throw new Error("Unexpected channel history request");
+      },
+    };
+    await expect(
+      loadSlackInvocationMessageContext(client, entry, async () => {
+        throw denied;
+      }),
+    ).rejects.toBe(denied);
   });
 });

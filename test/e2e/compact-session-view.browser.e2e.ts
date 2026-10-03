@@ -224,6 +224,10 @@ describe("compact session view on the live local workspace route (API fixture)",
             pinned: [],
             nextCursor: null,
             filtersApplied: true,
+            ...(url.searchParams.get("includeTotals") === "true"
+              ? { totals: { needsYouCount: 0, groups: [] } }
+              : {}),
+            ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
           });
         const archiveStatus = url.searchParams.get("archiveStatus") ?? "active";
         const sortBy =
@@ -236,9 +240,8 @@ describe("compact session view on the live local workspace route (API fixture)",
           fixture.childReadStarted?.resolve();
           await hold?.promise;
         }
-        let selected = (
-          fixture ? [fixture.root, ...fixture.children, ...fixture.peers] : rows
-        ).filter(
+        const fixtureRows = fixture ? [fixture.root, ...fixture.children, ...fixture.peers] : rows;
+        let selected = fixtureRows.filter(
           (row) =>
             archiveStatus === "all" ||
             (fixture && row.rootSessionId === fixture.root.id
@@ -254,6 +257,16 @@ describe("compact session view on the live local workspace route (API fixture)",
           selected = selected.filter(
             (row) => row.parentSessionId === url.searchParams.get("parentSessionId"),
           );
+        const needsYouOnly = url.searchParams.get("needsYouOnly") === "true";
+        // Every row in this fixture is idle, with no attention-bearing descendants.
+        if (needsYouOnly) selected = [];
+        const totalRoots = url.searchParams.get("pinsOnly")
+          ? fixtureRows.filter((row) => row.parentSessionId === null && !row.archived)
+          : selected.filter((row) => row.parentSessionId === null && !row.archived);
+        const totalRootIds = new Set(totalRoots.map((row) => row.id));
+        // Totals describe complete active trees before paging, including children
+        // hidden behind a collapsed root. Capture them before any held delivery.
+        const total = fixtureRows.filter((row) => totalRootIds.has(row.rootSessionId)).length;
         if (url.searchParams.get("pinsOnly")) selected = [];
         const archiveTime = (row: FixtureRow) => {
           const timestamp =
@@ -301,6 +314,29 @@ describe("compact session view on the live local workspace route (API fixture)",
           sortBy,
           archiveStatus,
           filtersApplied: true,
+          ...(url.searchParams.get("includeTotals") === "true"
+            ? {
+                totals: {
+                  needsYouCount: 0,
+                  groups: total
+                    ? [
+                        {
+                          channelId: null,
+                          total,
+                          attention: 0,
+                          attentionSince: null,
+                          failed: 0,
+                          active: 0,
+                          queued: 0,
+                          unread: 0,
+                          activeWork: 0,
+                        },
+                      ]
+                    : [],
+                },
+              }
+            : {}),
+          ...(needsYouOnly ? { needsYouOnly: true } : {}),
         };
         if (fixture && search) {
           const hold = fixture.holdSearch;

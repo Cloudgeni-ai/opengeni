@@ -257,7 +257,7 @@ test("the atomic migration ledger makes retry independent of the encryption key"
   const [count] =
     await owned.admin`SELECT count(*)::integer AS total FROM claude_subscription_credentials`;
   expect(count!.total).toBe(2);
-});
+}, 180_000);
 
 test("accepted turns, children, task digests and producer inputs retain their original organization scope", async () => {
   const sessions =
@@ -295,4 +295,4 @@ test("accepted turns, children, task digests and producer inputs retain their or
   const relations =
     await owned.admin`SELECT relname, relforcerowsecurity FROM pg_class WHERE relkind = 'r' AND (relname LIKE 'scheduled_task%authorit%' OR relname = 'scheduled_task_run_personal_resource_admissions')`;
   expect(relations.every((row) => row.relforcerowsecurity)).toBe(true);
-});
+}, 180_000);

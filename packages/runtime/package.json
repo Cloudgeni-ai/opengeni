@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "4.6.0",
+  "version": "4.7.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -36,6 +36,10 @@
     "./gmail-rest-mcp": {
       "types": "./src/gmail-rest-mcp.ts",
       "default": "./src/gmail-rest-mcp.ts"
+    },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
     },
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",

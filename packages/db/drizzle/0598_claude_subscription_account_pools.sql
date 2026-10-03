@@ -305,7 +305,7 @@ END $claude_pool_codec_receipt$;
 -- Derive new scope from the producer's accepted executable identity. Never
 -- resolve today's pool, organization membership, or session creator here.
 CREATE FUNCTION pg_temp.claude_pool_scope_0587(policy jsonb, model text) RETURNS jsonb
-LANGUAGE plpgsql IMMUTABLE AS $
+LANGUAGE plpgsql IMMUTABLE AS $claude_scope$
 BEGIN
   IF policy IS NOT NULL AND policy <> 'null'::jsonb THEN
     IF jsonb_typeof(policy) <> 'object' OR policy->>'schemaVersion' IS DISTINCT FROM '1'
@@ -316,7 +316,7 @@ BEGIN
   END IF;
   RETURN jsonb_build_object('version', 1, 'scope', CASE WHEN model LIKE 'organization-claude-subscription/%' THEN 'organization' ELSE 'workspace' END);
 END
-$;
+$claude_scope$;
 UPDATE sessions SET initial_claude_provider_account_authority_snapshot =
   pg_temp.claude_pool_scope_0587(metadata->'turnExecutionPolicyV1', model);
 UPDATE session_turns SET claude_provider_account_authority_snapshot =

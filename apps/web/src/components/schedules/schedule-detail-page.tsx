@@ -26,7 +26,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useVariableSets } from "@opengeni/react";
+import { modelDisplayName, useVariableSets } from "@opengeni/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -56,7 +56,7 @@ import { SettingRow } from "@/components/ui/setting-row";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { payerLabel } from "@/components/models/models-ui";
+import { modelPayerHint } from "@/lib/model-payer";
 import { useAppContext } from "@/context";
 import { formatElapsedSeconds } from "@/lib/format";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -849,7 +849,11 @@ function ScheduleAside({
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
-    const name = row ? `${row.label} · ${payerLabel(row.billingClass, row.providerLabel)}` : id;
+    const name = row
+      ? `${row.label} · ${modelPayerHint(row)}`
+      : id
+        ? modelDisplayName(id)
+        : undefined;
     if (chosen) return name ?? chosen;
     return name ? `Workspace default - ${name}` : "Workspace default";
   }, [catalog.defaultSelection?.model, catalog.rows, task]);

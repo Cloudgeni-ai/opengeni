@@ -3,6 +3,91 @@ import { CancelledFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("legacy activity inputs use the workspace account for both owner observations", async () => {
+    const owned = {
+      kind: "attempt-owned" as const,
+      turnId: "turn",
+      attemptId: "attempt",
+      executionGeneration: 2,
+      activityRef: { workflowId: "workflow", workflowRunId: "run", activityId: "activity" },
+    };
+    const db = {};
+    const workspace = mock(async () => ({ accountId: "workspace-account" }) as any);
+    const peek = mock(async () => owned);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db,
+          inspectSessionAttemptActivity: async () => {
+            throw new Error("metadata transport unavailable");
+          },
+        }) as any,
+      { getWorkspace: workspace, peekSessionWork: peek },
+    );
+    expect(
+      await activities.peekSessionWork({
+        workspaceId: "workspace",
+        sessionId: "session",
+        includeAdmissionFence: true,
+      }),
+    ).toEqual({ ...owned, ownerActivityState: "unknown" });
+    expect(workspace).toHaveBeenCalledWith(db, "workspace");
+    expect(peek).toHaveBeenCalledTimes(2);
+    for (const call of peek.mock.calls) {
+      expect(call).toEqual([db, "workspace", "session", true, "workspace-account"]);
+    }
+  });
+
+  test("explicit observer scope is never replaced by a workspace lookup", async () => {
+    const workspace = mock(async () => ({ accountId: "different-account" }) as any);
+    const peek = mock(async () => ({ kind: "unavailable" as const }));
+    const db = {};
+    const activities = createSessionStateActivities(async () => ({ db }) as any, {
+      getWorkspace: workspace,
+      peekSessionWork: peek,
+    });
+    expect(
+      await activities.peekSessionWork({
+        workspaceId: "workspace",
+        sessionId: "session",
+        observerAccountId: "explicit-account",
+      }),
+    ).toEqual({ kind: "unavailable" });
+    expect(workspace).not.toHaveBeenCalled();
+    expect(peek).toHaveBeenCalledWith(db, "workspace", "session", undefined, "explicit-account");
+  });
+
+  test("legacy missing workspace is unavailable without owner inspection or queue telemetry", async () => {
+    const inspect = mock(async () => "settled" as const);
+    const count = mock(async () => 0);
+    const peek = mock(async () => ({ kind: "idle" as const }));
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, inspectSessionAttemptActivity: inspect }) as any,
+      { getWorkspace: mock(async () => null), peekSessionWork: peek, countQueuedTurns: count },
+    );
+    expect(
+      await activities.peekSessionWork({ workspaceId: "workspace", sessionId: "session" }),
+    ).toEqual({ kind: "unavailable" });
+    expect(peek).not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  test("legacy workspace lookup failures still retry", async () => {
+    const error = new Error("database unavailable");
+    const peek = mock(async () => ({ kind: "idle" as const }));
+    const activities = createSessionStateActivities(async () => ({ db: {} }) as any, {
+      getWorkspace: mock(async () => {
+        throw error;
+      }),
+      peekSessionWork: peek,
+    });
+    await expect(
+      activities.peekSessionWork({ workspaceId: "workspace", sessionId: "session" }),
+    ).rejects.toBe(error);
+    expect(peek).not.toHaveBeenCalled();
+  });
+
   test("optional inspection never suppresses activity cancellation", async () => {
     const cancelled = new CancelledFailure("cancelled by control");
     const peek = mock(async () => ({

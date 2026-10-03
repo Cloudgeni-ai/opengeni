@@ -456,6 +456,8 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  // Unlisted apps share Slack’s restricted history/replies quota across all tokens.
+  slackAccessMode: z.enum(["limited", "full"]).default("limited"),
   slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
   slackCommand: z
     .string()
@@ -1253,13 +1255,20 @@ const SettingsSchema = z.object({
   // idle grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
-  // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
-  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // the deadline path has to act. Set 0 to disable new idle enrollments without
+  // disabling provider-deadline containment or cancelling an enrolled drain.
+  // A positive window must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit positive value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
   // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
   // plus this window plus the drain capture budget must fit before it.
   // getSettings derives the unset default between those two for short-lived
   // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
-  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().optional(),
+  sandboxIdleCommandContainmentMs: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .transform((value) => (value === 0 ? undefined : value)),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -1431,6 +1440,12 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Deployment ceiling for new managed accounts. When false, managed auth
+  // refuses every new Better Auth account (email/password sign-up and implicit
+  // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
+  // email verification, and invitation-bound account setup keep working. Read
+  // at startup; the 0585 runtime switch pauses sign-ups without a restart.
+  managedAuthNewSignupsEnabled: EnvBoolean.default(true),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -3380,6 +3395,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackAccessMode: optional("OPENGENI_SLACK_ACCESS_MODE"),
     slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
@@ -3730,6 +3746,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),

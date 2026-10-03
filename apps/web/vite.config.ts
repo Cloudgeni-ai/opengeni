@@ -88,13 +88,13 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod is a dependency-free runtime shared by the contracts schemas
-              // and app modules. Keep it in its own chunk: entry-aware merging
-              // can otherwise co-locate app code that reads contracts constants
-              // at module scope with Zod, creating a chunk cycle in which that
-              // code evaluates before the contracts chunk has initialized.
+              // Zod and the pure Skill receipt schemas initialize before the
+              // contracts barrel reads them. Keep them outside shared app chunks
+              // that import the barrel back: otherwise its SkillWriteReceipt
+              // consumer can evaluate before that schema exists. Co-locating
+              // these leaves also avoids an extra initial graph request.
               name: "zod-runtime",
-              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/]skills\.ts$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -264,8 +264,15 @@ export default defineConfig({
               // shared chunk here to avoid another direct-session request.
               // The usage-limit gauge and allowance wording are drawn by the
               // conversation's refusal row and by the lazy usage pages.
+              // The composer's voice-input switch shares the SDK transcription
+              // helper with the lazy settings page; keep it here so the
+              // settings merge cannot fold it in beside payment and identity
+              // glyphs and make that chunk a direct-session dependency.
+              // List sort arrows are shared by the direct session graph and
+              // the lazy conversation cards' repository list; keep them here
+              // instead of in their own tiny direct-session chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -434,6 +441,15 @@ export default defineConfig({
               test: /packages[\\/]contracts[\\/]src[\\/](?:document-artifact-(?:commands|query)|presentation-artifact-(?:commands|query)|spreadsheet-artifact-(?:commands|date|query)|editable-artifact-(?:binary|causal-frontier|codec-registry|committed-transaction|live|serialized-commit|versions)|editable-artifacts)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 5,
+            },
+            {
+              // The provider logos and connect list are shared by the Models
+              // pages and the post-signup model step. Pin them apart from
+              // settings-pages so onboarding never loads the settings surface.
+              name: "provider-connect-list",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-(?:mark|connect-list)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
             },
             {
               // Keep customer model setup in its own lazy feature boundary.

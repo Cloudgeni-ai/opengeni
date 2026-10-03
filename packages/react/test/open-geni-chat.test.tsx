@@ -118,6 +118,43 @@ describe("SessionList", () => {
 });
 
 describe("OpenGeniChat", () => {
+  test("conversation appearance reaches the stock model picker without replacing the conversation", async () => {
+    const { client, sessions } = listClient();
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={sessions[0]!.id}
+        conversationProps={{
+          modelPickerProps: {
+            groupPresentation: {
+              opengeni_credits: {
+                label: "Acme Assist",
+                icon: <svg data-testid="acme-conversation-model-mark" />,
+              },
+            },
+            messages: { label: "Choose a model" },
+          },
+        }}
+      />,
+    );
+    try {
+      await flush(150);
+      const trigger = view.container.querySelector('button[aria-label="Choose a model"]');
+      expect(trigger).not.toBeNull();
+      expect(
+        trigger?.querySelector(
+          '[aria-label="Acme Assist"] [data-testid="acme-conversation-model-mark"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        view.container.querySelector("[data-og-conversation-composer] textarea"),
+      ).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("starts a new chat from the first message and switches to it", async () => {
     const { client, calls } = listClient();
     const changes: Array<string | null> = [];

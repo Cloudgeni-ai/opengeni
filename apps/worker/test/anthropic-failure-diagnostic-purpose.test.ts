@@ -107,6 +107,7 @@ describe("Anthropic failure diagnostic purpose", () => {
             expectedConnectionId: "11111111-1111-4111-8111-111111111111",
             expectedCredentialVersion: 3,
             responseStatus: 401,
+            upstreamModelId: "claude-opus-fixture",
             requestId: "req_auth_fixture",
           },
         ],
@@ -171,115 +172,116 @@ describe("Anthropic failure diagnostic purpose", () => {
     ).toBeNull();
   });
 
-  for (const resumed of [true, false])
-    test(`Claude 429 checkpoints and ${resumed ? "rotates" : "waits"} on the same accepted turn`, async () => {
-      const diagnostic = new AnthropicRequestError(
-        "Synthetic provider failure",
-        429,
-        "anthropic_http_error",
-        { type: "rate_limit_error", message: "Fixture" },
-        new Headers({ "retry-after": "120", "request-id": "req_exact_fixture" }),
-      );
-      const { deps, settle } = failureDeps(diagnostic);
-      deps.billingState.isClaudeTurn = true;
-      deps.settings = {
-        environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
-      } as never;
-      Object.assign(deps.providerTurn, {
-        effectiveClaudeCredentialId: "credential-fixture",
-        effectiveClaudeCredentialVersion: 3,
-        claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
-        claudeUpstreamModelId: "claude-opus-fixture",
-        latestClaudeUsage: new Map([
-          [
-            "fixture",
-            {
-              scope: "workspace",
-              token: "sk-ant-oat01-fixture",
-              expectedConnectionId: "credential-fixture",
-              expectedCredentialVersion: 3,
-              responseStatus: 429,
-              requestId: "req_exact_fixture",
-              upstreamModelId: "claude-opus-fixture",
-            },
-          ],
-          [
-            "unrelated",
-            {
-              scope: "workspace",
-              token: "sk-ant-oat01-other-request",
-              expectedConnectionId: "credential-fixture",
-              expectedCredentialVersion: 3,
-              responseStatus: 429,
-              requestId: "req_other_fixture",
-              upstreamModelId: "claude-sonnet-fixture",
-            },
-          ],
-        ]),
-      });
-      Object.assign(deps.leases, {
-        claude: {
-          lost: false,
-          held: true,
-          subjectId: "user-fixture",
-          holderId: "holder-fixture",
-          generation: 7,
-        },
-      });
-      const history = mock(async () => undefined);
-      deps.historySink.reconcileConversationTruth = history;
-      const waiter = {
-        id: "waiter-fixture",
-        generation: 2,
-        nextCheckAt: new Date(Date.now() + 120_000),
-        wakeRevision: 1,
-      };
-      const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null);
-      const record = spyOn(opengeniDb, "recordClaudeAccountUsage").mockResolvedValue({} as never);
-      const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockResolvedValue({
-        action: "waiting",
-        waiter,
-        events: [],
-      } as never);
-      const reconcile = spyOn(opengeniDb, "reconcileClaudeCapacityWait").mockResolvedValue({
-        action: resumed ? "resumed" : "waiting",
-        waiter,
-        events: [],
-      } as never);
-      try {
-        expect(await settleTurnFailure(deps)).toMatchObject({
-          status: resumed ? "recovering" : "waiting_capacity",
-          turnId: "turn-1",
-        });
-        expect(history).toHaveBeenCalledWith({ requireDurable: true });
-        expect(record).toHaveBeenCalledWith(
-          {},
-          expect.objectContaining({
-            credentialId: "credential-fixture",
-            authoritySnapshot: { version: 1, scope: "workspace" },
-          }),
-          expect.objectContaining({
-            expectedCredentialVersion: 3,
-            token: "sk-ant-oat01-fixture",
-            modelCooldown: expect.objectContaining({ upstreamModelId: "claude-opus-fixture" }),
-          }),
+  for (const responseStatus of [200, 429])
+    for (const resumed of [true, false])
+      test(`Claude 429 over HTTP ${responseStatus} checkpoints and ${resumed ? "rotates" : "waits"} on the same accepted turn`, async () => {
+        const diagnostic = new AnthropicRequestError(
+          "Synthetic provider failure",
+          429,
+          "anthropic_http_error",
+          { type: "rate_limit_error", message: "Fixture" },
+          new Headers({ "retry-after": "120", "request-id": "req_exact_fixture" }),
         );
-        expect(arm.mock.calls[0]![1]).toMatchObject({
-          turnId: "turn-1",
-          expectedCredentialVersion: 3,
-          leaseFence: { holderId: "holder-fixture", generation: 7 },
+        const { deps, settle } = failureDeps(diagnostic);
+        deps.billingState.isClaudeTurn = true;
+        deps.settings = {
+          environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
+        } as never;
+        Object.assign(deps.providerTurn, {
+          effectiveClaudeCredentialId: "credential-fixture",
+          effectiveClaudeCredentialVersion: 3,
+          claudeAuthoritySnapshot: { version: 1, scope: "workspace" },
+          claudeUpstreamModelId: "claude-opus-fixture",
+          latestClaudeUsage: new Map([
+            [
+              "fixture",
+              {
+                scope: "workspace",
+                token: "sk-ant-oat01-fixture",
+                expectedConnectionId: "credential-fixture",
+                expectedCredentialVersion: 3,
+                responseStatus,
+                requestId: "req_exact_fixture",
+                upstreamModelId: "claude-opus-fixture",
+              },
+            ],
+            [
+              "unrelated",
+              {
+                scope: "workspace",
+                token: "sk-ant-oat01-other-request",
+                expectedConnectionId: "credential-fixture",
+                expectedCredentialVersion: 3,
+                responseStatus: 429,
+                requestId: "req_other_fixture",
+                upstreamModelId: "claude-sonnet-fixture",
+              },
+            ],
+          ]),
         });
-        expect(arm.mock.calls[0]![1]).not.toHaveProperty("credentialQuarantine");
-        expect(reconcile).toHaveBeenCalledTimes(1);
-        expect(settle).not.toHaveBeenCalled();
-        expect(deps.leases.claude.held).toBe(false);
-      } finally {
-        goal.mockRestore();
-        record.mockRestore();
-        arm.mockRestore();
-        reconcile.mockRestore();
-      }
-    });
+        Object.assign(deps.leases, {
+          claude: {
+            lost: false,
+            held: true,
+            subjectId: "user-fixture",
+            holderId: "holder-fixture",
+            generation: 7,
+          },
+        });
+        const history = mock(async () => undefined);
+        deps.historySink.reconcileConversationTruth = history;
+        const waiter = {
+          id: "waiter-fixture",
+          generation: 2,
+          nextCheckAt: new Date(Date.now() + 120_000),
+          wakeRevision: 1,
+        };
+        const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null);
+        const record = spyOn(opengeniDb, "recordClaudeAccountUsage").mockResolvedValue({} as never);
+        const arm = spyOn(opengeniDb, "armClaudeCapacityWait").mockResolvedValue({
+          action: "waiting",
+          waiter,
+          events: [],
+        } as never);
+        const reconcile = spyOn(opengeniDb, "reconcileClaudeCapacityWait").mockResolvedValue({
+          action: resumed ? "resumed" : "waiting",
+          waiter,
+          events: [],
+        } as never);
+        try {
+          expect(await settleTurnFailure(deps)).toMatchObject({
+            status: resumed ? "recovering" : "waiting_capacity",
+            turnId: "turn-1",
+          });
+          expect(history).toHaveBeenCalledWith({ requireDurable: true });
+          expect(record).toHaveBeenCalledWith(
+            {},
+            expect.objectContaining({
+              credentialId: "credential-fixture",
+              authoritySnapshot: { version: 1, scope: "workspace" },
+            }),
+            expect.objectContaining({
+              expectedCredentialVersion: 3,
+              token: "sk-ant-oat01-fixture",
+              modelCooldown: expect.objectContaining({ upstreamModelId: "claude-opus-fixture" }),
+            }),
+          );
+          expect(arm.mock.calls[0]![1]).toMatchObject({
+            turnId: "turn-1",
+            expectedCredentialVersion: 3,
+            leaseFence: { holderId: "holder-fixture", generation: 7 },
+          });
+          expect(arm.mock.calls[0]![1]).not.toHaveProperty("credentialQuarantine");
+          expect(reconcile).toHaveBeenCalledTimes(1);
+          expect(settle).not.toHaveBeenCalled();
+          expect(deps.leases.claude.held).toBe(false);
+        } finally {
+          goal.mockRestore();
+          record.mockRestore();
+          arm.mockRestore();
+          reconcile.mockRestore();
+        }
+      });
 
   for (const [status, type, failureCode, wrapped] of [
     [429, "rate_limit_error", "provider_rate_limited", false],

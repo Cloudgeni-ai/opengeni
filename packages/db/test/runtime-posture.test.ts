@@ -18,6 +18,7 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
+  ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
@@ -588,6 +589,95 @@ describe("runtime database posture evaluator", () => {
       "database is missing the Claude subscription account activation receipt",
     );
   });
+
+  const modelFactCapabilities = [
+    {
+      name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+      violation: "Insights complete usage amount projection is missing or unsafe",
+    },
+    {
+      name: "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+      violation: "Insights amount fact projection is missing or unsafe",
+    },
+    {
+      name: "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+      violation: "organization model usage aggregate is missing or unsafe",
+    },
+    {
+      name: "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+      violation: "Insights scoped fact projection is missing or unsafe",
+    },
+  ];
+
+  function modelFactPosture(): RuntimeDatabasePosture {
+    const posture = safePosture();
+    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "model_call_facts" });
+    posture.privateRoutines.push(
+      ...modelFactCapabilities.map(({ name }) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      })),
+    );
+    return posture;
+  }
+
+  test("requires all current model-fact capabilities without changing the frozen old contract", () => {
+    const posture = modelFactPosture();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    for (const { name, violation } of modelFactCapabilities) {
+      const missing = {
+        ...posture,
+        privateRoutines: posture.privateRoutines.filter((routine) => routine.name !== name),
+      };
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+      expect(
+        evaluateRuntimeDatabasePosture(missing, {
+          ...options,
+          modelFactCapabilityRoutines: modelFactCapabilities
+            .filter((capability) => capability.name !== name)
+            .map((capability) => capability.name),
+        }),
+      ).toEqual([]);
+    }
+    posture.privateRoutines = posture.privateRoutines.filter(
+      (routine) => !modelFactCapabilities.some(({ name }) => name === routine.name),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      modelFactCapabilities.map(({ violation }) => violation),
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, modelFactCapabilityRoutines: [] }),
+    ).toEqual([]);
+  });
+
+  for (const { name, violation } of modelFactCapabilities) {
+    test(`rejects unsafe or ambiguous ${name} even for an old binary`, () => {
+      for (const unsafe of [
+        { securityDefiner: false },
+        { execute: false },
+        { publicExecute: true },
+        { owner: "another_owner" },
+      ]) {
+        const posture = modelFactPosture();
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
+        for (const contract of [options, { ...options, modelFactCapabilityRoutines: [] }]) {
+          expect(evaluateRuntimeDatabasePosture(posture, contract)).toContain(violation);
+        }
+      }
+      const ambiguous = modelFactPosture();
+      ambiguous.privateRoutines.push({
+        ...ambiguous.privateRoutines.find((routine) => routine.name === name)!,
+      });
+      expect(evaluateRuntimeDatabasePosture(ambiguous, options)).toContain(violation);
+      expect(
+        evaluateRuntimeDatabasePosture(ambiguous, { ...options, modelFactCapabilityRoutines: [] }),
+      ).toContain(violation);
+    });
+  }
+
   test("archived import receipts require private FORCE RLS and scoped non-public capabilities", () => {
     const posture = safePosture();
     const ledger = {
@@ -913,6 +1003,49 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("organization signup use cases stay behind their record capability", () => {
+    const posture = safePosture();
+    const table = {
+      name: "organization_signup_use_cases",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("organization_signup_use_cases");
+    table.select = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct organization signup use case authority",
+    );
+    table.select = false;
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case relation lacks active FORCE-RLS isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case capability record_organization_signup_use_case(uuid, text, text) is missing or unsafe",
+    );
+  });
+
   test("requires the 0352 session Variable Set runtime receipt", () => {
     const posture = safePosture();
     posture.sessionVariableSetAttachmentsCutoverPresent = false;
@@ -1062,6 +1195,12 @@ describe("runtime database posture evaluator", () => {
               ? 1
               : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 4 : 0) +
+          // Content-free Slack provider quotas are global and full-DML only.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -1077,7 +1216,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 6;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1 + 6;
       for (const removed of [
         "workspace_packs",
         "pack_installations",

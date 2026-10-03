@@ -37,11 +37,13 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
@@ -347,7 +349,7 @@ async function signUpAndVerify(page: Page, input: { name: string; email: string 
   expect(verificationUrl.startsWith(`${publicOrigin}/v1/auth/verify-email?`)).toBe(true);
   await page.goto(verificationUrl, { waitUntil: "domcontentloaded" });
   const authOrOnboarding = page
-    .getByRole("heading", { name: /^(Sign in|Create your organization)$/ })
+    .getByRole("heading", { name: /^(Sign in|How do you want to use Opengeni\?)$/ })
     .first();
   await authOrOnboarding.waitFor();
   if ((await authOrOnboarding.textContent())?.trim() === "Sign in") {
@@ -411,6 +413,8 @@ beforeAll(async () => {
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
+    // Variable sets carry the developer setup key into the setup chat.
+    environmentsEncryptionKey: Buffer.alloc(32, 23).toString("base64"),
   });
   const api = createApp({
     settings,
@@ -493,6 +497,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const ownerEmail = `onboarding-owner-${RUN_ID}@example.test`;
 
     await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     await page.getByRole("heading", { name: "Create your organization" }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(1);
     expect(await page.getByLabel(/workspace/i).count()).toBe(0);
@@ -1073,7 +1079,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Alternate Owner",
       email: alternateOwnerEmail,
     });
-    await alternatePage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await alternatePage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const alternateOwner = sdk(await cookieHeader(alternateContext));
     const alternateCreated = await alternateOwner.createOrganization({
       name: "Onboarding Alternate Org",
@@ -1102,7 +1108,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Registered",
       email: registeredEmail,
     });
-    await registeredPage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await registeredPage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const registeredInvite = await owner.createOrganizationInvitation(organizationId, {
       email: registeredEmail,
       name: "Onboarding Registered",
@@ -1429,4 +1435,111 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await registeredContext.close();
   }, 240_000);
+
+  test("adding agents to a product records the choice, creates a scoped setup key, and opens a setup chat without the key in history", async () => {
+    if (!browser || !owned) throw new Error("acceptance harness unavailable");
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 960 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.60" },
+    });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: publicOrigin,
+    });
+    const page = await context.newPage();
+    const problems = observeBrowser(page);
+    const email = `onboarding-embed-${RUN_ID}@example.test`;
+    await signUpAndVerify(page, { name: "Onboarding Builder", email });
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^Add AI agents to my product/ }).click();
+    await page.getByLabel("Organization name").fill("Onboarding Product Org");
+    await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^(Continue|Skip for now)$/ }).click();
+    await page.getByRole("heading", { name: "Add AI agents to your product" }).waitFor();
+    // Shown once in its own copy step; the coding-agent prompt never carries it.
+    const keyField = page.locator("[data-slot=developer-setup-key]");
+    await keyField.waitFor();
+    const token = (await keyField.textContent())?.trim() ?? "";
+    expect(token).toStartWith("ogk_");
+    await page.getByRole("button", { name: "Copy key", exact: true }).click();
+    await page.getByRole("button", { name: "Key copied" }).waitFor();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
+    await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
+    await page.getByRole("button", { name: "Prompt copied" }).waitFor();
+    const prompt = await page.evaluate(() => navigator.clipboard.readText());
+    expect(prompt).not.toContain(token);
+    expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
+    expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
+    await expectNoAxeViolations(page, "body");
+
+    await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions\/[0-9a-f-]{36}$/u, {
+      timeout: 30_000,
+    });
+    const [, workspaceId, sessionId] =
+      /\/workspaces\/([0-9a-f-]{36})\/sessions\/([0-9a-f-]{36})$/u.exec(
+        new URL(page.url()).pathname,
+      )!;
+    await page
+      .getByText("I want to add AI agents to my product. Help me set it up.")
+      .first()
+      .waitFor({
+        timeout: 30_000,
+      });
+
+    const owner = sdk(await cookieHeader(context), "198.51.100.60");
+    const memberships = await owner.listOrganizationMemberships();
+    const organizationId = memberships.memberships[0]!.organizationId;
+    const keys = await owner.listOrganizationApiKeys(organizationId);
+    expect(keys.map((key) => [key.name, key.access, token.startsWith(key.prefix)])).toEqual([
+      ["Developer setup", "developer_setup", true],
+    ]);
+    expect(keys[0]!.expiresAt).not.toBeNull();
+    const workspace = await owner.getWorkspace(workspaceId!);
+    expect([workspace.name, workspace.kind, workspace.accountId]).toEqual([
+      "Opengeni setup",
+      "shared",
+      organizationId,
+    ]);
+    const session = await owner.getSession(workspaceId!, sessionId!);
+    expect(session.id).toBe(sessionId);
+    // The key reaches the setup chat only through its write-only variable set;
+    // the onboarding context (which names where it is) is durable session data.
+    const sessionRows = (pattern: string) => owned!.admin<Array<{ count: number }>>`
+      select (
+        (select count(*) from session_events e where e.session_id = ${sessionId}
+           and row_to_json(e)::text like ${pattern})
+        + (select count(*) from session_history_items h where h.session_id = ${sessionId}
+           and row_to_json(h)::text like ${pattern})
+        + (select count(*) from session_turns t where t.session_id = ${sessionId}
+           and row_to_json(t)::text like ${pattern})
+        + (select count(*) from sessions s where s.id = ${sessionId}
+           and row_to_json(s)::text like ${pattern})
+      )::int as count`;
+    expect((await sessionRows(`%${token}%`))[0]?.count).toBe(0);
+    expect(
+      (await sessionRows("%DEVELOPER_SETUP_API_KEY environment variable%"))[0]?.count,
+    ).toBeGreaterThan(0);
+    const variableSets = await owner.listVariableSets(workspaceId!);
+    expect(
+      variableSets.map((set) => [set.name, set.variables.map((variable) => variable.name)]),
+    ).toEqual([["Opengeni developer setup", ["DEVELOPER_SETUP_API_KEY"]]]);
+    expect(JSON.stringify(variableSets)).not.toContain(token);
+    expect((await sessionRows(`%${variableSets[0]!.id}%`))[0]?.count).toBeGreaterThan(0);
+    expect((await sessionRows("%builtin:opengeni-client%"))[0]?.count).toBeGreaterThan(0);
+    await page.screenshot({
+      path: `${EVIDENCE_DIR}/onboarding-developer-setup-chat-1440.png`,
+      fullPage: true,
+    });
+    // An idle session with no goal and a stubbed workflow answers its goal
+    // and stream reads with 404.
+    expectNoBrowserProblems({
+      ...problems,
+      consoleErrors: problems.consoleErrors.filter(
+        (problem) =>
+          !/status of 404 .*\/sessions\/[0-9a-f-]{36}\/(goal|stream-capabilities)$/u.test(problem),
+      ),
+    });
+    await context.close();
+  }, 180_000);
 });

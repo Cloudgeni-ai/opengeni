@@ -71,6 +71,26 @@ describe("managed auth form", () => {
     });
   });
 
+  test("explains paused sign-ups and offers sign-in instead", () => {
+    expect(
+      managedAuthFailure(
+        "signup",
+        new AuthApiError(
+          403,
+          "NEW_SIGNUPS_PAUSED",
+          null,
+          "We're at capacity for new accounts right now. Please try again later.",
+        ),
+      ),
+    ).toEqual({
+      fields: {},
+      message:
+        "We're at capacity for new accounts right now. Please try again later. If you already have an account, sign in instead.",
+      switchTo: "signin",
+      canResendVerification: false,
+    });
+  });
+
   test("explains a signup that created an account without a browser session", () => {
     expect(
       managedAuthFailure("signup", new ManagedAuthSessionUnavailableError("signup")),

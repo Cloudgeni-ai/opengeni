@@ -131,9 +131,11 @@ import {
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
 } from "@opengeni/core";
+import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
 } from "./auth/managed-auth";
@@ -366,9 +368,17 @@ export function createAppComposition(deps: AppDependencies): {
   assertManagedEmailTransportMetadata(managedEmailTransport);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
+    db: deps.db,
+    settings: deps.settings,
+    observability,
+  });
   const managedAuth =
     deps.managedAuth ??
-    createManagedAuth(deps.settings, deps.db, managedEmailTransport, { observability });
+    createManagedAuth(deps.settings, deps.db, managedEmailTransport, {
+      observability,
+      newSignupsGate: managedAuthNewSignupsGate,
+    });
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
@@ -879,6 +889,16 @@ export function createAppComposition(deps: AppDependencies): {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (
+        pathname === "/v1/auth/sign-up/email" &&
+        c.req.method === "POST" &&
+        !(await managedAuthNewSignupsGate.signupsOpen())
+      ) {
+        // Launch-load safety switch: refuse before Better Auth hashes the
+        // password or sends mail. Better Auth's own disableSignUp flags and
+        // the user-create hook remain the backstop for every other path.
+        return managedAuthNewSignupsPausedResponse();
+      }
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1257,7 +1277,12 @@ export function createAppComposition(deps: AppDependencies): {
         productAccessMode: deps.settings.productAccessMode,
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
-        auth: clientAuthConfig(deps.settings),
+        auth: clientAuthConfig(
+          deps.settings,
+          deps.settings.productAccessMode === "managed"
+            ? await managedAuthNewSignupsGate.signupsOpen()
+            : true,
+        ),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
         legal: clientLegalConfig(deps.settings),
@@ -1407,10 +1432,16 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceMemoryPromptMode,
         sessionMemory,
       });
-      await mcp.connect(transport);
       // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
       // worker that drops the call (Steer/Pause) aborts a blocking tool here.
-      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      // Each POST builds a fresh server; close it once the JSON response is
+      // ready, like the gateway paths above, so it can't outlive the request.
+      try {
+        await mcp.connect(transport);
+        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      } finally {
+        await mcp.close().catch(() => undefined);
+      }
     });
   });
 
@@ -1853,12 +1884,13 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"]) {
+function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: settings.environment !== "local",
+      newSignupsEnabled,
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)

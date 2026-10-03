@@ -273,7 +273,11 @@ async function selectScopedSubscriptionTurnCapacity(
         pinSource: null,
         expectedVersion: sessionPin.version,
       }).catch((error: unknown) => {
-        if (error instanceof Error && error.message === "xAI session pin changed") return;
+        if (
+          error instanceof Error &&
+          error.message === (claude ? "Claude" : "xAI") + " session pin changed"
+        )
+          return;
         throw error;
       });
     }

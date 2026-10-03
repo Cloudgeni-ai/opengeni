@@ -421,6 +421,7 @@ async function finalizeTurnAttemptSteps(
     if (claudeEncryptionKey && providerTurn.claudeAuthoritySnapshot && leases.claude.subjectId) {
       for (const snapshot of providerTurn.latestClaudeUsage.values()) {
         if (
+          (!snapshot.observation && !snapshot.refresh) ||
           snapshot.expectedConnectionId !== providerTurn.effectiveClaudeCredentialId ||
           snapshot.expectedCredentialVersion !== providerTurn.effectiveClaudeCredentialVersion
         )

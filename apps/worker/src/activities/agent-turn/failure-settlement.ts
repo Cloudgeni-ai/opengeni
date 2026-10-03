@@ -1495,7 +1495,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         (value) =>
           value.expectedConnectionId === scopedCredentialId &&
           value.expectedCredentialVersion === providerTurn.effectiveClaudeCredentialVersion &&
-          value.responseStatus === (scopedFailure.kind === "rate_limit" ? 429 : 401) &&
+          value.upstreamModelId === providerTurn.claudeUpstreamModelId &&
+          (value.responseStatus === (scopedFailure.kind === "rate_limit" ? 429 : 401) ||
+            (value.responseStatus === 200 &&
+              !!claudeFailure.requestId &&
+              value.requestId === claudeFailure.requestId)) &&
           (!claudeFailure.requestId || value.requestId === claudeFailure.requestId),
       );
       const receipt = matchingReceipts.length === 1 ? matchingReceipts[0] : undefined;

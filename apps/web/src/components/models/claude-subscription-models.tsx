@@ -127,9 +127,11 @@ export function ClaudeSettingRows({ claude }: { claude: ClaudeSubscriptions }) {
 function AccountUsage({
   claude,
   account,
+  onReconnect,
 }: {
   claude: ClaudeSubscriptions;
   account: ClaudeSubscriptionAccount;
+  onReconnect?: (() => void) | undefined;
 }) {
   const usage = useClaudeUsage({
     client: claude.client,
@@ -143,7 +145,7 @@ function AccountUsage({
     onCredentialChanged: claude.refresh,
     accountPool: true,
   });
-  return <ClaudeUsage state={usage} />;
+  return <ClaudeUsage state={usage} onReconnect={onReconnect} />;
 }
 export function ClaudeAccountPage({
   claude,
@@ -168,7 +170,18 @@ export function ClaudeAccountPage({
       providerName="Claude"
       connectionKind="claude_subscription"
       plan={claudePlan}
-      renderUsage={(account) => <AccountUsage key={account.id} claude={claude} account={account} />}
+      renderUsage={(account) => (
+        <AccountUsage
+          key={account.id}
+          claude={claude}
+          account={account}
+          onReconnect={
+            claude.canManageAccounts && !claude.inherited
+              ? () => places.openConnect(account.id)
+              : undefined
+          }
+        />
+      )}
       renderModels={
         models
           ? () => <ProviderCustomModels state={models} readOnlyCatalog={readOnlyCatalog} />

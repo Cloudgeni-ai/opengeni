@@ -1,4 +1,5 @@
 import {
+  BillingCheckoutStatus,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -8,6 +9,7 @@ import {
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
+import { OrganizationModelUsageQuery } from "@opengeni/contracts/organization-model-usage";
 import { configuredEntitlements } from "@opengeni/config";
 import {
   applyCreditLedgerEntry,
@@ -17,6 +19,7 @@ import {
   hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   withSessionRlsActorContext,
@@ -91,6 +94,19 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/billing/usage-models", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const parsed = OrganizationModelUsageQuery.safeParse(c.req.query());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid model usage query",
+      });
+    return await withBillingUsageActor(deps, context, accountId, async () =>
+      c.json(await getOrganizationModelUsage(deps.db, { accountId, ...parsed.data })),
+    );
+  });
+
   app.get("/v1/billing/entitlements", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
@@ -114,26 +130,61 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const body = parsed.data;
     const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
-    const amountCents = usdToCents(body.amountUsd);
-    const amountMicros = centsToMicros(amountCents);
     const stripe = stripeClient(deps);
+    const promotion = body.promotionCode
+      ? await resolveCheckoutPromotionCode(stripe, body.promotionCode)
+      : null;
+    const amountCents =
+      body.amountUsd !== undefined
+        ? usdToCents(body.amountUsd)
+        : (promotion?.amountOffCents ?? null);
+    if (amountCents === null) {
+      throw new HTTPException(422, {
+        message: promotion
+          ? "Choose how many credits to buy with this code."
+          : "amountUsd is required",
+      });
+    }
+    if (amountCents < 500 || amountCents > 1_000_000) {
+      throw new HTTPException(422, {
+        message: "Credits must be between $5 and $10,000.",
+      });
+    }
+    const amountMicros = centsToMicros(amountCents);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const idempotencyKey = `checkout:${accountId}:${amountMicros}:${crypto.randomUUID()}`;
-    const session = await stripe.checkout.sessions.create(
-      stripeCheckoutSessionCreateParams({
-        accountId,
-        customerId,
-        amountCents,
-        amountMicros,
-        creditsProductId: deps.settings.stripeCreditsProductId,
-        publicBaseUrl: deps.settings.publicBaseUrl,
-        webBaseUrl: deps.settings.webBaseUrl,
-        successUrl: body.successUrl,
-        cancelUrl: body.cancelUrl,
-        idempotencyKey,
-      }),
-      { idempotencyKey },
-    );
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await stripe.checkout.sessions.create(
+        stripeCheckoutSessionCreateParams({
+          accountId,
+          customerId,
+          amountCents,
+          amountMicros,
+          creditsProductId: deps.settings.stripeCreditsProductId,
+          publicBaseUrl: deps.settings.publicBaseUrl,
+          webBaseUrl: deps.settings.webBaseUrl,
+          successUrl: body.successUrl,
+          cancelUrl: body.cancelUrl,
+          idempotencyKey,
+          ...(promotion
+            ? {
+                promotionCodeId: promotion.id,
+                fullyDiscounted:
+                  promotion.percentOff === 100 || (promotion.amountOffCents ?? 0) >= amountCents,
+              }
+            : {}),
+        }),
+        { idempotencyKey },
+      );
+    } catch (error) {
+      // Stripe refuses a code whose restrictions this purchase doesn't meet
+      // (first purchase only, a minimum amount, another customer's code).
+      if (promotion && error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(422, { message: "This code can't be used for this purchase." });
+      }
+      throw error;
+    }
     if (!session.url) {
       throw new HTTPException(502, { message: "Stripe did not return a checkout URL" });
     }
@@ -141,6 +192,60 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       CreateCheckoutResponse.parse({
         checkoutSessionId: session.id,
         url: session.url,
+        amountUsd: amountCents / 100,
+      }),
+    );
+  });
+
+  // Where one checkout stands, for the page the customer returns to. Credits
+  // normally post from the webhook; a completed checkout whose webhook has not
+  // arrived yet is settled here from Stripe's own record of the session, under
+  // the same ledger idempotency key, so it grants at most once.
+  app.get("/v1/billing/checkout/:checkoutSessionId", async (c) => {
+    if (deps.settings.billingMode !== "stripe") {
+      throw new HTTPException(404, { message: "stripe billing is not enabled" });
+    }
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const checkoutSessionId = c.req.param("checkoutSessionId");
+    if (!/^cs_[A-Za-z0-9_]{1,250}$/.test(checkoutSessionId)) {
+      throw new HTTPException(404, { message: "checkout not found" });
+    }
+    const stripe = stripeClient(deps);
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await stripe.checkout.sessions.retrieve(checkoutSessionId);
+    } catch (error) {
+      if (error instanceof Stripe.errors.StripeInvalidRequestError) {
+        throw new HTTPException(404, { message: "checkout not found" });
+      }
+      throw error;
+    }
+    if (session.metadata?.opengeni_account_id !== accountId) {
+      throw new HTTPException(404, { message: "checkout not found" });
+    }
+    const credit = creditMetadata(session.metadata, `Stripe checkout session ${session.id}`);
+    let entry = await getCreditLedgerEntry(deps.db, accountId, credit.idempotencyKey);
+    if (!entry && session.status === "complete") {
+      await grantCheckoutSessionCredits(deps, session, {
+        stripeEventId: null,
+        livemode: session.livemode,
+      });
+      entry = await getCreditLedgerEntry(deps.db, accountId, credit.idempotencyKey);
+    }
+    return c.json(
+      BillingCheckoutStatus.parse({
+        checkoutSessionId: session.id,
+        status: session.status ?? "open",
+        credit: {
+          state: entry ? "granted" : "pending",
+          amountMicros: entry?.amountMicros ?? credit.amountMicros,
+          currency: "usd",
+          free: entry
+            ? entry.sourceType === "stripe_checkout_coupon"
+            : isFreeCouponCheckout(session),
+        },
+        balance: entry ? await getBillingBalance(deps.db, accountId) : null,
       }),
     );
   });
@@ -233,6 +338,14 @@ export function stripeCheckoutSessionCreateParams(input: {
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
   idempotencyKey: string;
+  /** Apply this promotion code up front instead of letting Stripe ask for one. */
+  promotionCodeId?: string | undefined;
+  /**
+   * The applied code covers the whole package, so the total is $0. Nothing is
+   * taxable, so Checkout skips tax and with it the billing address: the
+   * customer only confirms.
+   */
+  fullyDiscounted?: boolean | undefined;
 }): Stripe.Checkout.SessionCreateParams {
   const successUrl = checkoutReturnUrl(
     input.publicBaseUrl,
@@ -250,7 +363,10 @@ export function stripeCheckoutSessionCreateParams(input: {
   );
   return {
     mode: "payment",
-    allow_promotion_codes: true,
+    // Stripe takes either a code field on its page or one discount up front.
+    ...(input.promotionCodeId
+      ? { discounts: [{ promotion_code: input.promotionCodeId }] }
+      : { allow_promotion_codes: true }),
     customer: input.customerId,
     customer_update: {
       address: "auto",
@@ -258,7 +374,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     },
     success_url: successUrl,
     cancel_url: cancelUrl,
-    automatic_tax: { enabled: true },
+    automatic_tax: { enabled: !(input.promotionCodeId && input.fullyDiscounted) },
     billing_address_collection: "auto",
     line_items: [
       {
@@ -462,13 +578,29 @@ async function handleCheckoutSessionPayment(
   deps: ApiRouteDeps,
   event: Stripe.Event,
 ): Promise<void> {
-  const session = event.data.object as Stripe.Checkout.Session;
+  await grantCheckoutSessionCredits(deps, event.data.object as Stripe.Checkout.Session, {
+    stripeEventId: event.id,
+    stripeEventType: event.type,
+    livemode: event.livemode,
+  });
+}
+
+/**
+ * Grants a paid (or fully coupon-covered) OpenGeni checkout's credits once.
+ * The webhook calls this with its event; the checkout status read calls it
+ * with the session it retrieved from Stripe when the webhook is late.
+ */
+async function grantCheckoutSessionCredits(
+  deps: ApiRouteDeps,
+  session: Stripe.Checkout.Session,
+  source: { stripeEventId: string | null; stripeEventType?: string; livemode: boolean },
+): Promise<void> {
   const decision = stripeCheckoutCreditDecision(session);
   if (decision.action === "ignore") {
     if (decision.reason === "foreign_checkout") {
       console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
-        stripeEventType: event.type,
-        livemode: event.livemode,
+        stripeEventType: source.stripeEventType ?? null,
+        livemode: source.livemode,
       });
     }
     return;
@@ -482,8 +614,8 @@ async function handleCheckoutSessionPayment(
     console.info(
       "[api] stripe webhook ignored a checkout session for an account not in this deployment",
       {
-        stripeEventType: event.type,
-        livemode: event.livemode,
+        stripeEventType: source.stripeEventType ?? null,
+        livemode: source.livemode,
       },
     );
     return;
@@ -492,10 +624,13 @@ async function handleCheckoutSessionPayment(
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
       accountId: credit.accountId,
-      provider: stripeCustomerProvider(event),
+      provider: source.livemode ? "stripe:live" : "stripe:test",
       providerCustomerId: customerId,
       email: session.customer_details?.email ?? session.customer_email ?? null,
     });
+  }
+  if (await hasCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey)) {
+    return;
   }
   await applyCreditLedgerEntry(deps.db, {
     accountId: credit.accountId,
@@ -505,7 +640,7 @@ async function handleCheckoutSessionPayment(
     sourceId: session.id,
     idempotencyKey: credit.idempotencyKey,
     metadata: {
-      stripeEventId: event.id,
+      stripeEventId: source.stripeEventId,
       stripePaymentIntentId:
         typeof session.payment_intent === "string"
           ? session.payment_intent
@@ -521,6 +656,35 @@ async function handleCheckoutSessionPayment(
     },
   });
   recordCreditMicrosMetric(deps, freeCouponCheckout ? "grant" : "topup", credit.amountMicros);
+}
+
+/**
+ * Looks up a customer-typed promotion code. Stripe matches codes without
+ * regard to case. A fixed USD amount off sets the credits a checkout buys.
+ */
+async function resolveCheckoutPromotionCode(
+  stripe: Stripe,
+  code: string,
+): Promise<{ id: string; amountOffCents: number | null; percentOff: number | null }> {
+  const listed = await stripe.promotionCodes.list({
+    code,
+    active: true,
+    limit: 1,
+    expand: ["data.promotion.coupon"],
+  });
+  const promotionCode = listed.data[0];
+  const coupon =
+    promotionCode && typeof promotionCode.promotion?.coupon === "object"
+      ? promotionCode.promotion.coupon
+      : null;
+  if (!promotionCode || !coupon?.valid) {
+    throw new HTTPException(422, { message: "That code isn't valid or has expired." });
+  }
+  const amountOffCents =
+    coupon.amount_off && coupon.currency === "usd"
+      ? coupon.amount_off
+      : (coupon.currency_options?.usd?.amount_off ?? null);
+  return { id: promotionCode.id, amountOffCents, percentOff: coupon.percent_off ?? null };
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {

@@ -2219,6 +2219,43 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
+  test("requires a dedicated attention-filter receipt and forwards complete totals", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { needsYouOnly: true }),
+    ).rejects.toThrow("attention session filtering");
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, {
+        parentSessionId: null,
+        includeTotals: true,
+      }),
+    ).rejects.toThrow("complete session totals");
+    const totals = { needsYouCount: 12, groups: [] };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        needsYouOnly: true,
+        totals,
+      }),
+    );
+    expect(
+      (
+        await client.listSessionSummaryPage(WORKSPACE_ID, {
+          parentSessionId: null,
+          includeTotals: true,
+          needsYouOnly: true,
+        })
+      ).totals,
+    ).toEqual(totals);
+    expect(requests[0]!.url).toContain("includeTotals=true");
+    expect(requests[0]!.url).toContain("needsYouOnly=true");
+  });
+
   test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({
@@ -2687,4 +2724,22 @@ test("sets a workspace duration timer through the public endpoint", async () => 
   expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
   expect(requests[0]!.method).toBe("POST");
   expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+});
+
+test("Claude account disconnects send JSON for scoped browser mutation guards", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ disconnected: true }));
+  await client.disconnectClaudeSubscriptionAccount(
+    WORKSPACE_ID,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.disconnectOrganizationClaudeSubscriptionAccount(
+    "22222222-2222-4222-8222-222222222222",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  expect(requests).toHaveLength(2);
+  for (const request of requests) {
+    expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
 });

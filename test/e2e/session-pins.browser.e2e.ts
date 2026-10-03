@@ -10,7 +10,9 @@ import {
   grantWorkspaceAccess,
   removeWorkspaceMember,
   updateSessionTitle,
+  withWorkspaceRls,
 } from "@opengeni/db";
+import { sql } from "drizzle-orm";
 import { signDelegatedAccessToken, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -2964,6 +2966,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         pause: "paused",
       });
       expect(evidence.direct).toEqual([child.id]);
+      // New idle roots push the attention tree outside the four-row project window.
+      for (let index = 0; index < 6; index++)
+        await createSessionThroughApi(page, apiBaseUrl, workspaceId, `New idle fixture ${index}`);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
       await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
@@ -2987,6 +2994,79 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.screenshot({ path: "/tmp/ux-needs-you-child-routing.png", fullPage: true });
       await nested.click();
       await waitFor(() => page.url().endsWith(`/sessions/${grandchild.id}`));
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("keeps pinned workstreams with attention beyond the painted-tree depth", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const root = await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Deep pinned root");
+      await withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
+        await scoped.execute(sql`update workspaces
+          set settings = settings || '{"maxNestedAgentDepth":64}'::jsonb
+          where id = ${workspaceId}`);
+      });
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        root.id,
+        [{ type: "session.status.changed", payload: { status: "idle" } }],
+        { status: "idle" },
+      );
+      let parentId = root.id;
+      for (let depth = 1; depth <= 33; depth++) {
+        const child = await createTitledSession(dbClient.db, {
+          accountId: root.accountId,
+          workspaceId,
+          initialMessage: `Deep child ${depth}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          parentSessionId: parentId,
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        parentId = child.id;
+      }
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        parentId,
+        [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+        { status: "requires_action" },
+      );
+      await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, root, true);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();
+      await page.getByRole("menuitem", { name: /^Status/ }).focus();
+      await page.keyboard.press("ArrowRight");
+      const filteredPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname.endsWith("/sessions") &&
+          url.searchParams.get("needsYouOnly") === "true" &&
+          url.searchParams.get("includeTotals") === "true"
+        );
+      });
+      await page.getByRole("menuitemradio", { name: /^Needs you/ }).click();
+      const receipt = await (await filteredPage).json();
+      expect(receipt.pinned.map((session: { id: string }) => session.id)).toEqual([root.id]);
+      expect(receipt.pinned[0].treeStats.attentionDescendants).toBe(0);
+      await page
+        .getByRole("button", { name: "Session view, showing sessions that need you", exact: true })
+        .waitFor();
+      await page.locator(`a[data-session-row="${root.id}"]`).waitFor();
+      await page.screenshot({ path: "/tmp/ux-needs-you-deep-pinned.png", fullPage: true });
     } finally {
       await context.close();
     }

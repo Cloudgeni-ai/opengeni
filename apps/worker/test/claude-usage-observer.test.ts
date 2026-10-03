@@ -320,3 +320,40 @@ test("renewal failures propagate without dispatching the captured token", async 
     }),
   ).rejects.toBe(reason);
 });
+
+test("parallel same-model requests preserve exact rejected and successful stream receipts", async () => {
+  const latest = new Map<string, CapturedClaudeUsage>();
+  const observe = await createClaudeUsageObserver(providers, latest, async () => ({
+    token: providers[0]!.apiKey!,
+    connectionId: "original",
+    credentialVersion: 7,
+  }));
+  for (const [requestId, status] of [
+    ["synthetic-main", 429],
+    ["synthetic-title", 200],
+    ["synthetic-second", 401],
+  ] as const) {
+    observe(
+      providers[0]!.id,
+      new Response(null, {
+        status,
+        headers: { "request-id": requestId, "anthropic-ratelimit-unified-5h-utilization": ".2" },
+      }),
+      "claude-opus-fixture",
+    );
+  }
+  // A stream can fail after its HTTP 200 response, without quota headers.
+  observe(
+    providers[0]!.id,
+    new Response(null, { headers: { "request-id": "synthetic-stream" } }),
+    "claude-opus-fixture",
+  );
+  expect(
+    [...latest.values()].map(({ requestId, responseStatus }) => [requestId, responseStatus]),
+  ).toEqual([
+    ["synthetic-main", 429],
+    ["synthetic-title", 200],
+    ["synthetic-second", 401],
+    ["synthetic-stream", 200],
+  ]);
+});

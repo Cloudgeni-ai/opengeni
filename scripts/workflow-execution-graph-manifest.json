@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "851d0d790fcefec568aaaf39e6b6fc7bb699830e9f7829ad69c8862d05213340"
+      "sha256": "d51f1f3779d5b8180f037d3f6a5e6c7f416a516459247adde766142ba1889051"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -18,15 +18,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "62612655250d0015a0c55049fd97eae4e3d813052510bc7e67346567cb962db4"
+      "sha256": "cfead3d1f4861fbb68286303f0ff027564be79f8325dc28a139208624959af40"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
+      "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "32c9092f1a6262dfe73e6a53ea5a1f8c8a11657e55c1a318ab5b59b058a44dce"
+      "sha256": "a22bd63f2234df84051f3cb7aaca08f0104518acc036e69bf39654d87c3975b0"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -167,7 +167,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "install-smoke",
       "step": "Smoke the install script (Unix)",
-      "sha256": "e4499cffc236e1b07c7914ae240ecf7e00ff30cf9a82cbfba2d5ec2e41c481a1"
+      "sha256": "ba466df67f0454df50b23447cc12a4bfc0edc5d8d1f4cc4679765024e979ecf3"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",

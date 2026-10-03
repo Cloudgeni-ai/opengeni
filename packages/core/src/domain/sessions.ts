@@ -2997,7 +2997,7 @@ async function createSessionForRequestInFileScope(
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted
-  // execution policy fields therefore inherit that calling turn rather than the
+  // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
   // onto the OpenGeni-credits billing path. Legacy session-bound grants without
@@ -3034,10 +3034,11 @@ async function createSessionForRequestInFileScope(
     parentSession?.reasoningEffort ??
     resolvedDefault?.reasoningEffort ??
     settings.openaiReasoningEffort;
-  const inheritedLatencyMode =
-    parentCallingTurn?.latencyMode ?? parentSession?.latencyMode ?? "standard";
   const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
-  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
+  // A fresh session never implicitly opts into a faster, higher-cost tier.
+  // This is a fresh-creation default only: replay/repair preserves persisted
+  // policy, and follow-ups use the recipient session's own frozen settings.
+  const latencyMode = payload.latencyMode ?? "standard";
   if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
     throw new HTTPException(409, {
       message: "The submitted session options are not represented by the new-session draft",
@@ -3098,12 +3099,7 @@ async function createSessionForRequestInFileScope(
             : "deployment"
           : "explicit",
       latencyMode,
-      latencyModeSource:
-        payload.latencyMode === undefined
-          ? inheritedFromParent
-            ? "continuation"
-            : "deployment"
-          : "explicit",
+      latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
     }),
     { grant, authorization, trustedMetadata: [parentSession?.metadata] },
   );

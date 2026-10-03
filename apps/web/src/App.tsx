@@ -48,7 +48,8 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
-import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
+import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
+import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
 import {
   parseModelsAccount,
   parseModelsView,
@@ -380,11 +381,38 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
+// so the route table doesn't import the lazy Insights chunk).
+const INSIGHTS_SEARCH_KEYS = [
+  "view",
+  "range",
+  "group",
+  "metric",
+  "split",
+  "tab",
+  "ws",
+  "prov",
+  "model",
+  "payer",
+  "proj",
+  "who",
+  "root",
+  "sched",
+] as const;
+type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
-  // Opened from Organization settings > Billing & usage: back returns there.
-  validateSearch: (search: Record<string, unknown>): ReturnToSearch => parseReturnTo(search),
+  // Insights filters pass as strings (the lazy chunk validates their values);
+  // `from` is set when opened from Organization settings > Billing.
+  validateSearch: (search: Record<string, unknown>): InsightsRawSearch & ReturnToSearch => ({
+    ...Object.fromEntries(
+      INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+        typeof search[key] === "string" ? [[key, search[key]]] : [],
+      ),
+    ),
+    ...parseReturnTo(search),
+  }),
   component: Insights,
 });
 const workspaceCapabilitiesRoute = createRoute({
@@ -567,6 +595,8 @@ const workspaceOrganizationRoute = createRoute({
     search: Record<string, unknown>,
   ): {
     checkout?: CheckoutOutcome;
+    /** Stripe's session id on a same-tab return, so billing can celebrate its credits. */
+    checkoutSession?: string;
     section?: OrganizationAdminSection;
     account?: string;
     view?: ModelsView | OrganizationView | DeveloperView;
@@ -574,8 +604,11 @@ const workspaceOrganizationRoute = createRoute({
     invitation?: string;
     workspace?: string;
     webhook?: string;
-  } & ReturnToSearch => {
+  } & InsightsRawSearch &
+    ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
+    const checkoutSession =
+      checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
     const section = parseOrganizationSection(search.section);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view =
@@ -599,6 +632,7 @@ const workspaceOrganizationRoute = createRoute({
         : undefined;
     return {
       ...(checkout ? { checkout } : {}),
+      ...(checkoutSession ? { checkoutSession } : {}),
       ...(section ? { section } : {}),
       ...(account ? { account } : {}),
       ...(view ? { view } : {}),
@@ -606,6 +640,13 @@ const workspaceOrganizationRoute = createRoute({
       ...(invitation ? { invitation } : {}),
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
+      ...(section === "insights"
+        ? Object.fromEntries(
+            INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+              key !== "view" && typeof search[key] === "string" ? [[key, search[key]]] : [],
+            ),
+          )
+        : {}),
       ...parseReturnTo(search),
     };
   },
@@ -797,7 +838,23 @@ function Machines() {
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
   const search = workspaceInsightsRoute.useSearch();
-  return <LazyInsightsRoute workspaceId={workspaceId} returnTo={returnToOf(search)} />;
+  const navigate = workspaceInsightsRoute.useNavigate();
+  const { from: _from, fromLabel: _fromLabel, ...insightsSearch } = search;
+  const returnTo = returnToOf(search);
+  return (
+    <LazyInsightsRoute
+      workspaceId={workspaceId}
+      search={insightsSearch}
+      returnTo={returnTo}
+      onSearchChange={(next, options) =>
+        void navigate({
+          // Filters replace the search; the back link's origin stays.
+          search: { ...next, ...returnToSearch(returnTo) },
+          replace: options?.replace ?? false,
+        })
+      }
+    />
+  );
 }
 
 function CapabilitiesLegacyRedirect() {
@@ -971,8 +1028,11 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
+  const search = workspaceOrganizationRoute.useSearch();
+  const navigate = workspaceOrganizationRoute.useNavigate();
   const {
     checkout,
+    checkoutSession,
     section,
     account,
     view,
@@ -988,6 +1048,7 @@ function Organization() {
     <LazyOrgSettingsRoute
       workspaceId={workspaceId}
       checkout={checkout}
+      checkoutSession={checkoutSession}
       section={page}
       modelsAccount={page === "models" ? account : undefined}
       modelsView={page === "models" ? parseModelsView(view) : undefined}
@@ -1004,6 +1065,19 @@ function Organization() {
       person={person}
       invitation={invitation}
       workspace={workspace}
+      insights={
+        page === "insights"
+          ? {
+              search: Object.fromEntries(
+                INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+                  typeof search[key] === "string" ? [[key, search[key]]] : [],
+                ),
+              ),
+              onSearchChange: (next: Record<string, string | undefined>) =>
+                void navigate({ search: { section: "insights", ...next } }),
+            }
+          : undefined
+      }
     />
   );
 }

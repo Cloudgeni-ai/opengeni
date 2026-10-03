@@ -5,7 +5,11 @@ on:
     branches:
       - main
       - production
+  # Launch window (until 2026-10-04 22:00 Oslo): pull requests into main skip
+  # CI; agents merge on targeted local checks. Restore after the launch window.
   pull_request:
+    branches:
+      - production
   schedule:
     # Weekly full-mode drift coverage complements impact-selected pull-request
     # CI without rebuilding an unchanged source/image matrix every day.

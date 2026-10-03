@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   managedAuthRequiresEmailVerification,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthSocialSignupOptions,
   managedAuthUserCreateAdmission,
   managedAuthUserCreateOverride,
   resolveManagedAuthOAuthAttempt,
@@ -240,4 +241,33 @@ describe("managed user allowlist", () => {
       ).toBeUndefined();
     });
   }
+});
+
+describe("paused new account sign-ups", () => {
+  for (const provider of ["credential", "google", "github"]) {
+    test(`refuses every new ${provider} user while sign-ups are paused`, () => {
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: false },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBe(false);
+      expect(
+        managedAuthUserCreateAdmission(
+          { environment: "production", managedAuthNewSignupsEnabled: true },
+          { email: "new@example.com", emailVerified: true },
+          provider,
+        ),
+      ).toBeUndefined();
+    });
+  }
+
+  test("uses the hard provider switch, not only the client-overridable implicit one", () => {
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: true })).toEqual({});
+    expect(managedAuthSocialSignupOptions({ managedAuthNewSignupsEnabled: false })).toEqual({
+      disableImplicitSignUp: true,
+      disableSignUp: true,
+    });
+  });
 });

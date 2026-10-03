@@ -52,6 +52,12 @@ An agent retry remains bound to the same calling session and target across
 attempt replacement, while the current attempt must independently remain
 authorized. Replaying an old receipt does not overwrite a newer setting.
 
+`session_create` inherits omitted model and reasoning from the exact calling
+turn, but omitted `latencyMode` always starts a fresh session in `standard`.
+Explicit `fast` or `priority` is honored only when the selected model supports
+it. Sending another agent a message does not change that recipient's latency
+default; keyed creation replay returns the original accepted settings.
+
 This is a future-default change, not a prompt or a resume. Already accepted work
 keeps its frozen policy. Older queued turns cannot undo the choice when they
 start, and scheduled per-occurrence model overrides do not replace these explicit
@@ -110,6 +116,15 @@ request, no shell dependency, and no change to eager/search policy defaults.
 
 ### Tool argument errors
 
+First-party structured inputs reuse the native contract schemas, including
+nested fields, discriminators, enums, and required properties. The MCP
+registration check rejects opaque named inputs and array elements; arbitrary
+metadata dictionaries remain supported. `apps/api/src/mcp/contract-input.ts`
+publishes a model-safe projection and validates the full contract without
+inserting defaults, trimming text, or erasing omitted fields before the
+application applies inheritance. Host-only controls stay outside that
+projection, including schedule Slack delivery and Agent learning settings.
+
 Every adapter validates arguments against the tool's advertised input schema in
 the shared gateway, including properties a provider lists as required but does
 not itself enforce. A rejected call never reaches the provider. The error names
@@ -123,6 +138,13 @@ rest) and never quotes argument values:
   same summary as `message` and `details: { code: "invalid_tool_arguments",
   issues, omittedIssueCount }`, where each issue is `{ path, keyword, message }`.
 - Codemode and the unified workspace MCP surface the same error message.
+
+Union requirements are alternatives. A schema-declared discriminator selects
+the applicable branch; an unknown or missing tag reports its allowed formats.
+Ambiguous unions describe alternative corrections rather than presenting every
+branch's requirements as cumulative. Additional native contract refinements
+retain their preflight messages so cross-field failures explain the required
+relationship. Downstream provider and storage exceptions are separate failures.
 
 The native Connected Machine Codemode client sends its compiled API contract
 acknowledgement for compatibility with older deployments whose Codemode routes

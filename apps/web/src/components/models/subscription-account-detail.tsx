@@ -204,6 +204,11 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         actions={
           canEdit ? (
             <MoreMenu label={`More actions for ${name}`}>
+              {provider === "claude_subscription" ? (
+                <DropdownMenuItem onSelect={() => places.openConnect(account.id)}>
+                  Sign in again
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
                 <UnplugIcon />
                 Disconnect

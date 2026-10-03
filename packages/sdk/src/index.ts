@@ -227,6 +227,14 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "./model-display";
+export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
   ModelContextInstructionLayer,
@@ -610,6 +618,7 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  BillingCheckoutStatus,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembership,
   OrganizationAdministrationMember,
@@ -663,10 +672,12 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,
@@ -1050,6 +1061,7 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,

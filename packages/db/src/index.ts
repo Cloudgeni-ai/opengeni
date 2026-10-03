@@ -114,6 +114,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./scheduled-task-access";
+export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -138,6 +139,7 @@ import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./scheduled-slack-bot-messages";
+export * from "./organization-signup-use-cases";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -337,6 +339,7 @@ import type {
   SessionScopeSubjectId,
   SessionMemoryScope,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -758,6 +761,7 @@ export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
 export * from "./verified-signup-trial-switch";
+export * from "./managed-auth-new-signups-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -5386,6 +5390,7 @@ export async function recordModelCallFact(
 }
 
 export {
+  getOrganizationModelUsage,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   organizationUsageWindow,
@@ -35657,6 +35662,8 @@ export type SessionListFilterOptions = {
   createdFrom?: Date;
   /** Exclusive creation upper bound. */
   createdBefore?: Date;
+  /** Restrict root pages to workstreams requiring human attention. */
+  needsYouOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -35664,6 +35671,8 @@ export type SessionListFilterOptions = {
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
   SessionListFilterOptions & {
     subjectId: string;
+    /** Complete metadata totals, independent of pagination. Root or global pin pages. */
+    includeTotals?: boolean;
     cursor?: SessionListCursor | undefined;
     search?: string | undefined;
     /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
@@ -36585,6 +36594,167 @@ function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requ
   };
 }
 
+function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefined): SQL {
+  if (!scope) return sql`true`;
+  // Used only for parentless roots: target-only grants never admit relatives.
+  return sessionAuthorizationRootScopeFilter(scope, false);
+}
+
+/** Exact target grants never imply visibility of relatives. */
+function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
+  return sql`(
+    ${schema.sessions.status} in ('requires_action', 'failed')
+    or (
+      ${schema.sessions.parentSessionId} is null
+      and ${sessionRelatedListScope(scope)}
+      and exists (
+        with recursive attention_tree(id, status) as (
+          select child.id, child.status from ${schema.sessions} child
+          where child.workspace_id = ${schema.sessions.workspaceId}
+            and child.parent_session_id = ${schema.sessions.id}
+          union
+          select child.id, child.status from attention_tree parent
+          join ${schema.sessions} child on child.parent_session_id = parent.id
+          where child.workspace_id = ${schema.sessions.workspaceId}
+        )
+        select 1 from attention_tree where status = 'requires_action'
+      )
+    )
+  )`;
+}
+
+/**
+ * One content-free graph aggregation, before pagination. Each root owns a
+ * disjoint tree: a single-parent cycle cannot be reachable from a parentless
+ * root. UNION also deduplicates defensive legacy edges. Exact target scopes
+ * seed only their own row; pinned paths leave the ordinary project summaries.
+ */
+async function sessionListTotalsInScope(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+): Promise<SessionListTotals> {
+  const rootFilters = and(
+    eq(schema.sessions.workspaceId, workspaceId),
+    ...sessionFilters({ ...options, parentSessionId: null, needsYouOnly: false }),
+  );
+  const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
+    db,
+    sql`
+    with recursive roots as materialized (
+      select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
+        ${schema.sessions.status} as status,
+        ${schema.sessions.directControlState} as direct_control_state,
+        ${schema.sessions.directPauseRevision} as direct_pause_revision,
+        ${schema.sessions.subtreeRunOverrideRevision} as subtree_run_override_revision,
+        ${sessionRelatedListScope(options.authorizationScope)} as related,
+        exists (select 1 from ${schema.sessionPins} archived
+          where archived.workspace_id = ${workspaceId} and archived.subject_id = ${options.subjectId}
+            and archived.session_id = ${schema.sessions.id} and archived.archived) as archived
+      from ${schema.sessions} where ${rootFilters}
+    ), nodes(root_id, channel_id, id, status, pause_revision, pinned_path, related) as (
+      select root.id, root.channel_id, root.id, root.status,
+        greatest(
+          case when control.workspace_state = 'paused' and
+            (root.subtree_run_override_revision is null or
+             root.subtree_run_override_revision <= control.workspace_pause_revision)
+            then control.workspace_pause_revision end,
+          case when root.direct_control_state = 'paused' then root.direct_pause_revision end
+        ),
+        coalesce(personal.pinned, false), root.related
+      from roots root join ${schema.workspaceInferenceControls} control
+        on control.workspace_id = ${workspaceId}
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = root.id
+      union
+      select parent.root_id, parent.channel_id, child.id, child.status,
+        greatest(
+          case when child.subtree_run_override_revision is null or
+              child.subtree_run_override_revision <= parent.pause_revision
+            then parent.pause_revision end,
+          case when child.direct_control_state = 'paused' then child.direct_pause_revision end
+        ),
+        parent.pinned_path or coalesce(personal.pinned, false), parent.related
+      from nodes parent join ${schema.sessions} child on child.parent_session_id = parent.id
+        and child.workspace_id = ${workspaceId}
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = child.id
+      where parent.related
+    ), attention_roots as (
+      select root_id, bool_or(status = 'requires_action') as attention
+      from nodes group by root_id
+    ), root_attention as materialized (
+      select root.id, not root.archived and (
+        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+      ) as needs_you
+      from roots root left join attention_roots attention on attention.root_id = root.id
+    ), measured as (
+      select nodes.*,
+        cursor.last_meaningful_sequence > coalesce(
+          case when personal.manually_unread_through is not null then -1
+            else personal.acknowledged_sequence end, 0) as unread,
+        coalesce(personal.actively_working, false) as active_work,
+        case when nodes.status = 'requires_action' then (
+          select min(turn.updated_at) from ${schema.sessionTurns} turn
+          where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
+            and turn.status = 'requires_action'
+        ) end as attention_since,
+        nodes.status = 'idle' and session.active_turn_id is null
+          and session.input_wait_until is not null
+          and session.input_wait_turn_id = (
+            select finished.id from ${schema.sessionTurns} finished
+            where finished.workspace_id = ${workspaceId} and finished.session_id = nodes.id
+              and finished.finished_at is not null
+              and ${sessionInputWaitDecidingTurnSql(
+                {
+                  id: sql`finished.id`,
+                  source: sql`finished.source`,
+                  workspaceId: sql`finished.workspace_id`,
+                  sessionId: sql`finished.session_id`,
+                  finishedAt: sql`finished.finished_at`,
+                  metadata: sql`finished.metadata`,
+                },
+                sql`session.input_wait_turn_id`,
+              )}
+            order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+          ) as input_wait
+      from nodes join ${schema.sessions} session on session.workspace_id = ${workspaceId}
+        and session.id = nodes.id
+      join ${schema.sessionEventCursors} cursor on cursor.workspace_id = ${workspaceId}
+        and cursor.session_id = nodes.id and cursor.account_id = session.account_id
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = nodes.id
+      join roots root on root.id = nodes.root_id
+      join root_attention attention on attention.id = nodes.root_id
+      where not root.archived and not nodes.pinned_path
+        and (not ${Boolean(options.needsYouOnly)} or attention.needs_you)
+    ), grouped as (
+      select channel_id as "channelId", count(*)::int as total,
+        count(*) filter (where status = 'requires_action')::int as attention,
+        min(attention_since) as "attentionSince",
+        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where pause_revision is null and
+          (status in ('running', 'recovering') or input_wait))::int as active,
+        count(*) filter (where pause_revision is null and
+          status in ('queued', 'waiting_capacity'))::int as queued,
+        count(*) filter (where unread)::int as unread,
+        count(*) filter (where active_work)::int as "activeWork"
+      from measured group by channel_id
+    )
+    select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
+      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups
+  `,
+  );
+  const result = rows[0];
+  return {
+    needsYouCount: Number(result?.needsYouCount ?? 0),
+    groups: (result?.groups ?? []).map((group) => ({
+      ...group,
+      attentionSince: group.attentionSince ? new Date(group.attentionSince).toISOString() : null,
+    })),
+  };
+}
+
 function sessionFilters(
   options: Pick<
     ListSessionsForSubjectOptions,
@@ -36602,6 +36772,7 @@ function sessionFilters(
     | "createdFrom"
     | "createdBefore"
     | "scopeSubjectId"
+    | "needsYouOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -36614,6 +36785,7 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.needsYouOnly) filters.push(sessionNeedsYouSql(options.authorizationScope));
   if (options.originSiteId) {
     filters.push(
       sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
@@ -36632,7 +36804,11 @@ function sessionFilters(
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
   }
   if (options.authorizationScope) {
-    filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    filters.push(
+      options.parentSessionId === null
+        ? sessionAuthorizationRootScopeFilter(options.authorizationScope)
+        : sessionAuthorizationScopeFilter(options.authorizationScope),
+    );
   }
   if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
     const parentSessionId = options.parentSessionId;
@@ -36708,6 +36884,29 @@ export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer)
  */
 export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
   const hostScope = sessionAuthorizationHostScopeFilter(scope);
+  return scope.agentAccessViewer
+    ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
+    : hostScope;
+}
+
+/** A parentless root cannot be another granted root's descendant. */
+function sessionAuthorizationRootScopeFilter(
+  scope: SessionAuthorizationListScope,
+  includeExact = true,
+): SQL {
+  let hostScope: SQL = sql`true`;
+  if (scope.kind === "scoped") {
+    if (
+      scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
+      scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
+    ) {
+      throw new RangeError(
+        `Session authorization scope exceeds ${SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS} ids per field`,
+      );
+    }
+    const ids = [...new Set([...scope.rootSessionIds, ...(includeExact ? scope.sessionIds : [])])];
+    hostScope = ids.length > 0 ? inArray(schema.sessions.id, ids) : sql`false`;
+  }
   return scope.agentAccessViewer
     ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
     : hostScope;
@@ -36833,7 +37032,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
-    !options.scopeSubjectId
+    !options.scopeSubjectId &&
+    !options.needsYouOnly
   ) {
     return "all";
   }
@@ -36846,6 +37046,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
+    ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
   ]);
 }
 
@@ -37164,6 +37365,17 @@ async function readSessionListForSubject(
         if (options.archivedOnly && archiveMode !== "archived") {
           throw new SessionListCursorError("archivedOnly conflicts with archiveStatus");
         }
+        if (options.includeTotals && options.parentSessionId !== null && !options.pinsOnly)
+          throw new SessionListCursorError("Attention totals require root or global pin pages");
+        const totals = options.includeTotals
+          ? await sessionListTotalsInScope(
+              tx,
+              workspaceId,
+              options.pinsOnly
+                ? { ...options, archiveStatus: "active", parentSessionId: null }
+                : options,
+            )
+          : undefined;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
         const ordinaryPinFilter =
           archiveMode === "archived"
@@ -37615,6 +37827,8 @@ async function readSessionListForSubject(
         if (summary)
           return {
             projection: "summary",
+            ...(totals ? { totals } : {}),
+            ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -37623,6 +37837,8 @@ async function readSessionListForSubject(
             archiveStatus: archiveMode,
           };
         return {
+          ...(totals ? { totals } : {}),
+          ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -41656,6 +41872,16 @@ export async function acceptSessionHumanInputResponse(
           }
         }
         if (request.status !== "pending") {
+          // A timeout that lost the first-writer race has nothing left to expire.
+          // It does not acknowledge a human response or repair historical receipts.
+          if (input.expireOnly) {
+            return {
+              action: "conflict",
+              request: mapSessionHumanInputRequest(request),
+              events: [],
+              workflowWakeRevision: null,
+            } as const;
+          }
           let event = await humanInputResponseEventForRequest(tx as unknown as Database, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -42278,6 +42504,112 @@ export async function adoptManagedSessionBackgroundCommand(
         });
       }),
   );
+}
+
+/** Recover the missed receipt when a turn closes after retaining a legacy
+ * Modal command. Unknown observation is not exit proof or a reason to block
+ * subsequent turns: preserve the original process and adopt its background
+ * lifetime. The exact reaper claim replaces the now-closed attempt's fence. */
+export async function recoverManagedSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    reconciliationClaimId: string;
+  },
+) {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    const session = await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+    const [process] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(
+        and(
+          eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+          eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+          eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+          eq(schema.sandboxRetainedProcesses.id, input.processId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      session.accountId !== input.accountId ||
+      !process ||
+      process.state !== "active" ||
+      process.reconcileClaimId !== input.reconciliationClaimId ||
+      !retainedProcessMatchesSettlementIdentity(process, input.expected) ||
+      process.providerBackend !== "modal" ||
+      process.routeTargetId !== null ||
+      process.providerCommand?.kind !== "modal-router-v1" ||
+      process.providerCommand.supervision ||
+      process.ownerActorKind !== "turn" ||
+      !process.ownerAttemptId ||
+      !process.ownerTurnId ||
+      process.ownerActorId !== process.ownerAttemptId ||
+      process.ownerExecutionGeneration === null
+    )
+      return null;
+    const [owner] = await tx
+      .select({ state: schema.sessionTurnAttempts.state })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.accountId, input.accountId),
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.id, process.ownerAttemptId),
+          eq(schema.sessionTurnAttempts.turnId, process.ownerTurnId),
+          eq(schema.sessionTurnAttempts.executionGeneration, process.ownerExecutionGeneration),
+        ),
+      )
+      .limit(1);
+    if (owner?.state !== "closed") return null;
+    const [existing] = await tx
+      .select({ id: schema.sessionBackgroundCommands.id })
+      .from(schema.sessionBackgroundCommands)
+      .where(eq(schema.sessionBackgroundCommands.retainedProcessId, process.id))
+      .limit(1);
+    if (existing) return null;
+    const command = await insertManagedSessionBackgroundCommandInTransaction(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      commandId: process.id,
+      retainedProcessId: process.id,
+      turnId: process.ownerTurnId,
+      attemptId: process.ownerAttemptId,
+      executionGeneration: process.ownerExecutionGeneration,
+      command: `Retained command ${process.providerSessionId}; execution outcome unknown after interrupted turn. Inspect the existing execution; it has not been replayed.`,
+    });
+    const control = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+      lock: "none",
+    });
+    const stopping = process.cancellationRequestedAt !== null || control.state !== "active";
+    if (stopping)
+      await tx
+        .update(schema.sessionBackgroundCommands)
+        .set({
+          state: "stopping",
+          cancelRequestedAt: process.cancellationRequestedAt ?? new Date(),
+          cancelRequestedBy: "system:retained-command-recovery",
+        })
+        .where(eq(schema.sessionBackgroundCommands.id, command.id));
+    await enqueueSessionWorkflowWakeInTransaction(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+      reason: "retained_command_background_recovery",
+    });
+    return {
+      ...command,
+      state: stopping ? ("stopping" as const) : command.state,
+    };
+  });
 }
 
 export type InstallOrReadTurnExecutionPolicyForAttemptResult =
@@ -72180,7 +72512,7 @@ export async function claimSessionWorkForAttempt(
               and attempt.session_id = ${sessionId}
               and attempt.state = 'closed'
               and attempt.quiesced_at is null
-              and ${sessionAttemptPendingWritersSql(sql`attempt`)}
+              and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
           ) as pending
         `);
         if (unquiescedInterruption || unsettledWriters?.pending) {
@@ -75004,6 +75336,7 @@ async function nextSessionAttemptAwaitingQuiescence(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  writerMode: "physical" | "inference" = "physical",
 ): Promise<{
   attemptId: string;
 } | null> {
@@ -75019,7 +75352,7 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
         sql`(
-          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`)}
+          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`, writerMode)}
           or exists (
             select 1
             from session_attempt_interruptions interruption
@@ -75380,6 +75713,7 @@ export async function peekSessionWork(
       scopedDb,
       workspaceId,
       sessionId,
+      "inference",
     );
     if (awaitingQuiescence) {
       return {
@@ -82352,6 +82686,15 @@ export async function markSessionWorkflowWakeFailed(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // 0560's archive guard locks the session during the outbox UPDATE.
+      // Own the canonical prefix first, like delivery ACK and wake enqueue,
+      // so a failed transport cannot deadlock the turn committing that wake.
+      const locks = await lockSessionEventWriteRows(scopedDb, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+      });
+      if (!locks.sessions[0]) return false;
       const [row] = await scopedDb
         .update(schema.sessionWorkflowWakeOutbox)
         .set({

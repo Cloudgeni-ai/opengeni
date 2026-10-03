@@ -1704,8 +1704,25 @@ export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "ses
   sessions: SessionListEntry[];
 };
 
-/** Canonical session-list page; pinned rows are excluded from ordinary pages. */
+/** Complete metadata for authorized roots and ordinary project trees. */
+export type SessionListTotals = {
+  needsYouCount: number;
+  groups: Array<{
+    channelId: string | null;
+    total: number;
+    attention: number;
+    attentionSince: string | null;
+    failed: number;
+    active: number;
+    queued: number;
+    unread: number;
+    activeWork: number;
+  }>;
+};
+
 export type SessionListResponse = {
+  totals?: SessionListTotals;
+  needsYouOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -4183,6 +4200,11 @@ export type ClientAuthConfig =
       emailVerificationRequired?: boolean;
       /** Configured managed sign-in providers; omitted by older deployments. */
       socialProviders?: ("google" | "github")[];
+      /**
+       * False while the deployment has paused new account creation; existing
+       * accounts can still sign in. Omitted (treat as true) by older deployments.
+       */
+      newSignupsEnabled?: boolean;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
@@ -8093,6 +8115,11 @@ export type InsightsSeriesPoint = {
   calls: number;
 };
 
+export type InsightsScope = {
+  rootSessionId: string | null;
+  sessionId: string | null;
+};
+
 export type InsightsDepthBucket = {
   depth: number;
   sessions: number;
@@ -8117,6 +8144,20 @@ export type InsightsSpendDriver = {
   pctOfCreditUsd: number;
   pctOfTokens: number;
   deltaUsdVsPrior: number;
+};
+
+export type InsightsProjectRow = {
+  id: string;
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  label: string;
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  tokens: number;
+  cacheHitPct: number | null;
 };
 
 export type InsightsWarmGroupRow = {
@@ -8226,6 +8267,18 @@ export type WorkspaceInsightsSnapshot = {
   series: InsightsSeriesPoint[];
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
+  projects: InsightsProjectRow[];
+  privateChats: {
+    ownerKey: string;
+    name: string | null;
+    you: boolean;
+    calls: number;
+    tokens: number;
+    creditUsd: number;
+    estimatedProviderUsd: number;
+    estimatedProviderCostKnownCalls: number;
+  }[];
+  privateChatsTruncated: boolean;
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;
@@ -8266,6 +8319,13 @@ export type WorkspaceInsightsSnapshot = {
   agentRunsUsed: number;
   agentRunCap: number | null;
   modelFilterActive: boolean;
+  dataThrough: string | null;
+  cacheHitPct: number;
+  scope: InsightsScope;
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
 };
 
 export type WorkspaceInsightsResponse = {
@@ -8280,8 +8340,13 @@ export type BillingEntitlementsResponse = {
 
 export type CreateCheckoutRequest = {
   accountId?: string | undefined;
-  /** USD amount with cent precision (server enforces min/max). */
-  amountUsd: number;
+  /**
+   * USD amount with cent precision (server enforces min/max). Required unless
+   * `promotionCode` is given; a fixed-amount USD code then sets the amount.
+   */
+  amountUsd?: number | undefined;
+  /** A Stripe promotion code to apply up front, as the customer typed it. */
+  promotionCode?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
 };
@@ -8289,6 +8354,22 @@ export type CreateCheckoutRequest = {
 export type CreateCheckoutResponse = {
   checkoutSessionId: string;
   url: string;
+  /** The credits this checkout grants once it completes. */
+  amountUsd?: number | undefined;
+};
+
+/** Where one checkout stands, and whether its credits reached the balance. */
+export type BillingCheckoutStatus = {
+  checkoutSessionId: string;
+  status: "open" | "complete" | "expired";
+  credit: {
+    state: "pending" | "granted";
+    amountMicros: number;
+    currency: "usd";
+    /** True when a coupon covered the whole checkout, so nothing was charged. */
+    free: boolean;
+  };
+  balance: BillingBalance | null;
 };
 
 export type CreateBillingPortalRequest = {

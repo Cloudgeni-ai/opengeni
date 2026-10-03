@@ -212,6 +212,39 @@ describe("ListRow", () => {
     expect(visibleCopies).toHaveLength(1);
   });
 
+  test("a leading fact folds in ahead of the meta and stays on a phone-width line", () => {
+    const html = renderToStaticMarkup(
+      <RowList
+        variant="table"
+        label="Spend"
+        columns={[
+          { id: "calls", label: "Calls" },
+          { id: "amount", label: "Amount", hideLabel: true, leadsWhenFolded: true },
+          { id: "tokens", label: "Tokens" },
+        ]}
+      >
+        <ListRow
+          title="Subscriptions"
+          meta={["List-price estimate, not charged"]}
+          cells={{ calls: "186", amount: "~$22.80", tokens: "9.1M" }}
+        />
+      </RowList>,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    const text = container.textContent ?? "";
+    // Folded copy order on the secondary line: the amount, then the meta, then the rest.
+    expect(text.indexOf("~$22.80")).toBeLessThan(text.indexOf("List-price estimate"));
+    expect(text.indexOf("List-price estimate")).toBeLessThan(text.indexOf("Calls 186"));
+    const partOf = (needle: string) =>
+      [...container.querySelectorAll("span")].find(
+        (node) => node.style.flexShrink !== "" && node.textContent?.includes(needle),
+      );
+    expect(partOf("~$22.80")?.className).not.toContain("@max-[479px]/list:hidden");
+    expect(partOf("~$22.80")?.style.flexShrink).toBe("0");
+    expect(partOf("Calls 186")?.className).toContain("@max-[479px]/list:hidden");
+  });
+
   test("the list sizes the leading tile: 40 in catalogs, 32 in resource rows, 24 in tables", () => {
     const sizes = (["catalog", "resource", "table"] as const).map((variant) => {
       const html = renderToStaticMarkup(

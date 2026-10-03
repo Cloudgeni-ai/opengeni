@@ -1,6 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import {
   resolveInitiatingHuman,
+  buildSlackApiRateLimiter,
   beginConnectorActionExecution,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
@@ -1048,6 +1049,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        slackRateLimit: buildSlackApiRateLimiter(db, githubRestMcp.settings),
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
         ...(linkedAuthority
           ? {

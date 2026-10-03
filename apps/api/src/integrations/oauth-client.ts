@@ -944,7 +944,11 @@ async function completeMcpOAuthCallbackWithinDeadline(
       token,
       deadline,
     );
-    const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
+    const scopes = grantedScopes(
+      token.scopeText,
+      state.authorizeScopes,
+      builtInOAuthProfileFor(state),
+    );
     const credential = credentialBundle(token, state, client);
     const metadata = {
       resource: state.resource,
@@ -967,6 +971,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           : {}),
       },
       mcpToolsVerification: verification.metadata,
+      ...(verification.providerIdentity ?? {}),
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
@@ -981,7 +986,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
-            status: "active",
+            status: verification.connectionStatus ?? "active",
             credentialEncrypted,
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
@@ -994,6 +999,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             subjectId: ownerSubjectId,
             providerDomain: state.providerDomain,
             kind: "oauth2",
+            status: verification.connectionStatus ?? "active",
             credentialEncrypted,
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
@@ -1029,7 +1035,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
                   providerId: current.providerId,
                   label: state!.providerDomain,
                   ownership: current.ownership,
-                  status: "connected",
+                  status: connection.status === "needs_reauth" ? "auth_needed" : "connected",
                 },
               };
             },
@@ -2446,11 +2452,39 @@ async function verifyMcpToolsListNonFatal(
     | { status: "ok"; checkedAt: string; toolCount: number }
     | { status: "failed"; checkedAt: string; reason: string };
   tools?: Array<{ name: string; description?: string }>;
+  providerIdentity?: Record<string, string>;
+  connectionStatus?: "needs_reauth";
 }> {
+  let grantRejected = false;
   try {
-    const tools = await deadline.run("tools_list", (signal) =>
-      verifyMcpToolsList(settings, state.mcpUrl, token, signal),
-    );
+    const profile = builtInOAuthProfileFor(state);
+    const local = profile?.localToolVerification;
+    let providerIdentity: Record<string, string> | undefined;
+    const tools = await deadline.run("tools_list", async (signal) => {
+      if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
+        return verifyMcpToolsList(settings, state.mcpUrl, token, signal);
+      }
+      const response = await fetchOAuth(local.url, settings, {
+        method: "POST",
+        signal,
+        headers: {
+          authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+        },
+      });
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new Error("Connector token verification failed");
+      }
+      const payload = await readResponseJsonBounded<Record<string, unknown>>(
+        response,
+        OAUTH_MAX_RESPONSE_BYTES,
+        "Connector token verification",
+        { signal },
+      );
+      grantRejected = local.isRejectedGrant?.(payload) ?? false;
+      providerIdentity = local.validateIdentity(payload);
+      return local.toolsForScopes(grantedScopes(token.scopeText, state.authorizeScopes, profile));
+    });
     return {
       metadata: {
         status: "ok",
@@ -2458,6 +2492,7 @@ async function verifyMcpToolsListNonFatal(
         toolCount: tools.length,
       },
       tools,
+      ...(providerIdentity ? { providerIdentity } : {}),
     };
   } catch (error) {
     const staged =
@@ -2474,6 +2509,7 @@ async function verifyMcpToolsListNonFatal(
         checkedAt: new Date().toISOString(),
         reason: staged.reason,
       },
+      ...(grantRejected ? { connectionStatus: "needs_reauth" as const } : {}),
     };
   }
 }
@@ -2692,7 +2728,13 @@ function chooseProfileAuthorizeScopes(
     : scopes;
 }
 
-function grantedScopes(scopeText: string | undefined, fallback: string[]): string[] {
+function grantedScopes(
+  scopeText: string | undefined,
+  fallback: string[],
+  profile?: OAuthProviderProfile | null,
+): string[] {
+  if (profile?.reportedScopesRequired && !scopeText) return [];
+  if (profile?.normalizeGrantedScopes) return profile.normalizeGrantedScopes(scopeText ?? fallback);
   if (scopeText) {
     return uniqueStrings(scopeText.split(/\s+/).filter(Boolean));
   }

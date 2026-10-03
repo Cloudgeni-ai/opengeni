@@ -1,6 +1,7 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
 import {
@@ -225,7 +226,13 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
   );
 }
 
-export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
+export function ClaudeUsage({
+  state,
+  onReconnect,
+}: {
+  state: ClaudeUsageState;
+  onReconnect?: (() => void) | undefined;
+}) {
   const now = useMinuteNow();
   const value = state.value;
   const readings = claudeUsageReadings(value, now);
@@ -273,6 +280,11 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
           This setup token allows model calls. Usage readings update after Claude is used. Sign in
           again to check current usage and reset times.
         </p>
+      ) : null}
+      {value?.refreshStatus === "scope_required" && onReconnect ? (
+        <Button type="button" variant="outline" size="sm" className="mt-3" onClick={onReconnect}>
+          Sign in again
+        </Button>
       ) : null}
     </DetailSection>
   );

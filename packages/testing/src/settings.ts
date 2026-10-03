@@ -8,6 +8,7 @@ import {
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
+    slackAccessMode: "limited",
     serviceName: "opengeni",
     environment: "test",
     deploymentRevision: "dev",
@@ -64,6 +65,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentBetaVersion: undefined,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
+    managedAuthNewSignupsEnabled: true,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     organizationTenancyCanonicalActivationEnabled: false,
