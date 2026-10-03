@@ -1,5 +1,5 @@
 export type ActionCatalogEntry = {
-  /** Stable name an agent calls, from the SDK method ("listSessions"). */
+  /** Stable name an agent calls: the SDK method ("listSessions"), else "METHOD /path". */
   id: string;
   method: string;
   path: string;

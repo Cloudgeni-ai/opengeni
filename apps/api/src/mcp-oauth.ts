@@ -47,6 +47,7 @@ import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
+import { requireNotAgent } from "./http/acting-person";
 import { requireSameOriginBrowserMutation } from "./routes/codex";
 import {
   prepareWorkspaceToolGateway,
@@ -1021,6 +1022,7 @@ async function requireBrowserPerson(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<{ context: AccessContext }> {
+  requireNotAgent(c, "Approving a connection");
   if (
     deps.settings.productAccessMode !== "managed" ||
     !c.req.header("cookie") ||

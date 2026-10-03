@@ -12,6 +12,7 @@ import surface from "../../../scripts/public-api/surface.gen.json";
 import {
   buildActionCatalog,
   isActionCatalogExempt,
+  registeredApiRoutes,
 } from "../../../scripts/public-api/action-catalog";
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "../src/organization-mcp";
@@ -67,19 +68,32 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
-  test("covers every public route except the browser-only boundary, and matches the manifest", () => {
-    expect(ACTION_CATALOG).toEqual(buildActionCatalog());
-    const expected = surface.routes.filter((route) => !isActionCatalogExempt(route.path));
-    // Exemptions are the browser-only boundary, nothing else.
-    for (const route of surface.routes.filter((each) => isActionCatalogExempt(each.path)))
-      expect(route.path).toMatch(
-        /^\/v1\/(auth\/|mcp-connections\/|organizations\/:organizationId\/mcp-connections)/,
-      );
+  test("covers every registered route except the listed exemptions, and is current", () => {
+    const registered = registeredApiRoutes();
+    // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.
+    expect(ACTION_CATALOG).toEqual(buildActionCatalog(registered));
     const listed = new Set(ACTION_CATALOG.map((entry) => `${entry.method} ${entry.path}`));
-    for (const route of expected) expect(listed.has(`${route.method} ${route.path}`)).toBe(true);
-    expect(ACTION_CATALOG).toHaveLength(expected.length);
+    const missing = [...registered, ...surface.routes]
+      .filter((route) => !isActionCatalogExempt(route.path))
+      .map((route) => `${route.method} ${route.path}`)
+      .filter((key) => !listed.has(key));
+    expect(missing).toEqual([]);
     expect(new Set(ACTION_CATALOG.map((entry) => entry.id)).size).toBe(ACTION_CATALOG.length);
-    expect(ACTION_CATALOG.some((entry) => entry.path.startsWith("/v1/auth/"))).toBe(false);
+    for (const entry of ACTION_CATALOG) expect(isActionCatalogExempt(entry.path)).toBe(false);
+    // UI actions that live outside the SDK are included too.
+    for (const key of [
+      "PATCH /v1/organizations/:organizationId/codex/settings",
+      "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
+      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
+    ])
+      expect(listed.has(key)).toBe(true);
+    // The browser-only boundary stays out.
+    for (const key of [
+      "POST /v1/mcp-connections/requests/:request",
+      "PATCH /v1/organizations/:organizationId/mcp-connections/:connectionId",
+      "POST /v1/identity/login-bindings/:bindingId/recovery",
+    ])
+      expect(listed.has(key)).toBe(false);
   });
 });
 
