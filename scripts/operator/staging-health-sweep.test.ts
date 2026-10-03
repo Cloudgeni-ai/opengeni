@@ -13,8 +13,86 @@ import {
   applyOwnership,
   ownerClassification,
   safeDatabaseErrorCode,
+  boundedRun,
+  type OwnerObservation,
   type Run,
 } from "./staging-health-sweep";
+
+function healthyRun(
+  overrides: {
+    memory?: unknown;
+    limit?: unknown;
+    current?: { requests: number; errors: number };
+    baseline?: { requests: number; errors: number };
+    database?: Record<string, unknown>;
+    owners?: OwnerObservation[];
+  } = {},
+): Run {
+  return async (args) => {
+    if (args.includes("exec") && args.at(-1) === CANONICAL_RUNNER)
+      return JSON.stringify(overrides.owners ?? []);
+    if (args.includes("secret"))
+      return JSON.stringify({
+        data: {
+          OPENGENI_MIGRATIONS_DATABASE_URL: Buffer.from("postgres://fixture").toString("base64"),
+        },
+      });
+    if (args.includes("exec"))
+      return JSON.stringify({
+        queued: { total: 0, runnable: 0, controlUnknown: 0 },
+        recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
+        empty: {
+          sample: 3,
+          suspectTurns: 0,
+          repeatedSessions: 0,
+          controlUnknown: 0,
+          missingCompletionEvidence: 0,
+        },
+        latency: {
+          sample: 3,
+          p50Seconds: 1,
+          p95Seconds: 2,
+          invalidNegativeSamples: 0,
+          missingFirstStartEvents: 0,
+          futureFirstStartEvents: 0,
+        },
+        ...overrides.database,
+      });
+    if (args.includes("pods"))
+      return JSON.stringify({
+        items: [
+          {
+            metadata: { name: "api", labels: { "app.kubernetes.io/component": "api" } },
+            spec: {
+              containers: [
+                { name: "api", resources: { limits: { memory: overrides.limit ?? "2Gi" } } },
+              ],
+            },
+            status: { phase: "Running", containerStatuses: [{ name: "api", restartCount: 0 }] },
+          },
+        ],
+      });
+    if (args.at(-1)?.includes("metrics.k8s.io"))
+      return JSON.stringify({
+        items: [
+          {
+            metadata: { name: "api" },
+            timestamp: "2026-10-03T11:00:00Z",
+            window: "1m",
+            containers: [{ name: "api", usage: { memory: overrides.memory ?? "500Mi" } }],
+          },
+        ],
+      });
+    const query = decodeURIComponent(args.at(-1) ?? "");
+    const counts = query.includes(" offset ") ? overrides.baseline : overrides.current;
+    const value = query.includes("min(up")
+      ? 1
+      : query.includes('status=~"5.."')
+        ? (counts?.errors ?? 0)
+        : (counts?.requests ?? 100);
+    return JSON.stringify({ status: "success", data: { result: [{ value: [0, String(value)] }] } });
+  };
+}
 
 describe("staging health sweep", () => {
   test("defaults to staging and rejects unbounded or injectable arguments", () => {
@@ -33,6 +111,10 @@ describe("staging health sweep", () => {
     expect(memoryBytes("2Gi")).toBe(2 * 1024 ** 3);
     expect(memoryBytes("300000Ki")).toBe(300000 * 1024);
     expect(memoryBytes("100M")).toBe(100000000);
+    expect(memoryBytes("1e3")).toBe(1000);
+    expect(memoryBytes("0")).toBe(0);
+    for (const value of ["1.2.3Gi", "-1Gi", "1e999", "NaNGi", "Infinity", {}, 100])
+      expect(() => memoryBytes(value)).toThrow();
     expect(() => memoryBytes("secret")).toThrow();
   });
   test("reports init restarts and OOM without implying windowed history", () => {
@@ -69,6 +151,10 @@ describe("staging health sweep", () => {
     expect(() =>
       errorComparison({ requests: NaN, errors: 0 }, { requests: 1, errors: 0 }),
     ).toThrow();
+    expect(() =>
+      errorComparison({ requests: 100, errors: 101 }, { requests: 0, errors: 0 }),
+    ).toThrow();
+    expect(() => errorComparison({ requests: 0, errors: 0 }, { requests: 0, errors: 1 })).toThrow();
   });
   test("database contract is read only and respects revision-aware controls and legitimate empty completions", () => {
     expect(DATABASE_RUNNER).toContain("READ ONLY ISOLATION LEVEL REPEATABLE READ");
@@ -124,7 +210,13 @@ describe("staging health sweep", () => {
         return JSON.stringify({
           queued: { total: 0, runnable: 0, controlUnknown: 0 },
           recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
-          empty: { sample: 3, suspectTurns: 0, repeatedSessions: 0, controlUnknown: 0 },
+          empty: {
+            sample: 3,
+            suspectTurns: 0,
+            repeatedSessions: 0,
+            controlUnknown: 0,
+            missingCompletionEvidence: 0,
+          },
           latency: {
             sample: 3,
             p50Seconds: 1,
@@ -282,7 +374,14 @@ describe("staging health sweep", () => {
       total: 3,
       runnable: 3,
       excluded: {},
-      sessions: [{ session_id: "s", workspace_id: "w", reason: "runnable" }],
+      sessions: [
+        {
+          session_id: "s",
+          workspace_id: "w",
+          reason: "runnable",
+          queued_at: "2026-10-03T10:00:00Z",
+        },
+      ],
     };
     const result = applyOwnership(facts, [
       { session_id: "s", workspace_id: "w", state: "active", settlement: null, kind: "runnable" },
@@ -328,4 +427,319 @@ describe("staging health sweep", () => {
     expect(latency.facts?.missingFirstStartEvents).toBe(1);
     expect(latency.definition).toContain("FIRST");
   });
+  test("malformed API usage or limits fail closed rather than emitting OK/null bytes", async () => {
+    for (const overrides of [
+      { memory: "1.2.3Gi" },
+      { memory: "1e999" },
+      { limit: "-2Gi" },
+      { limit: "1.2.3Gi" },
+    ]) {
+      const result = await sweep(
+        parseArgs(["--database-secret", "reader"]),
+        healthyRun(overrides),
+        new Date("2026-10-03T11:00:00Z"),
+      );
+      const memory = result.checks.find((check) => check.id === "api-memory")!;
+      expect(memory.status).toBe("gap");
+      expect(memory).not.toHaveProperty("facts");
+    }
+  });
+  test("missing traffic comparison is an explicit gap with numerator/denominator facts", async () => {
+    for (const counts of [
+      { current: { requests: 100, errors: 50 }, baseline: { requests: 0, errors: 0 } },
+      { current: { requests: 0, errors: 0 }, baseline: { requests: 100, errors: 0 } },
+    ]) {
+      const result = await sweep(
+        parseArgs(["--database-secret", "reader"]),
+        healthyRun(counts),
+        new Date("2026-10-03T11:00:00Z"),
+      );
+      const comparison = result.checks.find((check) => check.id === "api-error-rate")!;
+      expect(comparison.status).toBe("gap");
+      expect(comparison.facts?.comparison).toBe("insufficient_traffic");
+      expect(comparison.facts?.current).toEqual(counts.current);
+      expect(comparison.facts?.baseline).toEqual(counts.baseline);
+      expect(result.exitCode).toBe(2);
+    }
+  });
+  test("missing usable completion evidence preserves denominator and is a gap", async () => {
+    const empty = {
+      sample: 3,
+      suspectTurns: 0,
+      repeatedSessions: 0,
+      controlUnknown: 0,
+      missingCompletionEvidence: 2,
+    };
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { empty } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "empty")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.sample).toBe(3);
+    expect(check.facts?.missingCompletionEvidence).toBe(2);
+  });
+  test("canonical runnable work with unknown accepted-work age is not claimed overdue", () => {
+    const facts = {
+      total: 0,
+      runnable: 1,
+      excluded: {},
+      sessions: [
+        {
+          session_id: "s",
+          workspace_id: "w",
+          reason: "runnable",
+          queued_at: null,
+          age_source: "unknown",
+        },
+      ],
+    };
+    const observed = [
+      {
+        session_id: "s",
+        workspace_id: "w",
+        state: "active" as const,
+        settlement: null,
+        kind: "runnable",
+      },
+    ];
+    const unknown = applyOwnership(facts, observed);
+    expect(unknown.unknownQueueAge).toBe(1);
+    expect(unknown.actionable).toBe(0);
+    expect(unknown.ownershipClassifications.queue_age_unknown).toBe(1);
+    const known = applyOwnership(
+      {
+        ...facts,
+        total: 1,
+        sessions: [
+          {
+            ...facts.sessions[0],
+            queued_at: "2026-10-03T10:00:00Z",
+            age_source: "pending_system_update",
+          },
+        ],
+      },
+      observed,
+    );
+    expect(known.unknownQueueAge).toBe(0);
+    expect(known.actionable).toBe(1);
+  });
+  test("unknown accepted-work age propagates to a sweep gap with canonical evidence retained", async () => {
+    const queued = {
+      total: 0,
+      runnable: 1,
+      controlUnknown: 0,
+      excluded: {},
+      sessions: [
+        {
+          session_id: "s",
+          workspace_id: "w",
+          reason: "runnable",
+          queued_at: null,
+          age_source: "unknown",
+        },
+      ],
+    };
+    const owners: OwnerObservation[] = [
+      { session_id: "s", workspace_id: "w", state: "active", settlement: null, kind: "runnable" },
+    ];
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { queued }, owners }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "queued")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.unknownQueueAge).toBe(1);
+    expect(check.facts?.actionable).toBe(0);
+    expect(check.facts?.ownerUnknown).toBe(0);
+    expect(result.exitCode).toBe(2);
+  });
+  test.skipIf(process.env.OPENGENI_HEALTH_SWEEP_LIVE_TESTS !== "1")(
+    "read-only SQL fixtures retain missing completions and pending work across session projections",
+    async () => {
+      const run = boundedRun(20);
+      const kube = ["kubectl", "--context", "opengeni-stg-neu-aks", "-n", "opengeni"];
+      const secret = JSON.parse(
+        await run([...kube, "get", "secret", "opengeni-migrations", "-o", "json"]),
+      );
+      const url = Buffer.from(secret.data.OPENGENI_MIGRATIONS_DATABASE_URL, "base64").toString();
+      const table = (name: string, columns: string, rows: object[]) =>
+        `${name} AS (SELECT * FROM jsonb_to_recordset('${JSON.stringify(rows).replaceAll("'", "''")}'::jsonb) AS fixture(${columns}))`;
+      const sessions = (rows: { id: string; status: string }[]) =>
+        table(
+          "sessions",
+          "id text,workspace_id text,parent_session_id text,direct_control_state text,direct_pause_revision bigint,subtree_run_override_revision bigint,status text,input_wait_until timestamptz,created_at timestamptz",
+          rows.map((row) => ({
+            ...row,
+            workspace_id: "w",
+            direct_control_state: "active",
+            created_at: "2020-01-01T00:00:00Z",
+          })),
+        );
+      const control = table(
+        "workspace_inference_controls",
+        "workspace_id text,workspace_state text,workspace_pause_revision bigint",
+        [{ workspace_id: "w", workspace_state: "active" }],
+      );
+      const query = (name: "queued" | "empty", fixtures: string[]) => {
+        const productionQuery = databaseQueries()[name]!;
+        return (
+          "WITH RECURSIVE " +
+          fixtures.join(",") +
+          "," +
+          productionQuery.replace(/^WITH RECURSIVE /, "")
+        );
+      };
+      const queued = query("queued", [
+        sessions([
+          { id: "fresh", status: "queued" },
+          { id: "old-update", status: "queued" },
+          { id: "human-idle", status: "idle" },
+          { id: "api-running", status: "running" },
+          { id: "internal-idle", status: "idle" },
+          { id: "unknown", status: "queued" },
+        ]),
+        control,
+        table(
+          "session_turns",
+          "id text,workspace_id text,session_id text,status text,source text,created_at timestamptz",
+          [
+            {
+              id: "human",
+              workspace_id: "w",
+              session_id: "human-idle",
+              status: "queued",
+              source: "user",
+              created_at: "2026-10-03T12:56:00Z",
+            },
+            {
+              id: "api",
+              workspace_id: "w",
+              session_id: "api-running",
+              status: "queued",
+              source: "api",
+              created_at: "2026-10-03T12:55:00Z",
+            },
+            {
+              id: "internal",
+              workspace_id: "w",
+              session_id: "internal-idle",
+              status: "queued",
+              source: "goal",
+              created_at: "2020-01-01T00:00:00Z",
+            },
+          ],
+        ),
+        table(
+          "session_system_updates",
+          "workspace_id text,session_id text,state text,created_at timestamptz",
+          [
+            {
+              workspace_id: "w",
+              session_id: "fresh",
+              state: "pending",
+              created_at: "2026-10-03T12:59:00Z",
+            },
+            {
+              workspace_id: "w",
+              session_id: "old-update",
+              state: "pending",
+              created_at: "2026-10-03T12:57:00Z",
+            },
+          ],
+        ),
+      ]);
+      const empty = query("empty", [
+        sessions([{ id: "completed", status: "idle" }]),
+        control,
+        table(
+          "session_turns",
+          "id text,workspace_id text,session_id text,status text,source text,finished_at timestamptz",
+          ["valid", "missing", "malformed"].map((id) => ({
+            id,
+            workspace_id: "w",
+            session_id: "completed",
+            status: "completed",
+            source: "user",
+            finished_at: "2026-10-03T12:55:00Z",
+          })),
+        ),
+        table(
+          "session_events",
+          "id text,workspace_id text,session_id text,turn_id text,type text,created_at timestamptz,payload jsonb,sequence int,duplicate_of_event_id text",
+          [
+            {
+              id: "v",
+              workspace_id: "w",
+              session_id: "completed",
+              turn_id: "valid",
+              type: "turn.completed",
+              created_at: "2026-10-03T12:55:00Z",
+              payload: { output: "usable" },
+              sequence: 1,
+            },
+            {
+              id: "d",
+              workspace_id: "w",
+              session_id: "completed",
+              turn_id: "missing",
+              type: "turn.completed",
+              created_at: "2026-10-03T12:55:00Z",
+              payload: { output: "duplicate" },
+              sequence: 2,
+              duplicate_of_event_id: "earlier",
+            },
+            {
+              id: "m",
+              workspace_id: "w",
+              session_id: "completed",
+              turn_id: "malformed",
+              type: "turn.completed",
+              created_at: "2026-10-03T12:55:00Z",
+              payload: [],
+              sequence: 3,
+            },
+          ],
+        ),
+      ]);
+      const result = JSON.parse(
+        await run(
+          [...kube, "exec", "-i", "deployment/opengeni-api", "--", "bun", "-e", DATABASE_RUNNER],
+          JSON.stringify({
+            url,
+            now: "2026-10-03T13:00:00Z",
+            windowMinutes: 30,
+            queries: { queued, empty },
+          }),
+        ),
+      );
+      expect(result.queued).not.toHaveProperty("gap");
+      expect(result.queued.total).toBe(3);
+      expect(result.queued.unknownAgeCandidates).toBe(1);
+      expect(result.queued.sessions.map((row: any) => row.session_id).sort()).toEqual([
+        "api-running",
+        "human-idle",
+        "old-update",
+        "unknown",
+      ]);
+      expect(
+        result.queued.sessions.find((row: any) => row.session_id === "old-update").queued_at,
+      ).toStartWith("2026-10-03T12:57:00");
+      const observations = result.queued.sessions.map((row: any) => ({
+        session_id: row.session_id,
+        workspace_id: row.workspace_id,
+        state: "active",
+        settlement: null,
+        kind: "runnable",
+      }));
+      expect(applyOwnership(result.queued, observations).unknownQueueAge).toBe(1);
+      expect(applyOwnership(result.queued, observations).actionable).toBe(3);
+      expect(result.empty).not.toHaveProperty("gap");
+      expect(result.empty.sample).toBe(3);
+      expect(result.empty.missingCompletionEvidence).toBe(2);
+      expect(result.empty.repeatedSessions).toBe(0);
+    },
+  );
 });

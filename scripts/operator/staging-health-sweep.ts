@@ -77,9 +77,10 @@ export function parseArgs(args: string[]): SweepOptions {
 
 // Canonical revision-aware inherited pause semantics: session-control.ts discovery projection.
 // Only candidate paths are visited. Cycles/depth overflow fail closed rather than report active.
-export function controlCte(includeRecentTurns: boolean): string {
+export function controlCte(includeRecentTurns: boolean, includeQueueWork = true): string {
   return `WITH RECURSIVE targets AS MATERIALIZED (
   SELECT id,workspace_id FROM sessions WHERE status IN ('queued','recovering')
+  ${includeQueueWork ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE status='queued' AND source IN ('user','api') UNION SELECT session_id,workspace_id FROM session_system_updates WHERE state='pending'" : ""}
   ${includeRecentTurns ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE finished_at >= $1::timestamptz - ($2::int * interval '1 minute')" : ""}
 ), candidates AS MATERIALIZED (
   SELECT s.id,s.workspace_id,s.parent_session_id,s.direct_control_state,s.direct_pause_revision,
@@ -110,7 +111,7 @@ export function controlCte(includeRecentTurns: boolean): string {
 )`;
 }
 
-export const CONTROL_CTE = controlCte(true);
+export const CONTROL_CTE = controlCte(true, false);
 
 export function safeDatabaseErrorCode(error: unknown): string {
   let candidate = error;
@@ -127,23 +128,29 @@ export function safeDatabaseErrorCode(error: unknown): string {
 
 export function databaseQueries(): Record<string, string> {
   return {
-    queued: `${controlCte(false)}, overdue AS (
-      SELECT s.id session_id,s.workspace_id,coalesce(q.oldest,s.created_at) queued_at,
+    queued: `${controlCte(false)}, pending_work AS (
+      SELECT s.id session_id,s.workspace_id,least(q.oldest,u.oldest) queued_at,
+        CASE WHEN q.oldest IS NOT NULL AND (u.oldest IS NULL OR q.oldest<=u.oldest) THEN 'queued_human_api_turn'
+          WHEN u.oldest IS NOT NULL THEN 'pending_system_update' ELSE 'unknown' END age_source,
         CASE WHEN NOT c.valid THEN 'control_unknown' WHEN s.status IN ('cancelled','failed') THEN 'terminal'
           WHEN c.paused THEN 'paused'
-          WHEN s.input_wait_until>$1::timestamptz THEN 'awaiting_input'
           WHEN EXISTS (SELECT 1 FROM session_turns active WHERE active.session_id=s.id AND active.workspace_id=s.workspace_id
             AND active.status IN ('running','requires_action','recovering','waiting_capacity')) THEN 'behind_active_turn'
           ELSE 'runnable' END reason
       FROM candidates s JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT min(created_at) oldest FROM session_turns t
-        WHERE t.session_id=s.id AND t.workspace_id=s.workspace_id AND t.status='queued') q ON true
-      WHERE s.status='queued' AND coalesce(q.oldest,s.created_at)<$1::timestamptz-interval '2 minutes'
-    ) SELECT jsonb_build_object('total',count(*),'runnable',count(*) FILTER(WHERE reason='runnable'),
+        WHERE t.session_id=s.id AND t.workspace_id=s.workspace_id AND t.status='queued' AND t.source IN ('user','api')) q ON true
+      LEFT JOIN LATERAL (SELECT min(created_at) oldest FROM session_system_updates u
+        WHERE u.session_id=s.id AND u.workspace_id=s.workspace_id AND u.state='pending') u ON true
+      WHERE s.status='queued' OR q.oldest IS NOT NULL OR u.oldest IS NOT NULL
+    ), overdue AS (
+      SELECT * FROM pending_work WHERE queued_at<$1::timestamptz-interval '2 minutes' OR queued_at IS NULL
+    ) SELECT jsonb_build_object('total',count(*) FILTER(WHERE queued_at IS NOT NULL),
+      'unknownAgeCandidates',count(*) FILTER(WHERE queued_at IS NULL),'runnable',count(*) FILTER(WHERE reason='runnable'),
       'controlUnknown',count(*) FILTER(WHERE reason='control_unknown'),
       'excluded',coalesce((SELECT jsonb_object_agg(reason,n) FROM (SELECT reason,count(*) n FROM overdue WHERE reason!='runnable' GROUP BY reason) x),'{}'),
-      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,reason FROM overdue ORDER BY queued_at LIMIT 100) x),'[]')) facts FROM overdue`,
-    recovering: `${controlCte(false)}, recoveries AS (
+      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,age_source,reason FROM overdue ORDER BY queued_at NULLS FIRST LIMIT 100) x),'[]')) facts FROM overdue`,
+    recovering: `${controlCte(false, false)}, recoveries AS (
       SELECT s.id session_id,s.workspace_id,r.since,c.paused,c.valid FROM candidates s
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT e.created_at since FROM session_events e WHERE e.session_id=s.id AND e.workspace_id=s.workspace_id
@@ -155,12 +162,13 @@ export function databaseQueries(): Record<string, string> {
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,since FROM recoveries
         WHERE since<$1::timestamptz-interval '5 minutes' AND NOT paused ORDER BY since LIMIT 100) x),'[]')) facts FROM recoveries`,
     empty: `${CONTROL_CTE}, completed_turns AS MATERIALIZED (
-      SELECT id,workspace_id,session_id,source FROM session_turns WHERE finished_at>=$1::timestamptz-($2::int*interval '1 minute')
+      SELECT id,workspace_id,session_id,source,finished_at FROM session_turns WHERE finished_at>=$1::timestamptz-($2::int*interval '1 minute')
         AND finished_at<=$1::timestamptz AND status='completed'
     ), completions AS (
-      SELECT e.session_id,e.workspace_id,e.turn_id,e.created_at,
+      SELECT t.session_id,t.workspace_id,t.id turn_id,coalesce(e.created_at,t.finished_at) created_at,
         coalesce(e.payload->>'emptyFinalReply','false')='true' explicit_empty,
-        CASE WHEN NOT c.valid THEN 'control_unknown' WHEN s.status IN ('cancelled','failed') THEN 'terminal'
+        CASE WHEN e.id IS NULL OR jsonb_typeof(e.payload) IS DISTINCT FROM 'object' THEN 'missing_evidence'
+          WHEN NOT c.valid THEN 'control_unknown' WHEN s.status IN ('cancelled','failed') THEN 'terminal'
           WHEN c.paused THEN 'paused'
           WHEN s.input_wait_until>$1::timestamptz OR EXISTS (SELECT 1 FROM session_events wait
             WHERE wait.workspace_id=e.workspace_id AND wait.turn_id=e.turn_id
@@ -171,19 +179,19 @@ export function databaseQueries(): Record<string, string> {
           WHEN EXISTS (SELECT 1 FROM session_events tool WHERE tool.workspace_id=e.workspace_id AND tool.turn_id=e.turn_id
             AND tool.type IN ('agent.toolCall.created','agent.toolCall.output')) THEN 'tool_only'
           ELSE 'suspect' END classification
-      FROM completed_turns t JOIN LATERAL (
+      FROM completed_turns t LEFT JOIN LATERAL (
         SELECT e.* FROM session_events e WHERE e.turn_id=t.id AND e.workspace_id=t.workspace_id
           AND e.type='turn.completed' AND e.duplicate_of_event_id IS NULL
+          AND e.created_at>=$1::timestamptz-($2::int*interval '1 minute') AND e.created_at<=$1::timestamptz
           ORDER BY e.sequence DESC LIMIT 1
       ) e ON true
-      JOIN candidates s ON s.id=e.session_id AND s.workspace_id=e.workspace_id
+      JOIN candidates s ON s.id=t.session_id AND s.workspace_id=t.workspace_id
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
-      WHERE e.type='turn.completed' AND e.duplicate_of_event_id IS NULL
-        AND e.created_at>=$1::timestamptz-($2::int*interval '1 minute') AND e.created_at<=$1::timestamptz
     ), repeated AS (
       SELECT session_id,workspace_id,count(DISTINCT turn_id) empty_turns,min(created_at) first_at,max(created_at) last_at
       FROM completions WHERE classification='suspect' GROUP BY session_id,workspace_id HAVING count(DISTINCT turn_id)>=2
     ) SELECT jsonb_build_object('sample',count(*),'suspectTurns',count(*) FILTER(WHERE classification='suspect'),
+      'missingCompletionEvidence',count(*) FILTER(WHERE classification='missing_evidence'),
       'repeatedSessions',(SELECT count(*) FROM repeated),'controlUnknown',count(*) FILTER(WHERE classification='control_unknown'),
       'classifications',coalesce((SELECT jsonb_object_agg(classification,n) FROM (SELECT classification,count(*) n FROM completions GROUP BY classification) x),'{}'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM repeated ORDER BY empty_turns DESC LIMIT 100) x),'[]')) facts FROM completions`,
@@ -350,13 +358,20 @@ export function applyOwnership(facts: any, observations: OwnerObservation[], rec
     (row: any) => recovering || ["runnable", "behind_active_turn"].includes(row.reason),
   );
   let ownerUnknown = 0;
+  let unknownQueueAge = 0;
   let actionable = 0;
   const classifications: Record<string, number> = {};
   const ownership = targets.map((row: any) => {
     const observation = observations.find(
       (o) => o.session_id === row.session_id && o.workspace_id === row.workspace_id,
     );
-    const classification = ownerClassification(observation);
+    const canonicalClassification = ownerClassification(observation);
+    const ageUnknown =
+      !recovering &&
+      row.queued_at == null &&
+      ["runnable_candidate", "settled_owner_candidate"].includes(canonicalClassification);
+    const classification = ageUnknown ? "queue_age_unknown" : canonicalClassification;
+    if (ageUnknown) unknownQueueAge++;
     if (classification === "unknown") ownerUnknown++;
     if (["runnable_candidate", "settled_owner_candidate"].includes(classification)) actionable++;
     classifications[classification] = (classifications[classification] ?? 0) + 1;
@@ -385,6 +400,7 @@ export function applyOwnership(facts: any, observations: OwnerObservation[], rec
     ...(recovering ? {} : { sqlRunnableCandidates: runnable }),
     actionable,
     ownerUnknown: ownerUnknown + omitted,
+    ...(recovering ? {} : { unknownQueueAge }),
     ownershipClassifications: classifications,
     ownership,
     ownershipDefinition:
@@ -392,13 +408,24 @@ export function applyOwnership(facts: any, observations: OwnerObservation[], rec
   };
 }
 
-export function memoryBytes(value: string): number {
-  const m = /^([0-9.]+)([KMGTPE]i|[kMGTPE]|m)?$/.exec(value);
+export function memoryBytes(value: unknown): number {
+  if (typeof value !== "string") throw new Error("invalid Kubernetes quantity");
+  const m = /^\+?((?:\d+(?:\.\d*)?|\.\d+))([KMGTPE]i|[numkMGTPE]|[eE][+-]?\d+)?$/.exec(value);
   if (!m) throw new Error("invalid Kubernetes quantity");
   const unit = m[2] ?? "";
-  if (unit === "m") return Number(m[1]) / 1000;
   const power = unit ? "KMGTPE".indexOf(unit[0]!.toUpperCase()) + 1 : 0;
-  return Number(m[1]) * (unit.endsWith("i") ? 1024 : 1000) ** power;
+  const factor = /^[eE][+-]?\d+$/.test(unit)
+    ? 10 ** Number(unit.slice(1))
+    : unit === "n"
+      ? 1e-9
+      : unit === "u"
+        ? 1e-6
+        : unit === "m"
+          ? 1e-3
+          : (unit.endsWith("i") ? 1024 : 1000) ** power;
+  const bytes = Number(m[1]) * factor;
+  if (!Number.isFinite(bytes) || bytes < 0) throw new Error("invalid Kubernetes quantity");
+  return bytes;
 }
 
 export function podFacts(value: any): Record<string, unknown> {
@@ -434,6 +461,8 @@ export function errorComparison(
   for (const n of [current.requests, current.errors, baseline.requests, baseline.errors]) {
     if (!Number.isFinite(n) || n < 0) throw new Error("invalid counter increase");
   }
+  if (current.errors > current.requests || baseline.errors > baseline.requests)
+    throw new Error("inconsistent error denominator");
   const currentRate = current.requests > 0 ? current.errors / current.requests : null;
   const baselineRate = baseline.requests > 0 ? baseline.errors / baseline.requests : null;
   const spike =
@@ -472,10 +501,18 @@ export async function sweep(
     definition: string,
     read: () => Promise<Record<string, unknown>>,
     bad: (f: any) => boolean,
+    incomplete?: (f: any) => boolean,
   ) => {
     try {
       const facts = await read();
-      checks.push({ id, definition, facts, status: bad(facts) ? "finding" : "ok" });
+      const gap = incomplete?.(facts) ?? false;
+      checks.push({
+        id,
+        definition,
+        facts,
+        status: gap ? "gap" : bad(facts) ? "finding" : "ok",
+        ...(gap ? { gap: "source_evidence_incomplete" } : {}),
+      });
     } catch {
       checks.push({
         id,
@@ -527,9 +564,10 @@ export async function sweep(
         const spec = v.spec.containers.find((c: any) => c.name === "api");
         if (!usage) throw new Error("missing API container");
         const bytes = memoryBytes(usage.usage.memory);
-        const limitBytes = spec.resources?.limits?.memory
-          ? memoryBytes(spec.resources.limits.memory)
-          : null;
+        const limitBytes =
+          spec.resources?.limits?.memory !== undefined
+            ? memoryBytes(spec.resources.limits.memory)
+            : null;
         return {
           pod: v.metadata.name,
           timestamp: sample.timestamp,
@@ -555,10 +593,10 @@ export async function sweep(
   const database = async () => {
     const definitions: Record<string, string> = {
       queued:
-        "Sessions whose durable status is queued, older than 120s since earliest queued turn (or initial creation); excludes historical queued-turn rows in nonqueued sessions. Canonical control.peekSessionWork and exact Temporal owner metadata classify candidates; missing ownership evidence is a gap. First 100 oldest listed; at most 20 canonical targets.",
+        "Accepted pending human/API turns and system updates across all session projections, plus durable queued sessions. Known age >120s uses earliest pending-work created_at, never session creation. Historical internal queued-turn rows alone are not pending-work authority. Unknown-age canonical runnable work is a gap. Canonical control.peekSessionWork and exact owner metadata classify candidates; first 100 listed, at most 20 observed.",
       recovering:
         "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Missing transition or ownership evidence is a gap, not proof of physical quiescence.",
-      empty: `At least two distinct completed suspect turns in ${options.windowMinutes}m; explicit emptyFinalReply or no reply/tools. Excludes effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
+      empty: `All completed turns in ${options.windowMinutes}m retain denominator coverage; missing usable turn.completed evidence is a gap. At least two distinct suspect turns flag repeated empty replies; explicit emptyFinalReply or no reply/tools, excluding effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
       latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start events are a gap. Database exact percentiles, not TTFT.`,
     };
     let data: any;
@@ -653,11 +691,17 @@ export async function sweep(
       const facts = data[name];
       const required =
         name === "queued"
-          ? ["total", "sqlRunnableCandidates", "controlUnknown"]
+          ? ["total", "sqlRunnableCandidates", "controlUnknown", "unknownQueueAge"]
           : name === "recovering"
             ? ["total", "controlUnknown", "missingStatusTimestamp"]
             : name === "empty"
-              ? ["sample", "suspectTurns", "repeatedSessions", "controlUnknown"]
+              ? [
+                  "sample",
+                  "suspectTurns",
+                  "repeatedSessions",
+                  "controlUnknown",
+                  "missingCompletionEvidence",
+                ]
               : [
                   "sample",
                   "invalidNegativeSamples",
@@ -671,6 +715,8 @@ export async function sweep(
         facts.gap ||
         facts.controlUnknown > 0 ||
         facts.ownerUnknown > 0 ||
+        facts.unknownQueueAge > 0 ||
+        facts.missingCompletionEvidence > 0 ||
         facts.missingStatusTimestamp > 0 ||
         facts.missingFirstStartEvents > 0 ||
         facts.futureFirstStartEvents > 0 ||
@@ -745,6 +791,7 @@ export async function sweep(
       return errorComparison(current, baseline);
     },
     (f) => f.spike,
+    (f) => f.comparison !== "available",
   );
   await Promise.all([kube, memory, database(), errorRates]);
   checks.sort((a, b) => a.id.localeCompare(b.id));
