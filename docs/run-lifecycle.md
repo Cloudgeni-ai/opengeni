@@ -2613,8 +2613,14 @@ workspace control fence and the process -> admission -> lease row locks:
   writer changes the holder counters, and gives the SECURITY DEFINER inventory
   inventory-only read policies on the turn, attempt, admission, system-update
   and goal tables so its screen sees them as the FORCE-RLS owner. Process age is
-  never a fact. A derived default window that cannot fit these bounds leaves
-  idle containment off (deadline rule only) rather than failing boot.
+  never a fact. Set `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` to explicitly
+  disable new idle-command enrollments. Configuration normalizes zero to the
+  existing absent window (deadline rule only), without deriving a replacement
+  window or passing zero to the database inventory. Unset or blank values still
+  derive the default; a derived window that cannot fit these bounds leaves idle
+  containment off rather than failing boot. Disabling this rule does not undo an
+  already enrolled drain, disable ordinary idle-lease reaping, or change provider
+  deadlines, stop grace, capture requirements, or turn/wait/holder fences.
 
 A holder or writer that committed first is seen and refuses enrollment; a later
 one observes the requested rotation and is fenced until the successor box.

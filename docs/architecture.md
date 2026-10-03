@@ -1556,7 +1556,9 @@ helper UUID/cursors.
 Legacy retained Modal commands, whatever their health, use the existing drain once
 the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
 wait or pending request; they settle lost with a notice. Command backoff never
-suppresses rotation's provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+suppresses rotation's provider-lifecycle checks. Set that window to `0` to disable
+new idle-command enrollment; provider-deadline containment and already enrolled
+drains remain active. Details: `docs/run-lifecycle.md`.
 
 `apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
 the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,
