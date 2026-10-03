@@ -1037,24 +1037,15 @@ credits-path price and is zero for externally billed calls.
 Insights counts every ledger row, including private/missing/deleted sessions;
 `privateChats` exposes person-only amounts. Details/samples remain actor-visible;
 debits remain unchanged.
-Unified workspace/organization `insights/usage` and `insights/calls` GET routes
-use `@opengeni/contracts/insights-usage`: UTC windows, repeated filters, groups,
-payer totals, coverage and nullable prior measures. Readers initially use raw
-facts; daily rollups are a performance follow-up, not a YTD latency guarantee.
-Visibility and metadata remain live. Deleted usage is distinct from private
-amounts. No hidden session/title or other Personal workspace identity is a
-facet; membership names require independent authority.
-
-Workspace usage requires `workspace:admin`; organization usage requires
-`billing:read`. Calls/details additionally require existing workspace read
-grants and actor visibility. Privacy masking precedes identity filters.
-Charged totals follow actual debits, including unmatched residuals, not nominal
-prices. List estimates span all payers; comparison schedules never authorize
-debits. Gateway totals remain authoritative. Events preserve class snapshots
-verbatim; absent price provenance leaves forward classes null. Historical
-allocation must conserve captured totals and declare approximation. Unknown
-counters/costs are not zeroes; reasoning is part of output. The separate prior
-cache denominator prevents an empty prior cache comparison.
+Unified workspace/organization GET `insights/usage` and `insights/calls` use
+`@opengeni/contracts/insights-usage`. Raw readers preserve live metadata,
+actual-debit residuals, all-payer estimates and coverage; rollup performance is
+follow-up. Workspace requires `workspace:admin`, organization `billing:read`;
+details additionally require workspace read grants and actor visibility.
+Masking precedes identity filters. Hidden sessions/titles and other Personal
+identities never become facets. Unknown counters/classes remain unknown;
+historical allocation must conserve captured totals. Comparison pricing never
+authorizes debits. See [the checkpoint](insights-raw-usage-api.md).
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and
