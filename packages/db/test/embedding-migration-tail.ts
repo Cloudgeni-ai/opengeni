@@ -84,4 +84,7 @@ export const embeddingMigrationTail = [
   "0585_session_attention_cursor.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  "0606_insights_daily_rollups.sql",
+  "0607_insights_actual_model_debits.sql",
+  "0608_insights_historical_list_allocations.sql",
 ];

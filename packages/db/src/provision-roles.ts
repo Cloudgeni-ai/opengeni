@@ -2137,6 +2137,28 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.insights_raw_amount_inputs(uuid,uuid,timestamptz,timestamptz) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.insights_usage_payer(text,text), opengeni_private.insights_usage_filter(jsonb,jsonb) FROM PUBLIC;
     END IF;
+    DECLARE rollup_table regclass; rollup_columns text; rollup_routine regprocedure;
+    BEGIN
+      FOR rollup_table IN SELECT c.oid::regclass FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='opengeni_private' AND c.relname IN('insights_usage_daily','insights_model_daily',
+          'insights_model_daily_timestamps','insights_charge_daily','insights_charge_links','insights_list_rate_snapshots') LOOP
+        SELECT string_agg(quote_ident(attname),',') INTO rollup_columns FROM pg_attribute
+          WHERE attrelid=rollup_table AND attnum>0 AND NOT attisdropped;
+        EXECUTE format('REVOKE ALL ON TABLE %s FROM %I',rollup_table,${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE %s FROM %I',rollup_columns,rollup_table,${literal(role)});
+        EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC',rollup_table);
+        EXECUTE format('REVOKE ALL (%s) ON TABLE %s FROM PUBLIC',rollup_columns,rollup_table);
+      END LOOP;
+      FOR rollup_routine IN SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='opengeni_private' AND p.proname IN('insights_add_measures','insights_contribution_delta',
+          'insights_fact_telemetry_known','insights_fact_measures','insights_fact_contributions','insights_rollup_dimensions',
+          'insights_apply_delta','maintain_insights_daily_rollup','insights_rollup_edge_ranges','insights_usage_window','insights_model_window',
+          'insights_charge_dimensions','insights_charge_row','insights_charge_delta','insights_apply_charge',
+          'maintain_insights_model_charges','insights_charge_window','insights_rollup_public_measures','insights_rollup_amount_inputs',
+          'insights_allocate_recorded_list_classes','allocate_insights_model_list_classes','insights_backfill_list_snapshot','guard_insights_list_rate_snapshot') LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',rollup_routine);
+      END LOOP;
+    END;
     IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
