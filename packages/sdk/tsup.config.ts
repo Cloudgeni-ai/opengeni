@@ -47,6 +47,7 @@ export default defineConfig({
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
     "src/model-picker-order.ts",
+    "src/model-display.ts",
   ],
   format: ["esm"],
   target: "es2022",
@@ -64,5 +65,6 @@ export default defineConfig({
     "@opengeni/contracts/site-session-http",
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",
+    "@opengeni/contracts/model-display",
   ],
 });

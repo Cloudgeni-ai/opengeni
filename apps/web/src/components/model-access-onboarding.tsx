@@ -1,3 +1,4 @@
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { labelReasoningEffort } from "@opengeni/react";
@@ -108,8 +109,9 @@ export type IncludedOnboardingModel = {
 
 /** "GPT-6 Luna with extra high reasoning", or just the label when there is no effort to name. */
 function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string {
-  if (model.reasoningEffort === "none") return model.label;
-  return `${model.label} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
+  const name = modelDisplayName(model);
+  if (model.reasoningEffort === "none") return name;
+  return `${name} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
 }
 
 /**
@@ -242,7 +244,9 @@ export function ModelAccessOnboardingPanel({
         );
         if (model) {
           setSelectionRetry(null);
-          toast.success(`${model.label} (${FAMILY_LABELS[family]}) is selected for your next chat`);
+          toast.success(
+            `${modelDisplayName(model)} (${FAMILY_LABELS[family]}) is selected for your next chat`,
+          );
         } else {
           setSelectionRetry(family);
           toast.error("The connection is ready, but its model is not selectable yet");
@@ -776,8 +780,8 @@ export function ModelAccessOnboardingPanel({
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
             {includedModel.free
-              ? `${includedModel.label} is set up and free to use. No card or API key needed.`
-              : `${includedModel.label} is set up and included with this deployment.`}
+              ? `${modelDisplayName(includedModel)} is set up and free to use. No card or API key needed.`
+              : `${modelDisplayName(includedModel)} is set up and included with this deployment.`}
           </p>
           <Button
             type="button"

@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
+import { ModelTile, modelDisplayName } from "@/components/model-identity";
 import { Notice } from "@/components/ui/notice";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { RowButton } from "@/components/ui/page-actions";
@@ -347,8 +348,8 @@ export function OrganizationModelUsagePanel(props: {
           {data.models.map((row) => (
             <ListRow
               key={`${row.provider}:${row.model}:${row.totals.billingPath}`}
-              leading={<LogoTile name={row.model} />}
-              title={row.model}
+              leading={<ModelTile model={row.model} />}
+              title={modelDisplayName(row.model)}
               meta={[
                 providerLabel(row.provider),
                 rowPayerLabel(row.totals.billingPath, row.provider),

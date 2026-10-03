@@ -26,6 +26,7 @@ import {
   PickerNavRow,
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
+import { ModelMark } from "./model-mark";
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
@@ -42,11 +43,15 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     return words.every((word) => text.includes(word));
   });
   const matchingIds = new Set(filtered.map((row) => row.id));
-  const groups = groupPickerRowsByBillingClass(rows, { codexOnly: props.codexOnly === true })
+  const groups = groupPickerRowsByBillingClass(rows, {
+    codexOnly: props.codexOnly === true,
+    selectedId: props.model,
+  })
     .map((group) => {
       const override = props.groupPresentation?.[group.billingClass]?.description;
       return {
         ...group,
+        label: props.groupPresentation?.[group.billingClass]?.label ?? group.label,
         rows: group.rows.filter((row) => matchingIds.has(row.id)),
         description:
           override === undefined
@@ -73,6 +78,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const modelRow = (row: ClientPickerModelRow) => (
     <PickerNavRow
       key={row.id}
+      icon={<ModelMark model={row.catalog} className="size-4 text-og-fg-muted" />}
       label={row.label}
       hint={row.unavailableReason ?? undefined}
       disabled={props.disabled || !row.selectable}

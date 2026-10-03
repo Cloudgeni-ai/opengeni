@@ -1,4 +1,5 @@
 import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
+import { ModelName } from "../src/components/model-mark";
 import { projectClientModelRows } from "../src/model-policy";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
@@ -646,16 +647,18 @@ describe("ModelPolicyPicker", () => {
     const group = container.querySelector('section[aria-label="Models"]')!;
     expect(group.querySelectorAll("button").length).toBe(5);
     expect(container.querySelector('section[aria-label="External"]')).toBeNull();
-    for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
+    // Organization- and workspace-connected keys share one scope-free group.
+    for (const label of ["API keys", "Codex"]) {
       expect(container.querySelector(`section[aria-label="${label}"]`)).toBeTruthy();
     }
+    expect(container.querySelector('section[aria-label="Organization providers"]')).toBeNull();
     expect(group.textContent?.match(/Gratis/g)?.length).toBe(1);
     expect(group.textContent).not.toContain("credits");
     const paid = group.querySelector<HTMLButtonElement>(
       '[data-testid="model-picker-choice-openrouter/charged:free"]',
     )!;
     expect(paid.getAttribute("aria-description")).toBeNull();
-    expect(paid.title).toBe("openrouter/charged:free");
+    expect(paid.title).toBe("Charged");
     await act(async () => paid.click());
     expect(calls).toEqual(["openrouter/charged:free"]);
     expect(JSON.stringify(models)).toBe(before);
@@ -1077,7 +1080,9 @@ describe("ModelPolicyPicker", () => {
     const trigger = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Model and effort"]',
     );
-    expect(trigger?.textContent).toContain("codex/unavailable");
+    // The trigger names the model, never its routing id.
+    expect(trigger?.textContent).toContain("Unavailable");
+    expect(trigger?.textContent).not.toContain("codex/");
 
     expect(container.textContent).toContain("Catalog unavailable");
     expect(container.textContent).toContain("No models available.");
@@ -1155,10 +1160,10 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
-  test("labels the shared BYOK rail as workspace-provider billing", async () => {
+  test("labels the shared BYOK rail without connection scope", async () => {
     const container = await mount(<BillingClassMark billingClass="byok" />);
 
-    expect(container.querySelector('[aria-label="Workspace provider account"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="API key"]')).toBeTruthy();
   });
 
   test("uses the credits-safe rail when a removed OpenRouter selection has no cost row", async () => {
@@ -1246,5 +1251,53 @@ describe("ModelPolicyPicker", () => {
       container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
         ?.textContent,
     ).not.toContain("Opengeni credits");
+  });
+});
+
+describe("model identity outside settings", () => {
+  test("ModelName shows the clean name and maker mark for any connection scope", async () => {
+    const container = await mount(
+      <>
+        <ModelName model="organization-claude-subscription/claude-opus-5-5" />
+        <ModelName model="workspace-claude-subscription/claude-opus-5-5" />
+        <ModelName model="codex/gpt-6.1-sol" />
+      </>,
+    );
+    const names = [...container.querySelectorAll("span[title]")].map((node) => node.textContent);
+    expect(names).toEqual(["Claude Opus 5.5", "Claude Opus 5.5", "GPT-6.1 Sol"]);
+    expect(
+      [...container.querySelectorAll("[data-model-vendor]")].map((node) =>
+        node.getAttribute("data-model-vendor"),
+      ),
+    ).toEqual(["anthropic", "anthropic", "openai"]);
+    expect(container.textContent).not.toContain("/");
+  });
+
+  test("API-key trigger shows the maker mark and name, not a key or raw id", async () => {
+    const model: ClientModel = {
+      ...MODELS[0]!,
+      id: "organization-anthropic/claude-haiku-4-5-20251001",
+      label: "claude-haiku-4-5-20251001",
+      provider: "organization-anthropic",
+      providerLabel: "Anthropic API",
+      source: undefined,
+      cost: "organization",
+    };
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[model]}
+        model={model.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector('button[aria-label="Model and effort"]')!;
+    expect(trigger.textContent).toContain("Claude Haiku 4.5");
+    expect(trigger.textContent).not.toContain("claude-haiku");
+    expect(trigger.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
+    expect(trigger.querySelector('[data-testid^="billing-class-icon-"]')).toBeNull();
   });
 });

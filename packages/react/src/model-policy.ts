@@ -3,6 +3,7 @@ import {
   modelPickerBillingClassFor,
   type ModelPickerBillingClass,
 } from "@opengeni/sdk/model-picker-order";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type PickerBillingClass = ModelPickerBillingClass;
@@ -29,8 +30,10 @@ const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
   claude_subscription: "Claude subscription",
-  byok: "Workspace providers",
-  organization_byok: "Organization providers",
+  // Who connected the key (organization or workspace) is a settings fact, not
+  // a model choice: both scopes share one label and one picker group.
+  byok: "API keys",
+  organization_byok: "API keys",
 };
 
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
@@ -203,30 +206,40 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 
 function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
-    return "Billed to the workspace Anthropic API account";
+    return "Billed to the connected Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude plan · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
-    return "Billed to the workspace OpenRouter account";
+    return "Billed to the connected OpenRouter account";
   }
   if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
-    return "Billed to the workspace Vercel account";
+    return "Billed to the connected Vercel account";
   }
-  return "Billed to the workspace provider account";
+  return "Billed to the connected provider account";
 }
 
 function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
-    return "Billed to the organization Anthropic API account";
+    return "Billed to the connected Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude plan · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
-    return "Billed to the organization OpenRouter account";
+    return "Billed to the connected OpenRouter account";
   }
   if (model.provider === "organization-gateway") {
-    return "Billed to the organization Vercel account";
+    return "Billed to the connected Vercel account";
   }
-  return "Billed to the organization provider account";
+  return "Billed to the connected provider account";
+}
+
+/**
+ * The curated compact label, else the family-free name for Claude models
+ * ("Opus 5.5"): the maker's mark beside it already says Claude.
+ */
+function compactLabel(catalog: ClientModel): { shortLabel?: string } {
+  if (catalog.shortLabel) return { shortLabel: catalog.shortLabel };
+  const name = modelDisplayName(catalog);
+  return name.startsWith("Claude ") ? { shortLabel: name.slice("Claude ".length) } : {};
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
@@ -236,8 +249,8 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
       const billingClass = billingClassForModel(catalog);
       return {
         id: catalog.id,
-        label: catalog.label,
-        ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
+        label: modelDisplayName(catalog),
+        ...compactLabel(catalog),
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
@@ -257,8 +270,8 @@ export function projectClientModelRows(models: ClientModel[]): PickerModelRow<Cl
     const billingClass = billingClassForModel(catalog);
     return {
       id: catalog.id,
-      label: catalog.label,
-      ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
+      label: modelDisplayName(catalog),
+      ...compactLabel(catalog),
       billingClass,
       billingClassLabel: billingClassLabel(billingClass),
       selectable: true,
@@ -283,13 +296,45 @@ export function findPickerRow<TCatalog extends ClientModel>(
   return rows.find((row) => row.id === modelId) ?? null;
 }
 
+export type GroupPickerRowsOptions = {
+  codexOnly?: boolean;
+  /** Kept visible when it has an identical twin (see below). */
+  selectedId?: string | undefined;
+};
+
+/**
+ * Organization- and workspace-connected API keys are one choice for the person
+ * picking a model, so they share one group.
+ */
+function displayGroupFor(billingClass: PickerBillingClass): PickerBillingClass {
+  return billingClass === "organization_byok" ? "byok" : billingClass;
+}
+
+/** Groups whose connections can exist at both organization and workspace scope. */
+const TWIN_GROUPS: ReadonlySet<PickerBillingClass> = new Set(["byok", "claude_subscription"]);
+
+/**
+ * Two rows in one connection group with the same display name (the same model
+ * connected by the organization and by the workspace) are one choice: show one. Keep the
+ * current selection, else a selectable row, else the first in picker order.
+ */
+function prefersTwin<TCatalog extends ClientModel>(
+  candidate: PickerModelRow<TCatalog>,
+  current: PickerModelRow<TCatalog>,
+  selectedId: string | undefined,
+): boolean {
+  if (selectedId !== undefined && current.id === selectedId) return false;
+  if (selectedId !== undefined && candidate.id === selectedId) return true;
+  return candidate.selectable && !current.selectable;
+}
+
 export function groupPickerRowsByBillingClass(
   rows: PickerModelRow[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -297,7 +342,7 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
 }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -310,14 +355,23 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
     rows: PickerModelRow<TCatalog>[];
   }> = [];
   for (const row of sorted) {
-    const existing = groups.find((group) => group.billingClass === row.billingClass);
+    const billingClass = displayGroupFor(row.billingClass);
+    const existing = groups.find((group) => group.billingClass === billingClass);
     if (existing) {
-      existing.rows.push(row);
+      const twin = TWIN_GROUPS.has(billingClass)
+        ? existing.rows.findIndex((candidate) => candidate.label === row.label)
+        : -1;
+      if (twin < 0) {
+        existing.rows.push(row);
+      } else if (prefersTwin(row, existing.rows[twin]!, options?.selectedId)) {
+        existing.rows[twin] = row;
+      }
       continue;
     }
     groups.push({
-      billingClass: row.billingClass,
-      label: row.billingClassLabel,
+      billingClass,
+      label:
+        billingClass === row.billingClass ? row.billingClassLabel : billingClassLabel(billingClass),
       rows: [row],
     });
   }
@@ -341,3 +395,4 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   }
   return groups;
 }
+export { modelDisplayName, modelVendor } from "@opengeni/sdk/model-display";

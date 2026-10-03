@@ -412,6 +412,13 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
+Model display: outside Models settings a model is its clean name plus its maker's
+logo, never a routing prefix, connection id or organization/workspace scope.
+`packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported
+by `@opengeni/sdk/model-display`) and `@opengeni/react`'s `ModelName`/`ModelMark` are
+the one source; the console's `apps/web/src/components/model-identity.tsx` adds the
+logo tile and payer hint. The picker merges org- and workspace-connected copies.
+
 Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
 ([design](design/agent-configuration.md)).
 

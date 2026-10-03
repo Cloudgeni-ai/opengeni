@@ -536,7 +536,21 @@ export {
   runnableLatencyModesForModel,
   sortPickerRows,
 } from "./model-policy";
-export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
+export type {
+  GroupPickerRowsOptions,
+  LatencyModeId,
+  PickerBillingClass,
+  PickerModelRow,
+} from "./model-policy";
+export { ChatGptMark, ModelMark, ModelName } from "./components/model-mark";
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "@opengeni/sdk/model-display";
+export type { ModelDisplayInput, ModelVendor } from "@opengeni/sdk/model-display";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
