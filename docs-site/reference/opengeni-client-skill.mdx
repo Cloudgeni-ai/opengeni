@@ -540,6 +540,22 @@ for background API/MCP access, or the product's signed workspace credential
 provider for short-lived managed-sandbox Git/cloud material. See
 [Data tools and credentials](data-tools-and-credentials.md).
 
+`firstPartyMcpTools: []` narrows the broad first-party model-visible selection;
+it does not set a zero permission ceiling. Public `createSession` rejects an
+explicit `firstPartyMcpPermissions: []` with 422, including `asService` calls.
+This recipe omits that override, preserving the top-level default worker
+permission set (or inherited policy for a child), not zero authority. Any
+intentional public permission override must be nonempty and within the
+creator's grant; do not add permissions merely to make startup succeed.
+
+Inbound automation `sessionTemplate` is a different boundary: both first-party
+arrays default to `[]`, and explicit `[]` is supported. That empty effective
+ceiling skips remote OpenGeni-delegated MCP preparation without a token or
+endpoint request. Requested first-party tools or dedicated `files`/`docs` stay
+unavailable with an `insufficient_scope` advisory. Product MCP servers,
+independent connections, host-owned local adapters and already-authorized native
+runtime mechanics keep their own authorization paths.
+
 ## Per-user tool tokens
 
 When the product's MCP server should act as the signed-in user, give each
@@ -1427,6 +1443,25 @@ Read response visibility from `session.tenancy?.visibility`, not
 `session.visibility`. The top-level `visibility` field belongs to create
 requests; the response's tenancy projection may be absent when private-session
 support is unavailable. Absence means unknown, not `"workspace"`.
+
+Public `createSession` rejects `firstPartyMcpPermissions: []` with 422,
+including `asService` calls. `firstPartyMcpTools: []` narrows the broad
+model-visible selection, not permission authority. Omitting permissions is not
+zero authority: a top-level request retains the default worker permission set,
+and a child inherits its bounded policy. An intentional public permission
+override must be nonempty and within the creator's grant. See
+[Agent recipes](agent-recipes.md); never pad permissions merely to make startup
+succeed.
+
+Automation session templates instead default both first-party arrays to `[]`
+and support explicit empty arrays. That supported automation ceiling, or an
+already-effective internal or linked permission ceiling of `[]`, is zero
+delegated OpenGeni authority. Runtime skips remote first-party MCP preparation;
+requested first-party tools or dedicated `files`/`docs` remain absent with an
+`insufficient_scope` advisory. External-host MCP servers, host-owned local
+adapters, independent connections and already-authorized native runtime
+mechanics retain their own authority. This runtime behavior does not widen
+public `createSession` admission.
 
 `effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
 locally if your UI needs capability sections:

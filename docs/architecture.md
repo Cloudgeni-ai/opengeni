@@ -303,6 +303,12 @@ worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
 recovery.
 
+An effective first-party permission ceiling of `[]` remains zero delegated
+OpenGeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+never pads a grant or signs an empty token; external-host, host-local,
+connection-backed and already-authorized native paths keep their own authority.
+See [automation defaults](automations.md#empty-first-party-authority).
+
 Organization settings owns the cross-workspace roster and roles. A managed
 browser administrator is the ordinary authority. Single-user local deployments
 also admit only the access resolver's canonical `opengeni:local/default` + `dev`
