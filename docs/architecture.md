@@ -108,6 +108,9 @@ terminal proof; it never manufactures quiescence or replays an unknown command.
 Control observation is not settlement: unavailable reads/owned attempts keep
 bounded, interruptible waits without marking idle, revoking writers or dispatching
 successors; Temporal metadata never proves writer quiescence.
+Separate settled-owner recovery re-inspects the original dispatch and atomically
+closes only the exact current owner under control, physical/inference writer
+fences, committing its quiescence receipt, same-turn recovery and durable wake.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 

@@ -713,6 +713,28 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       ...(safeObservation ? { observerAccountId: input.accountId } : {}),
     });
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
+      if (
+        peek.kind === "attempt-owned" &&
+        "ownerActivityState" in peek &&
+        peek.ownerActivityState === "settled" &&
+        patched("session-settled-owner-recovery-v1")
+      ) {
+        const reconciliation = await activity.reconcileSettledSessionAttempt({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: peek.turnId,
+          attemptId: peek.attemptId,
+          executionGeneration: peek.executionGeneration,
+          // Continue-as-new observers carry no owner authority. Always use
+          // the DB-stored original run/activity, not this observer's run.
+          workflowId: peek.activityRef.workflowId,
+          workflowRunId: peek.activityRef.workflowRunId,
+          activityId: peek.activityRef.activityId,
+        });
+        if (reconciliation.action === "recovering") continue;
+        if (reconciliation.action === "exceeded") return;
+      }
       // No terminal/idle projection and no successor dispatch. Restoration
       // need not produce a wake, so retain the observer with a bounded timer
       // instead of closing and stranding durable work. Signals interrupt the

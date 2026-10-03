@@ -105,6 +105,8 @@ export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
 export const reconcileSessionAttemptQuiescence =
   defaultControlActivities.reconcileSessionAttemptQuiescence;
+export const reconcileSettledSessionAttempt =
+  defaultControlActivities.reconcileSettledSessionAttempt;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;

@@ -244,6 +244,22 @@ export type ReconcileSessionAttemptQuiescenceResult = {
   action: "quiesced" | "pending" | "stale";
 };
 
+export type ReconcileSettledSessionAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type ReconcileSettledSessionAttemptResult = {
+  action: "recovering" | "exceeded" | "pending" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
