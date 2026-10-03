@@ -99,8 +99,11 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
 `OpenGeniChat` (the user's chat list plus `SessionConversation`) from
-`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css`. For custom-branded
+embeds, theme with scoped `--og-*` tokens. For stock UI, use the shipped components
+and stylesheet without cosmetic host CSS or token overrides; see
+[Stock and host-branded appearance](references/product-shapes-and-ui.md#stock-and-host-branded-appearance).
+Import from `session-ui`, not the package root: the root also
 exports the workbench, whose editors, terminal and desktop viewer are optional
 peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped
@@ -2816,7 +2819,7 @@ Before calling an integration complete, verify:
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
 | Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason to replace the component. For custom-branded embeds, theme with `--og-*` tokens and density props. For stock UI, keep the shipped components and stylesheet without cosmetic host CSS or token overrides; see [Stock and host-branded appearance](#stock-and-host-branded-appearance). Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
 ## Stock and host-branded appearance
 
