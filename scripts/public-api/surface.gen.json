@@ -1292,7 +1292,6 @@
       "method": "GET",
       "path": "/v1/workspaces",
       "sdk": [
-        "OpenGeniClient.discoverPlugins",
         "OpenGeniClient.listWorkspaces"
       ],
       "request": [],
@@ -2258,6 +2257,15 @@
       "response": [
         "DiscoverMcpCapabilitiesResponse"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
+      "sdk": [
+        "OpenGeniClient.discoverPlugins"
+      ],
+      "request": [],
+      "response": []
     },
     {
       "method": "GET",
