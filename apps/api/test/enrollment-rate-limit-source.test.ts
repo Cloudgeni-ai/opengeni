@@ -74,4 +74,3 @@ describe("enrollment rate-limit source and bounded state", () => {
     expect(limiter.bucketCount).toBe(10_000);
   });
 });
-
