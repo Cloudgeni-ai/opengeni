@@ -47,7 +47,32 @@ function noTransport(value: unknown): void {
   }
 }
 
-const ORGANIZATION_MCP_URL = "https://app.opengeni.ai/v1/mcp";
+// Read the actual native producer instead of duplicating its raw URL. Both
+// hosts must agree, while the URL contract below independently fences authority.
+const ORGANIZATION_MCP_URL: string = json("plugins/opengeni/mcp.json").mcpServers.opengeni.url;
+
+function isOrganizationMcpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    const [leadingSlash, version, resource, ...children] = url.pathname.split("/");
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "app.opengeni.ai" &&
+      url.port === "" &&
+      leadingSlash === "" &&
+      version === "v1" &&
+      resource === "mcp" &&
+      children.length === 0 &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
 
 describe("shared OpenGeni package", () => {
   test("one identity uses default contained skills and compatible manifests", () => {
@@ -88,15 +113,18 @@ describe("shared OpenGeni package", () => {
 
   test("each host gets exactly one credential-free organization MCP server through its native file", () => {
     // Claude Code: inline in its manifest, HTTP transport, OAuth discovered from the server.
-    expect(json("plugins/opengeni/.claude-plugin/plugin.json").mcpServers).toEqual({
+    const claude = json("plugins/opengeni/.claude-plugin/plugin.json").mcpServers;
+    expect(claude).toEqual({
       opengeni: { type: "http", url: ORGANIZATION_MCP_URL },
     });
+    expect(isOrganizationMcpUrl(claude.opengeni.url)).toBe(true);
     // Codex, Cursor and other Agent Plugins hosts: the portable root mcp.json.
     const portable = json("plugins/opengeni/mcp.json");
     expect(portable).toEqual({
       $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
       mcpServers: { opengeni: { type: "streamable-http", url: ORGANIZATION_MCP_URL } },
     });
+    expect(isOrganizationMcpUrl(portable.mcpServers.opengeni.url)).toBe(true);
     const schema = json("scripts/fixtures/agent-plugin-mcp-1.0.0.schema.json");
     expect(schema.$id).toBe(portable.$schema);
     expect(schema.required).toEqual(["$schema", "mcpServers"]);
@@ -107,6 +135,33 @@ describe("shared OpenGeni package", () => {
       expect(Object.keys(http.properties)).toContain(key);
     // No second copy a host could also load.
     expect(existsSync(join(pluginRoot, ".mcp.json"))).toBe(false);
+  });
+
+  test("organization MCP defaults reject other authorities, workspace resources and embedded credentials", () => {
+    const canonical = new URL(ORGANIZATION_MCP_URL);
+    const mutations = [
+      { protocol: "http:" },
+      { hostname: "untrusted.example" },
+      { port: "8443" },
+      { pathname: "/v1/workspaces/example/mcp" },
+      ...["docs", "files", "tools"].map((child) => ({
+        pathname: `${canonical.pathname}/${child}`,
+      })),
+      { pathname: `${canonical.pathname}%2Fdocs` },
+      { pathname: `${canonical.pathname}-connections` },
+      { search: "?workspaceId=example" },
+      { hash: "#workspace" },
+      { username: "embedded-user" },
+      { password: "embedded-password" },
+    ];
+    for (const mutation of mutations) {
+      const url = new URL(canonical);
+      Object.assign(url, mutation);
+      expect(isOrganizationMcpUrl(url.href), JSON.stringify(mutation)).toBe(false);
+    }
+    for (const value of [undefined, null, "", {}, { url: ORGANIZATION_MCP_URL }, "not-a-url"]) {
+      expect(isOrganizationMcpUrl(value)).toBe(false);
+    }
   });
 
   test("plugin metadata is shared and needs no install-time settings", () => {
@@ -148,7 +203,7 @@ describe("shared OpenGeni package", () => {
       expect(frontmatter).not.toBeNull();
       const metadata = Bun.YAML.parse(frontmatter![1]!) as Record<string, string>;
       expect(metadata.name).toBe(name);
-      expect(metadata.description.trim().length).toBeGreaterThan(0);
+      expect(metadata.description?.trim().length ?? 0).toBeGreaterThan(0);
       for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
         if (/^(?:https?:|#)/.test(match[1]!)) continue;
         contained(resolve(dirname(path), match[1]!.split("#")[0]!));
