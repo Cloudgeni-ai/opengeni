@@ -595,19 +595,18 @@ tickets, bounded streaming, and `toolServer` tokens for `/tool-auth`
 
 ### 3.11 Work discovery remains advisory and permission-first
 
-Compact related-work discovery is a read projection over already-authorized
-sessions, durable semantic titles, active goals, and bounded typed work claims.
+Compact related-work discovery is read-only, projecting already-authorized sessions,
+durable semantic titles, active goals, and bounded typed work claims.
 Workspace/private-session rules, exact live-attempt validation, Slack-private
-scope, and optional embedding-host list narrowing run before lifecycle filters,
-matching, ranking, counts, cursors, or ancestor labels. A hidden session cannot
-influence even aggregate discovery output.
+scope, and optional embedding-host list narrowing precede lifecycle filters,
+matching, ranking, counts, cursors, or ancestor labels. Hidden sessions cannot
+influence even aggregate output.
 
-Work claims are non-exclusive evidence. They do not reserve a repository,
-transfer ownership, grant access, or trigger control. Exact-attempt mutation is
-CAS- and operation-id-fenced; terminal goal/session lifecycle settles active
-evidence while retaining immutable revisions. Search never includes opening
-prompts, instructions, resources, tools, files, or full history, and no agent is
-required to search before working.
+Work claims are non-exclusive evidence, not repository reservations, ownership
+transfers, access grants or control triggers. Mutations require exact-attempt CAS/operation-id
+fences; terminal goal/session lifecycle settles active evidence, retaining immutable
+revisions. Search excludes opening prompts, instructions, resources, tools, files,
+and full history; agents need not search before working.
 
 Canonical: `packages/contracts/src/work-claims.ts`,
 `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, and
@@ -1067,8 +1066,8 @@ Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.t
 
 ## 6. Repository layout
 
-Bun workspaces span `apps/*`, `examples/*`, and `packages/*`, consuming internal
-packages from source. Connected Machine agent/relay use the Rust Cargo workspace
+Workspaces: `apps/*`, `examples/*`, `packages/*`. Bun consumes internal packages
+from source; Connected Machine agent/relay use Rust Cargo workspace
 `agent/`.
 
 `examples/vue-conversation/app` has its own npm lock and builds against the
@@ -1419,38 +1418,38 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 React root stays optional-peer-free; workbench subpaths register peer loaders
 (`packages/react/src/lib/workbench-peers.ts`, `scripts/react-root-package-contract.test.ts`).
 
-`ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed
-connection inventory and OAuth setup. Presentation filters never authorize
+`ConnectPanel`/`ConnectionDiscovery`/`McpConnectionCard` share console/embed
+connection inventory/OAuth setup. Presentation filters never authorize
 acquisition. Session-targeted setup preserves exact personal consent/tool
 selection; connection-only setup never mutates sessions.
-Canonical mechanics: [shared connection presentation](connection-presentation.md).
+Mechanics: [shared connection presentation](connection-presentation.md).
 
-`SessionConversation` includes feed, queue/actions, durable composer, model policy,
-tool approvals, attachments, human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
+`SessionConversation` includes feed/queue/actions, durable composer, model policy,
+tool approvals/attachments/human-input forms/history; `ChatComposer` is input-only. Sites supply Site-bound
 clients. Foreground/background share tokens; light embeds set iframe
 `data-og-theme="light"`.
 
-`conversationTimeline`, `SessionChrome`, `SessionCommands` and `ChatComposer`
+`conversationTimeline`/`SessionChrome`/`SessionCommands`/`ChatComposer`
 share reconciliation/controls. Commands mount only in open activity drawers.
 `SessionConnectionRequest` requires exact native identities, failing closed on
 missing/ambiguous matches. Selection/grant helpers: `packages/react/src`.
 
-Sites install exact SDK/React/Codemode/CLI versions via virtual skill file
-`package-versions.json`: source-manifest defaults or canary
-`OPENGENI_SITE_PACKAGE_VERSIONS`, without worker-directory writes.
+Sites' virtual Skill file `package-versions.json` pins exact SDK/React/Codemode/CLI
+versions: source-manifest defaults or canary `OPENGENI_SITE_PACKAGE_VERSIONS`;
+no worker-directory writes.
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased `/opt/opengeni/site-packages`
 archives locally, never in deployed images.
 
-`packages/react` owns timeline history. `use-session-events.ts` fences navigation by
-session/client lifetime independently of SSE reconnects; Web supplies events/session keys.
+Timeline history: `packages/react`. `use-session-events.ts` fences navigation by
+session/client lifetime, independently of SSE reconnects; Web supplies events/session keys.
 Overlap uses retained event identity; prepends may change partial-message row IDs.
 `timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx` corrects
 residual browser-anchor movement without resuming tip-follow. Upward input loads
 bounded older pages despite collapsed rows. Underfill preserves tails, offers
 earlier navigation at limits, never auto-pages forward; Jump to latest restores
-live tails. Normalization joins chunks by provider identity, completing each message
+live tails. Provider-identity chunk normalization completes each message
 once, in order, with `phase` (see `docs/run-lifecycle.md`).
-Pre-transfer metadata planning bounds batches to 256 events and default 1 MiB full-payload pages.
+Pre-transfer metadata planning caps batches at 256 events; full-payload pages default to 1 MiB.
 
 Lazy rail/Find search retained user/completed-assistant text through the browser SDK,
 excluding DOM/tools/reasoning/unfinished deltas. Rail providers preserve dialog state
@@ -1471,7 +1470,7 @@ Web lazily mounts questions, commands and attachments; text/repository chips sta
 eager. Suspense preserves transcripts; `test/e2e/session-lazy-panels.browser.e2e.ts`
 checks desktop/mobile chunks.
 
-Products use server-side SDK proxies and optional React surfaces; in-process
+Products use server-side SDK proxies/optional React surfaces; in-process
 embedding preserves boundaries.
 
 `.agents/skills/opengeni-client` guides implementation only. Product backends
@@ -1667,12 +1666,12 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 ## 11. Build, test, and release
 
-Toolchains: Bun/strict TypeScript and Cargo (Rust agent/relay).
-Unit tests/typechecking need no infrastructure; integration, end-to-end, browser,
-artifact-runtime and live lanes declare services/credentials.
+Toolchains: Bun/strict TypeScript; Cargo for Rust agent/relay.
+Unit tests/typechecking are infrastructure-free; integration/end-to-end/browser/artifact-runtime/live
+lanes declare services/credentials.
 
-Manifests, Changesets, CI and release scripts govern evidence-bound npm, image,
-Helm and Rust publication with retained source identity. Web builds target both CPUs.
+Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
+publication, retaining source identity. Web builds target both CPUs.
 `reconcile-production-packages.yml` reconciles npm availability independently of acceptance.
 
 Commands: [`../AGENTS.md`](../AGENTS.md), [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
@@ -1686,7 +1685,7 @@ Typed `@opengeni/deployment` profiles derive validated standalone/embedded
 environments, preflights, stack plans and runtime artifacts.
 
 Helm owns applications/integrations; cloud Terraform roots/stack wrappers compose
-external infrastructure. Bundled Postgres, Temporal, NATS and storage templates
+external infrastructure. Bundled Postgres/Temporal/NATS/storage templates
 serve development, CI, conformance and documented single-machine fixtures.
 They are not production defaults.
 
