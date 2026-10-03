@@ -12114,23 +12114,25 @@ export const InstallLibrarySkillRequest = z
   .strict();
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
-export const InstalledSkill = z.object({
-  skillReceipt: SkillWriteReceipt.optional(),
-  capabilityId: z.string().min(1),
-  pluginId: z.string().uuid(),
-  pluginVersionId: z.string().uuid(),
-  facetId: z.string().uuid(),
-  pluginInstallationId: z.string().uuid(),
-  facetInstallationId: z.string().uuid(),
-  installationVersion: z.number().int().positive(),
-  source: SkillInstallationSource,
-  version: z.string().min(1).max(96),
-  sourceUrl: z.string().url(),
-  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  name: z.string(),
-  status: z.literal("installed"),
-});
+export const InstalledSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    skillReceipt: SkillWriteReceipt.optional(),
+    capabilityId: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    facetId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    facetInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url(),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    name: z.string(),
+    status: z.literal("installed"),
+  }),
+);
 export type InstalledSkill = z.infer<typeof InstalledSkill>;
 
 export const CapabilityComponentOwner = z.object({
@@ -12849,21 +12851,23 @@ export const InstallPluginRequest = z
   .strict();
 export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
-export const InstalledPlugin = z
-  .object({
-    skillWrites: z.array(SkillWriteReceipt).optional(),
-    skillPublications: z.array(SkillPublicationReceipt).optional(),
-    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-    pluginKey: z.string().min(1),
-    version: z.string().min(1),
-    pluginId: z.string().uuid(),
-    pluginVersionId: z.string().uuid(),
-    pluginInstallationId: z.string().uuid(),
-    installationVersion: z.number().int().positive(),
-    componentCount: z.number().int().positive(),
-    status: z.literal("installed"),
-  })
-  .strict();
+export const InstalledPlugin = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      skillWrites: z.array(SkillWriteReceipt).optional(),
+      skillPublications: z.array(SkillPublicationReceipt).optional(),
+      skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
+      pluginKey: z.string().min(1),
+      version: z.string().min(1),
+      pluginId: z.string().uuid(),
+      pluginVersionId: z.string().uuid(),
+      pluginInstallationId: z.string().uuid(),
+      installationVersion: z.number().int().positive(),
+      componentCount: z.number().int().positive(),
+      status: z.literal("installed"),
+    })
+    .strict(),
+);
 export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
 
 export const PluginInstallationSummary = z
