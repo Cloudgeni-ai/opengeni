@@ -352,6 +352,7 @@ export const InsightsUsageResponse = z
     generatedAt: UtcDateTime,
     dataThrough: UtcDateTime.nullable(),
     totals: InsightsUsageMeasures,
+    /** Null for truly empty prior windows; ledger-only money survives missing call facts. */
     prior: InsightsUsageMeasures.nullable(),
     groupBy: InsightsUsageGroupBy,
     groups: z.array(InsightsUsageGroup),
@@ -424,11 +425,17 @@ export const InsightsUsageResponse = z
         message: "Bucket is automatic for the range",
       });
     }
-    if (value.prior?.calls === 0) {
+    // Model-call facts can soft-fail after money is recorded. Preserve those
+    // amounts without inventing calls or known token/class coverage.
+    if (
+      value.prior?.calls === 0 &&
+      value.prior.chargedMicros === 0 &&
+      value.prior.listMicros === 0
+    ) {
       context.addIssue({
         code: "custom",
         path: ["prior"],
-        message: "Zero-call prior must be null",
+        message: "Prior without recorded calls or money must be null",
       });
     }
     if (value.scope.kind === "workspace" && value.groupBy === "workspace") {

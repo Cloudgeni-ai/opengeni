@@ -60,6 +60,19 @@ function emptyMeasures(): InsightsUsageMeasures {
   };
 }
 
+function ledgerOnlyMeasures(chargedMicros: number, listMicros: number): InsightsUsageMeasures {
+  return {
+    ...emptyMeasures(),
+    chargedMicros,
+    listMicros,
+    byPayer: {
+      opengeni_credits: { ...zeroPayer, chargedMicros },
+      subscription: { ...zeroPayer },
+      own_key: { ...zeroPayer, listMicros },
+    },
+  };
+}
+
 function response(): InsightsUsageResponse {
   return {
     scope: { kind: "workspace", accountId: id, workspaceId: secondId },
@@ -412,7 +425,7 @@ describe("Insights response contracts", () => {
     expect(exact.listMicros).toBe(10);
   });
 
-  test("validates UTC/calendar dates, chronological windows, automatic bucket and zero-call prior", () => {
+  test("validates UTC/calendar dates, chronological windows, automatic bucket and prior coverage", () => {
     for (const generatedAt of [
       "not-a-date",
       "2026-02-30T00:00:00Z",
@@ -457,6 +470,86 @@ describe("Insights response contracts", () => {
         groupBy: "workspace",
       }).success,
     ).toBe(true);
+  });
+
+  test("preserves ledger-only prior money without inventing calls or known coverage", () => {
+    for (const [chargedMicros, listMicros] of [
+      [7, 0],
+      [0, 11],
+      [7, 11],
+      [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    ] as const) {
+      const prior = ledgerOnlyMeasures(chargedMicros, listMicros);
+      expect(InsightsUsageMeasures.parse(prior)).toEqual(prior);
+      const parsed = InsightsUsageResponse.parse({ ...response(), prior });
+      expect(parsed.prior).toEqual(prior);
+      expect(parsed.prior).toMatchObject({
+        calls: 0,
+        tokenKnownCalls: 0,
+        cacheKnownCalls: 0,
+        cacheWriteKnownCalls: 0,
+        listClassKnownCalls: 0,
+        pricedCalls: 0,
+        tokens: zeroTokens,
+        chargedMicros,
+        listMicros,
+        listByClassMicros: null,
+        listByClassApprox: false,
+      });
+    }
+  });
+
+  test("truly empty priors stay null and zero-length priors still reject ledger money", () => {
+    expect(InsightsUsageResponse.parse({ ...response(), prior: null }).prior).toBeNull();
+    expect(InsightsUsageResponse.safeParse({ ...response(), prior: emptyMeasures() }).success).toBe(
+      false,
+    );
+    for (const prior of [ledgerOnlyMeasures(7, 0), ledgerOnlyMeasures(0, 11)]) {
+      expect(
+        InsightsUsageResponse.safeParse({
+          ...response(),
+          priorWindowEnd: response().priorWindowStart,
+          prior,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("ledger-only priors cannot bypass safe amounts, payer totals or zero-call coverage", () => {
+    const prior = ledgerOnlyMeasures(7, 11);
+    for (const field of [
+      "tokenKnownCalls",
+      "cacheKnownCalls",
+      "cacheWriteKnownCalls",
+      "listClassKnownCalls",
+      "pricedCalls",
+    ]) {
+      expect(
+        InsightsUsageResponse.safeParse({ ...response(), prior: { ...prior, [field]: 1 } }).success,
+      ).toBe(false);
+    }
+    for (const amount of [-1, 0.5, 2 ** 53, Infinity, NaN]) {
+      for (const field of ["chargedMicros", "listMicros"]) {
+        expect(
+          InsightsUsageResponse.safeParse({
+            ...response(),
+            prior: { ...prior, [field]: amount },
+          }).success,
+        ).toBe(false);
+      }
+    }
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...response(),
+        prior: {
+          ...prior,
+          byPayer: {
+            ...prior.byPayer,
+            opengeni_credits: { ...zeroPayer, chargedMicros: 6 },
+          },
+        },
+      }).success,
+    ).toBe(false);
   });
 
   for (const [range, boundary, priorBoundary] of [
