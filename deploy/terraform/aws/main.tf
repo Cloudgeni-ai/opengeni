@@ -351,12 +351,31 @@ resource "aws_security_group" "postgres" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "postgres_from_vpc" {
-  count             = var.postgres.mode == "managed" ? 1 : 0
+  # Preserve the existing managed-VPC state address on upgrades.
+  count             = var.postgres.mode == "managed" && var.network.create_vpc ? 1 : 0
   security_group_id = aws_security_group.postgres[0].id
-  cidr_ipv4         = var.network.create_vpc ? var.network.cidr_block : "10.0.0.0/8"
+  cidr_ipv4         = var.network.cidr_block
   from_port         = 5432
   ip_protocol       = "tcp"
   to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "postgres_from_client_cidrs" {
+  for_each          = var.postgres.mode == "managed" && !var.network.create_vpc ? toset(var.postgres.allowed_client_cidrs) : toset([])
+  security_group_id = aws_security_group.postgres[0].id
+  cidr_ipv4         = each.value
+  from_port         = 5432
+  ip_protocol       = "tcp"
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_ingress_rule" "postgres_from_security_groups" {
+  for_each                     = var.postgres.mode == "managed" && !var.network.create_vpc ? toset(var.postgres.allowed_security_group_ids) : toset([])
+  security_group_id            = aws_security_group.postgres[0].id
+  referenced_security_group_id = each.value
+  from_port                    = 5432
+  ip_protocol                  = "tcp"
+  to_port                      = 5432
 }
 
 resource "aws_db_instance" "postgres" {
