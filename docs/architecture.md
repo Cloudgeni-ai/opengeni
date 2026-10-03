@@ -494,6 +494,9 @@ Home-compute selection proves establishment authority; invalid pointers reconcil
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Pending cancellation accepts non-dispatch only from call-scoped routing admission
+proof or typed provider rejection; issued helpers retain independent physical
+joins after original retained registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.

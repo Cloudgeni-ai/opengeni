@@ -1763,7 +1763,13 @@ reads on that helper's exact retained route, or exact durable terminal proof.
 The helper is never relaunched or cancelled with the original command's marker.
 Generic rejection, rendered errors, and unretained helper locators remain
 outcome-unknown and keep quiescence closed; only typed non-dispatch/rejection
-permits retrying the tombstone helper. The queue/chrome projection renders this
+or call-scoped proof from routing's pre-provider admission-refusal boundary
+permits retrying the tombstone helper. Routing preserves the original refusal
+error and reports proof separately for that invocation only; an error name,
+message, or the same error thrown after provider dispatch is never proof. A
+refused helper releases only its own join, not the original retained process's
+physical/durable settlement fence, and later trusted registration stops its
+ordinary-helper retries. The queue/chrome projection renders this
 period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.

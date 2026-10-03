@@ -8,6 +8,7 @@ import {
 import {
   RoutingMutationOutcomeUnknownError,
   renderRoutingMutationOutcomeUnknownToolResult,
+  type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
 import { sendCommandInput } from "./command-input";
 import {
@@ -96,7 +97,10 @@ type ActiveShellSession = {
 };
 
 type CommandCancellationSession = {
-  execCommand?(args: TurnSandboxCommandArgs): Promise<string>;
+  execCommand?(
+    args: TurnSandboxCommandArgs,
+    options?: RoutingCommandDispatchOptions,
+  ): Promise<string>;
   /** Resolve the physical cancellation primitive for the current route. A
    * routing proxy must answer from its resolved backend, not from the proxy's
    * always-present method surface or a pre-resolution PTY default. */
@@ -1808,13 +1812,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
   private async settlePendingShellCancellationCommand(state: PendingShellStart): Promise<unknown> {
     const command = pendingShellCancellationCommand(state);
+    const dispatchProof: { admissionRefusal?: { error: unknown } } = {};
     // SDK errorFunction may erase an exact retained locator. The same routing
     // session's direct exec preserves typed uncertainty and ordinary admission;
     // it does not bypass the writer fence or select a different backend.
     const observation = Promise.resolve()
       .then(async () =>
         state.session?.execCommand
-          ? await state.session.execCommand(shellHelperArgs(command))
+          ? await state.session.execCommand(shellHelperArgs(command), {
+              onMutationAdmissionRefused: (error) => {
+                dispatchProof.admissionRefusal = { error };
+              },
+            })
           : await state.execInvoke(state.runContext, shellHelperInput(command), undefined),
       )
       .then(
@@ -1846,12 +1855,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     if (providerCancellation) await providerCancellation;
     if (
       outcome.kind === "rejected" &&
-      (outcome.error instanceof ProviderCommandStartRejectedError ||
+      ((dispatchProof.admissionRefusal !== undefined &&
+        Object.is(dispatchProof.admissionRefusal.error, outcome.error)) ||
+        outcome.error instanceof ProviderCommandStartRejectedError ||
         outcome.error instanceof ModalCommandStartNotDispatchedError ||
         outcome.error instanceof ModalCommandStartPreDispatchUnavailableError)
     ) {
-      // Typed pre-dispatch/authoritative rejection proves THIS helper has no
-      // process. Generic transport rejection or a rendered error does not.
+      // Call-scoped routing admission proof or typed provider rejection proves
+      // THIS helper has no process. Error names/messages alone, another call's
+      // refusal, generic transport rejection and rendered errors do not. This
+      // releases only this helper join; exact original settlement still owns
+      // quiescence, and a later retained handoff stops ordinary-helper retries.
       throw outcome.error;
     }
     if (
