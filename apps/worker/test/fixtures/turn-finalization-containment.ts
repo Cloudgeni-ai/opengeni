@@ -53,7 +53,7 @@ const deps = {
   observability,
   requestWorkerDrain: () => containment.request(),
   turnFinalizationTimeoutMs: 25,
-  leases: { codex: { held: false, stopHeartbeat() {} }, xai: { held: false, stopHeartbeat() {} } },
+  leases: { codex: { held: false, stopHeartbeat() {} }, xai: { held: false, stopHeartbeat() {} }, claude: { held: false, stopHeartbeat() {} } },
   machineOpObserver: { drainEvents: () => [] },
   stopLeaseHeartbeat() {},
   turnCompletionMemoryCollector: { schedule() {} },
