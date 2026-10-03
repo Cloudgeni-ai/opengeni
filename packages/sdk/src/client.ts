@@ -5,6 +5,16 @@ import type {
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
 } from "@opengeni/contracts";
+import {
+  insightsUsageQueryString,
+  type WorkspaceInsightsUsageOptions,
+  type OrganizationInsightsUsageOptions,
+  type WorkspaceInsightsCallsOptions,
+  type OrganizationInsightsCallsOptions,
+  type InsightsCallsScope,
+  type InsightsUsageResponse,
+  type InsightsCallsResponse,
+} from "./insights-usage";
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
   SessionMessageSearchRequest,
@@ -8820,6 +8830,65 @@ export class OpenGeniClient {
         ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
       { signal: options.signal },
+    );
+  }
+
+  /** Shared usage under the existing workspace access gate. */
+  async getWorkspaceInsightsUsage(
+    workspaceId: string,
+    options: WorkspaceInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Shared usage under the existing organization access gate. */
+  async getOrganizationInsightsUsage(
+    accountId: string,
+    options: OrganizationInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(accountId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Visible calls only; a filter never grants access to hidden call facts. */
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "workspace" }>,
+    options?: WorkspaceInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "organization" }>,
+    options?: OrganizationInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: InsightsCallsScope,
+    options: OrganizationInsightsCallsOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsCallsResponse> {
+    const path =
+      scope.kind === "workspace"
+        ? `/v1/workspaces/${encodeURIComponent(scope.workspaceId)}/insights/calls`
+        : `/v1/organizations/${encodeURIComponent(scope.accountId)}/insights/calls`;
+    return await this.requestJson(
+      "GET",
+      `${path}${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
     );
   }
 

@@ -7922,7 +7922,12 @@
   "ingress": [
     "POST /v1/webhooks/automations/:endpointId"
   ],
-  "unmatchedSdkCalls": [],
+  "unmatchedSdkCalls": [
+    "GET /v1/organizations/:p/insights/calls (OpenGeniClient.listInsightsCalls)",
+    "GET /v1/organizations/:p/insights/usage (OpenGeniClient.getOrganizationInsightsUsage)",
+    "GET /v1/workspaces/:p/insights/calls (OpenGeniClient.listInsightsCalls)",
+    "GET /v1/workspaces/:p/insights/usage (OpenGeniClient.getWorkspaceInsightsUsage)"
+  ],
   "events": {
     "SessionEventType": [
       "agent.message.completed",
@@ -27344,6 +27349,29 @@
       "toHonoHandler": "value",
       "WebHandler": "type"
     },
+    "@opengeni/sdk/insights-usage": {
+      "InsightsCall": "type",
+      "InsightsCallsResponse": "type",
+      "InsightsCallsScope": "type",
+      "InsightsUsageClassMicros": "type",
+      "InsightsUsageFacets": "type",
+      "InsightsUsageGroup": "type",
+      "InsightsUsageGroupBy": "type",
+      "InsightsUsageMeasures": "type",
+      "InsightsUsagePayer": "type",
+      "insightsUsageQueryString": "value",
+      "InsightsUsageRange": "type",
+      "InsightsUsageResponse": "type",
+      "InsightsUsageScope": "type",
+      "InsightsUsageSeriesPoint": "type",
+      "InsightsUsageSource": "type",
+      "InsightsUsageTokens": "type",
+      "InsightsUsageWindowOptions": "type",
+      "OrganizationInsightsCallsOptions": "type",
+      "OrganizationInsightsUsageOptions": "type",
+      "WorkspaceInsightsCallsOptions": "type",
+      "WorkspaceInsightsUsageOptions": "type"
+    },
     "@opengeni/sdk/interaction": {
       "AttachedBrowserBridge": "type",
       "AttachedBrowserDevice": "type",
@@ -29901,6 +29929,7 @@
       "getOrganizationApiKey",
       "getOrganizationClaudeSubscriptionAccountUsage",
       "getOrganizationClaudeSubscriptionUsage",
+      "getOrganizationInsightsUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationModelUsage",
       "getOrganizationRecovery",
@@ -29941,6 +29970,7 @@
       "getWorkspaceClaudeSubscriptionUsage",
       "getWorkspaceCredentialProvider",
       "getWorkspaceInsights",
+      "getWorkspaceInsightsUsage",
       "getWorkspaceInstructionPolicyRevision",
       "getWorkspaceLearningHistory",
       "getWorkspaceModelAccessPolicy",
@@ -29998,6 +30028,7 @@
       "listGoalRevisionPage",
       "listGoalRevisions",
       "listHumanInputRequests",
+      "listInsightsCalls",
       "listInstalledPlugins",
       "listInstalledSkills",
       "listIntegrationDefinitions",
