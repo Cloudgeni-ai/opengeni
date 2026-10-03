@@ -119,6 +119,111 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test.each(["credits", "free"] as const)(
+    "stock deployment %s presentation is neutral without changing model truth",
+    async (cost) => {
+      const models: ClientModel[] = [
+        {
+          ...MODELS[0]!,
+          id: "deployment/model",
+          label: "Deployment model",
+          source: "opengeni",
+          provider: "openai",
+          cost,
+        },
+        MODELS[1]!,
+      ];
+      const before = JSON.stringify(models);
+      const container = await mount(
+        <>
+          <ModelPolicyPicker
+            models={models}
+            model="deployment/model"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />
+          <ModelPolicyPickerMenu
+            models={models}
+            model="deployment/model"
+            effort="low"
+            latencyMode="standard"
+            onModelChange={() => {}}
+            onEffortChange={() => {}}
+            onLatencyModeChange={() => {}}
+          />
+        </>,
+      );
+      expect(container.querySelector('section[aria-label="Models"]')).not.toBeNull();
+      expect(
+        container.querySelector('[role="img"][aria-label="Models"] .lucide-sparkles'),
+      ).not.toBeNull();
+      expect(container.querySelector('svg[viewBox="0 0 140 133"]')).toBeNull();
+      expect(container.textContent).not.toContain("Opengeni");
+      expect(
+        container.querySelector('section[aria-label="Codex"] svg[viewBox="0 0 24 24"]'),
+      ).not.toBeNull();
+      expect(container.textContent).toContain("ChatGPT / Codex plan");
+      const choice = container.querySelector(
+        '[data-testid="model-picker-choice-deployment/model"]',
+      )!;
+      expect(choice.textContent?.includes("Free")).toBe(cost === "free");
+      expect(JSON.stringify(models)).toBe(before);
+    },
+  );
+
+  test("neutral defaults preserve external identities and caller-provided row labels", async () => {
+    const rows = projectClientModelRows([
+      { ...MODELS[0]!, id: "deployment/model", source: "opengeni", cost: "credits" },
+      { ...MODELS[0]!, id: "external/model", source: "opengeni", provider: "custom" },
+      MODELS[1]!,
+    ]).map((row) =>
+      row.id === "external/model"
+        ? { ...row, billingClass: "external" as const, billingClassLabel: "External" }
+        : row.billingClass === "opengeni_credits"
+          ? { ...row, billingClassLabel: "Host models" }
+          : row,
+    );
+    const catalogRows = rows.map((row) => ({
+      ...row,
+      catalog: {
+        ...row.catalog,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: row.selectable,
+          reason: null,
+          checkedAt: null,
+        },
+      },
+    }));
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        rows={catalogRows}
+        model="deployment/model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('section[aria-label="Host models"]')).not.toBeNull();
+    expect(
+      container.querySelector(
+        'section[aria-label="External"] [data-testid="billing-class-icon-external"] svg',
+      ),
+    ).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Codex"]')).not.toBeNull();
+  });
+
   test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
     const rows = projectClientModelRows([
       {
@@ -305,7 +410,7 @@ describe("ModelPolicyPicker", () => {
         [...container.querySelectorAll("section")].map((section) =>
           section.getAttribute("aria-label"),
         ),
-      ).toEqual(["Codex", "Opengeni"]);
+      ).toEqual(["Codex", "Models"]);
       expect(
         container.querySelector('[data-testid="model-picker-choice-free"] [aria-label="Selected"]'),
       ).toBeTruthy();
@@ -363,7 +468,7 @@ describe("ModelPolicyPicker", () => {
       [...container.querySelectorAll("section")].map((section) =>
         section.getAttribute("aria-label"),
       ),
-    ).toEqual(["Opengeni", "Codex"]);
+    ).toEqual(["Models", "Codex"]);
     expect(calls).toEqual([]);
   });
 
@@ -538,7 +643,7 @@ describe("ModelPolicyPicker", () => {
         onLatencyModeChange={() => {}}
       />,
     );
-    const group = container.querySelector('section[aria-label="Opengeni"]')!;
+    const group = container.querySelector('section[aria-label="Models"]')!;
     expect(group.querySelectorAll("button").length).toBe(5);
     expect(container.querySelector('section[aria-label="External"]')).toBeNull();
     for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
@@ -1075,7 +1180,7 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
-  test("renders the OpenGeni mark for an anonymous deployment provider", async () => {
+  test("renders the neutral Models mark for an anonymous deployment provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
@@ -1099,6 +1204,7 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
     ).toBeTruthy();
+    expect(container.querySelector('[aria-label="Models"] .lucide-sparkles')).not.toBeNull();
   });
 
   test("badges only explicitly free deployment models", async () => {

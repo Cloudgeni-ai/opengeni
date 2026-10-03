@@ -15,12 +15,57 @@ import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 let previewModel: Record<string, unknown> | null = null;
+let previewCouponRedeemedAt: number | null = null;
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
   },
-  async createBillingCheckout({ amountUsd }: { amountUsd: number }) {
-    return { url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}` };
+  async createBillingCheckout({
+    amountUsd,
+    promotionCode,
+  }: {
+    amountUsd?: number;
+    promotionCode?: string;
+  }) {
+    if (promotionCode) {
+      // `LAUNCH100` is a $100 code here; anything else is refused like Stripe would.
+      if (promotionCode.trim().toUpperCase() !== "LAUNCH100") {
+        throw new Error("That code isn't valid or has expired.");
+      }
+      previewCouponRedeemedAt = Date.now();
+      return {
+        checkoutSessionId: "cs_preview_coupon",
+        url: `${window.location.origin}/dev/onboarding?view=checkout&amount=100&coupon=1`,
+        amountUsd: 100,
+      };
+    }
+    return {
+      checkoutSessionId: "cs_preview_purchase",
+      url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}`,
+    };
+  },
+  // The coupon's credits "land" two seconds after redeeming.
+  async getBillingCheckout(checkoutSessionId: string) {
+    const granted =
+      previewCouponRedeemedAt !== null && Date.now() - previewCouponRedeemedAt > 2_000;
+    return {
+      checkoutSessionId,
+      status: granted ? "complete" : "open",
+      credit: {
+        state: granted ? "granted" : "pending",
+        amountMicros: 100_000_000,
+        currency: "usd",
+        free: true,
+      },
+      balance: granted
+        ? {
+            accountId: "preview-organization",
+            balanceMicros: 110_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          }
+        : null,
+    };
   },
   async codexConnectStart() {
     const state = crypto.randomUUID();
@@ -113,6 +158,24 @@ const previewMethods = {
   async saveNewSessionDraft() {
     return previewMethods.getNewSessionDraft();
   },
+  // Developer setup ("Add AI agents to my product"). Nothing real is created.
+  async createOrganizationApiKey() {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return {
+      apiKey: { id: crypto.randomUUID(), prefix: "ogk_preview12" },
+      token: "ogk_preview12_NOT-A-REAL-KEY-local-preview-only",
+    };
+  },
+  async createWorkspace() {
+    return { id: "preview-setup-workspace" };
+  },
+  async createVariableSet() {
+    return { id: "preview-variable-set" };
+  },
+  async createSession() {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { id: "preview-setup-session" };
+  },
 };
 const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
 
@@ -183,7 +246,7 @@ function previewStartingCredits() {
 }
 
 function ModelPreview({ organization = false }: { organization?: boolean }) {
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState<false | { sessionId?: string }>(false);
   const includedModel = previewIncludedModel();
   const startingCredits = previewStartingCredits();
   if (completed)
@@ -193,8 +256,9 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
           <p className="text-xs text-fg-subtle">LOCAL PREVIEW</p>
           <h1 className="text-xl font-semibold">Onboarding complete</h1>
           <p className="text-sm text-fg-muted">
-            In the app, you now arrive in your Personal workspace. The connected model is selected
-            for your next chat.
+            {completed.sessionId
+              ? "In the app, you now arrive in the setup chat, in the Opengeni setup workspace."
+              : "In the app, you now arrive in your Personal workspace. The connected model is selected for your next chat."}
           </p>
           <Button onClick={() => setCompleted(false)}>Try another option</Button>
           <Button asChild variant="ghost">
@@ -214,7 +278,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       previewState="required"
       activeEmail="preview@example.test"
       onSignOut={() => window.location.assign("/dev/onboarding")}
-      onComplete={() => setCompleted(true)}
+      onComplete={(destination) => setCompleted(destination ?? {})}
     />
   ) : (
     <ModelAccessOnboardingPanel
@@ -227,7 +291,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       supergrokEnabled
       includedModel={includedModel}
       startingCredits={startingCredits}
-      onComplete={() => setCompleted(true)}
+      onComplete={() => setCompleted({})}
     />
   );
 }

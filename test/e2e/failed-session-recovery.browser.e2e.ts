@@ -88,7 +88,15 @@ for (const unsupported of [true, false]) {
       ]);
       const picker = page.getByRole("button", { name: "Model and effort", exact: true });
       await picker.waitFor();
-      expect(await banner.locator("details").count()).toBe(0);
+      const details = banner.locator("details");
+      expect(await details.count()).toBe(unsupported ? 0 : 1);
+      if (!unsupported) {
+        expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+        expect(await details.locator("p").textContent()).toBe("Connection interrupted.");
+        expect(await banner.locator("span").first().textContent()).toBe(
+          "The session stopped unexpectedly.",
+        );
+      }
       expect(await banner.getByRole("button", { name: /Choose/ }).count()).toBe(0);
       if (unsupported) {
         expect(await banner.textContent()).toBe(
@@ -580,6 +588,33 @@ async function installApi(
     if (path.endsWith("/models") || path.endsWith("/model-catalog"))
       return json({
         models: [
+          // The unsupported lane's session model is absent from the catalog,
+          // exactly as for a model removed from it; other lanes list it.
+          ...(unsupported
+            ? []
+            : [
+                {
+                  id: "gpt-5.6-sol",
+                  label: "GPT-5.6 Sol",
+                  provider: "openai",
+                  providerLabel: "OpenAI",
+                  api: "responses",
+                  source: "opengeni",
+                  cost: "credits",
+                  credentialReadiness: {
+                    status: "ready",
+                    reason: null,
+                    basis: "configuration",
+                    checkedAt: null,
+                  },
+                  availability: {
+                    status: "available",
+                    selectable: true,
+                    reason: null,
+                    checkedAt: null,
+                  },
+                },
+              ]),
           {
             id: "supported-model",
             label: "Supported model",

@@ -24,7 +24,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
-  opengeni_credits: "Opengeni",
+  opengeni_credits: "Models",
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",

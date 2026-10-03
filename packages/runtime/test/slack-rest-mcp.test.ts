@@ -464,7 +464,7 @@ describe("Slack API-backed MCP pilot", () => {
     },
   );
 
-  test.each(["http", "json", "transport", "body", "server"])(
+  test.each(["http", "json", "transport", "body", "server", "internal_error", "fatal_error"])(
     "never replays a submitted mutation after %s failure",
     async (failure) => {
       const refreshes: boolean[] = [];
@@ -482,6 +482,8 @@ describe("Slack API-backed MCP pilot", () => {
           if (failure === "http") return new Response(null, { status: 401 });
           if (failure === "json") return Response.json({ ok: false, error: "token_expired" });
           if (failure === "body") return new Response("<invalid response>");
+          if (failure === "internal_error" || failure === "fatal_error")
+            return Response.json({ ok: false, error: failure });
           return Response.json({ ok: false, error: "fatal_error" }, { status: 503 });
         },
       });
@@ -491,9 +493,57 @@ describe("Slack API-backed MCP pilot", () => {
         code: "slack_mutation_outcome_unknown",
         outcome: "unknown",
         retryable: false,
+        message: expect.stringContaining("Check Slack before sending again."),
       });
       expect(sends).toBe(1);
       expect(refreshes).toEqual([false, false]);
+    },
+  );
+
+  test.each(["channel_not_found", "missing_scope"])(
+    "keeps a definitive mutation rejection %s as an ordinary provider error",
+    async (providerError) => {
+      let sends = 0;
+      const refreshes: boolean[] = [];
+      const slack = server({
+        resolveCredential: async (input) => {
+          refreshes.push(input.forceRefresh === true);
+          return { status: "ok", connectionId: "conn_1", headers: {}, grantedScopes: allScopes };
+        },
+        fetchImpl: async (url) => {
+          if (method(url) === "auth.test") return Response.json(identity);
+          sends++;
+          return Response.json({ ok: false, error: providerError });
+        },
+      });
+      const result = await slack.callToolResult("slack_send_message", {
+        channel: "C123",
+        text: "hello",
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(providerError);
+      expect(result.content[0].text).not.toContain("outcome is uncertain");
+      expect(sends).toBe(1);
+      expect(refreshes).toEqual([false, false]);
+    },
+  );
+
+  test.each(["internal_error", "fatal_error"])(
+    "keeps a safe-read %s as an ordinary provider error",
+    async (providerError) => {
+      let reads = 0;
+      const slack = server({
+        fetchImpl: async (url) => {
+          if (method(url) === "auth.test") return Response.json(identity);
+          reads++;
+          return Response.json({ ok: false, error: providerError });
+        },
+      });
+      const result = await slack.callToolResult("slack_list_users", {});
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(providerError);
+      expect(result.content[0].text).not.toContain("outcome is uncertain");
+      expect(reads).toBe(1);
     },
   );
 

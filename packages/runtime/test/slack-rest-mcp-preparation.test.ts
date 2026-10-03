@@ -137,93 +137,98 @@ describe("Slack bridge through the ordinary attempt gateway", () => {
     }
   });
 
-  test("ordinary human approval gates a send and an ambiguous result settles uncertain", async () => {
-    let approved = false;
-    let sends = 0;
-    const settlements: unknown[] = [];
-    const settings = testSettings({
-      mcpServers: [
-        {
-          id: "slack",
-          url: "https://mcp.slack.com/mcp",
-          connectionRef: {
-            providerDomain: "slack.com",
-            kind: "oauth2",
-            subjectScope: "subject",
-            connectionId: "personal",
-          },
-          cacheToolsList: false,
-        },
-      ],
-    });
-    const hooks: ConnectorActionPolicyHooks = {
-      prepare: async (call) => {
-        expect(call.connectionId).toBe("personal");
-        expect(call.toolName).toBe("slack_send_message");
-        return { managed: true, decision: "ask" };
-      },
-      begin: async () =>
-        approved
-          ? { allowed: true, managed: true, requestId: "send-request" }
-          : {
-              allowed: false,
-              managed: true,
-              requestId: "send-request",
-              reason: "approval_required",
+  test.each(["transport", "internal_error", "fatal_error"])(
+    "ordinary human approval gates a send and an ambiguous %s result settles uncertain",
+    async (failure) => {
+      let approved = false;
+      let sends = 0;
+      const settlements: unknown[] = [];
+      const settings = testSettings({
+        mcpServers: [
+          {
+            id: "slack",
+            url: "https://mcp.slack.com/mcp",
+            connectionRef: {
+              providerDomain: "slack.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+              connectionId: "personal",
             },
-      complete: async (result) => {
-        settlements.push(result);
-      },
-    };
-    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "slack" }], {
-      ...scope,
-      connectorActionPolicy: hooks,
-      resolveCredential: async () => ({
-        status: "ok",
-        connectionId: "personal",
-        headers: { authorization: "Bearer personal" },
-        grantedScopes: ["chat:write"],
-      }),
-      mcpFetchImpl: async (url) => {
-        if (new URL(url.toString()).pathname.endsWith("auth.test"))
-          return Response.json({ ok: true, team_id: "T123", user_id: "U123" });
-        sends++;
-        throw new Error("Provider transport failed after submission");
-      },
-    });
-    const agent = buildOpenGeniAgent(settings, [], {
-      mcpServers: prepared.mcpServers,
-      resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
-      connectorActionPolicy: hooks,
-    });
-    try {
-      const sdkTool = (await agent.getMcpTools(new RunContext())).find(
-        (tool) => tool.type === "function" && tool.name === "slack__slack_send_message",
-      );
-      if (!sdkTool || sdkTool.type !== "function") throw new Error("Slack send tool missing");
-      expect(
-        await sdkTool.needsApproval(
+            cacheToolsList: false,
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          expect(call.connectionId).toBe("personal");
+          expect(call.toolName).toBe("slack_send_message");
+          return { managed: true, decision: "ask" };
+        },
+        begin: async () =>
+          approved
+            ? { allowed: true, managed: true, requestId: "send-request" }
+            : {
+                allowed: false,
+                managed: true,
+                requestId: "send-request",
+                reason: "approval_required",
+              },
+        complete: async (result) => {
+          settlements.push(result);
+        },
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "slack" }], {
+        ...scope,
+        connectorActionPolicy: hooks,
+        resolveCredential: async () => ({
+          status: "ok",
+          connectionId: "personal",
+          headers: { authorization: "Bearer personal" },
+          grantedScopes: ["chat:write"],
+        }),
+        mcpFetchImpl: async (url) => {
+          if (new URL(url.toString()).pathname.endsWith("auth.test"))
+            return Response.json({ ok: true, team_id: "T123", user_id: "U123" });
+          sends++;
+          if (failure === "transport")
+            throw new Error("Provider transport failed after submission");
+          return Response.json({ ok: false, error: failure });
+        },
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const sdkTool = (await agent.getMcpTools(new RunContext())).find(
+          (tool) => tool.type === "function" && tool.name === "slack__slack_send_message",
+        );
+        if (!sdkTool || sdkTool.type !== "function") throw new Error("Slack send tool missing");
+        expect(
+          await sdkTool.needsApproval(
+            new RunContext(),
+            { channel: "C123", text: "hello" },
+            "call-send",
+          ),
+        ).toBe(true);
+        expect(sends).toBe(0);
+        approved = true;
+        const output = await sdkTool.invoke(
           new RunContext(),
-          { channel: "C123", text: "hello" },
-          "call-send",
-        ),
-      ).toBe(true);
-      expect(sends).toBe(0);
-      approved = true;
-      const output = await sdkTool.invoke(
-        new RunContext(),
-        JSON.stringify({ channel: "C123", text: "hello" }),
-        {
-          toolCall: { callId: "call-send" },
-        } as any,
-      );
-      expect(JSON.stringify(output)).toContain('"isError":true');
-      expect(JSON.stringify(output)).toContain("Do not retry automatically");
-      expect(JSON.stringify(output)).not.toContain("Please try again");
-      expect(sends).toBe(1);
-      expect(settlements).toEqual([{ requestId: "send-request", outcome: "uncertain" }]);
-    } finally {
-      await prepared.close();
-    }
-  });
+          JSON.stringify({ channel: "C123", text: "hello" }),
+          {
+            toolCall: { callId: "call-send" },
+          } as any,
+        );
+        expect(JSON.stringify(output)).toContain('"isError":true');
+        expect(JSON.stringify(output)).toContain("Do not retry automatically");
+        expect(JSON.stringify(output)).not.toContain("Please try again");
+        expect(sends).toBe(1);
+        expect(settlements).toEqual([{ requestId: "send-request", outcome: "uncertain" }]);
+      } finally {
+        await prepared.close();
+      }
+    },
+  );
 });

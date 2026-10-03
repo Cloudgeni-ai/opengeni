@@ -1,6 +1,7 @@
 import { Loader2Icon, RotateCwIcon } from "lucide-react";
 
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { useErrorMessage } from "../lib/error-message";
 
 type QueueStateProps = {
   queue: UseTurnQueueResult;
@@ -60,6 +61,7 @@ export function QueueErrorAlert({
   queue,
   dividerBefore = false,
 }: QueueStateProps & { dividerBefore?: boolean }) {
+  const formatError = useErrorMessage();
   return (
     <div className={`${dividerBefore ? "border-t border-border" : ""} p-2`}>
       <div
@@ -74,7 +76,7 @@ export function QueueErrorAlert({
           data-testid="queue-error-message"
           dir="auto"
         >
-          {(queue.mutationError ?? queue.error)?.message}
+          {formatError(queue.mutationError ?? queue.error)}
         </span>
         <button
           type="button"

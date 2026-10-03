@@ -253,6 +253,10 @@ Capability modules (current size in characters):
   doctrine (~5.4k of CORE).
 - **skills** (~1k), **admin** or integration setup (~1k), plus the already
   conditional variable-set, rig, codemode, and code-search directives.
+- **media**: runtime/provider image and video discovery, separate from integration
+  setup. Capability enablement permits discovery; it does not assert attachment.
+  Always-on runtime mechanics explains progressive schemas, focused searches,
+  exhaustive listing, and literal-prefix recovery without widening authority.
 
 Two additions the legacy text lacked, both shipped in the modular composer
 (`packages/runtime/src/agent-instructions/`):

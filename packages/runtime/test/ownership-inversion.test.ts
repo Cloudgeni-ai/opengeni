@@ -683,13 +683,22 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     }
     await result.completed;
 
-    // The clone/seed command hit the PROVIDED box exactly once, before the turn —
-    // carrying both the off-manifest token seed and the clone script.
-    const cloneExecs = execCalls.filter((c) => c.cmd.includes("clone_repository"));
+    // The clone/seed program is transferred to the PROVIDED box, then executed
+    // exactly once before the turn. Inspect the decoded program, not its transport.
+    const chunks = execCalls.flatMap(({ cmd }) => {
+      const match = cmd.match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
+      return match ? [match[1]!] : [];
+    });
+    expect(chunks.length).toBeGreaterThan(0);
+    const cloneProgram = Buffer.from(chunks.join(""), "base64").toString("utf8");
+    const cloneExecs = execCalls.filter((c) =>
+      c.cmd.includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    );
     expect(cloneExecs.length).toBe(1);
-    expect(cloneExecs[0]!.cmd).toContain("OPENGENI_GIT_TOKEN_SEED");
-    expect(cloneExecs[0]!.cmd).toContain("seed-token-e2e");
-    expect(cloneExecs[0]!.cmd).toContain("repos/example/repo");
+    expect(cloneProgram).toContain("clone_repository");
+    expect(cloneProgram).toContain("OPENGENI_GIT_TOKEN_SEED");
+    expect(cloneProgram).toContain("seed-token-e2e");
+    expect(cloneProgram).toContain("repos/example/repo");
   });
 
   test("connected machine (effective backend selfhosted): NO platform setup exec touches the user's box", async () => {

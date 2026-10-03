@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
+import { AnthropicRequestError } from "./anthropic-request-error";
 import {
   protocol,
   Usage,
@@ -9,12 +10,39 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
 
 export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
+}
+
+/** Preserve documented spend proof, without retaining an arbitrary error body. */
+function anthropicSpendLimitCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
+  const value = error as Json;
+  if (
+    value.type === "rate_limit_error" &&
+    value.details?.error_code === "enforced_spend_limit_reached"
+  )
+    return "enforced_spend_limit_reached";
+  if (
+    value.type === "invalid_request_error" &&
+    typeof value.message === "string" &&
+    /^You have reached your specified (?:workspace )?API usage limits\b/.test(value.message)
+  )
+    return "enforced_spend_limit_reached";
+  return undefined;
+}
+
+function anthropicHttpSpendLimitCode(detail: string): string | undefined {
+  try {
+    return anthropicSpendLimitCode(JSON.parse(detail)?.error);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Closed provider rejections carry authored copy, never arbitrary response text. */
@@ -301,6 +329,47 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
   return messages;
 }
 
+/**
+ * Compaction retains user/system inputs but removes their intervening assistant
+ * replies. Anthropic's system beta requires a system message after a user and
+ * before an assistant (or at the end), not user -> system -> user. Coalesce each
+ * user phase and its system blocks at that boundary, retaining their own roles,
+ * exact content and relative order. A machine-only continuation after an
+ * assistant needs a request-local input anchor; it is not a new human message.
+ * Never move a system across an assistant.
+ */
+function placeConversationSystems(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let systems: Json[] = [];
+  const flush = () => {
+    if (!systems.length) return;
+    if (result.at(-1)?.role !== "user")
+      result.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "OpenGeni continuation (machine-origin input; no new human message).",
+          },
+        ],
+      });
+    result.push({ role: "system", content: systems });
+    systems = [];
+  };
+  for (const message of messages) {
+    if (message.role === "system") {
+      systems.push(...message.content);
+      continue;
+    }
+    if (message.role === "assistant") flush();
+    const previous = result.at(-1);
+    if (previous?.role === message.role) previous.content.push(...message.content);
+    else result.push(message);
+  }
+  flush();
+  return result;
+}
+
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
@@ -330,16 +399,16 @@ export function buildAnthropicRequest(
       );
     return matches[0]![0];
   };
-  const messages = anthropicMessages(request.input);
+  let messages = anthropicMessages(request.input);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   const system = request.systemInstructions
     ? ([{ type: "text", text: request.systemInstructions }] as Json[])
     : [];
-  // Even with mid-conversation-system enabled, initial system/developer
-  // instructions belong in the top-level system field. Keep later system
-  // messages at their original history position.
+  // Initial system/developer instructions belong in the top-level field. Later
+  // systems keep their authority within the same assistant-delimited phase.
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
+  messages = placeConversationSystems(messages);
   const tools: Json[] = request.tools.map((tool) => {
     if (tool.type !== "function")
       throw new AnthropicProtocolError(`Claude does not support the ${tool.type} tool transport`);
@@ -601,12 +670,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
@@ -634,14 +705,25 @@ export class AnthropicMessagesModel implements Model {
         : response.status === 401
           ? "Claude credentials expired or were revoked. Replace the key or setup token in Models."
           : "Claude request failed (HTTP " + response.status + ")";
-      throw Object.assign(new Error(message), {
-        status: response.status,
-        request_id: response.headers.get("request-id"),
-        headers: response.headers.has("retry-after")
-          ? { "retry-after": response.headers.get("retry-after")! }
-          : {},
-        code: contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
-      });
+      let source: unknown;
+      try {
+        source = JSON.parse(detail)?.error;
+      } catch {
+        // Malformed, truncated or non-JSON bodies retain structural status only.
+      }
+      throw new AnthropicRequestError(
+        message,
+        response.status,
+        contextExceeded
+          ? "context_length_exceeded"
+          : response.status === 402
+            ? "anthropic_billing_error"
+            : response.status === 400 || response.status === 429
+              ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
+              : "anthropic_http_error",
+        source,
+        response.headers,
+      );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
     return response;
@@ -674,23 +756,54 @@ export class AnthropicMessagesModel implements Model {
         const statuses: Record<string, number> = {
           invalid_request_error: 400,
           authentication_error: 401,
+          billing_error: 402,
           permission_error: 403,
           not_found_error: 404,
+          conflict_error: 409,
           request_too_large: 413,
           rate_limit_error: 429,
           api_error: 500,
+          timeout_error: 504,
           overloaded_error: 529,
         };
-        const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
-        const rejection = providerRejection(status, event.error, response.headers);
+        // A new error type is not evidence of a server failure. Never invent
+        // a retryable status for an unknown terminal; completed tools stay saved.
+        const status =
+          typeof kind === "string" && Object.hasOwn(statuses, kind) ? statuses[kind] : undefined;
+        const rejection =
+          status !== undefined
+            ? providerRejection(status, event.error, response.headers)
+            : undefined;
         if (rejection) throw rejection;
-        throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
-          status,
-          code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+        const spendCode =
+          status === 400 || status === 429 ? anthropicSpendLimitCode(event.error) : undefined;
+        const code =
+          spendCode ??
+          (status === 402
+            ? "anthropic_billing_error"
+            : status === 429
+              ? "rate_limit_exceeded"
+              : "anthropic_stream_error");
+        const failureMessage =
+          status === undefined
+            ? "Claude returned an unrecognized stream error. Automatic retries stopped."
+            : `Claude stream failed (HTTP ${status})`;
+        throw Object.assign(new Error(failureMessage), {
+          ...(status !== undefined ? { status } : {}),
+          code,
           request_id: response.headers.get("request-id"),
           headers: response.headers.has("retry-after")
             ? { "retry-after": response.headers.get("retry-after")! }
             : {},
+          // Keep the structural stream wrapper stable for provider rejection
+          // guards while the typed cause keeps provider text private.
+          cause: new AnthropicRequestError(
+            failureMessage,
+            status,
+            code,
+            event.error,
+            response.headers,
+          ),
         });
       }
       switch (event.type) {

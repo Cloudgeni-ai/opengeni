@@ -82,6 +82,14 @@ invalid Unicode are rejected. A native-looking ID does not impersonate a native
 user. Workspace mapping identity passed to `ensureWorkspace` is a separate
 concept from this acting-user identity.
 
+Use an immutable database/auth subject ID, never an editable username, email or
+display name. Renaming must keep the same external ID and private history;
+reassigning a username must not reassign the previous actor's identity. History
+collision on username reuse is conditional on the host allowing reuse, not a
+guarantee about every host. Derive the ID anew from current authentication rather
+than a mounted component's old user object; apply the
+[identity/session epoch fence](product-shapes-and-ui.md#bind-asynchronous-ui-work-to-the-current-identity-and-session).
+
 User mode lazily establishes an external identity but does not grant access to a
 shared workspace. An explicitly authorized service onboarding operation may use:
 
@@ -101,6 +109,15 @@ permissions conflict instead of overwriting a subsequently reduced grant. Instal
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
+
+Check the host user's current enabled state, tenant membership and role on every
+session read/control route and every provider call. A still-valid token or an
+old `sessions:control` onboarding grant is not proof of current host authority.
+Block newly disallowed requests immediately and reconcile OpenGeni grants using
+the authorized membership lifecycle below; do not silently re-onboard or widen
+them on a user request. Permission-changing revocation can cancel running work.
+Per-user workspaces and deliberate team/site sharing are valid product choices,
+but neither replaces these current host-policy checks.
 
 ### Read the member inventory: SDK versus REST
 

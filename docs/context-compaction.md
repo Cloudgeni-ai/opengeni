@@ -168,6 +168,17 @@ Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
 
+Claude's Messages adapter preserves these system-role inputs request-locally.
+Portable replacement removes assistant replies, which can leave
+`user → system → user` (including the user-role checkpoint summary). The
+mid-conversation system beta rejects that order. The adapter coalesces user
+inputs within each assistant-delimited phase and places that phase's system
+blocks after them, before the next assistant or at the end. Exact block text,
+system authority, user ordering, system ordering, tool correlation and signed
+assistant content survive; no system moves across an assistant, and canonical
+history is never rewritten. Already-compacted sessions use this projection on
+their next ordinary turn without clearing context or rerunning completed tools.
+
 Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole

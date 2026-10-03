@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Permission, Workspace } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createApiKey, createDb, createWorkspace, type DbClient } from "@opengeni/db";
+import {
+  createApiKey,
+  createDb,
+  createWorkspace,
+  deleteWorkspaceIfQuiescent,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -26,6 +34,7 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
+let scheduleDeletes = 0;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-organization-workspace-key-deletion");
@@ -42,7 +51,9 @@ beforeAll(async () => {
     bus: new MemoryEventBus(),
     settings: testSettings({ productAccessMode: "managed", sandboxBackend: "none" }),
     workflowClient: {
-      deleteScheduledTaskSchedule: noop,
+      deleteScheduledTaskSchedule: async () => {
+        scheduleDeletes += 1;
+      },
     } as unknown as SessionWorkflowClient,
     githubStateSecret: "test",
     objectStorage: null,
@@ -108,6 +119,66 @@ async function workspaceExists(id: string): Promise<boolean> {
 }
 
 describe("organization API key workspace deletion", () => {
+  test.each(["workspace", "organization"] as const)(
+    "%s deletion retains audit-linked data and rolls back cleanup before returning a conflict",
+    async (route) => {
+      if (!app) return;
+      const { accountId } = await organizationFixture();
+      const tenant = await createWorkspace(client!.db, { accountId, name: "Retained tenant" });
+      const key = await organizationKey(accountId, organizationApiKeyPermissions);
+      const receiptId = crypto.randomUUID();
+      const scheduleId = `retained-workspace-${crypto.randomUUID()}`;
+      // These pre-0461 operation receipts remain immutable audit evidence in
+      // the current migrated schema, including their restrictive workspace FK.
+      await shared!.admin`insert into knowledge_operation_receipts (
+        id, account_id, scope_kind, scope_workspace_id, scope_key,
+        operation_kind, operation_namespace, operation_id, input_hash, result_id,
+        actor_kind, actor_subject_id
+      ) values (
+        ${receiptId}, ${accountId}, 'workspace', ${tenant.id},
+        opengeni_private.scoped_knowledge_scope_key('workspace', ${tenant.id}::uuid, null),
+        'provider', 'deletion-regression', ${crypto.randomUUID()}, ${"a".repeat(64)},
+        ${crypto.randomUUID()}, 'human', 'user:fixture'
+      )`;
+      await shared!.admin`insert into scheduled_tasks (
+        account_id, workspace_id, name, schedule, temporal_schedule_id, agent_config
+      ) values (
+        ${accountId}, ${tenant.id}, 'retained schedule',
+        ${shared!.admin.json({ type: "interval", everySeconds: 60 })}, ${scheduleId},
+        ${shared!.admin.json({ prompt: "fixture", resources: [], tools: [], metadata: {} })}
+      )`;
+      const [before] = await shared!
+        .admin`select * from knowledge_operation_receipts where id=${receiptId}`;
+      const baselineError = await deleteWorkspaceIfQuiescent(client!.db, {
+        accountId,
+        workspaceId: tenant.id,
+      }).catch((error: unknown) => error);
+      expect(nestedPostgresSqlState(baselineError)).toBe("23503");
+      expect(safeDatabaseErrorFacts(baselineError).constraint).toBe(
+        "knowledge_operation_receipts_scope_workspace_id_fkey",
+      );
+      const deletesBefore = scheduleDeletes;
+      const path =
+        route === "workspace"
+          ? `/v1/workspaces/${tenant.id}`
+          : `/v1/organizations/${accountId}/workspaces/${tenant.id}`;
+      const response = await del(path, key);
+      expect(response.status).toBe(409);
+      expect(await response.text()).toContain("retained or linked records");
+      expect(await workspaceExists(tenant.id)).toBe(true);
+      const [after] = await shared!
+        .admin`select * from knowledge_operation_receipts where id=${receiptId}`;
+      expect(after).toEqual(before);
+      const [rows] = await shared!.admin<{ schedules: number; cleanups: number }[]>`
+        select
+          (select count(*)::int from scheduled_tasks where temporal_schedule_id=${scheduleId}) as schedules,
+          (select count(*)::int from temporal_schedule_cleanup_outbox where temporal_schedule_id=${scheduleId}) as cleanups`;
+      expect(rows).toEqual({ schedules: 1, cleanups: 0 });
+      expect(scheduleDeletes).toBe(deletesBefore);
+    },
+    60_000,
+  );
+
   test("a full organization key deletes the workspace it provisioned", async () => {
     if (!app) return;
     const { accountId } = await organizationFixture();

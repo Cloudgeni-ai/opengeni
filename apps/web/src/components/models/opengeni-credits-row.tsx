@@ -1,9 +1,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { BrandMark } from "@/components/brand-mark";
 import { ListRow } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
+import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
 import { useAppContext } from "@/context";
 import { formatMoneyMicros } from "@/lib/format";
 import { modelUsesCredits } from "@/lib/model-policy";
@@ -89,7 +88,7 @@ export function OpenGeniCreditsRow({
     });
   return (
     <ListRow
-      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="Opengeni" />}
+      leading={<OpenGeniCreditsTile />}
       title="Opengeni credits"
       meta={[scope, "Pay as you go", credits.balanceLabel]}
       {...(credits.canOpenBilling ? { onOpen: openBilling, indicator: "open" as const } : {})}

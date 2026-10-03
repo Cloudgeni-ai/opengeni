@@ -557,12 +557,73 @@ test("the model picker follows the proxy's modelSelection flag and the modelPick
         sessionId={SESSION_ID}
         client={clientWith(modelSelection)}
         workspaceId={WORKSPACE_ID}
+        modelPickerProps={{
+          messages: { label: "Model and effort" },
+          groupPresentation: { opengeni_credits: { label: "Host models" } },
+        }}
         {...(prop === undefined ? {} : { modelPicker: prop })}
       />,
     );
     try {
       await flush(150);
       expect(picker(view.container) !== null).toBe(expected);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the complete conversation forwards only picker appearance without replacing policy callbacks", async () => {
+  let modelMutations = 0;
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  for (const customized of [false, true]) {
+    // Extra JS properties must not take over the conversation's policy wiring.
+    const appearance = {
+      groupPresentation: {
+        opengeni_credits: { label: "Host models", icon: <svg data-testid="host-model-mark" /> },
+      },
+      messages: { label: "Choose a model" },
+      model: "untrusted/model",
+      onModelChange: () => {
+        modelMutations++;
+      },
+    };
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        {...(customized ? { modelPickerProps: appearance } : {})}
+      />,
+    );
+    try {
+      await flush(150);
+      const trigger = view.container.querySelector(
+        `button[aria-label="${customized ? "Choose a model" : "Model and effort"}"]`,
+      )!;
+      expect(trigger).not.toBeNull();
+      expect(trigger.textContent).toContain("model-x");
+      expect(trigger.textContent).not.toContain("untrusted/model");
+      expect(
+        trigger.querySelector(
+          customized
+            ? '[aria-label="Host models"] [data-testid="host-model-mark"]'
+            : '[aria-label="Models"] .lucide-sparkles',
+        ),
+      ).not.toBeNull();
+      expect(modelMutations).toBe(0);
     } finally {
       await view.unmount();
     }

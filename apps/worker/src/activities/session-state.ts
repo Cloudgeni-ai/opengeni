@@ -13,6 +13,7 @@ import {
   getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
+  getWorkspace,
   expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
   expireScheduledRunHumanWait as expireScheduledRunHumanWaitDb,
   expireSessionHumanInputRequest,
@@ -69,6 +70,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
+  getWorkspace: typeof getWorkspace;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
   expireScheduledRunHumanWait: typeof expireScheduledRunHumanWaitDb;
@@ -114,6 +116,7 @@ export function createSessionStateActivities(
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
+  const getWorkspaceFn = overrides.getWorkspace ?? getWorkspace;
   const expireSessionHumanInputRequestFn =
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const expireSessionInteractionInterventionFn =
@@ -566,12 +569,18 @@ export function createSessionStateActivities(
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db, observability, inspectSessionAttemptActivity } = await services();
+    // Already scheduled activities retain their old input across workflow upgrades.
+    // Resolve its workspace scope exactly as the legacy DB path did, then use the
+    // observer path so absent rows and a still-owned attempt are observations.
+    const observerAccountId =
+      input.observerAccountId ?? (await getWorkspaceFn(db, input.workspaceId))?.accountId;
+    if (!observerAccountId) return { kind: "unavailable" as const };
     const peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.includeAdmissionFence,
-      input.observerAccountId,
+      observerAccountId,
     );
     if (peek.kind === "unavailable") return peek;
     if (peek.kind === "attempt-owned") {
@@ -598,7 +607,7 @@ export function createSessionStateActivities(
         input.workspaceId,
         input.sessionId,
         input.includeAdmissionFence,
-        input.observerAccountId,
+        observerAccountId,
       );
       if (
         current.kind !== "attempt-owned" ||

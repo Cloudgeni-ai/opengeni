@@ -46,8 +46,10 @@ browser; I’ll handle the organization and developer setup.”** Let the person
 complete sign-in/sign-up, email verification and MFA. Do not request their
 password in chat or automate a verification challenge.
 
-After authentication, complete the organization-name step using the product's
-name, or reuse the exact intended existing organization. A bound invitation
+After authentication, if onboarding first asks how to use Opengeni, choose
+**Run agents in the cloud**: the other path shows a key on screen, and this
+setup creates its key below instead. Complete the organization-name step using
+the product's name, or reuse the exact intended existing organization. A bound invitation
 takes precedence; do not create a second organization. Skip optional model or
 purchase onboarding when an authorized billing path already exists. A key does
 not buy credits or make an unavailable model usable.
@@ -159,6 +161,15 @@ proxy/authentication boundary. A short-lived setup key expiring is intentional;
 before shipping a long-lived integration, provision a separately scoped runtime
 credential through the authenticated organization administrator, not by granting
 key-management permission to the setup key.
+
+Carry the appearance choice into that handoff: custom-branded embeds should
+match host fonts/colors/spacing/radius/theme with no UI-owned OpenGeni branding;
+stock shipped UI should need no cosmetic host CSS. Expect polished desktop
+around 1440px/mobile around 390px and supported light/dark. Stock defects belong
+to package React/CSS, not host workarounds. Preserve first-try evidence; in
+coordinated trials the coordinator captures the browser matrix. Do not require
+screenshot submission for the coding-agent handoff. These are expectations,
+not a passed UI qualification or a reason to broaden setup permissions.
 
 For staging verification, delete only resources recorded as created by this
 run, verify removal, and revoke its disposable key through the authenticated

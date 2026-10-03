@@ -868,6 +868,65 @@ describe("embedded worker lifecycle contract", () => {
     expect(executions).toBe(2);
   });
 
+  test("timed-out readiness requests reuse the pending catalog check", async () => {
+    let executions = 0;
+    let catalogChecks = 0;
+    let release!: () => void;
+    let started!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const catalogPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = {
+      execute: async () => {
+        executions += 1;
+        return [];
+      },
+    } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) {
+        started();
+        await catalogPending;
+      }
+    });
+    const pending = check();
+    await catalogStarted;
+    const settings = testSettings();
+    const fetch = createWorkerHttpHandler({
+      settings,
+      observability: createObservability(settings, { component: "worker-test" }),
+      checks: { db: check, nats: () => undefined, temporal: () => undefined },
+      timeoutMs: 5,
+    });
+    const responses = await Promise.all([
+      fetch(new Request("http://localhost/readyz")),
+      fetch(new Request("http://localhost/readyz")),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([503, 503]);
+    expect(executions).toBe(1);
+    expect(catalogChecks).toBe(1);
+    release();
+    await pending;
+    expect((await fetch(new Request("http://localhost/readyz"))).status).toBe(200);
+    expect(executions).toBe(2);
+    expect(catalogChecks).toBe(2);
+  });
+
+  test("catalog failure resets database readiness for a later successful check", async () => {
+    let catalogChecks = 0;
+    const db = { execute: async () => [] } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) throw new Error("catalog unavailable");
+    });
+    await expect(check()).rejects.toThrow("catalog unavailable");
+    await expect(check()).resolves.toBeUndefined();
+    expect(catalogChecks).toBe(2);
+  });
+
   test("readiness follows role lifecycle while health stays live during drain", async () => {
     const settings = testSettings();
     const observability = createObservability(settings, { component: "worker-test" });

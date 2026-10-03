@@ -1809,6 +1809,8 @@ async function defaultExporter(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1_000),
   });
+  // Export decisions use only the status; release the ignored response body.
+  await response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);
   }

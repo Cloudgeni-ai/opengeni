@@ -381,7 +381,12 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
         typeof payload.error === "string" && /^[a-z0-9_]{1,80}$/u.test(payload.error)
           ? payload.error
           : `http_${response.status}`;
-      if (plan.mutation && response.status >= 500)
+      if (
+        plan.mutation &&
+        (response.status >= 500 ||
+          providerCode === "internal_error" ||
+          providerCode === "fatal_error")
+      )
         throw new SlackMutationOutcomeUnknownError(
           "Slack returned a server error after submission; outcome is uncertain. Check Slack before sending again.",
         );

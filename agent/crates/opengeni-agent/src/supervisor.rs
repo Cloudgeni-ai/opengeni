@@ -1280,22 +1280,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // Never fence the whole host waiting for their lifetime to end. The
             // fence already excludes new routed work; defer this update if any
             // accepted work remains, preserving its independent lifetime.
-            let pending = update_drain.snapshot();
-            let admission = engine.admission_snapshot();
-            let mut busy_code = match pending {
-                None => Some("update_state_unavailable"),
-                Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
-                Some(pending)
-                    if pending.routed > 0
-                        || admission.light_running > 0
-                        || admission.light_queued > 0
-                        || admission.heavy_running > 0
-                        || admission.heavy_queued > 0 =>
-                {
-                    Some("update_busy_work")
-                }
-                Some(_) => None,
-            };
+            let mut busy_code = update_busy_code(&update_drain, &engine);
             if busy_code.is_none() {
                 if let Some(backend) = browser_control {
                     busy_code = match backend.is_idle().await {
@@ -2116,8 +2101,303 @@ fn running_binary_sha256() -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn update_busy_code(update_drain: &UpdateDrain, engine: &Engine) -> Option<&'static str> {
+    let pending = update_drain.snapshot();
+    let admission = engine.admission_snapshot();
+    match pending {
+        None => Some("update_state_unavailable"),
+        Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
+        Some(pending)
+            if pending.routed > 0
+                // A completed child may still own an unconsumed terminal result.
+                || engine.live_ops() > 0
+                || admission.light_running > 0
+                || admission.light_queued > 0
+                || admission.heavy_running > 0
+                || admission.heavy_queued > 0 =>
+        {
+            Some("update_busy_work")
+        }
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    async fn retained_update_result(
+        engine: &Arc<Engine>,
+        drain: &Arc<UpdateDrain>,
+        scope: &str,
+    ) -> (opengeni_agent_engine::OpId, crate::engine::StartedJob, u64) {
+        use crate::engine::{scoped_op_id, StartOutcome};
+        use crate::job::{JobExit, JobOutcome};
+
+        let reservation = drain.reserve_work(None).expect("routed work admitted");
+        let operation = scoped_op_id(scope, "synthetic-command");
+        let ticket = engine
+            .admit(&operation, JobClass::Heavy, scope)
+            .await
+            .expect("child admitted");
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let outcome = engine.start_job(
+            &operation,
+            ticket,
+            Vec::new(),
+            None,
+            || {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.arg("-c").arg("printf synthetic-result");
+                opengeni_agent_platform::spawn_contained(command, None)
+            },
+            |_| {},
+            |exit| format!("{exit:?}").into_bytes(),
+            move |sequence, exit: &JobExit| {
+                drop(reservation);
+                let _ = exit_tx.send((sequence, exit.clone()));
+            },
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh child must start");
+        };
+        let (sequence, exit) = tokio::time::timeout(Duration::from_secs(5), exit_rx)
+            .await
+            .expect("child completed")
+            .expect("terminal receipt");
+        assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
+        assert_eq!(exit.stdout.total_bytes, 16);
+        assert_eq!(exit.stdout.digest, blake3::hash(b"synthetic-result"));
+        assert_eq!(started.handles.exit.get(), Some(&exit));
+        (
+            operation,
+            started,
+            sequence.expect("retained terminal frame"),
+        )
+    }
+
+    #[cfg(unix)]
+    async fn update_result_barrier(started: &crate::engine::StartedJob) {
+        let completed = Arc::new(tokio::sync::Notify::new());
+        started
+            .mailbox
+            .send(crate::job::JobCommand::Barrier {
+                completed: completed.clone(),
+            })
+            .await
+            .expect("retained result still routable");
+        tokio::time::timeout(Duration::from_secs(5), completed.notified())
+            .await
+            .expect("prior mailbox commands applied");
+    }
+
+    #[cfg(unix)]
+    async fn acknowledge_update_result(
+        engine: &Engine,
+        operation: &opengeni_agent_engine::OpId,
+        started: &crate::engine::StartedJob,
+        sequence: u64,
+    ) {
+        use crate::job::JobCommand;
+        use opengeni_agent_engine::registry::QueryAnswer;
+
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: sequence,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                engine.query(operation),
+                QueryAnswer::Complete {
+                    final_acked: true,
+                    ..
+                }
+            ) || engine.route_command(operation, JobCommand::Detach { completed: None })
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted final ack releases its route");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_retained_result_requires_current_terminal_ack() {
+        use crate::job::JobCommand;
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let (operation, started, sequence) =
+            retained_update_result(&engine, &drain, "scope-a").await;
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert!(drain.reserve_work(None).is_none());
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        for generation in [1, 2] {
+            started
+                .mailbox
+                .send(JobCommand::Attach {
+                    generation,
+                    from_seq: 0,
+                    window_bytes: 1 << 20,
+                })
+                .await
+                .unwrap();
+        }
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: sequence,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: sequence - 1,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        update_result_barrier(&started).await;
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        acknowledge_update_result(&engine, &operation, &started, sequence).await;
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_retained_results_wait_for_each_connection_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let (first, first_job, first_sequence) =
+            retained_update_result(&engine, &drain, "scope-a").await;
+        let (second, second_job, second_sequence) =
+            retained_update_result(&engine, &drain, "scope-b").await;
+        assert_ne!(first, second);
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert_eq!(engine.live_ops(), 2);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        acknowledge_update_result(&engine, &first, &first_job, first_sequence).await;
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert!(drain.reserve_work(None).is_none());
+        acknowledge_update_result(&engine, &second, &second_job, second_sequence).await;
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
+
+    #[tokio::test]
+    async fn update_retained_result_spawn_failure_does_not_block_update() {
+        use crate::engine::StartOutcome;
+        use opengeni_agent_engine::{registry::QueryAnswer, OpId};
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let operation = OpId::from("synthetic-spawn-failure");
+        let ticket = engine
+            .admit(&operation, JobClass::Heavy, "scope-a")
+            .await
+            .unwrap();
+        let outcome = engine.start_job(
+            &operation,
+            ticket,
+            Vec::new(),
+            None,
+            || Err(std::io::Error::other("synthetic spawn failure")),
+            |_| {},
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        assert!(matches!(outcome, StartOutcome::SpawnFailed { .. }));
+        assert!(matches!(
+            engine.query(&operation),
+            QueryAnswer::Complete {
+                final_acked: true,
+                ..
+            }
+        ));
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::too_many_lines)] // real update router, progress receipts, and admission recovery
     async fn update_defers_live_or_unreadable_interaction_controllers() {

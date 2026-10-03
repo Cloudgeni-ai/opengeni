@@ -1255,13 +1255,20 @@ const SettingsSchema = z.object({
   // idle grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
-  // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
-  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // the deadline path has to act. Set 0 to disable new idle enrollments without
+  // disabling provider-deadline containment or cancelling an enrolled drain.
+  // A positive window must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit positive value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
   // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
   // plus this window plus the drain capture budget must fit before it.
   // getSettings derives the unset default between those two for short-lived
   // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
-  sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().optional(),
+  sandboxIdleCommandContainmentMs: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .transform((value) => (value === 0 ? undefined : value)),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -5234,6 +5241,48 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
 }
 
+function matchesAdditiveCapabilityDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { latencyModes, inputModalities } = model.capabilities;
+  // V1 has only three unique latency ids and three unique input modalities:
+  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // exact historical declaration; never ignore the digest or alter existing
+  // mode support, runnable state, billing multiplier, or request-tier routing.
+  // Every other executable field remains in the digest. Do not compose this
+  // with the pre-wire-profile or implicit-caching migration exceptions.
+  for (let latencyMask = 1; latencyMask < 1 << latencyModes.length; latencyMask += 1) {
+    const retainedModes = latencyModes.filter((_mode, index) => latencyMask & (1 << index));
+    if (!retainedModes.some((mode) => mode.id === policy.latencyMode && mode.runnable)) {
+      continue;
+    }
+    for (let inputMask = 1; inputMask < 1 << inputModalities.length; inputMask += 1) {
+      const retainedInputs = inputModalities.filter((_modality, index) => inputMask & (1 << index));
+      if (
+        retainedModes.length === latencyModes.length &&
+        retainedInputs.length === inputModalities.length
+      ) {
+        continue;
+      }
+      const capabilities = {
+        ...model.capabilities,
+        latencyModes: retainedModes,
+        inputModalities: retainedInputs,
+      };
+      if (
+        policy.definitionVersion ===
+        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5950,7 +5999,7 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
- * Any deployment/provider drift fails before a provider or compaction call.
+ * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(
   settings: Settings,
@@ -6002,7 +6051,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === resolved.model.definitionVersion ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -8509,3 +8559,5 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./subscription-account-selection";
+export * from "./claude-subscription-capacity";
