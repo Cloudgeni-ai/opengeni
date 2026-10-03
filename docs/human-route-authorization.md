@@ -1,4 +1,4 @@
-# Human and browser route authorization (OPE-647)
+# Human and browser route authorization
 
 `scripts/public-api/human-route-classification.json` is the reviewed inventory
 of human/browser-gated HTTP registrations, including indirect helpers,

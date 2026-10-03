@@ -1,6 +1,5 @@
 {
   "schemaVersion": 1,
-  "issue": "OPE-647",
   "routes": [
     {
       "method": "GET",

@@ -1,4 +1,4 @@
-/** Source inventory for OPE-647. Classifications are reviewed, never inferred. */
+/** Human-route source inventory. Classifications are reviewed, never inferred. */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseSync } from "oxc-parser";
