@@ -24,13 +24,9 @@ export function sessionStatusLabel(status: Session["status"]): string {
   }
 }
 
-export function sessionInputWait(
-  session: Pick<Session, "status" | "effectiveControl" | "inputWait">,
-) {
-  return session.status === "idle" && session.effectiveControl?.state === "active"
-    ? (session.inputWait ?? null)
-    : null;
-}
+import { sessionInputWait } from "@opengeni/react/session-list-model";
+
+export { sessionInputWait };
 
 export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact = false): string {
   const deadline = new Date(deadlineAt);

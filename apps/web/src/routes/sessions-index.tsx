@@ -30,7 +30,6 @@ import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
   ModelMark,
-  modelDisplayName,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
@@ -106,7 +105,7 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { StatusDot } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
@@ -132,7 +131,6 @@ import {
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
-import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -146,7 +144,13 @@ import {
   resolvePersonalResourceOwnerScope,
   selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
-import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import {
+  recentSessionModelPresentation,
+  recentSessionStatus,
+  recentSessionsForHome,
+  relativeTimeLabel,
+  sessionRepoLabel,
+} from "@opengeni/react/session-list-model";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -1981,14 +1985,8 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
     pollIntervalMs: 30_000,
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const recent = useMemo(() => {
-    const ordinary = sessions.filter((session) => !session.pinned);
-    const { running, grouped } = groupSessionsForRail(ordinary);
-    // Pins are server-authoritative and intentionally sit above ordinary
-    // recency rows here too. `sessions` retains the historical all-visible-row
-    // contract, so remove its pins before recombining the explicit section.
-    return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
-  }, [pinned, sessions]);
+  // Pins are server-authoritative and sit above running and recency rows.
+  const recent = useMemo(() => recentSessionsForHome(sessions, pinned, 6), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -2015,43 +2013,6 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
-  queued: "queued",
-  running: "running",
-  recovering: "running",
-  waiting_capacity: "waiting",
-  requires_action: "waiting",
-  idle: "idle",
-  failed: "failed",
-  cancelled: "cancelled",
-};
-
-/** A short `owner/repo` label from the session's first repository resource. */
-function sessionRepoLabel(session: Session): string | null {
-  const repo = session.resources.find((resource) => resource.kind === "repository");
-  if (!repo || repo.kind !== "repository") {
-    return null;
-  }
-  const parts = repo.uri
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
-}
-
-function recentSessionModelPresentation(
-  modelId: string,
-  catalogRows: readonly PickerModelRow[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
-  const row = findPickerRow([...catalogRows], modelId);
-  return {
-    label: row?.label ?? modelDisplayName(modelId),
-    billingClass:
-      row?.billingClass ??
-      (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
-  };
-}
-
 function RecentSessionRow({
   workspaceId,
   session,
@@ -2065,7 +2026,7 @@ function RecentSessionRow({
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);
-  const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
+  const status = recentSessionStatus(session);
   return (
     <li className="min-w-0">
       <Link
@@ -2073,10 +2034,7 @@ function RecentSessionRow({
         params={{ workspaceId, sessionId: session.id }}
         className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
       >
-        <StatusDot
-          tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
-          pulse={hasBackgroundCommand || session.status === "running"}
-        />
+        <StatusDot tone={status.tone} pulse={status.pulse} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
