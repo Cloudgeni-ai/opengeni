@@ -10,6 +10,7 @@ import {
 } from "@opengeni/sdk";
 
 import {
+  QUESTIONS,
   QUESTION_TITLES,
   matchQuestion,
   replyBeats,
@@ -41,6 +42,8 @@ export type RecordedAnswer = Readonly<{ sessionId: string; question: QuestionId 
 export type RecordedClient = SessionClientLike & {
   /** Ask in an existing chat, as if typed into its composer. */
   ask: (sessionId: string, text: string) => void;
+  /** The customer finished connecting a tool: they say so, and the agent goes on. */
+  connected: (sessionId: string) => void;
   /** Start a new chat with this first message; returns its id. */
   startChat: (text: string) => string;
   /** Whether an answer is playing in that chat. */
@@ -473,6 +476,9 @@ export function createRecordedClient({
     },
     ask: (sessionId: string, text: string) => {
       play(chatFor(sessionId), text);
+    },
+    connected: (sessionId: string) => {
+      play(chatFor(sessionId), QUESTIONS.connected);
     },
     startChat,
     isPlaying: (sessionId: string) => chats.get(sessionId)?.session.status === "running",

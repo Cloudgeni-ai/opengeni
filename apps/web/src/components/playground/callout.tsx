@@ -94,11 +94,18 @@ export function computeCalloutLayout(
   return dock(width);
 }
 
-/** The union of the boxes of every element the selector matches. */
-function measureTarget(selector: string): Box | null {
-  const boxes = Array.from(document.querySelectorAll(selector), (element) =>
-    element.getBoundingClientRect(),
-  ).filter((box) => box.width > 0 && box.height > 0);
+/**
+ * The union of the boxes of every element the first matching selector finds
+ * (a list falls back in order: "the Connect button, else the question").
+ */
+function measureTarget(selectors: string | readonly string[]): Box | null {
+  let boxes: DOMRect[] = [];
+  for (const selector of typeof selectors === "string" ? [selectors] : selectors) {
+    boxes = Array.from(document.querySelectorAll(selector), (element) =>
+      element.getBoundingClientRect(),
+    ).filter((box) => box.width > 0 && box.height > 0);
+    if (boxes.length > 0) break;
+  }
   if (boxes.length === 0) return null;
   return {
     left: Math.min(...boxes.map((box) => box.left)),
@@ -116,8 +123,9 @@ export function Callout({
   actions,
 }: {
   id: string;
-  /** CSS selector of what it points at (several elements: their union). */
-  target: string;
+  /** CSS selector of what it points at (several elements: their union), or
+   * selectors to try in order. */
+  target: string | readonly string[];
   /** Where the bubble may sit, in order of preference. */
   sides: readonly CalloutSide[];
   children: ReactNode;

@@ -133,7 +133,7 @@ const marked = (container: HTMLElement) =>
   Array.from(snippet(container).querySelectorAll("[data-changed]"), (line) => line.textContent);
 
 describe("playground", () => {
-  test("is one screen: Acme with the real chat, two questions, the snippet, one button", async () => {
+  test("is one screen: Acme with the real chat, three questions, the snippet, one button", async () => {
     const { container, unmount } = await mount();
     try {
       expect(container.querySelector("h1")!.textContent).toBe("Playground");
@@ -142,7 +142,7 @@ describe("playground", () => {
       expect(chat(container)).toContain("Delivery address");
       expect(container.querySelector("[data-og-new-chat-composer] textarea")).not.toBeNull();
       expect(container.querySelectorAll('[aria-label="Suggested questions"] button').length).toBe(
-        2,
+        3,
       );
       const code = snippet(container).textContent ?? "";
       expect(code).toContain("<OpenGeniChat />");
@@ -231,7 +231,7 @@ describe("playground", () => {
     }
   });
 
-  test("callouts go chat, color, code, ship, each on the person's action", async () => {
+  test("callouts go chat, color, code, tool, ship, each on the person's action", async () => {
     const { container, unmount } = await mount();
     try {
       expect(callout(container)!.dataset.callout).toBe("chat");
@@ -251,6 +251,12 @@ describe("playground", () => {
         ),
       );
       expect(callout(container)!.dataset.callout).toBe("color");
+      // It points at a color to pick, not the one already chosen.
+      const next = container.querySelector<HTMLElement>("[data-next-swatch]")!;
+      expect(next.getAttribute("aria-checked")).toBe("false");
+      // Light/dark alone doesn't move on; a different color does.
+      await press(buttonIn(container.querySelector('[aria-label="Theme"]')!, "Light"));
+      expect(callout(container)!.dataset.callout).toBe("color");
       await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Rose"]'));
       expect(callout(container)!.dataset.callout).toBe("code");
       expect(callout(container)!.textContent).toContain("one prop");
@@ -258,6 +264,24 @@ describe("playground", () => {
       await settle(20);
       expect(callout(container)!.dataset.callout).toBe("code");
       await press(buttonIn(callout(container)!, "Next"));
+
+      // Connect a tool: the real in-chat Connect card, then the agent goes on.
+      expect(callout(container)!.dataset.callout).toBe("tool");
+      expect(callout(container)!.textContent).toContain("connect tools right in the chat");
+      const pickup = container.querySelector<HTMLElement>("[data-question='pickup']")!;
+      expect(pickup.hasAttribute("data-pulse")).toBe(true);
+      await press(pickup);
+      const connect = container.querySelector<HTMLAnchorElement>(
+        "[data-playground-product] a[href='https://accounts.acme.example/oauth/calendar']",
+      )!;
+      expect(connect.textContent).toContain("Connect");
+      expect(chat(container)).toContain("Connect Calendar");
+      await press(connect);
+      // The pretend sign-in shows on the card's own button, then the agent goes on.
+      expect(connect.dataset.demoConnect).toBe("connected");
+      expect(chat(container)).toContain("I've connected my calendar.");
+      expect(chat(container)).toContain("Your calendar is free Thursday 10-12");
+
       expect(callout(container)!.dataset.callout).toBe("ship");
       expect(callout(container)!.textContent).toContain("This opens a chat where an agent");
       // The caption steps aside while the callout says it.

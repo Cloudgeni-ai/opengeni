@@ -18,27 +18,50 @@ export type ScriptBeat =
       /** How long the call runs before its result shows. */
       ms: number;
     }
+  | {
+      /**
+       * A tool the customer hasn't connected: the real `tool.auth_needed`
+       * event, which `@opengeni/react` shows as its in-chat Connect card.
+       */
+      kind: "connect";
+      serverId: string;
+      toolName: string;
+      providerDomain: string;
+    }
   | { kind: "say"; text: string };
 
-export type QuestionId = "order" | "charged" | "refund" | "other";
+export type QuestionId = "order" | "charged" | "refund" | "pickup" | "connected" | "other";
 
 export const QUESTIONS: Record<Exclude<QuestionId, "other">, string> = {
   order: "Where is my order #4417?",
   charged: "Was I charged twice this month?",
   refund: "Yes, refund the extra one",
+  pickup: "Book a pickup for my return",
+  connected: "I've connected my calendar.",
 };
+
+/**
+ * Where the demo's Connect card links. A real product's server hands the
+ * user its own OAuth link; the playground catches this one and pretends the
+ * customer signed in.
+ */
+export const DEMO_AUTHORIZATION_URL = "https://accounts.acme.example/oauth/calendar";
 
 /** A short chat title, as the agent would set it. */
 export const QUESTION_TITLES: Record<QuestionId, string> = {
   order: "Order #4417",
   charged: "Double charge",
   refund: "Refund",
+  pickup: "Return pickup",
+  connected: "Return pickup",
   other: "Question",
 };
 
 /** Which recorded answer a typed message gets. */
 export function matchQuestion(text: string): QuestionId {
   const normalized = text.toLowerCase();
+  if (/connected|i'?ve connect/u.test(normalized)) return "connected";
+  if (/pick ?up|return|calendar|schedul|book/u.test(normalized)) return "pickup";
   if (/\brefund|\byes\b/u.test(normalized)) return "refund";
   if (/charg|bill|invoice|pay|twice|double/u.test(normalized)) return "charged";
   if (/order|deliver|ship|track|package|parcel|#?\d{3,}/u.test(normalized)) return "order";
@@ -92,6 +115,40 @@ export function replyBeats(question: QuestionId): ScriptBeat[] {
           ms: 900,
         },
         say("Done. The duplicate **$49** is on its way back to your card."),
+      ];
+    case "pickup":
+      return [
+        {
+          kind: "connect",
+          serverId: "calendar",
+          toolName: "calendar__find_free_time",
+          providerDomain: "calendar.google.com",
+        },
+        say(
+          "I can book the pickup when you're home. Connect your calendar above so I can find a free slot.",
+        ),
+      ];
+    case "connected":
+      return [
+        {
+          kind: "tool",
+          id: "call-calendar",
+          name: "calendar__find_free_time",
+          args: { within: "next 3 days", length: "2h" },
+          output: { free: [{ day: "Thursday", from: "10:00", to: "12:00" }] },
+          ms: 900,
+        },
+        {
+          kind: "tool",
+          id: "call-pickup",
+          name: "acme__schedule_pickup",
+          args: { orderId: "4417", day: "Thursday", window: "10:00-12:00" },
+          output: { booked: true, carrier: "UPS" },
+          ms: 800,
+        },
+        say(
+          "Your calendar is free **Thursday 10-12**, so I booked UPS to pick up your return then.",
+        ),
       ];
     default:
       return [
@@ -148,7 +205,21 @@ export function replyTimeline(beats: readonly ScriptBeat[], turnId: string): Tim
   ];
   let at = SCRIPT_TIMING.startMs + SCRIPT_TIMING.beatGapMs;
   for (const beat of beats) {
-    if (beat.kind === "tool") {
+    if (beat.kind === "connect") {
+      out.push({
+        afterMs: at,
+        type: "tool.auth_needed",
+        payload: {
+          serverId: beat.serverId,
+          toolName: beat.toolName,
+          providerDomain: beat.providerDomain,
+          reason: "missing_connection",
+          connectionSubjectScope: "subject",
+          authorizationUrl: DEMO_AUTHORIZATION_URL,
+        },
+        turnId,
+      });
+    } else if (beat.kind === "tool") {
       out.push({
         afterMs: at,
         type: "agent.toolCall.created",

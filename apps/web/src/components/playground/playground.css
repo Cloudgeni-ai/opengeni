@@ -137,6 +137,27 @@
   }
 }
 
+/* The demo's Connect: the stock card's button shows the pretend sign-in. */
+.acme-agent a[data-demo-connect] {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+.acme-agent a[data-demo-connect] > * {
+  visibility: hidden;
+}
+.acme-agent a[data-demo-connect]::after {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--og-color-primary-fg);
+  content: "Connecting…";
+}
+.acme-agent a[data-demo-connect="connected"]::after {
+  content: "✓ Connected";
+}
+
 /* The snippet marks the lines a change just wrote. */
 .og-code-line {
   transition: background-color 600ms ease-out;

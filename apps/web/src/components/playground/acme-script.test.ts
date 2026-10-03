@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  DEMO_AUTHORIZATION_URL,
   QUESTIONS,
   matchQuestion,
   replyBeats,
@@ -20,6 +21,8 @@ describe("Acme's recorded answers", () => {
     expect(matchQuestion(QUESTIONS.charged)).toBe("charged");
     expect(matchQuestion("Why did you bill me twice")).toBe("charged");
     expect(matchQuestion(QUESTIONS.refund)).toBe("refund");
+    expect(matchQuestion(QUESTIONS.pickup)).toBe("pickup");
+    expect(matchQuestion(QUESTIONS.connected)).toBe("connected");
     expect(matchQuestion("hello")).toBe("other");
   });
 
@@ -29,6 +32,20 @@ describe("Acme's recorded answers", () => {
     expect(tools(replyBeats("charged"))).toEqual(["acme__list_charges"]);
     expect(tools(replyBeats("refund"))).toEqual(["acme__refund_charge"]);
     expect(tools(replyBeats("other"))).toEqual([]);
+  });
+
+  test("a tool the customer hasn't connected asks for it with the real auth event", () => {
+    const events = replyTimeline(replyBeats("pickup"), "t1");
+    const ask = events.find((event) => event.type === "tool.auth_needed")!;
+    expect(ask.payload).toMatchObject({
+      toolName: "calendar__find_free_time",
+      reason: "missing_connection",
+      authorizationUrl: DEMO_AUTHORIZATION_URL,
+    });
+    expect(tools(replyBeats("connected"))).toEqual([
+      "calendar__find_free_time",
+      "acme__schedule_pickup",
+    ]);
   });
 
   test("an answer is a whole turn: started, streamed, completed and idle", () => {

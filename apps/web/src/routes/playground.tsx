@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { ADD_AGENT_DEFAULT_PROMPT } from "@/components/new-session-starters";
 import { AcmeProduct } from "@/components/playground/acme-product";
-import { QUESTIONS } from "@/components/playground/acme-script";
+import { DEMO_AUTHORIZATION_URL, QUESTIONS } from "@/components/playground/acme-script";
 import {
   ADD_TO_PRODUCT_FIRST_REPLY,
   ADD_TO_PRODUCT_INSTRUCTIONS,
@@ -39,18 +39,24 @@ import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-jo
 import { cn } from "@/lib/utils";
 
 /** The callouts, in order. Each moves on only when the person acts. */
-export type Tip = "chat" | "color" | "code" | "ship";
+export type Tip = "chat" | "color" | "code" | "tool" | "ship";
 const SIDES: Record<Tip, readonly CalloutSide[]> = {
   chat: ["right", "below"],
   color: ["below", "right"],
   code: ["left", "above"],
+  tool: ["right", "below"],
   ship: ["right", "below"],
 };
-const TARGETS: Record<Tip, string> = {
-  chat: "[data-callout-target='questions']",
-  // The selected swatch itself, not the gap between swatches.
-  color: "[data-callout-target='colors'] [aria-checked='true']",
+const TARGETS: Record<Tip, string | readonly string[]> = {
+  chat: "[data-callout-target='questions'] [data-question='order']",
+  // A color to pick: the swatch after the selected one.
+  color: "[data-callout-target='colors'] [data-next-swatch]",
   code: "[data-snippet='page'] [data-changed]",
+  // The chat's Connect card once it shows; until then, the question that needs it.
+  tool: [
+    `[data-playground-product] a[href="${DEMO_AUTHORIZATION_URL}"]`,
+    "[data-callout-target='questions'] [data-question='pickup']",
+  ],
   ship: "[data-callout-target='ship']",
 };
 
@@ -90,9 +96,12 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     defaultChatStyle(document.documentElement.dataset.ogTheme === "light" ? "light" : "dark"),
   );
   const restyle = (next: ChatStyle) => {
+    // Only a different color moves the tips on (light and dark don't).
+    const recolored = next.accent.value !== style.accent.value;
     setStyle(next);
     report("style");
-    setTip((current) => (current === "chat" || current === "color" ? "code" : current));
+    if (recolored)
+      setTip((current) => (current === "chat" || current === "color" ? "code" : current));
   };
   const [hex, setHex] = useState("");
   const lines = useMemo(() => chatSnippet(style), [style]);
@@ -112,8 +121,12 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     }),
   );
   useEffect(() => () => client.dispose(), [client]);
-
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const onConnected = () => {
+    if (!sessionId) return;
+    client.connected(sessionId);
+    setTip((current) => (current === "tool" ? "ship" : current));
+  };
   const [epoch, setEpoch] = useState(0);
   const ask = (text: string) => {
     if (sessionId) {
@@ -188,13 +201,14 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
             type="button"
             size="xs"
             className="border-transparent bg-canvas text-fg hover:bg-canvas/90"
-            onClick={() => setTip("ship")}
+            onClick={() => setTip("tool")}
           >
             Next
           </Button>
         </>
       ),
     },
+    tool: { text: "Agents ask users to connect tools right in the chat.", actions: skip },
     ship: {
       text: "Ready? This opens a chat where an agent adds it to your product with you.",
       actions: skip,
@@ -245,16 +259,23 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                 aria-label="Suggested questions"
                 data-callout-target="questions"
               >
-                {[QUESTIONS.order, QUESTIONS.charged].map((question, index) => (
+                {(["order", "charged", "pickup"] as const).map((id) => (
                   <button
-                    key={question}
+                    key={id}
                     type="button"
                     disabled={playing > 0}
-                    onClick={() => ask(question)}
-                    data-pulse={showTip === "chat" && index === 0 ? "" : undefined}
+                    onClick={() => ask(QUESTIONS[id])}
+                    data-question={id}
+                    // The question the current tip is about pulses gently.
+                    data-pulse={
+                      (showTip === "chat" && id === "order") ||
+                      (showTip === "tool" && id === "pickup")
+                        ? ""
+                        : undefined
+                    }
                     className="og-pulse rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-fg transition-colors duration-[120ms] outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50 pointer-coarse:min-h-11"
                   >
-                    {question}
+                    {QUESTIONS[id]}
                   </button>
                 ))}
               </div>
@@ -283,12 +304,17 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                 {ACCENTS.map((accent, index) => {
                   const selected = style.accent.name === accent.name;
                   const custom = !ACCENTS.includes(style.accent);
+                  const selectedIndex = ACCENTS.findIndex(
+                    (each) => each.name === style.accent.name,
+                  );
+                  const next = index === (selectedIndex + 1) % ACCENTS.length;
                   return (
                     <button
                       key={accent.name}
                       type="button"
                       role="radio"
                       aria-checked={selected}
+                      data-next-swatch={next ? "" : undefined}
                       aria-label={accent.name}
                       title={accent.name}
                       tabIndex={selected || (custom && index === 0) ? 0 : -1}
@@ -341,6 +367,7 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                 onSessionChange={setSessionId}
                 epoch={epoch}
                 person={person}
+                onConnected={onConnected}
               />
             </div>
           </section>
