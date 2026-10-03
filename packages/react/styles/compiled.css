@@ -1624,9 +1624,6 @@
 :where(.og-root).bottom-3,:where(.og-root) .bottom-3 {
     bottom: calc(var(--spacing) * 3);
   }
-:where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
-    bottom: calc(var(--spacing) * 4);
-  }
 :where(.og-root).bottom-full,:where(.og-root) .bottom-full {
     bottom: 100%;
   }
@@ -6326,6 +6323,30 @@
 :where(.og-root).pointer-coarse\:opacity-100,:where(.og-root) .pointer-coarse\:opacity-100 {
     @media (pointer: coarse) {
       opacity: 100%;
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:absolute,:where(.og-root) .pointer-coarse\:before\:absolute {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        position: absolute;
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:-inset-1\.5,:where(.og-root) .pointer-coarse\:before\:-inset-1\.5 {
+    @media (pointer: coarse) {
+      &::before {
+        content: var(--tw-content);
+        inset: calc(var(--spacing) * -1.5);
+      }
+    }
+  }
+:where(.og-root).pointer-coarse\:before\:content-\[\'\'\],:where(.og-root) .pointer-coarse\:before\:content-\[\'\'\] {
+    @media (pointer: coarse) {
+      &::before {
+        --tw-content: '';
+        content: var(--tw-content);
+      }
     }
   }
 :where(.og-root).pointer-coarse\:after\:-inset-2\.5,:where(.og-root) .pointer-coarse\:after\:-inset-2\.5 {

@@ -339,17 +339,19 @@ const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /** Breathing room above the question when following stops at an answer. */
 const QUESTION_NAV_MARGIN_PX = 12;
 /**
- * Floating timeline navigation (Back to your message, Jump to latest) shares one
- * fixed anchor: centered at the bottom of the conversation, above the composer.
- * The pills never measure or dodge the content beneath them, so they cannot
- * wander sideways or drift vertically as rows stream in or the host resizes.
+ * Floating timeline navigation: two identical small round arrow buttons at fixed
+ * spots, centered on the conversation. Back to your message floats just below
+ * the top edge, Jump to latest just above the bottom edge. They never measure or
+ * dodge the content beneath them (floating over a sliver of text is fine), so
+ * they cannot wander as rows stream in or the host resizes. Coarse pointers get
+ * a larger invisible hit area instead of a larger button.
  */
-const NAV_PILL_CLASS =
-  "pointer-events-auto inline-flex max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur hover:border-og-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:min-h-11";
-const NAV_PILL_MOTION = {
-  initial: { opacity: 0, y: 8 },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: 8 },
+const NAV_BUTTON_CLASS =
+  "pointer-events-auto relative inline-flex size-8 items-center justify-center rounded-full border border-og-border bg-og-surface-3/90 text-og-fg-muted shadow-og-md backdrop-blur hover:border-og-border-strong hover:text-og-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:before:absolute pointer-coarse:before:-inset-1.5 pointer-coarse:before:content-['']";
+const NAV_FADE = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  exit: { opacity: 0 },
   transition: { duration: 0.15, ease: "easeOut" },
 } as const;
 /**
@@ -2591,19 +2593,36 @@ export function MessageTimeline({
                       ) : null}
 
                       <div
-                        data-og-timeline-nav=""
-                        // One fixed anchor for every floating navigation control: a
-                        // centered column at the bottom of the conversation. Newest
-                        // stays nearest the composer; the up-pointing action and the
-                        // later-activity status stack above it.
-                        className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex flex-col items-center gap-2 px-4 sm:px-6"
+                        data-og-timeline-nav="top"
+                        className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center"
                       >
-                        <AnimatePresence mode="popLayout">
+                        <AnimatePresence>
+                          {questionNav ? (
+                            <motion.button
+                              key="question-nav"
+                              {...NAV_FADE}
+                              type="button"
+                              data-og-question-nav=""
+                              data-og-jump-to-question=""
+                              title="Back to your message"
+                              onClick={() => jumpToQuestion(questionNav.key)}
+                              className={NAV_BUTTON_CLASS}
+                            >
+                              <ArrowUpIcon aria-hidden className="size-4" />
+                              <span className="sr-only">Back to your message</span>
+                            </motion.button>
+                          ) : null}
+                        </AnimatePresence>
+                      </div>
+                      <div
+                        data-og-timeline-nav="bottom"
+                        className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex flex-col items-center gap-2"
+                      >
+                        <AnimatePresence>
                           {loadingNewer ? (
                             <motion.div
                               key="loading-newer"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
+                              {...NAV_FADE}
                               data-og-loading-newer=""
                               aria-live="polite"
                               className="flex max-w-full justify-center"
@@ -2613,28 +2632,13 @@ export function MessageTimeline({
                               </span>
                             </motion.div>
                           ) : null}
-                          {questionNav ? (
-                            <motion.button
-                              key="question-nav"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
-                              type="button"
-                              data-og-question-nav=""
-                              data-og-jump-to-question=""
-                              onClick={() => jumpToQuestion(questionNav.key)}
-                              className={NAV_PILL_CLASS}
-                            >
-                              <ArrowUpIcon aria-hidden className="size-3.5 shrink-0" />
-                              Back to your message
-                            </motion.button>
-                          ) : null}
                           {jumpPillShown ? (
                             <motion.button
                               key="jump-to-latest"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
+                              {...NAV_FADE}
                               type="button"
                               data-og-jump-to-latest=""
+                              title="Jump to latest"
                               onClick={() => {
                                 // Returning to the tip explicitly releases reader-owned
                                 // prose. Clear only this timeline's selection before the
@@ -2689,10 +2693,10 @@ export function MessageTimeline({
                                   snapToBottom(node);
                                 }
                               }}
-                              className={NAV_PILL_CLASS}
+                              className={NAV_BUTTON_CLASS}
                             >
-                              <ArrowDownIcon aria-hidden className="size-3.5 shrink-0" />
-                              Jump to latest
+                              <ArrowDownIcon aria-hidden className="size-4" />
+                              <span className="sr-only">Jump to latest</span>
                             </motion.button>
                           ) : null}
                         </AnimatePresence>

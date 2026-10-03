@@ -158,7 +158,7 @@ describe("embedded artifact viewer", () => {
     }
   }, 60_000);
 
-  /** Where the floating navigation pills sit, relative to the conversation frame. */
+  /** Where the floating navigation buttons sit, relative to the conversation frame. */
   async function navigationGeometry(page: Page) {
     return await page.evaluate(() => {
       const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
@@ -169,7 +169,10 @@ describe("embedded artifact viewer", () => {
         const box = node.getBoundingClientRect();
         return {
           centerOffset: Math.round(box.left + box.width / 2 - (frame.left + frame.width / 2)),
+          topGap: Math.round(box.top - frame.top),
           bottomGap: Math.round(frame.bottom - box.bottom),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
           top: Math.round(box.top),
           bottom: Math.round(box.bottom),
           left: Math.round(box.left - frame.left),
@@ -184,13 +187,13 @@ describe("embedded artifact viewer", () => {
   }
 
   for (const width of [1440, 390, 320]) {
-    test(`timeline navigation stays anchored bottom-center at ${width}px`, async () => {
+    test(`timeline navigation buttons stay small and fixed at ${width}px`, async () => {
       const page = await open(width, "light", "&long", 560, width < 768);
       try {
         await page.locator("[data-og-work-header]").first().waitFor();
         await page.waitForTimeout(600);
         // Read just past the start of the longest exchange: the reader's message
-        // is above and the latest activity below, so both navigation pills show.
+        // is above and the latest activity below, so both navigation buttons show.
         const scroller = page.locator("[data-og-timeline-scroller]");
         await scroller.evaluate((node) => {
           const origin = node.getBoundingClientRect().top - node.scrollTop;
@@ -209,20 +212,19 @@ describe("embedded artifact viewer", () => {
         await capture(page, `timeline-navigation-${width}-light`);
         const latest = rest.latest!;
         const question = rest.question!;
-        // Both pills are centered in the conversation and fully inside it.
+        // Both buttons are the same small circle, centered in the conversation.
         expect(Math.abs(latest.centerOffset)).toBeLessThanOrEqual(1);
         expect(Math.abs(question.centerOffset)).toBeLessThanOrEqual(1);
-        for (const pill of [latest, question]) {
-          expect(pill.left).toBeGreaterThanOrEqual(0);
-          expect(pill.right).toBeGreaterThanOrEqual(0);
+        for (const button of [latest, question]) {
+          expect(button.width).toBe(32);
+          expect(button.height).toBe(32);
         }
-        // Jump to latest sits just above the composer edge; the message action
-        // stacks directly above it.
-        expect(latest.bottomGap).toBe(16);
-        expect(question.bottom).toBeLessThanOrEqual(latest.top - 8);
-        expect(latest.top - question.bottom).toBeLessThanOrEqual(10);
+        // Back to your message floats just below the top edge, Jump to latest
+        // just above the bottom edge.
+        expect(question.topGap).toBe(12);
+        expect(latest.bottomGap).toBe(12);
 
-        // Reading on (different rows under the pills, time passing) never moves them.
+        // Reading on (different rows under the buttons, time passing) never moves them.
         for (const delta of [-90, -90, 60]) {
           await scroller.evaluate((node, by) => {
             node.scrollTop += by;
@@ -230,7 +232,7 @@ describe("embedded artifact viewer", () => {
           await page.waitForTimeout(700);
           const next = await navigationGeometry(page);
           if (next.latest) expect(next.latest).toEqual(latest);
-          if (next.question) expect(next.question.centerOffset).toBe(question.centerOffset);
+          if (next.question) expect(next.question).toEqual(question);
         }
 
         await page.locator("[data-og-jump-to-latest]").click();
