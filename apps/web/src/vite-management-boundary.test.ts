@@ -71,6 +71,45 @@ describe("web management chunk boundary", () => {
     expect(source).toContain('import("@/components/organization-api-keys-section")');
   });
 
+  test("keeps payment and identity glyphs behind settings without capturing shared session glyphs", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = config.match(/name: "settings-pages",[\s\S]*?priority: (\d+),/u);
+    const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(pattern).toBeDefined();
+    expect(group?.[0]).toContain("includeDependenciesRecursively: false");
+    const settingsTest = new RegExp(pattern!);
+    const sharedGroup = config.match(/name: "session-shared-primitives",[\s\S]*?priority: (\d+),/u);
+    const sharedPattern = sharedGroup?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(sharedPattern).toBeDefined();
+    const sharedTest = new RegExp(sharedPattern!);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
+      const iconId = (icon: string) =>
+        moduleId(`node_modules/lucide-react/dist/esm/icons/${icon}.mjs`);
+      for (const icon of ["credit-card", "fingerprint-pattern"]) {
+        expect(settingsTest.test(iconId(icon))).toBe(true);
+        expect(sharedTest.test(iconId(icon))).toBe(false);
+      }
+      for (const icon of ["plus", "code-xml", "menu", "gauge"]) {
+        expect(settingsTest.test(iconId(icon))).toBe(false);
+      }
+      expect(sharedTest.test(iconId("plus"))).toBe(true);
+      for (const module of [
+        "apps/web/src/routes/session.tsx",
+        "apps/web/src/components/credit-required-prompt.tsx",
+        "node_modules/lucide-react/dist/esm/createLucideIcon.mjs",
+      ]) {
+        expect(settingsTest.test(moduleId(module))).toBe(false);
+      }
+    }
+    for (const routeGroup of ["session", "workspace-members", "workspace-settings"]) {
+      const priority = config.match(
+        new RegExp(`name: "${routeGroup}",[\\s\\S]*?priority: (\\d+),`, "u"),
+      )?.[1];
+      expect(Number(group?.[1])).toBeGreaterThan(Number(priority));
+    }
+  });
+
   test("keeps revision and diff UI behind the existing lazy management group", async () => {
     const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
     const group = config.match(/name: "management-ui-primitives",[\s\S]*?priority: (\d+),/u);

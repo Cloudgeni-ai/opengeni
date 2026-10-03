@@ -348,8 +348,11 @@ export default defineConfig({
               // Organization API-key setup is dynamically imported by Developer
               // settings. Pin its implementation here too so shared dependencies
               // cannot merge it into the direct-session graph.
+              // Payment and organization-identity glyphs are lazy-only too.
+              // Entry-aware merging otherwise pairs them with shared session
+              // glyphs and makes them eager; leave their icon factory shared.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
