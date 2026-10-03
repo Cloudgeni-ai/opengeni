@@ -3,12 +3,14 @@ import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { normalizeModelCallUsage } from "@opengeni/runtime";
 
 import {
   emitModelCallUsage,
   recordAuthoritativeModelCallFact,
   recordModelUsageAndDebitCredits,
-} from "../src/activities/agent-turn";
+  sanitizedModelUsageInput,
+} from "../src/activities/agent-turn/model-usage";
 
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
@@ -156,6 +158,205 @@ describe("recordAuthoritativeModelCallFact", () => {
       estimatedProviderCostMicros: 4,
       pricingSource: "gateway_reported",
     });
+  });
+
+  test("preserves cache-write telemetry in the durable usage event and fact, including zero and unknown", async () => {
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => usageSpy.mockRestore());
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockResolvedValue(undefined as never);
+    restores.push(() => factSpy.mockRestore());
+    const payloads: Array<Record<string, unknown>> = [];
+    const observability = { info: () => undefined, warn: () => undefined } as never;
+    for (const cacheWriteTokens of [400, 0, undefined]) {
+      const sourceKey = `cache-write-${cacheWriteTokens ?? "unknown"}`;
+      const usage = {
+        inputTokens: 1000,
+        outputTokens: 50,
+        totalTokens: 1050,
+        inputTokensDetails: {
+          cached_tokens: 100,
+          ...(cacheWriteTokens === undefined ? {} : { cache_write_tokens: cacheWriteTokens }),
+        },
+      };
+      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-cache-write",
+        turnId: "turn-cache-write",
+        turnAttemptId: "attempt-cache-write",
+        model: "codex/gpt-5.6-sol",
+        externallyBilled: true,
+        usage,
+        sourceKey,
+      });
+      expect(billing).not.toBeNull();
+      if (!billing) return;
+      expect(
+        await emitModelCallUsage({
+          observability,
+          publish: async (batch) => {
+            payloads.push(batch[0]?.payload as Record<string, unknown>);
+            return {
+              accepted: true,
+              events: batch.map((event) => ({
+                ...event,
+                id: crypto.randomUUID(),
+                turnAssociation: "current" as const,
+              })) as never,
+            };
+          },
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-cache-write",
+          turnId: "turn-cache-write",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          sourceKey,
+          usage: { usage },
+          normalizedUsage: billing.normalizedUsage,
+          billingPath: billing.billingPath,
+        }),
+      ).toBe(true);
+      await recordAuthoritativeModelCallFact({
+        db,
+        observability,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-cache-write",
+        turnId: "turn-cache-write",
+        turnAttemptId: "attempt-cache-write",
+        sourceKey,
+        provider: "codex-subscription",
+        providerApi: "responses",
+        model: "codex/gpt-5.6-sol",
+        billing,
+      });
+      expect(payloads.at(-1)).toMatchObject({
+        sourceKey,
+        cacheWriteTokens: cacheWriteTokens ?? null,
+      });
+      expect(factSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+        sourceKey,
+        cacheWriteTokens: cacheWriteTokens ?? null,
+      });
+    }
+    expect(factSpy).toHaveBeenCalledTimes(3);
+  });
+
+  test("freezes accepted total and class comparisons in the event and fact without a new debit", async () => {
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockResolvedValue(undefined as never);
+    restores.push(() => factSpy.mockRestore());
+    const payloads: Array<Record<string, unknown>> = [];
+    const snapshot = {
+      pricedCostMicros: 0,
+      estimatedProviderCostMicros: 1000,
+      equivalentCreditCostMicros: 1200,
+      pricingSource: "configured_list_price" as const,
+      listByClassMicros: { uncachedInput: 200, cacheRead: 100, cacheWrite: 50, output: 650 },
+      listByClassApprox: true,
+    };
+    const usage = { inputTokens: 1000, outputTokens: 50 };
+    const billing = {
+      ...snapshot,
+      billingPath: "external" as const,
+      normalizedUsage: normalizeModelCallUsage(usage),
+    };
+    const observability = { info: () => undefined, warn: () => undefined } as never;
+    expect(
+      await emitModelCallUsage({
+        observability,
+        publish: async (batch) => {
+          payloads.push(batch[0]!.payload as Record<string, unknown>);
+          return {
+            accepted: true,
+            events: batch.map((event) => ({
+              ...event,
+              id: crypto.randomUUID(),
+              turnAssociation: "current" as const,
+            })) as never,
+            canonicalStartupMilestones: [],
+          };
+        },
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-snapshot",
+        turnId: "turn-snapshot",
+        provider: "claude-subscription",
+        providerApi: "anthropic-messages",
+        model: "snapshot-model",
+        sourceKey: "response-snapshot",
+        usage: { usage },
+        normalizedUsage: billing.normalizedUsage,
+        billingPath: billing.billingPath,
+        billingSnapshot: billing,
+      }),
+    ).toBe(true);
+    await recordAuthoritativeModelCallFact({
+      db,
+      observability,
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-snapshot",
+      turnId: "turn-snapshot",
+      turnAttemptId: "attempt-snapshot",
+      sourceKey: "response-snapshot",
+      provider: "claude-subscription",
+      providerApi: "anthropic-messages",
+      model: "snapshot-model",
+      billing,
+    });
+    expect(payloads[0]).toMatchObject(snapshot);
+    expect(payloads[0]).not.toHaveProperty("normalizedUsage");
+    expect(payloads[0]).not.toHaveProperty("billingSnapshot");
+    expect(factSpy.mock.calls[0]?.[1]).toMatchObject(snapshot);
+  });
+
+  test("the worker sanitizer retains root and per-request TTL evidence for forward snapshots", () => {
+    const normalized = normalizeModelCallUsage({
+      requestUsageEntries: [
+        {
+          inputTokens: 1000,
+          outputTokens: 10,
+          inputTokensDetails: {
+            cached_tokens: 0,
+            cache_write_tokens: 100,
+            cache_write_tokens_5m: 100,
+            cache_write_tokens_1h: 0,
+          },
+        },
+        {
+          inputTokens: 2000,
+          outputTokens: 20,
+          inputTokensDetails: {
+            cached_tokens: 10,
+            cache_write_tokens: 200,
+            cache_write_tokens_5m: 0,
+            cache_write_tokens_1h: 200,
+          },
+        },
+      ],
+    });
+    const sanitized = sanitizedModelUsageInput(normalized);
+    expect(sanitized.inputTokensDetails).toEqual({
+      cached_tokens: 10,
+      cache_write_tokens: 300,
+      cache_write_tokens_5m: 100,
+      cache_write_tokens_1h: 200,
+    });
+    expect(sanitized.requestUsageEntries?.[0]?.inputTokensDetails).toEqual({
+      cached_tokens: 0,
+      cache_write_tokens: 100,
+      cache_write_tokens_5m: 100,
+      cache_write_tokens_1h: 0,
+    });
+    expect(sanitized.requestUsageEntries?.[1]?.inputTokensDetails).toEqual({
+      cached_tokens: 10,
+      cache_write_tokens: 200,
+      cache_write_tokens_5m: 0,
+      cache_write_tokens_1h: 200,
+    });
+    expect(sanitized.totalTokens).toBe(3030);
   });
 
   test("external billing returns pricedCostMicros 0 for facts", async () => {

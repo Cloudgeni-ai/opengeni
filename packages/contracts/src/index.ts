@@ -3859,12 +3859,13 @@ export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
 /**
  * Usage grouped by each root session's current project. `other` folds the
- * projects past the listed limit; `unavailable` holds trees whose root the
- * viewer cannot read. Rows sum to the window totals.
+ * projects past the listed limit; `unavailable` holds private trees whose root
+ * the viewer cannot read; `deleted` holds retained usage without a session.
+ * Rows sum to the window totals. Neither amounts-only bucket identifies chats.
  */
 export const InsightsProjectRow = z.object({
   id: z.string().min(1),
-  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
   label: z.string().min(1),
   projects: z.number().int().nonnegative(),
   rootSessions: z.number().int().nonnegative(),
@@ -4033,6 +4034,8 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
+  /** Prior input whose cache details are known. Omitted by older API replicas. */
+  priorCacheInputTokens: z.number().nonnegative().optional(),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),

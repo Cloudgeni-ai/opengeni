@@ -1037,8 +1037,31 @@ credits-path price and is zero for externally billed calls.
 Insights counts every ledger row, including private/missing/deleted sessions;
 `privateChats` exposes person-only amounts. Details/samples remain actor-visible;
 debits remain unchanged.
+Daily usage and model-call rollups are maintained by transactional source-row
+deltas, not a scheduled refresh. Readers combine complete UTC days with exact
+raw partial-day edges and resolve current session visibility and metadata at
+read time. Deleted retained usage is separate from other people's Only-me
+amounts; no private session ID/title is a group or filter facet. Organization
+Personal amounts preserve the existing membership-name granularity without
+exposing another person's Personal workspace ID or name. The owner-only
+FORCE-RLS backfill, runtime grants, rolling compatibility and parity checks are
+described in [`insights-daily-rollups.md`](insights-daily-rollups.md).
+
+The additive workspace/organization `insights/usage` and `insights/calls` GET
+routes use the narrow `@opengeni/contracts/insights-usage` subpath. Workspace
+usage still requires `workspace:admin`; organization usage still requires
+`billing:read`. Organization amount authority never grants individual call or
+session access. Exact UTC ranges, repeated filters, groups, payer totals,
+token-knownness coverage and a nullable prior window share one query contract.
+Charged totals remain authoritative debits, while list totals are recorded
+provider estimates across all payers. Missing historical cache-write counters
+and per-class cost snapshots remain unknown, not zero or repriced using today's
+catalog. The prior cache denominator is exposed separately so an empty prior
+window cannot appear to have a cache-hit comparison.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
-`packages/db/src/insights-model-bundle.ts`.
+`packages/db/src/insights-model-bundle.ts`,
+`packages/core/src/domain/insights-usage.ts`, and
+`apps/api/src/routes/insights-usage.ts`.
 Workspace Insights and Organization settings > Insights render one dashboard
 (`apps/web/src/components/insights/usage-dashboard.tsx`) over the usage query
 (`.../insights/usage`, group-by plus token-class and cost breakdown); the

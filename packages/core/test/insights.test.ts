@@ -373,6 +373,7 @@ describe("getWorkspaceInsights", () => {
       expect(snapshot.recentCalls).toEqual([]);
       expect(snapshot.workspaceCreditUsd).toBe(0);
       expect(snapshot.creditUsd).toBe(0);
+      expect(snapshot.priorCacheInputTokens).toBe(0);
 
       const bundleInput = modelBundle.mock.calls.at(-1)?.[1];
       expect(bundleInput?.since.toISOString()).toBe(now.toISOString());
@@ -624,6 +625,43 @@ describe("getWorkspaceInsights", () => {
     ]);
     expect(snapshot.projects[0]).toMatchObject({ creditUsd: 1.25, cacheHitPct: 50, calls: 2 });
     expect(snapshot.projects[3]?.cacheHitPct).toBe(0);
+  });
+
+  test("exposes the prior cache denominator separately from total input", async () => {
+    const { modelBundle } = stubEmptyWorkspace();
+    modelBundle.mockResolvedValue({
+      ...emptyModelBundle(),
+      priorModelRows: [
+        {
+          provider: "openai",
+          model: "model",
+          billingPath: "external",
+          calls: 2,
+          inputTokens: 1000,
+          outputTokens: 0,
+          cachedTokens: 100,
+          cacheInputTokens: 200,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 1000,
+          tokenKnownCalls: 2,
+          cacheKnownCalls: 1,
+          pricedCostMicros: 0,
+          estimatedProviderCostMicros: 0,
+          estimatedProviderCostKnownCalls: 0,
+          equivalentCreditCostMicros: 0,
+          equivalentCreditCostKnownCalls: 0,
+        },
+      ],
+    });
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "week", now: new Date("2026-10-03T10:00:00.000Z") },
+    );
+    expect(snapshot.priorInputTokens).toBe(1000);
+    expect(snapshot.priorCacheInputTokens).toBe(200);
+    expect(snapshot.priorCacheHitPct).toBe(50);
   });
 });
 
