@@ -13,7 +13,7 @@ import {
   type UsageResponse,
 } from "./usage-contract";
 import { modelDisplayName, providerDisplayName, type ModelLabelSource } from "./model-display";
-import { costMicros, payerName } from "./usage-format";
+import { costMicros, payerName, sourceName } from "./usage-format";
 
 export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   model: "Model",
@@ -24,6 +24,7 @@ export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   rootSession: "Session",
   person: "Person",
   schedule: "Schedule",
+  source: "Source",
 };
 
 /** Group-bys in menu order, per scope. */
@@ -36,6 +37,7 @@ export const GROUP_ORDER: readonly UsageGroupBy[] = [
   "rootSession",
   "person",
   "schedule",
+  "source",
 ];
 
 export const FILTER_FIELD_OF: Record<UsageGroupBy, UsageFilterField> = {
@@ -47,6 +49,7 @@ export const FILTER_FIELD_OF: Record<UsageGroupBy, UsageFilterField> = {
   rootSession: "rootSessionId",
   person: "person",
   schedule: "scheduleId",
+  source: "source",
 };
 
 /** Where a click on a row goes next: filter to it, then look one level down. */
@@ -59,6 +62,7 @@ export const DRILL_NEXT: Record<UsageGroupBy, UsageGroupBy> = {
   rootSession: "model",
   person: "rootSession",
   schedule: "model",
+  source: "model",
 };
 
 export type BreakdownRow = {
@@ -121,6 +125,7 @@ function rowLabel(
       label: payerName(group.payer),
     };
   }
+  if (groupBy === "source") return { label: sourceName(group.key) };
   return { label: group.label };
 }
 
@@ -159,7 +164,12 @@ export function breakdownRows(
         ...(detail ? { detail } : {}),
         kind: group.kind,
         ...(group.you ? { you: true } : {}),
-        filter: filterable ? { field, values: [filterValue] } : null,
+        // A private row filters to its person (amounts only); other folded rows can't be filtered.
+        filter: filterable
+          ? { field, values: [filterValue] }
+          : group.kind === "private" && group.personKey
+            ? { field: "person", values: [group.personKey] }
+            : null,
         ...(response.groupBy === "rootSession" && group.kind === "item"
           ? { sessionId: group.key }
           : {}),

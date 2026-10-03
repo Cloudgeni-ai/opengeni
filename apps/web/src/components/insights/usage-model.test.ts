@@ -46,6 +46,26 @@ describe("usage search", () => {
     });
   });
 
+  test("a custom range needs both days in order", () => {
+    expect(parseUsageSearch({ range: "custom", start: "2026-09-01", end: "2026-09-15" })).toEqual({
+      range: "custom",
+      start: "2026-09-01",
+      end: "2026-09-15",
+    });
+    expect(parseUsageSearch({ range: "custom", start: "2026-09-15", end: "2026-09-01" })).toEqual(
+      {},
+    );
+    expect(parseUsageSearch({ range: "custom", start: "nope" })).toEqual({});
+    expect(
+      nextUsageSearch(
+        { range: "custom", start: "2026-09-01", end: "2026-09-02" },
+        { range: "ytd" },
+      ),
+    ).toEqual({
+      range: "ytd",
+    });
+  });
+
   test("filters round-trip, models split on the first slash", () => {
     const search = nextUsageSearch(
       {},

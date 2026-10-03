@@ -165,6 +165,7 @@ export function fixtureUsage(
             key: "private:owner-1",
             kind: "private" as const,
             label: "Ada Lovelace",
+            personKey: "person-2",
             measures: callMeasures(FIXTURE_MODELS[2]!, 300),
           },
           {
@@ -207,6 +208,35 @@ export function fixtureUsage(
             kind: "personal" as const,
             label: "Grace Hopper",
             measures: callMeasures(FIXTURE_MODELS[3]!, 300),
+          },
+        ];
+      case "source":
+        return (["web", "agent", "schedule", "slack", "api"] as const).map((source, index) => ({
+          key: source,
+          kind: "item" as const,
+          label: source,
+          measures: callMeasures(FIXTURE_MODELS[index % FIXTURE_MODELS.length]!, 900 - index * 150),
+        }));
+      case "person":
+        return [
+          {
+            key: "person-1",
+            kind: "item" as const,
+            label: "Bendik Hansen",
+            you: true,
+            measures: callMeasures(FIXTURE_MODELS[0]!, 1_800),
+          },
+          {
+            key: "person-2",
+            kind: "item" as const,
+            label: "Ada Lovelace",
+            measures: callMeasures(FIXTURE_MODELS[1]!, 900),
+          },
+          {
+            key: "service",
+            kind: "service" as const,
+            label: "Automations",
+            measures: callMeasures(FIXTURE_MODELS[2]!, 500),
           },
         ];
       case "payer":
@@ -297,6 +327,7 @@ export function fixtureUsage(
         { key: "person-2", name: "Ada Lovelace", you: false },
       ],
       schedules: [{ id: "55555555-0000-4000-8000-000000000001", name: "Nightly triage" }],
+      sources: ["web", "api", "slack", "schedule", "agent"],
     },
     capabilities: {
       groupBy: [
@@ -308,6 +339,7 @@ export function fixtureUsage(
         "rootSession",
         "person",
         "schedule",
+        "source",
       ],
       filters: [
         "workspaceId",
@@ -318,8 +350,9 @@ export function fixtureUsage(
         "person",
         "rootSessionId",
         "scheduleId",
+        "source",
       ],
-      ranges: ["today", "week", "month", "30d", "90d", "ytd"],
+      ranges: ["today", "week", "month", "30d", "90d", "ytd", "custom"],
       seriesGroups: true,
     },
   };
