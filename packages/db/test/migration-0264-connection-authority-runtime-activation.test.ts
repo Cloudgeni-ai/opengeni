@@ -42,6 +42,13 @@ const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_
 const scheduledProducerMaterializationMigrationName =
   "0414_scheduled_generated_producer_materialization.sql";
 const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
+// Reuse the shared dependency tail, extending only this fixture's replay.
+// 0598 clones the 0345 waiter fence and extends the 0275/0402 authority ledgers;
+// none may be treated as installed while those prerequisites are absent.
+const cutoverMigrationTail = [
+  ...embeddingMigrationTail,
+  "0598_claude_subscription_account_pools.sql",
+].sort();
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -103,7 +110,7 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${scheduledProducerMaterializationMigrationName}),
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
-      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
+      await sql`insert into schema_migrations (name) select unnest(${cutoverMigrationTail}::text[])`;
       await migrate(blank.databaseUrl);
       // Current session adapters select the complete sessions row while this
       // fixture intentionally withholds 0402. Supply only its later columns
@@ -119,7 +126,9 @@ describe("migration 0264 connection authority runtime activation", () => {
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
         add column input_wait_reason text,
-        add column input_wait_set_at timestamptz
+        add column input_wait_set_at timestamptz,
+        add column initial_claude_provider_account_authority_snapshot jsonb
+          not null default '{"version":1,"scope":"workspace"}'::jsonb
       `;
 
       const [account] = await sql<{ id: string }[]>`
@@ -173,6 +182,9 @@ describe("migration 0264 connection authority runtime activation", () => {
         latencyMode: "standard" as const,
         sandboxBackend: "none",
         subjectId,
+        // This is pre-0264 work, not fresh subscription selection. 0598 is
+        // withheld with its scheduled-ledger prerequisites in the shared tail.
+        initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
       });
       await cutoverClient.close();
       const explicitDelegation = [
@@ -214,7 +226,7 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         delete from schema_migrations
-        where name = any(${embeddingMigrationTail}::text[]) or name in (
+        where name = any(${cutoverMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -279,12 +291,13 @@ describe("migration 0264 connection authority runtime activation", () => {
         drop column input_wait_turn_id,
         drop column input_wait_until,
         drop column input_wait_reason,
-        drop column input_wait_set_at
+        drop column input_wait_set_at,
+        drop column initial_claude_provider_account_authority_snapshot
       `;
       await migrate(blank.databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
-        where name = any(${embeddingMigrationTail}::text[]) or name in (
+        where name = any(${cutoverMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -303,24 +316,26 @@ describe("migration 0264 connection authority runtime activation", () => {
         )
         order by name
       `;
-      expect(receipts.map((receipt) => receipt.name)).toEqual([
-        migrationName,
-        scheduledConnectionAuthorityMigrationName,
-        organizationMembershipLockOrderMigrationName,
-        personalGitHubRepositorySelectionMigrationName,
-        sessionTenancyFenceMigrationName,
-        sessionEventCursorMigrationName,
-        sessionEventRawLaneActivationMigrationName,
-        sandboxProviderDeadlineInteractionMigrationName,
-        sandboxProviderDeadlineInteractionFollowupMigrationName,
-        sandboxDeadlineRotationPreemptionMigrationName,
-        sessionInputWaitMigrationName,
-        commandTrackingRetirementMigrationName,
-        scheduledSessionTargetIndexMigrationName,
-        scheduledProducerMaterializationMigrationName,
-        scheduledInheritedToolAdmissionMigrationName,
-        ...embeddingMigrationTail,
-      ]);
+      expect(receipts.map((receipt) => receipt.name)).toEqual(
+        [
+          migrationName,
+          scheduledConnectionAuthorityMigrationName,
+          organizationMembershipLockOrderMigrationName,
+          personalGitHubRepositorySelectionMigrationName,
+          sessionTenancyFenceMigrationName,
+          sessionEventCursorMigrationName,
+          sessionEventRawLaneActivationMigrationName,
+          sandboxProviderDeadlineInteractionMigrationName,
+          sandboxProviderDeadlineInteractionFollowupMigrationName,
+          sandboxDeadlineRotationPreemptionMigrationName,
+          sessionInputWaitMigrationName,
+          commandTrackingRetirementMigrationName,
+          scheduledSessionTargetIndexMigrationName,
+          scheduledProducerMaterializationMigrationName,
+          scheduledInheritedToolAdmissionMigrationName,
+          ...cutoverMigrationTail,
+        ].sort(),
+      );
     } finally {
       await sql.end({ timeout: 1 });
       await blank.release();
