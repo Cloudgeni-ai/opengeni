@@ -942,6 +942,17 @@ tool/subject. A client
 cancellation authority. Attempt/turn interruption remains the sole cancellation
 boundary and still drains or closes journaled work under the existing lifecycle.
 
+Accepted reasoning-capable GPT-5-and-later models on direct OpenAI or Azure
+Responses request provider-generated summaries with `reasoning.summary: auto`.
+Their `response.reasoning_summary_text.delta` events use the existing fenced
+`agent.reasoning.delta`, SSE and visible reasoning-preview path before final
+message text when the provider emits them. Summary timing and presence are
+provider-dependent; this does not expose private or encrypted reasoning or
+promise a first-token deadline. Codex retains `detailed`; chat, unverified
+compatible/proxy routes, nonreasoning and other model families retain their
+existing settings. Effort, tools, instructions, history and admission do not
+change, and no extra startup publication or await is introduced.
+
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
 turn's durable consecutive provider-recovery count rather than unrelated
