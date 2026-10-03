@@ -89,7 +89,7 @@ export function SessionBrowseOrderControls({
   onSortByChange: (value: SessionBrowseSortBy) => void;
   status: SessionBrowseStatus;
   onStatusChange: (value: SessionBrowseStatus) => void;
-  /** Loaded workstreams waiting on the person, counted beside "Needs you". */
+  /** Authorized active workstreams waiting on the person, counted beside "Needs you". */
   needsYouCount?: number;
   showEmptyGroups: boolean;
   onShowEmptyGroupsChange: (value: boolean) => void;

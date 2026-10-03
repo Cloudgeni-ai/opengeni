@@ -647,6 +647,10 @@ function sessionListQuery(options: {
 }
 
 export type SessionListPageOptions = {
+  /** Complete content-free totals for an authorized root page. */
+  includeTotals?: boolean;
+  /** Filter attention rows before pagination. */
+  needsYouOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -698,7 +702,10 @@ const SESSION_PAGE_STRING_QUERY_KEYS = [
 ] as const;
 
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
-  return SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined);
+  return (
+    Boolean(options.needsYouOnly) ||
+    SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
+  );
 }
 
 function unsupportedSessionPage(feature: string): Error {
@@ -1649,6 +1656,8 @@ export class OpenGeniClient {
         if (value) query[key] = value;
       }
       if (options.pinsOnly) query.pinsOnly = "true";
+      if (options.includeTotals) query.includeTotals = "true";
+      if (options.needsYouOnly) query.needsYouOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -1688,20 +1697,26 @@ export class OpenGeniClient {
       // array as a successful search would be worse than an explicit rolling-
       // upgrade error (and client-side filtering cannot recover matches beyond
       // the old endpoint's bounded first page).
-      const unsupported = options.cursor
-        ? "stable session-page cursors"
-        : search
-          ? "session search"
-          : options.pinsOnly
-            ? "pins-only session lists"
-            : options.archivedOnly
-              ? "archived session lists"
-              : filtered
-                ? "filtered session lists"
-                : null;
+      const unsupported = options.includeTotals
+        ? "complete session totals"
+        : options.cursor
+          ? "stable session-page cursors"
+          : search
+            ? "session search"
+            : options.pinsOnly
+              ? "pins-only session lists"
+              : options.archivedOnly
+                ? "archived session lists"
+                : filtered
+                  ? "filtered session lists"
+                  : null;
       if (unsupported) throw unsupportedSessionPage(unsupported);
       return { pinned: [], sessions: response, nextCursor: null };
     }
+    if (options.includeTotals && response.totals === undefined)
+      throw unsupportedSessionPage("complete session totals");
+    if (options.needsYouOnly && response.needsYouOnly !== true)
+      throw unsupportedSessionPage("attention session filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }

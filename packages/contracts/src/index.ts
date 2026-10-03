@@ -13383,6 +13383,27 @@ export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
 
 export type SessionSummary = Session;
 
+/** Content-free complete root discovery metadata, independent of page size. */
+export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    needsYouCount: z.number().int().nonnegative(),
+    groups: z.array(
+      z.object({
+        channelId: z.string().uuid().nullable(),
+        total: z.number().int().nonnegative(),
+        attention: z.number().int().nonnegative(),
+        attentionSince: z.string().datetime().nullable(),
+        failed: z.number().int().nonnegative(),
+        active: z.number().int().nonnegative(),
+        queued: z.number().int().nonnegative(),
+        unread: z.number().int().nonnegative(),
+        activeWork: z.number().int().nonnegative(),
+      }),
+    ),
+  }),
+);
+export type SessionListTotals = z.infer<typeof SessionListTotals>;
+
 /**
  * The canonical session-list page. Pinned rows are returned separately and are
  * excluded from `sessions`, so a cursor can page ordinary recency rows without
@@ -13395,6 +13416,9 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   z.object({
     pinned: z.array(Session),
     filtersApplied: z.literal(true).optional(),
+    /** Explicit receipt: older servers may acknowledge other filters only. */
+    needsYouOnly: z.literal(true).optional(),
+    totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
     sortBy: z.enum(["updatedAt", "createdAt", "name", "archivedAt"]).optional(),

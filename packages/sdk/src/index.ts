@@ -1054,6 +1054,7 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,

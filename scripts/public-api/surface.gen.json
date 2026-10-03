@@ -20463,6 +20463,7 @@
         "$": "object",
         "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
         "$.filtersApplied": "const?=[\"true\"]",
+        "$.needsYouOnly": "const?=[\"true\"]",
         "$.nextCursor": "string! null",
         "$.originSiteId": "string?",
         "$.pinned": "array!",
@@ -20471,7 +20472,8 @@
         "$.projection": "const!=[\"\\\"summary\\\"\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(SessionListEntry)",
-        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
+        "$.totals": "ref(SessionListTotals)?"
       }
     },
     "SessionListResponse": {
@@ -20482,6 +20484,7 @@
         "$": "object",
         "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
         "$.filtersApplied": "const?=[\"true\"]",
+        "$.needsYouOnly": "const?=[\"true\"]",
         "$.nextCursor": "string! null",
         "$.originSiteId": "string?",
         "$.pinned": "array!",
@@ -20489,7 +20492,28 @@
         "$.pinnedTruncated": "boolean?",
         "$.sessions": "array!",
         "$.sessions[]": "ref(Session)",
-        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
+        "$.totals": "ref(SessionListTotals)?"
+      }
+    },
+    "SessionListTotals": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.groups": "array!",
+        "$.groups[]": "object",
+        "$.groups[].active": "integer!",
+        "$.groups[].activeWork": "integer!",
+        "$.groups[].attention": "integer!",
+        "$.groups[].attentionSince": "string! null",
+        "$.groups[].channelId": "string! null",
+        "$.groups[].failed": "integer!",
+        "$.groups[].queued": "integer!",
+        "$.groups[].total": "integer!",
+        "$.groups[].unread": "integer!",
+        "$.needsYouCount": "integer!"
       }
     },
     "SessionMcpApprovalPolicy": {
@@ -26072,6 +26096,7 @@
       "SessionListEntryResponse": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
+      "SessionListTotals": "type",
       "SessionMcpApprovalPolicy": "type",
       "SessionMcpApprovalPolicyTarget": "type",
       "SessionMcpCredentialUpdateInput": "type",

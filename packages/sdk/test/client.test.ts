@@ -2219,6 +2219,43 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
+  test("requires a dedicated attention-filter receipt and forwards complete totals", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { needsYouOnly: true }),
+    ).rejects.toThrow("attention session filtering");
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, {
+        parentSessionId: null,
+        includeTotals: true,
+      }),
+    ).rejects.toThrow("complete session totals");
+    const totals = { needsYouCount: 12, groups: [] };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        needsYouOnly: true,
+        totals,
+      }),
+    );
+    expect(
+      (
+        await client.listSessionSummaryPage(WORKSPACE_ID, {
+          parentSessionId: null,
+          includeTotals: true,
+          needsYouOnly: true,
+        })
+      ).totals,
+    ).toEqual(totals);
+    expect(requests[0]!.url).toContain("includeTotals=true");
+    expect(requests[0]!.url).toContain("needsYouOnly=true");
+  });
+
   test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({

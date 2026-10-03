@@ -419,22 +419,76 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       };
       return json(state.session);
     }
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const rows =
+        state.enableCreate && !state.created
+          ? []
+          : [
+              state.session,
+              {
+                ...state.session,
+                id: otherSessionId,
+                rootSessionId: otherSessionId,
+                title: "Unloaded other session",
+              },
+            ];
+      const needsYou = (row: (typeof rows)[number]) =>
+        row.status === "requires_action" || row.status === "failed";
+      const needsYouOnly = params.get("needsYouOnly") === "true";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const archiveStatus = params.get("archiveStatus") ?? "active";
+      const filtered = needsYouOnly ? rows.filter(needsYou) : rows;
+      // All fixture roots are unarchived and unpinned. Global pin metadata
+      // remains complete when ordinary browse rows are filtered or absent.
+      const measured = pinsOnly ? rows : archiveStatus === "archived" ? [] : filtered;
       return json({
         sessions:
-          state.enableCreate && !state.created
+          pinsOnly ||
+          archiveStatus === "archived" ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
             ? []
-            : [
-                state.session,
-                { ...state.session, id: otherSessionId, title: "Unloaded other session" },
-              ],
+            : filtered,
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
         filtersApplied: true,
-        sortBy: new URL(request.url()).searchParams.get("sortBy") ?? "updated",
-        archiveStatus: new URL(request.url()).searchParams.get("archiveStatus") ?? "active",
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus,
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: rows.filter(needsYou).length,
+                groups: measured.length
+                  ? [
+                      {
+                        channelId: null,
+                        total: measured.length,
+                        attention: measured.filter((row) => row.status === "requires_action")
+                          .length,
+                        attentionSince: null,
+                        failed: 0,
+                        active: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "running" || row.status === "recovering"),
+                        ).length,
+                        queued: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "queued" || row.status === "waiting_capacity"),
+                        ).length,
+                        unread: 0,
+                        activeWork: 0,
+                      },
+                    ]
+                  : [],
+              },
+            }
+          : {}),
       });
+    }
     if (
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}` ||
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events`
