@@ -5,7 +5,7 @@ export type SessionStartObservability = Pick<Observability, "startSpan">;
 
 /** Content-free child spans around existing work; export is never joined and
  * diagnostic failures cannot alter the lifecycle or its exact error. */
-export function measureSessionStartPhase<T>(
+export async function measureSessionStartPhase<T>(
   observability: SessionStartObservability | null | undefined,
   phase: SessionStartPhase,
   work: () => Promise<T>,

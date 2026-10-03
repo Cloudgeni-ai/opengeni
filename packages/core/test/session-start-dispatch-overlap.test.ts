@@ -53,7 +53,11 @@ const flush = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 };
 
-function fixture(wakeRevision: number | null = 7, realFanout = false) {
+function fixture(
+  wakeRevision: number | null = 7,
+  realFanout = false,
+  syncFailure?: "fanout" | "wake",
+) {
   const holds = {
     initialize: deferred(),
     fanout: deferred(),
@@ -62,9 +66,11 @@ function fixture(wakeRevision: number | null = 7, realFanout = false) {
   };
   const calls: string[] = [];
   const session = { id: "session", workspaceId: "workspace", accountId: "account" };
+  const syncError = new Error("synchronous port refusal");
   const bus = {
     publish: () => {
       calls.push("fanout");
+      if (syncFailure === "fanout") throw syncError;
       return holds.fanout.promise;
     },
   };
@@ -86,6 +92,7 @@ function fixture(wakeRevision: number | null = 7, realFanout = false) {
     workflowClient: {
       wakeSessionWorkflow: () => {
         calls.push("wake");
+        if (syncFailure === "wake") throw syncError;
         return holds.wake.promise;
       },
     },
@@ -112,6 +119,7 @@ function fixture(wakeRevision: number | null = 7, realFanout = false) {
     calls,
     running,
     started,
+    syncError,
     settled: () => settled,
     async cleanup() {
       holds.initialize.resolve(started);
@@ -223,3 +231,20 @@ test("real best-effort fanout failure remains successful after both notification
     await f.cleanup();
   }
 });
+
+for (const failed of ["fanout", "wake"] as const) {
+  test(`synchronous ${failed} port failure still observes and joins the held sibling`, async () => {
+    const f = fixture(7, false, failed);
+    try {
+      f.holds.initialize.resolve(f.started);
+      await flush();
+      expect(f.calls).toEqual(["initialize", "fanout", "wake"]);
+      expect(f.settled()).toBe(false);
+      expect(f.calls).not.toContain("reload");
+      f.holds[failed === "fanout" ? "wake" : "fanout"].resolve();
+      await expect(f.running).rejects.toBe(f.syncError);
+    } finally {
+      await f.cleanup();
+    }
+  });
+}
