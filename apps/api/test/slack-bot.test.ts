@@ -122,6 +122,11 @@ afterEach(async () => {
     await sql`delete from memory_slack_publications where account_id = any(${accountIds}::uuid[])`;
     await sql`delete from memory_slack_publication_configurations where account_id = any(${accountIds}::uuid[])`;
     await sql`delete from external_identities where account_id = any(${accountIds}::uuid[])`;
+    // Tasks cascade their membership-bound revision authorities; sessions
+    // cascade their control/turn children and release owner/subject/fork FKs.
+    // Neither cleanup bypasses unexpected retained-history FKs or guards.
+    await sql`delete from scheduled_tasks where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from sessions where account_id = any(${accountIds}::uuid[])`;
     // Personal connection authorities retain their membership via RESTRICT.
     // Dispose only this fixture's connection children before those authorities
     // and memberships; unexpected retained references still fail the cleanup.

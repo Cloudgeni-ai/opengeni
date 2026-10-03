@@ -468,7 +468,9 @@ test("authority, target, replay and native-human request lanes stay fenced", asy
       f.cancellation,
     ),
   ).rejects.toMatchObject({ status: 403 });
-  // The existing human timestamp-CAS variant does not become service authority.
+  // The legacy human timestamp-CAS variant does not derive verified
+  // organization administration from this service request.
+  const membersBeforeNativeRevoke = await f.members();
   await expect(
     f.service.revokeOrganizationWorkspaceMember(
       f.accountId,
@@ -476,7 +478,11 @@ test("authority, target, replay and native-human request lanes stay fenced", asy
       f.identity.organizationMembershipId,
       { operationId: crypto.randomUUID(), expectedUpdatedAt: new Date().toISOString() },
     ),
-  ).rejects.toMatchObject({ status: 401 });
+  ).rejects.toMatchObject({
+    status: 403,
+    body: JSON.stringify({ message: "Organization administration is not authorized" }),
+  });
+  expect(await f.members()).toEqual(membersBeforeNativeRevoke);
   await f.revoke();
   await expect(
     f.service.cancelExternalWorkspaceMemberGrant(
