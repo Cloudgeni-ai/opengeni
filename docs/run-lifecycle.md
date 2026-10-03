@@ -3512,7 +3512,35 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. The historical `model_sdk_serialization` phase is Codex-only:
+critical path. Initial session creation adds content-free
+`core.session_start.initialize|event_fanout|workflow_wake|session_reload`
+child spans around the existing atomic initialization, post-commit fanout,
+immediate workflow signal plus wake-ledger acknowledgement, and response reload.
+The initial turn, authority, event log and wake outbox still commit atomically
+before either notification. Initial live fanout and the immediate durable-revision
+workflow wake then overlap; both settle before response reload or error propagation.
+Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
+transport failures remain best-effort. Durable SSE replay handles later committed
+events arriving ahead of initial live fanout. Worker child phases
+`services_initialization`, `claim_catalog_read`, `claim_atomic`,
+`claim_session_read`, and `claim_capability_settings` separate startup work
+before durable `turn.started`; provider/backend labels remain `unresolved`
+until the existing reads establish them. `learning_policy_freeze` and
+`attachment_authority_projection` cover the existing work after that start but
+before the historical worker-preparation timer. Service initialization precedes
+the execution root and claim timer; its completed span is backdated beneath
+the root, not evidence that it ran after the claim. These observations add no
+database reads or event publications, do not join telemetry exports, and leave
+historical metric boundaries intact. Missing observations are not zero durations.
+After successful exact claim ownership, session reload and capability settings
+overlap as fresh reads in separate root-pool RLS transactions; neither uses the
+other's result. Both results still precede credential selection, accepted-policy
+installation, allowance checks and durable turn start. This read join is fail-fast:
+the first observed error can replace the prior serial diagnostic priority, and a
+read-only sibling may retain its pooled connection/shared tenancy lock until it
+finishes, but cannot start tools, publish events or continue downstream authority.
+Neither overlap establishes a measured latency saving without matched live spans.
+The historical `model_sdk_serialization` phase is Codex-only:
 it runs from the worker checkpoint immediately before `runtime.runStream` to
 the Codex `transport_entry` callback. It includes SDK runner/tool/input
 preparation, not just JSON serialization CPU time. When reported,
