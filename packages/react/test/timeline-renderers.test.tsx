@@ -3355,6 +3355,167 @@ describe("StartupPhaseRow", () => {
 
   beforeEach(() => setStartupDetails(true));
   afterEach(() => setStartupDetails(false));
+
+  test("rotation recovery replaces neutral preparation waits with successful startup", async () => {
+    const firstAttemptId = "566d06b5-006d-48b8-9e54-9c2f0fc1b28c";
+    const recoveredAttemptId = "e77d3179-b001-4b0b-a0a8-6e6443a164a7";
+    const receipt = (type: string, payload: unknown, attemptId = firstAttemptId) => ({
+      ...timelineEvent(type, payload),
+      turnAttemptId: attemptId,
+    });
+    const waiting = [
+      receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+      receipt("sandbox.operation.started", { name: "sandbox.provision" }),
+      receipt("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        retryable: true,
+        failureCode: "rotation_in_progress",
+        failureStage: "lifecycle_wait",
+        failureCategory: "drain_capture_wait",
+        expectedTransition: true,
+      }),
+      receipt("turn.startup.phase.failed", { phase: "model_preparation", durationMs: 3_000 }),
+      receipt("turn.recovery.requested", { reason: "sandbox_deadline_rotation" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={waiting} status="running" />);
+    try {
+      await flush();
+
+      expect(r.container.textContent).toContain("Waiting for sandbox rotation");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+      expect(r.container.querySelectorAll(".text-og-status-failed")).toHaveLength(0);
+
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...waiting,
+            receipt("turn.started", {}, recoveredAttemptId),
+            receipt(
+              "turn.startup.phase.started",
+              { phase: "model_preparation" },
+              recoveredAttemptId,
+            ),
+            receipt("sandbox.operation.started", { name: "sandbox.provision" }, recoveredAttemptId),
+            receipt(
+              "sandbox.operation.completed",
+              { name: "sandbox.provision", origin: "resumed" },
+              recoveredAttemptId,
+            ),
+            receipt(
+              "turn.startup.phase.completed",
+              { phase: "model_preparation", durationMs: 500 },
+              recoveredAttemptId,
+            ),
+            receipt("agent.model.request", { phase: "started" }, recoveredAttemptId),
+            receipt(
+              "agent.model.request",
+              { phase: "first_byte", durationMs: 125 },
+              recoveredAttemptId,
+            ),
+            receipt("turn.completed", { output: "Ready." }, recoveredAttemptId),
+          ]}
+          status="idle"
+        />,
+      );
+      await flush();
+      expect(r.container.textContent).toContain("Ready.");
+      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
+        (candidate) => candidate.textContent?.includes("Preparation"),
+      );
+      expect(summary?.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => summary?.click());
+      await flush();
+      expect(r.container.textContent).toContain("Model request dispatched");
+      expect(r.container.textContent).toContain("Sandbox reattached");
+      expect(r.container.textContent).not.toContain("Waiting for sandbox rotation");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("actual preparation and provider failures retain red failure rows", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 500,
+            expectedTransition: false,
+            error: "Model request rejected",
+          }),
+          timelineEvent("agent.model.request", { phase: "started" }),
+          timelineEvent("agent.model.request", { phase: "failed", durationMs: 125 }),
+        ]}
+        status="failed"
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Runtime/model preparation failed");
+    expect(r.container.textContent).toContain("Model didn’t respond");
+    expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(2);
+    expect(r.container.querySelectorAll(".text-og-status-failed").length).toBeGreaterThan(0);
+    await r.unmount();
+  });
+
+  test("an expected preparation wait leaves a lost command failed with retained output", async () => {
+    const callId = "8f71c668-a605-4291-93ef-f4e57a37a4d1";
+    const command = {
+      commandId: "5c81f730-9a3b-40d9-a5b4-cad84c897c73",
+      status: "lost",
+      reason: "provider_deadline_containment",
+      exitCode: null,
+      stdout: "Check started; intermediate result retained.",
+    };
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("turn.startup.phase.started", { phase: "model_preparation" }),
+          timelineEvent("sandbox.operation.failed", {
+            name: "sandbox.provision",
+            expectedTransition: true,
+            retryable: true,
+            failureCode: "rotation_in_progress",
+            failureStage: "lifecycle_wait",
+            failureCategory: "drain_capture_wait",
+          }),
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 500,
+          }),
+          timelineEvent("agent.toolCall.created", {
+            id: callId,
+            name: "exec_command",
+            arguments: { cmd: "bun run checks" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: callId,
+            error: true,
+            output: JSON.stringify(command),
+          }),
+        ]}
+        status="running"
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Waiting for sandbox rotation");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(1);
+      const failed = r.container.querySelector<HTMLElement>('[data-status="failed"]');
+      expect(failed?.querySelector(".text-og-status-failed")).not.toBeNull();
+      await act(async () => failed?.click());
+      await flush();
+      expect(r.container.textContent).toContain("provider_deadline_containment");
+      expect(r.container.textContent).toContain('"status":"lost"');
+      expect(r.container.textContent).toContain('"exitCode":null');
+      expect(r.container.textContent).toContain(command.stdout);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

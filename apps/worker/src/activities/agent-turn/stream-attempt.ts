@@ -108,6 +108,7 @@ import {
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   compactionFailureTurnEventPayload,
+  modelPreparationFailureEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
@@ -1472,10 +1473,7 @@ export async function runTurnStreamAttempt(
         await eventing.publish!([
           {
             type: "turn.startup.phase.failed",
-            payload: {
-              phase: "model_preparation",
-              durationMs: Math.round(durationMs),
-            },
+            payload: modelPreparationFailureEventPayload(error, durationMs),
           },
         ]);
       }
