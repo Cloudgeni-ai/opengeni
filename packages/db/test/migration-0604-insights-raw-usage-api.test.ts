@@ -46,7 +46,7 @@ let accountId: string,
   privateId: string,
   deletedId: string,
   subjectId: string;
-const migrationName = "0603_insights_raw_usage_api.sql";
+const migrationName = "0604_insights_raw_usage_api.sql";
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
 const preMigrationRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
 const postureOptions = {
