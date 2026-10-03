@@ -850,6 +850,13 @@ Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
 
+Startup metadata reads overlap only within independent pairs: video policy and
+Skill descriptors after native-link authorization, then per-attempt recovery
+instructions and a second live video-policy read before agent construction.
+Both pairs finish before downstream catalog writes; each reader retains its
+own RLS scope. Recovery reads remain unconditional, policy reads remain fresh,
+and failures prevent downstream preparation without bypassing execution fences.
+
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
 OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the

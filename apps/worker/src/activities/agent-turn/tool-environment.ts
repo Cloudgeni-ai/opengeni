@@ -656,7 +656,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
-  const skillConfiguration = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  // Independent scoped reads after the native-link authority check. Both
+  // finish before assembling the Skill index or preparing executable tools.
+  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    listSkillDescriptors(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+    }),
+  ]);
   const bundledSkills = loadConfiguredBundledSkills({
     bundledSkillIds: session.bundledSkillIds,
     firstPartyTools: selectedFirstPartyMcpTools,
@@ -670,11 +679,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       artifact: skill,
     })),
   ];
-  const sharedSkillDescriptors = await listSkillDescriptors(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-  });
   const skillCatalog =
     toolFamilies.skills === false
       ? []
