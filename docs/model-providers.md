@@ -1265,6 +1265,32 @@ deployment uses Data Zone or another SKU whose rates differ from the built-in
 Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
+Insights comparisons use `configuredModelListPricingSchedules` and
+`calculateModelListUsageCostBreakdown`. These project reviewed upstream rates
+onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
+product routes without adding comparison-only prices to debit authority or
+changing frozen execution-definition hashes. Registry prices and explicit
+product-ID overrides still win. External metering never becomes a credit debit.
+
+The added Standard rates were reviewed on 2026-10-03 against
+[OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[xAI model pricing](https://docs.x.ai/developers/models/grok-4.7),
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), and
+the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
+[OpenRouter](https://openrouter.ai/api/v1/models) catalogs. GPT-6.1 Sol uses a
+5% cache-read rate and the exclusive 272K long-context boundary; Grok 4.5–4.7
+double their token rates above 200K; the reviewed native Claude models have no
+long-context premium. Claude 1-hour native cache writes use 2x base input,
+rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
+has an explicit zero list price, not an unknown price.
+
+Unknown future models, alternate/custom endpoints, unpinned Gateway custom
+routes, and Azure SKU-specific rates are not inferred from similar names. Use
+an exact provider-reported cost or an explicit reviewed operator price for
+these cases. This audit is bounded to the supported code catalog and reviewed
+native profiles; it does not read or mutate a deployed catalog or reprice old
+usage facts.
+
 ### Price audit (llm-prices canary)
 
 OpenGeni debit authority is the hand-maintained
@@ -1279,8 +1305,8 @@ bun run check:model-pricing
 ```
 
 That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
-compares Standard short- and long-context rates for the allow-listed GPT-5.6
-product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+compares Standard short- and long-context rates for the allow-listed GPT-6.1,
+GPT-6, and GPT-5.6 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
 Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific

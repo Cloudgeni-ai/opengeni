@@ -3022,6 +3022,30 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
+  // Reviewed 2026-10-03 against https://developers.openai.com/api/docs/pricing
+  // and https://ai-gateway.vercel.sh/v1/models. GPT-6.1 Sol's cache-read rate
+  // is 5% of input, not GPT-6 Sol's 10%. The long-context boundary is >272K.
+  "gpt-6.1-sol": {
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 200_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
   "gpt-6-astra": {
     default: {
       // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
@@ -3186,6 +3210,84 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       outputMicrosPerMillionTokens: 4_400_000,
       marginBps: 500,
     },
+  },
+  // xAI Standard API list rates, reviewed 2026-10-03:
+  // https://docs.x.ai/developers/models/grok-4.5 (and grok-4.6 / grok-4.7).
+  // All three double input, cache reads and output above 200K input tokens.
+  // xAI's automatic caching has no separate cache-write surcharge.
+  ...Object.fromEntries(
+    (
+      [
+        ["grok-4.5", 300_000],
+        ["grok-4.6", 500_000],
+        ["grok-4.7", 500_000],
+      ] as const
+    ).map(([model, cachedInput]) => [
+      model,
+      {
+        default: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: cachedInput,
+          outputMicrosPerMillionTokens: 6_000_000,
+          marginBps: 500,
+        },
+        inputTokenTiers: [
+          {
+            minimumInputTokens: 200_001,
+            pricing: {
+              inputMicrosPerMillionTokens: 4_000_000,
+              cachedInputMicrosPerMillionTokens: cachedInput * 2,
+              outputMicrosPerMillionTokens: 12_000_000,
+              marginBps: 500,
+            },
+          },
+        ],
+      },
+    ]),
+  ),
+  // Every reviewed native Claude profile. Standard/global prices include
+  // 5-minute cache writes; 1-hour native routes are projected separately.
+  // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-03).
+  // Opus 5.5 cache reads are 5%, unlike the older models' 10%; none of these
+  // models has a long-context premium.
+  ...Object.fromEntries(
+    (
+      [
+        ["claude-opus-5-5", 4_000_000, 200_000, 5_000_000, 20_000_000],
+        ["claude-sonnet-5-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
+        ["claude-opus-5", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-sonnet-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
+        ["claude-opus-4-8", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-opus-4-7", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-opus-4-6", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-sonnet-4-6", 3_000_000, 300_000, 3_750_000, 15_000_000],
+        ["claude-haiku-4-5-20251001", 1_000_000, 100_000, 1_250_000, 5_000_000],
+      ] as const
+    ).map(([model, input, cachedInput, cacheWrite, output]) => [
+      model,
+      {
+        default: {
+          inputMicrosPerMillionTokens: input,
+          cachedInputMicrosPerMillionTokens: cachedInput,
+          cacheWriteMicrosPerMillionTokens: cacheWrite,
+          outputMicrosPerMillionTokens: output,
+          marginBps: 500,
+        },
+      },
+    ]),
+  ),
+};
+
+// Explicitly priced free variant, not an unknown rate. List-only metadata
+// preserves previously accepted free-route execution definitions.
+// https://openrouter.ai/api/v1/models, verified 2026-10-03.
+const reviewedFreeOpenRouterListPricing: ModelPricingScheduleV1 = {
+  default: {
+    inputMicrosPerMillionTokens: 0,
+    cachedInputMicrosPerMillionTokens: 0,
+    cacheWriteMicrosPerMillionTokens: 0,
+    outputMicrosPerMillionTokens: 0,
+    marginBps: 500,
   },
 };
 
@@ -6103,6 +6205,129 @@ export function configuredModelPricingSchedules(
   };
 }
 
+/**
+ * Insights list-price metadata, including reviewed namespaced provider routes.
+ * Kept separate from debit/catalog pricing: adding a comparison must not change
+ * an accepted turn's frozen execution-definition hash or payer classification.
+ * Inline registry and explicit product-ID prices always win over projections.
+ */
+export function configuredModelListPricingSchedules(
+  settings: Settings,
+): Record<string, ModelPricingScheduleV1> {
+  const prices = configuredModelPricingSchedules(settings);
+  prices[DEFAULT_OPENROUTER_MODEL_ID] ??= reviewedFreeOpenRouterListPricing;
+  const configured = Object.fromEntries(
+    Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
+      model,
+      normalizeModelPricingSchedule(pricing),
+    ]),
+  );
+  for (const provider of configuredRegistryProviders(settings)) {
+    for (const model of provider.models) {
+      if (prices[model.id] !== undefined) continue;
+      const reviewed = reviewedProviderModelPricing(settings, provider, model, configured);
+      if (reviewed) prices[model.id] = reviewed;
+    }
+  }
+  return prices;
+}
+
+/**
+ * A reviewed upstream list rate may also describe a namespaced product route.
+ * Never infer a rate by stripping arbitrary prefixes, matching labels, or
+ * treating every OpenAI-compatible endpoint as the original provider.
+ * This is pricing metadata only: credential selection and payer/metering are
+ * still derived exclusively from the accepted execution policy.
+ */
+function reviewedProviderModelPricing(
+  settings: Settings,
+  provider: InternalRegistryProvider,
+  model: RegistryProvider["models"][number],
+  configured: Record<string, ModelPricingScheduleV1>,
+): ModelPricingScheduleV1 | undefined {
+  const upstream = model.upstreamModelId ?? model.id;
+  let priceId: string | undefined;
+  let nativeClaude = false;
+  switch (provider.kind) {
+    case "codex-subscription":
+      if (upstream.startsWith("gpt-")) priceId = upstream;
+      break;
+    case "xai-subscription":
+      if (upstream.startsWith("grok-")) priceId = upstream;
+      break;
+    case "anthropic-workspace":
+    case "anthropic-organization":
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      if (claudeNativeModelProfile(upstream)) {
+        priceId = upstream;
+        nativeClaude = true;
+      }
+      break;
+    case "direct-openai-workspace":
+      if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
+        priceId = upstream;
+      }
+      break;
+    case "vercel-gateway-managed":
+    case "vercel-gateway-workspace":
+    case "vercel-gateway-organization":
+      // Only curated, provider-pinned routes use the conservative fallback.
+      // Arbitrary Gateway custom models still require exact reported cost or
+      // an explicit operator rate, even if their slugs resemble a known model.
+      priceId = configuredGatewayCatalogModels(settings).find(
+        (candidate) =>
+          candidate.upstreamModelId === upstream &&
+          Object.values(OPENGENI_GATEWAY_MODELS).some(
+            (reviewed) => reviewed.upstreamModelId === candidate.upstreamModelId,
+          ),
+      )?.productId;
+      break;
+    case "openrouter-workspace":
+    case "openrouter-organization":
+    case "openrouter-managed":
+      if (upstream === DEFAULT_OPENROUTER_MODEL_ID.slice(OPENROUTER_MODEL_ID_PREFIX.length)) {
+        priceId = DEFAULT_OPENROUTER_MODEL_ID;
+      }
+      break;
+    case "api-key":
+      // Explicit deployments of the official APIs may use their own product
+      // IDs. Custom gateways/proxies and Azure SKUs do not inherit API rates.
+      if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
+        priceId = upstream;
+      } else if (provider.baseUrl.replace(/\/$/u, "") === "https://api.x.ai/v1") {
+        if (upstream.startsWith("grok-")) priceId = upstream;
+      } else if (
+        provider.api === "anthropic-messages" &&
+        provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1" &&
+        claudeNativeModelProfile(upstream)
+      ) {
+        priceId = upstream;
+        nativeClaude = true;
+      }
+      break;
+    default:
+      return undefined;
+  }
+  if (!priceId) return undefined;
+  // Explicit upstream overrides retain the existing Codex comparison behavior;
+  // a product-ID override or inline registry rate still has higher precedence.
+  if (configured[priceId]) return configured[priceId];
+  const schedule =
+    defaultModelPricing[priceId] ??
+    (priceId === DEFAULT_OPENROUTER_MODEL_ID ? reviewedFreeOpenRouterListPricing : undefined);
+  if (!schedule) return undefined;
+  if (!nativeClaude || provider.anthropic?.cacheTtl !== "1h") return schedule;
+  // Anthropic's 1-hour cache writes are 2x base input, rather than 5m's 1.25x.
+  return {
+    ...schedule,
+    default: {
+      ...schedule.default,
+      cacheWriteMicrosPerMillionTokens: schedule.default.inputMicrosPerMillionTokens * 2,
+    },
+  };
+}
+
 /** Legacy flat projection: returns the default/below-threshold price. */
 export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
   return Object.fromEntries(
@@ -6219,6 +6444,27 @@ export function calculateModelUsageCostBreakdown(
   options?: { latencyMode?: LatencyMode },
 ): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
+  return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+/** Provider-list/equivalent-credit comparison only; never debit authority. */
+export function calculateModelListUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+function calculateUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  schedule: ModelPricingScheduleV1 | undefined,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
   }

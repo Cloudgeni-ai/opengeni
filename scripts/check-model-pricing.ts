@@ -40,6 +40,12 @@ const AUDIT_MODELS: Array<{
   longMinimumInputTokens?: number;
 }> = [
   {
+    productId: "gpt-6.1-sol",
+    shortId: "gpt-6.1-sol",
+    longId: "gpt-6.1-sol-272k",
+    longMinimumInputTokens: 272_001,
+  },
+  {
     productId: "gpt-6-luna",
     shortId: "gpt-6-luna",
     longId: "gpt-6-luna-272k",
