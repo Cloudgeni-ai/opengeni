@@ -1,9 +1,4 @@
-import {
-  configuredModels,
-  configuredProviders,
-  type ResolvedModelProvider,
-  type Settings,
-} from "@opengeni/config";
+import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
@@ -34,7 +29,6 @@ import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
-import { azureGatewayFailoverFetch } from "./azure-gateway-failover";
 import {
   observeClaudeUsageResponse,
   prepareClaudeSubscriptionRequest,
@@ -84,27 +78,21 @@ export function buildOpenAIClientFromSettings(
   providerId: string = settings.openaiProvider,
 ): OpenAI {
   if (settings.openaiProvider === "azure") {
-    const provider = configuredProviders(settings).find((candidate) => candidate.builtin)!;
-    const failoverModels = provider.azureGatewayFailoverModels;
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
     return new ReplayableJsonOpenAI(
       {
         apiKey,
         baseURL,
-        maxRetries: failoverModels ? 0 : settings.openaiMaxRetries,
+        maxRetries: settings.openaiMaxRetries,
         defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
         defaultHeaders:
           settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
             ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
             : undefined,
-        fetch: deploymentAzureFetch(
-          provider,
-          settings,
-          sdkRetryingModelFetch(
-            settings.openaiMaxRetries,
-            instrumentedModelFetch(providerId, globalThis.fetch),
-          ),
+        fetch: sdkRetryingModelFetch(
+          settings.openaiMaxRetries,
+          instrumentedModelFetch(providerId, globalThis.fetch),
         ),
       },
       { modelRequestPolicy: azureModelRequestPolicy },
@@ -196,11 +184,6 @@ function providerClientCacheKey(
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
         openaiMaxRetries: settings.openaiMaxRetries,
-        azureGatewayFailoverModels: provider.azureGatewayFailoverModels ?? null,
-        gatewayKeyDigest:
-          provider.azureGatewayFailoverModels && settings.vercelAiGatewayApiKey
-            ? createHash("sha256").update(settings.vercelAiGatewayApiKey, "utf8").digest("hex")
-            : null,
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -328,10 +311,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   // before a retryable response failure reaches this process. Neither
   // transport has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
-  const registryMaxRetries =
-    gatewayProvider || openRouterProvider || provider.azureGatewayFailoverModels
-      ? 0
-      : settings.openaiMaxRetries;
+  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -395,23 +375,19 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-              fetch: deploymentAzureFetch(
-                provider,
-                settings,
-                sdkRetryingModelFetch(
-                  registryMaxRetries,
-                  anonymousProvider
-                    ? withoutAuthenticationHeaders(
+              fetch: sdkRetryingModelFetch(
+                registryMaxRetries,
+                anonymousProvider
+                  ? withoutAuthenticationHeaders(
+                      instrumentedModelFetch(provider.id, globalThis.fetch),
+                    )
+                  : gatewayProvider
+                    ? vercelGatewayRoutingFetch(
+                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
                         instrumentedModelFetch(provider.id, globalThis.fetch),
+                        gatewayPolicies,
                       )
-                    : gatewayProvider
-                      ? vercelGatewayRoutingFetch(
-                          provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                          instrumentedModelFetch(provider.id, globalThis.fetch),
-                          gatewayPolicies,
-                        )
-                      : instrumentedModelFetch(provider.id, globalThis.fetch),
-                ),
+                    : instrumentedModelFetch(provider.id, globalThis.fetch),
               ),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
@@ -420,22 +396,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     cacheProviderClient(cacheKey, provider.id, client);
   }
   return client;
-}
-
-function deploymentAzureFetch(
-  provider: ResolvedModelProvider,
-  settings: Settings,
-  primary: typeof fetch,
-): typeof fetch {
-  if (!provider.azureGatewayFailoverModels) return primary;
-  if (!settings.vercelAiGatewayApiKey)
-    throw new Error("Azure Gateway failover credential unavailable");
-  return azureGatewayFailoverFetch(
-    provider.azureGatewayFailoverModels,
-    settings.vercelAiGatewayApiKey,
-    primary,
-    instrumentedModelFetch("vercel-gateway-failover", globalThis.fetch),
-  );
 }
 
 export function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {

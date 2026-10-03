@@ -514,12 +514,6 @@ User-message file attachments enter the runtime manifest and eager materializati
 
 ## Verification
 
-Optional deployment-funded Azure Responses failover is owned by
-`packages/config/src/azure-gateway-failover.ts` and
-`packages/runtime/src/azure-gateway-failover.ts`; see `docs/model-providers.md`.
-Its explicit same-model route is part of accepted model-definition authority;
-never enable it by rewriting an already accepted policy or replaying a turn.
-
 Published-file chat links use `artifact:<id>` and host artifact navigation;
 `sandbox:` links still open the workspace inspector. Media previews share
 `apps/web/src/components/artifacts/retained-file-preview.tsx`. Preserve closed

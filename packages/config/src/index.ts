@@ -1,6 +1,4 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
-import { parseAzureGatewayFailoverJson } from "./azure-gateway-failover";
-export { parseAzureGatewayFailoverJson } from "./azure-gateway-failover";
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
@@ -611,9 +609,6 @@ const SettingsSchema = z.object({
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
   vercelAiGatewayApiKey: z.string().optional(),
-  // Explicit deployment-funded Azure Responses -> same-model Gateway routes.
-  // Empty by default; never borrows a workspace/organization connection.
-  azureGatewayFailoverJson: z.string().default("{}"),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
   /** Durable video generation uses the workspace-owned Gateway credential. */
@@ -2691,7 +2686,6 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
  * replacement.
  */
 export interface ResolvedModelProvider {
-  azureGatewayFailoverModels?: Readonly<Record<string, string>> | undefined;
   anthropic?: z.infer<typeof AnthropicProviderOptions> | undefined;
   id: string; // "openai" | "azure" | registry id
   label: string;
@@ -3393,7 +3387,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
-    azureGatewayFailoverJson: optional("OPENGENI_AZURE_GATEWAY_FAILOVER_JSON"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
     videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
     videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
@@ -5005,17 +4998,6 @@ function definitionVersionFor(
       defaultHeaders: requestMetadata.headers,
       defaultQuery: requestMetadata.query,
       ...(requestMetadata.anthropic ? { anthropic: requestMetadata.anthropic } : {}),
-      ...(provider.azureGatewayFailoverModels?.[model.upstreamModelId]
-        ? {
-            azureGatewayFailover: {
-              model: provider.azureGatewayFailoverModels[model.upstreamModelId],
-              baseUrl: "https://ai-gateway.vercel.sh/v1",
-              providers: ["openai"],
-              statuses: [429, 500, 502, 503, 504],
-              compatibilityCode: "invalid_encrypted_content",
-            },
-          }
-        : {}),
     },
     credentialSource: model.credentialSource,
     billing: model.billing,
@@ -5140,43 +5122,7 @@ export function configuredProviders(
       billing: registryBilling(provider),
     }),
   );
-  const providers = [builtin, ...registry];
-  const failover = parseAzureGatewayFailoverJson(settings.azureGatewayFailoverJson ?? "{}");
-  for (const [id, models] of Object.entries(failover)) {
-    const provider = providers.find((candidate) => candidate.id === id);
-    if (
-      !provider ||
-      provider.kind !== "api-key" ||
-      provider.api !== "responses" ||
-      provider.wireProfile !== "azure-openai" ||
-      provider.credentialSource.kind !== "deployment" ||
-      provider.billing.upstreamPayer !== "deployment"
-    ) {
-      throw new Error(
-        "Azure Gateway failover requires a deployment-funded Azure Responses provider",
-      );
-    }
-    if (!usableDeploymentSecret(settings.vercelAiGatewayApiKey)) {
-      throw new Error("Azure Gateway failover requires OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
-    }
-    const upstreamModels = provider.builtin
-      ? new Set(
-          settings.openaiAllowedModels
-            .split(",")
-            .map((value) => value.trim())
-            .concat(settings.openaiModel),
-        )
-      : new Set(
-          configuredRegistryProviders(settings)
-            .find((candidate) => candidate.id === id)
-            ?.models.map((model) => model.upstreamModelId ?? model.id),
-        );
-    if (Object.keys(models).some((model) => !upstreamModels.has(model))) {
-      throw new Error("Azure Gateway failover references an unconfigured upstream model");
-    }
-    provider.azureGatewayFailoverModels = models;
-  }
-  return providers;
+  return [builtin, ...registry];
 }
 
 /**
@@ -5614,34 +5560,6 @@ export function isModelAvailableForNewSelection(settings: Settings, modelId: str
     .array(CodexCatalogModelSchema)
     .parse(JSON.parse(settings.resolvedCodexModelsJson));
   return models.some((model) => model.id === modelId && !model.retired);
-}
-
-/** Called only with the durable policy installed for a claimed accepted attempt. */
-export function settingsForAcceptedAzureTurn(
-  settings: Settings,
-  policy: TurnExecutionPolicyV1,
-  expected: {
-    modelId: string;
-    reasoningEffort: Settings["openaiReasoningEffort"];
-    latencyMode?: LatencyMode;
-  },
-): Settings {
-  const routes = parseAzureGatewayFailoverJson(settings.azureGatewayFailoverJson ?? "{}");
-  const models = routes[policy.providerId];
-  if (!models || !Object.hasOwn(models, policy.upstreamModelId)) return settings;
-  try {
-    assertTurnExecutionPolicyMatchesConfigV1(settings, policy, expected);
-    return settings;
-  } catch (error) {
-    if (!(error instanceof TurnExecutionPolicyDefinitionMismatchError)) throw error;
-    // A new route cannot grant authority to a previously accepted turn. Only
-    // the exact historical primary-only definition may continue without it.
-    delete models[policy.upstreamModelId];
-    if (!Object.keys(models).length) delete routes[policy.providerId];
-    const primaryOnly = { ...settings, azureGatewayFailoverJson: JSON.stringify(routes) };
-    assertTurnExecutionPolicyMatchesConfigV1(primaryOnly, policy, expected);
-    return primaryOnly;
-  }
 }
 
 /** Called only with the durable policy installed for a claimed accepted attempt. */

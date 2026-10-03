@@ -126,7 +126,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     workerHttpPort: 8001,
     corsAllowOriginRegex: String.raw`https?://(localhost|127\.0\.0\.1)(:\d+)?`,
     openaiProvider: "openai",
-    azureGatewayFailoverJson: "{}",
     openaiApiKey: "test-openai-key",
     openaiBaseUrl: undefined,
     openaiModel: "scripted-model",

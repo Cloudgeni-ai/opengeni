@@ -503,52 +503,6 @@ endpoint to prepare an update, but the accepted registry remains canonical.
 
 ## Curated AI Gateway models
 
-### Optional Azure same-model failover
-
-`OPENGENI_AZURE_GATEWAY_FAILOVER_JSON` enables explicit deployment-funded
-Azure Responses routes through the deployment's
-`OPENGENI_VERCEL_AI_GATEWAY_API_KEY`. The default `{}` keeps existing routing.
-For example, a synthetic Azure provider with a `fixture-model` deployment uses:
-
-```json
-{"fixture-primary":{"fixture-model":"openai/fixture-model"}}
-```
-
-Use the built-in provider id `azure` for built-in models or the exact registry
-provider id for a declared `wireProfile: "azure-openai"` Responses provider.
-Every mapping must preserve the upstream model slug, and the model must be
-declared. Workspace, organization and subscription credentials never enter this
-path. Gateway routing is fixed to OpenAI system/BYOK capacity for that same
-model; it cannot loop back through Azure or select another model.
-
-Azure is tried first. One HTTP 429, 500, 502, 503 or 504 refusal may make one
-Gateway request before a successful response begins. There is no transport
-retry after network uncertainty, cancellation or any successful stream, and
-OpenAI SDK retries are disabled on opted-in clients. Unreviewed hosted tools,
-provider-owned file/item/response locators, background requests and remote
-compaction are ineligible. Function tools and hosted web search keep ordinary
-execution boundaries; no full agent turn or tool operation is replayed.
-
-Inline conversation and reasoning remain unchanged. A subsequent exact HTTP
-400 `invalid_encrypted_content` rejection with inline encrypted reasoning may
-continue through Gateway, since returning Gateway-origin opaque reasoning to
-Azure can fail validation. Other input, authorization, safety and policy
-refusals remain terminal. This path neither deletes history nor tries a new
-model. The Gateway response can still fail its own validation.
-
-The route is bound into the selected model's executable definition. On activation,
-previously accepted turns continue with their exact primary-only definition;
-newly accepted turns may use the configured route. This narrow reconstruction
-never tolerates another definition change or rewrites the accepted policy.
-Disabling a route still fences turns that accepted it; drain or settle those
-turns before removal. The existing
-logical model, payer and retail pricing remain selected; supplier settlement
-uses that model's configured token pricing. Physical Gateway requests have a
-separate `vercel-gateway-failover` transport metric and exact request capture.
-Failed supplier requests may incur upstream costs not reported as successful
-usage. Keep a funded Gateway balance and review capability, latency-tier,
-inline-history and tool continuity for each model before enabling its mapping.
-
 `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
 models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
