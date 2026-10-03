@@ -1902,6 +1902,79 @@ function firefoxLiveEventsAbortPageErrorsForValidatedRace(
     .map((evidence) => evidence.message);
 }
 
+function minimumCostTerminalAssignment(
+  costs: readonly ReadonlyMap<number, number>[],
+  terminalCount: number,
+  excluded?: { errorIndex: number; terminalIndex: number },
+): { cost: number; terminalIndexes: number[] } | null {
+  if (costs.length > terminalCount) return null;
+  // Rectangular Hungarian assignment. Missing edges have infinite cost;
+  // an unreachable augmenting path means the full ledger cannot correlate.
+  const rowPotential = Array.from({ length: costs.length + 1 }, () => 0);
+  const columnPotential = Array.from({ length: terminalCount + 1 }, () => 0);
+  const rowByColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  const previousColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  for (let row = 1; row <= costs.length; row += 1) {
+    rowByColumn[0] = row;
+    let column = 0;
+    const distances = Array.from({ length: terminalCount + 1 }, () => Number.POSITIVE_INFINITY);
+    const visited = Array.from({ length: terminalCount + 1 }, () => false);
+    do {
+      visited[column] = true;
+      const currentRow = rowByColumn[column] ?? 0;
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let candidateColumn = 1; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) continue;
+        const forbidden =
+          excluded?.errorIndex === currentRow - 1 && excluded.terminalIndex === candidateColumn - 1;
+        const edgeCost = forbidden
+          ? Number.POSITIVE_INFINITY
+          : (costs[currentRow - 1]?.get(candidateColumn - 1) ?? Number.POSITIVE_INFINITY);
+        const distance =
+          edgeCost - (rowPotential[currentRow] ?? 0) - (columnPotential[candidateColumn] ?? 0);
+        if (distance < (distances[candidateColumn] ?? Number.POSITIVE_INFINITY)) {
+          distances[candidateColumn] = distance;
+          previousColumn[candidateColumn] = column;
+        }
+        if ((distances[candidateColumn] ?? Number.POSITIVE_INFINITY) < delta) {
+          delta = distances[candidateColumn] ?? Number.POSITIVE_INFINITY;
+          nextColumn = candidateColumn;
+        }
+      }
+      if (!Number.isFinite(delta)) return null;
+      for (let candidateColumn = 0; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) {
+          const assignedRow = rowByColumn[candidateColumn] ?? 0;
+          rowPotential[assignedRow] = (rowPotential[assignedRow] ?? 0) + delta;
+          columnPotential[candidateColumn] = (columnPotential[candidateColumn] ?? 0) - delta;
+        } else {
+          distances[candidateColumn] =
+            (distances[candidateColumn] ?? Number.POSITIVE_INFINITY) - delta;
+        }
+      }
+      column = nextColumn;
+    } while (rowByColumn[column] !== 0);
+    do {
+      const predecessor = previousColumn[column] ?? 0;
+      rowByColumn[column] = rowByColumn[predecessor] ?? 0;
+      column = predecessor;
+    } while (column !== 0);
+  }
+  const terminalIndexes = Array.from({ length: costs.length }, () => -1);
+  for (let column = 1; column <= terminalCount; column += 1) {
+    const row = rowByColumn[column] ?? 0;
+    if (row > 0) terminalIndexes[row - 1] = column - 1;
+  }
+  let cost = 0;
+  for (const [errorIndex, terminalIndex] of terminalIndexes.entries()) {
+    const distance = costs[errorIndex]?.get(terminalIndex);
+    if (distance === undefined || !Number.isFinite(distance)) return null;
+    cost += distance;
+  }
+  return { cost, terminalIndexes };
+}
+
 function webKitLiveEventsPageErrorsForValidatedRace(
   problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
   engine: EngineName,
@@ -1969,36 +2042,26 @@ function webKitLiveEventsPageErrorsForValidatedRace(
       ),
     });
   }
-  // Prefer the nearest unambiguous terminal, but reassign an earlier error
-  // when it would otherwise steal a later error's only eligible terminal.
-  // Stable evidence order and a complete matching make callback delivery
-  // order irrelevant; the real ledger is untouched until all errors match.
-  const errorByTerminal = new Map<number, number>();
-  const assign = (errorIndex: number, visited: Set<number>): boolean => {
-    const candidate = candidates[errorIndex];
-    if (!candidate) return false;
-    for (const { index } of candidate.matches) {
-      if (visited.has(index)) continue;
-      visited.add(index);
-      const previousError = errorByTerminal.get(index);
-      if (previousError === undefined || assign(previousError, visited)) {
-        errorByTerminal.set(index, errorIndex);
-        return true;
-      }
-    }
-    return false;
-  };
-  const errorOrder = candidates
-    .map((candidate, index) => ({ candidate, index }))
-    .sort(
-      (left, right) =>
-        left.candidate.pageError.observedAt - right.candidate.pageError.observedAt ||
-        left.candidate.pageError.message.localeCompare(right.candidate.pageError.message),
+  // Require a uniquely minimum-lag complete assignment, not a nearest-first
+  // traversal that can steal a later callback's only eligible terminal.
+  // Every different assignment excludes at least one selected edge, so
+  // re-solving without each such edge detects all equal-cost alternatives.
+  const costs = candidates.map(
+    ({ matches }) => new Map(matches.map(({ index, distance }) => [index, distance])),
+  );
+  const best = minimumCostTerminalAssignment(costs, problems.acceptedRequestTerminals.length);
+  if (best === null) return [];
+  for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+    const alternative = minimumCostTerminalAssignment(
+      costs,
+      problems.acceptedRequestTerminals.length,
+      { errorIndex, terminalIndex },
     );
-  for (const { index } of errorOrder) {
-    if (!assign(index, new Set())) return [];
+    // One nanosecond absorbs summation roundoff conservatively: nearly tied
+    // evidence remains red, rather than manufacturing a unique correlation.
+    if (alternative !== null && alternative.cost <= best.cost + 0.000_001) return [];
   }
-  for (const index of [...errorByTerminal.keys()].sort((a, b) => b - a)) {
+  for (const index of [...best.terminalIndexes].sort((a, b) => b - a)) {
     problems.acceptedRequestTerminals.splice(index, 1);
   }
   return candidates.map(({ pageError }) => pageError.message);
@@ -4300,6 +4363,69 @@ describe("provider-neutral browser account acceptance", () => {
     ]);
   });
 
+  test("the strict browser ledger solves bounded minimum-lag assignments", () => {
+    // Exhaust every two-error/three-terminal graph with missing or 0/1/2 ms
+    // edges against an independent enumeration, including excluded edges.
+    for (let encoding = 0; encoding < 4 ** 6; encoding += 1) {
+      const costs = Array.from({ length: 2 }, (_, errorIndex) => {
+        const row = new Map<number, number>();
+        for (let terminalIndex = 0; terminalIndex < 3; terminalIndex += 1) {
+          const digit = Math.floor(encoding / 4 ** (errorIndex * 3 + terminalIndex)) % 4;
+          if (digit > 0) row.set(terminalIndex, digit - 1);
+        }
+        return row;
+      });
+      const oracle = (excluded?: { errorIndex: number; terminalIndex: number }) => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let first = 0; first < 3; first += 1) {
+          for (let second = 0; second < 3; second += 1) {
+            if (
+              first === second ||
+              (excluded?.errorIndex === 0 && excluded.terminalIndex === first) ||
+              (excluded?.errorIndex === 1 && excluded.terminalIndex === second)
+            ) {
+              continue;
+            }
+            best = Math.min(
+              best,
+              (costs[0]?.get(first) ?? Number.POSITIVE_INFINITY) +
+                (costs[1]?.get(second) ?? Number.POSITIVE_INFINITY),
+            );
+          }
+        }
+        return Number.isFinite(best) ? best : null;
+      };
+      const best = minimumCostTerminalAssignment(costs, 3);
+      expect(best?.cost ?? null).toBe(oracle());
+      if (best !== null) {
+        expect(new Set(best.terminalIndexes).size).toBe(2);
+        for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+          const excluded = { errorIndex, terminalIndex };
+          expect(minimumCostTerminalAssignment(costs, 3, excluded)?.cost ?? null).toBe(
+            oracle(excluded),
+          );
+        }
+      }
+    }
+    expect(
+      minimumCostTerminalAssignment(
+        [
+          new Map([
+            [0, 1],
+            [1, 2],
+          ]),
+          new Map([
+            [1, 1],
+            [2, 2],
+          ]),
+          new Map([[0, 2]]),
+        ],
+        3,
+      ),
+    ).toEqual({ cost: 6, terminalIndexes: [1, 2, 0] });
+    expect(minimumCostTerminalAssignment([new Map(), new Map()], 1)).toBeNull();
+  });
+
   test("the strict browser ledger correlates WebKit race pageerrors without broad CORS exemptions", () => {
     const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
     const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
@@ -4428,6 +4554,19 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual([]);
     expect(incomplete).toEqual(overlappingTerminals);
+    // Both complete assignments have the same total lag (2,100 ms), even
+    // though neither pageerror has a local nearest-distance tie.
+    const equalLagErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 3_000 },
+    ];
+    for (const errors of [equalLagErrors, [...equalLagErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const ambiguousTerminals = [...terminals];
+        expect(match(ambiguousTerminals, errors, "webkit", overlappingScope)).toEqual([]);
+        expect(ambiguousTerminals).toEqual(terminals);
+      }
+    }
     const ambiguousFallback = [...overlappingTerminals, { ...terminal, observedAt: 2_000 }];
     const ambiguousOriginal = [...ambiguousFallback];
     expect(
