@@ -27,6 +27,7 @@ import {
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { withMcpClient } from "./helpers/first-party-tool-client";
 
 // Agent configuration on the public session API: create, PUT .../agent with the
 // shared tool-policy CAS, typed 422s, the admission switch, the default-for-new-
@@ -225,28 +226,38 @@ describe("agent configuration admission switch (real PostgreSQL)", () => {
     expect(enabled.json.agentConfig.enabled).toBe(true);
   });
 
-  test("off: the MCP session_create schema is unchanged (no agent parameter)", async () => {
+  test("MCP discovery exposes agent selection only when admission is enabled", async () => {
     if (!available) return;
     const grant = await fixture();
     const root = await rootSession(grant, null);
     const attempt = await liveAttempt(grant, root.id);
-    const schemaKeys = (switches: Switches) => {
+    const discoverSchema = async (switches: Switches) => {
       const server = buildOpenGeniMcpServer(
         routeDeps(switches),
         agentGrant(grant, attempt, ["session_create"]),
       );
-      const tool = (
-        server as unknown as {
-          _registeredTools: Record<string, { inputSchema: { shape?: Record<string, unknown> } }>;
-        }
-      )._registeredTools["session_create"]!;
-      const schema = tool.inputSchema as unknown as { def?: { in?: { shape?: object } } };
-      return (
-        JSON.stringify(schema).includes('"agent"') || "agent" in (tool.inputSchema.shape ?? {})
-      );
+      return withMcpClient(server, async (mcpClient) => {
+        const tool = (await mcpClient.listTools()).tools.find(
+          (entry) => entry.name === "session_create",
+        );
+        expect(tool).toBeDefined();
+        return tool!.inputSchema;
+      });
     };
-    expect(schemaKeys({})).toBe(false);
-    expect(schemaKeys({ admission: true })).toBe(true);
+    const off = await discoverSchema({});
+    const on = await discoverSchema({ admission: true });
+    for (const schema of [off, on]) {
+      expect(schema.properties).toHaveProperty("initialMessage");
+      expect(schema.required).toContain("initialMessage");
+      expect(schema.required).not.toContain("agent");
+    }
+    expect(off.properties).not.toHaveProperty("agent");
+    const { agent, ...remainingProperties } = on.properties!;
+    expect(agent).toMatchObject({
+      type: "object",
+      properties: { capabilities: { anyOf: expect.any(Array) } },
+    });
+    expect({ ...on, properties: remainingProperties }).toEqual(off);
   });
 });
 
