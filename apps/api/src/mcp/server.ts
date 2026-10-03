@@ -349,6 +349,7 @@ import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-a
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -537,11 +538,29 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
   };
 }
 
-function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown) {
+function orchestrationFailureResult(
+  tool: OrchestrationToolName,
+  error: unknown,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+) {
   const envelope = orchestrationFailureEnvelope(tool, error);
+  let result: Record<string, unknown> = envelope;
+  if (envelope.error.code === `${tool}_failed` || envelope.error.code === `${tool}_unavailable`) {
+    try {
+      result = {
+        error: {
+          ...envelope.error,
+          ...orchestrationFailureDiagnostic(deps, tool, error, exactAgentAttemptClaims(grant)),
+        },
+      };
+    } catch {
+      // Diagnostic construction must never replace the original tool outcome.
+    }
+  }
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    structuredContent: envelope,
+    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    structuredContent: result,
     isError: true as const,
   };
 }
@@ -5229,7 +5248,7 @@ function registerWorkspaceOrchestrationTools(
           );
           return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
-          return orchestrationFailureResult("session_create", error);
+          return orchestrationFailureResult("session_create", error, deps, grant);
         }
       },
     );
@@ -5334,7 +5353,7 @@ function registerWorkspaceOrchestrationTools(
             }),
           );
         } catch (error) {
-          return orchestrationFailureResult("session_send_message", error);
+          return orchestrationFailureResult("session_send_message", error, deps, grant);
         }
       },
     );
@@ -5519,7 +5538,7 @@ function registerWorkspaceOrchestrationTools(
               }),
             );
           } catch (error) {
-            return orchestrationFailureResult("session_steer", error);
+            return orchestrationFailureResult("session_steer", error, deps, grant);
           }
         },
       );
