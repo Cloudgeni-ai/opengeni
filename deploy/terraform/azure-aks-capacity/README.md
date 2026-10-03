@@ -55,10 +55,25 @@ no-op as scoped, not a full-root no-op. Later pool creation must prove both real
 system ceilings and the joint quota/SKU envelope. Globally reject all destruction
 and replacement, including operations outside the intended pool addresses.
 
-The provider never receives a pinned autoscaled `node_count`; the lifecycle also
-ignores its drift. A staging bounds apply refuses a live count above five instead
-of forcing a scale-down. Existing labels, taints, versions, and upgrade settings
-are preserved. Pool deletion or decommission is not authorized by this root.
+Terraform configuration never pins autoscaled `node_count`; the lifecycle also
+ignores its drift. AzureRM 4.72.0 creates an autoscaled User pool at `min_count`
+when count is omitted, so a new launch pool starts at three. Its node-pool update
+path GETs the existing pool and retains that response's count in the PUT even
+when Terraform has no count diff; it does **not** promise HTTP-level count
+omission. A concurrent autoscaler change between that GET and PUT is therefore
+a provider race, not eliminated by `ignore_changes`. A real guarded saved plan,
+refreshed count admission, and post-apply readback/no-op remain mandatory; mocks
+prove neither an imported no-op nor real count preservation.
+
+The staging import rejects wrong cluster/pool IDs, region, pool name, mode, OS
+type, priority, SKU, disk, pod density, or disabled autoscaling. It admits only
+monotonic bounds tightening and a live count within four to five, rather than
+forcing either a scale-up or scale-down. Every other optional imported field,
+including networking, security, labels, taints, OS SKU, versions, and upgrade
+settings, is preserved. Pool deletion or decommission is not authorized by this
+root. Review the pinned provider's
+[create/update implementation](https://github.com/hashicorp/terraform-provider-azurerm/blob/v4.72.0/internal/services/containers/kubernetes_cluster_node_pool_resource.go)
+before changing these safeguards.
 
 The new pool's upgrade policy allows one rounded surge node, a 30-minute drain,
 and five-minute soak. It does not override PDBs, checkpoints, graceful worker

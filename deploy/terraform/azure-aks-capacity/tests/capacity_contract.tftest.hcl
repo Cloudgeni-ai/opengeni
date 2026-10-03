@@ -1,20 +1,25 @@
 mock_provider "azurerm" {
   mock_data "azurerm_kubernetes_cluster" {
     defaults = {
-      id = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
+      location = "northeurope"
     }
   }
 
   mock_data "azurerm_kubernetes_cluster_node_pool" {
     defaults = {
       auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
       name                 = "system"
       node_count           = 4
       os_disk_size_gb      = 128
       os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D4ds_v4"
     }
   }
@@ -32,8 +37,9 @@ variables {
   subscription_id = "00000000-0000-0000-0000-000000000001"
 }
 
-# Mock providers cannot execute an import. Override only computed resource
-# fields; desired bounds and identity still come from the real configuration.
+# Mock providers cannot execute an import or prove a real no-op/count update.
+# Override only computed resource fields; desired bounds and identity still
+# come from the real configuration. Provider HTTP behavior is reviewed separately.
 override_resource {
   target = azurerm_kubernetes_cluster_node_pool.system[0]
   values = {
@@ -64,6 +70,33 @@ run "production_does_not_adopt_system_pool" {
 
   variables {
     environment = "production"
+  }
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster.existing
+    values = {
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-prod-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-prod-neu-aks"
+      location = "northeurope"
+    }
+  }
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-prod-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-prod-neu-aks/agentPools/system"
+      max_count            = 6
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
   }
 
   assert {
@@ -163,18 +196,34 @@ run "staging_live_count_five_is_preserved" {
     target = data.azurerm_kubernetes_cluster_node_pool.system
     values = {
       auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
+      name                 = "system"
       node_count           = 5
       os_disk_size_gb      = 128
       os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D4ds_v4"
     }
   }
 
+  override_resource {
+    target          = azurerm_kubernetes_cluster_node_pool.system[0]
+    override_during = plan
+    values = {
+      node_count = 5
+    }
+  }
+
   assert {
-    condition     = azurerm_kubernetes_cluster_node_pool.system[0].max_count == 5
+    condition = (
+      azurerm_kubernetes_cluster_node_pool.system[0].max_count == 5 &&
+      azurerm_kubernetes_cluster_node_pool.system[0].node_count == 5
+    )
     error_message = "Tightening the ceiling must admit, not downscale, an already valid live count."
   }
 }
@@ -186,12 +235,17 @@ run "reject_staging_forced_live_count_reduction" {
     target = data.azurerm_kubernetes_cluster_node_pool.system
     values = {
       auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
+      name                 = "system"
       node_count           = 6
       os_disk_size_gb      = 128
       os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D4ds_v4"
     }
   }
@@ -206,12 +260,17 @@ run "reject_system_sku_drift" {
     target = data.azurerm_kubernetes_cluster_node_pool.system
     values = {
       auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
+      name                 = "system"
       node_count           = 4
       os_disk_size_gb      = 128
       os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D8ds_v4"
     }
   }
@@ -226,12 +285,17 @@ run "reject_disabled_existing_autoscaler" {
     target = data.azurerm_kubernetes_cluster_node_pool.system
     values = {
       auto_scaling_enabled = false
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
+      name                 = "system"
       node_count           = 4
       os_disk_size_gb      = 128
       os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D4ds_v4"
     }
   }
@@ -246,17 +310,281 @@ run "reject_system_disk_drift" {
     target = data.azurerm_kubernetes_cluster_node_pool.system
     values = {
       auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
       max_count            = 8
       max_pods             = 30
       min_count            = 4
+      mode                 = "System"
+      name                 = "system"
       node_count           = 4
       os_disk_size_gb      = 64
       os_disk_type         = "Ephemeral"
+      os_type              = "Linux"
+      priority             = "Regular"
       vm_size              = "Standard_D4ds_v4"
     }
   }
 
   expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_system_mode_drift" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "User"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_wrong_cluster_identity" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster.existing
+    values = {
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
+      location = "northeurope"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_wrong_region" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster.existing
+    values = {
+      id       = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks"
+      location = "westeurope"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_wrong_pool_identity" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_system_os_type_drift" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Windows"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_system_priority_drift" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Spot"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_system_pod_density_drift" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 110
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system, azurerm_kubernetes_cluster_node_pool.launch]
+}
+
+run "reject_staging_forced_live_count_increase" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 3
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system]
+}
+
+run "reject_staging_minimum_widening" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 5
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 5
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system]
+}
+
+run "reject_staging_ceiling_widening" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 4
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  expect_failures = [azurerm_kubernetes_cluster_node_pool.system]
+}
+
+run "staging_already_tightened_bounds_are_admitted" {
+  command = plan
+
+  override_data {
+    target = data.azurerm_kubernetes_cluster_node_pool.system
+    values = {
+      auto_scaling_enabled = true
+      id                   = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-opengeni-stg-neu/providers/Microsoft.ContainerService/managedClusters/opengeni-stg-neu-aks/agentPools/system"
+      max_count            = 5
+      max_pods             = 30
+      min_count            = 4
+      mode                 = "System"
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      os_type              = "Linux"
+      priority             = "Regular"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster_node_pool.system[0].min_count == 4 &&
+      azurerm_kubernetes_cluster_node_pool.system[0].max_count == 5
+    )
+    error_message = "Already-tightened live bounds must remain admissible; this mock is not proof of an imported no-op."
+  }
 }
 
 run "reject_unreviewed_environment" {
