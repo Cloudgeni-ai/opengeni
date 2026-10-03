@@ -71,6 +71,8 @@ const ICONS: Record<string, string> = {
   "square-terminal": "SquareTerminalIcon",
   target: "TargetIcon",
   terminal: "TerminalIcon",
+  "thumbs-down": "ThumbsDownIcon",
+  "thumbs-up": "ThumbsUpIcon",
   "trash-2": "Trash2Icon",
   "triangle-alert": "TriangleAlertIcon",
   wrench: "WrenchIcon",

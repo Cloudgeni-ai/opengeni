@@ -45,6 +45,8 @@ export type { ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";
 export type { ButtonVariant } from "./controls";
 export { QueueDock } from "./queue-dock";
+export { FeedbackSheet, TurnFeedbackButtons, useTurnRatings } from "./feedback";
+export type { TurnFeedbackTarget } from "./feedback";
 export { ModelMark, SectionLabel, SessionRow, SessionRowList, StatusDot } from "./session-list";
 export type { SessionRowProps } from "./session-list";
 export { webColorsDark, webColorsLight } from "../ui/web-tokens.generated";

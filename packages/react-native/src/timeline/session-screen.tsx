@@ -1,10 +1,15 @@
-import { conversationTimeline } from "@opengeni/react/session";
-import { useMemo, type ReactNode } from "react";
+import {
+  conversationTimeline,
+  type AgentMessageItem,
+  type UserMessageItem,
+} from "@opengeni/react/session";
+import { useCallback, useMemo, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import { SessionComposer, type SessionComposerProps } from "./composer";
+import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { ApprovalStrip, HumanInputCard } from "./decisions";
 import { QueueDock } from "./queue-dock";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
@@ -37,6 +42,8 @@ export interface NativeSessionScreenProps extends Omit<
   bottomInset?: number | undefined;
   /** Distance from this screen's bottom edge to the window bottom (e.g. a tab bar). */
   keyboardBottomOffset?: number | undefined;
+  /** Reply feedback (thumbs beside Copy), as the web timeline offers it. */
+  feedback?: TurnFeedbackTarget | undefined;
 }
 
 export function NativeSessionScreen({
@@ -46,6 +53,8 @@ export function NativeSessionScreen({
   topBar,
   bottomInset,
   keyboardBottomOffset,
+  feedback,
+  renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
   const theme = useNativeTimelineTheme();
@@ -58,11 +67,33 @@ export function NativeSessionScreen({
   const paused = queue.effectiveControl?.state === "paused";
   const waitingOnInput = humanInput.requests.length > 0 && status === "requires_action";
   const busy = composer.sending || composer.pausing || composer.resuming;
+  const { ratings, rate } = useTurnRatings(feedback);
+  // Web order beside Copy: reply feedback, then host actions (fork, share…).
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => {
+      const host = hostMessageActions?.(item);
+      if (!feedback || item.kind !== "agent-message" || item.streaming || !item.turnId) return host;
+      const turnId = item.turnId;
+      return (
+        <>
+          <TurnFeedbackButtons
+            target={feedback}
+            turnId={turnId}
+            saved={ratings[turnId]}
+            onRated={(sentiment) => rate(turnId, sentiment)}
+          />
+          {host}
+        </>
+      );
+    },
+    [feedback, hostMessageActions, rate, ratings],
+  );
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
       {topBar}
       <MessageTimeline
         {...timelineProps}
+        renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
         items={items}
         status={status}
         trailing={

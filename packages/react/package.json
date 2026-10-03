@@ -146,6 +146,10 @@
     "./model-mark-paths": {
       "types": "./src/model-mark-paths.ts",
       "default": "./src/model-mark-paths.ts"
+    },
+    "./session-feedback-model": {
+      "types": "./src/session-feedback-model.ts",
+      "default": "./src/session-feedback-model.ts"
     }
   },
   "publishConfig": {

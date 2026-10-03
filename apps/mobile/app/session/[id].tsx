@@ -7,6 +7,7 @@ import {
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { Stack, router, useLocalSearchParams } from "expo-router";
+import { useMemo } from "react";
 import { Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
@@ -46,6 +47,10 @@ function LiveSession(props: {
     workspaceId: props.workspaceId,
   });
   const session = controller.session.session;
+  const feedback = useMemo(
+    () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
+    [props.client, props.workspaceId, props.sessionId],
+  );
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
   const pill = session?.model
     ? compactModelPill(props.models, session.model, session.reasoningEffort)
@@ -66,6 +71,7 @@ function LiveSession(props: {
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
+        feedback={feedback}
         composer={{
           options: pill ? (
             <ComposerPill label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name} />
