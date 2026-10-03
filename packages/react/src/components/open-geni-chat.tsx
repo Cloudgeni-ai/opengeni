@@ -148,6 +148,7 @@ export function OpenGeniChat({
       )}
       style={{ ...hostTheme.style, height }}
       data-og-theme={hostTheme.attribute}
+      data-og-host-theme=""
       data-og-chat=""
     >
       <aside
@@ -254,11 +255,13 @@ function NewChat({
   return (
     <form
       onSubmit={(event) => void submit(event)}
-      className="mx-auto box-border flex h-full w-full max-w-3xl flex-col justify-center gap-4 p-3 pb-[12vh]"
+      className="mx-auto box-border flex h-full w-full max-w-3xl flex-col gap-4 p-3"
       data-og-new-chat-composer=""
     >
+      {/* Sits a little above center, relative to the panel rather than the page. */}
+      <div aria-hidden className="min-h-0 flex-[2]" />
       {labels.newChatTitle ? (
-        <h2 className="text-center text-og-md font-medium text-og-fg">{labels.newChatTitle}</h2>
+        <p className="text-center text-og-md font-medium text-og-fg">{labels.newChatTitle}</p>
       ) : null}
       <div
         className={cn(
@@ -310,6 +313,7 @@ function NewChat({
           )}
         </p>
       ) : null}
+      <div aria-hidden className="min-h-0 flex-[3]" />
     </form>
   );
 }

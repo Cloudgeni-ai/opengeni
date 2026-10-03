@@ -86,6 +86,12 @@ export type HumanInputFormProps = {
   autoFocus?: boolean | undefined;
   /** Start collapsed to a compact bar (drafts still retained). */
   defaultCollapsed?: boolean | undefined;
+  /**
+   * Answer a yes/no decision (one required choice between an accept and a
+   * decline option, without Other) with two buttons instead of a radio list.
+   * Off by default; embedded conversations turn it on.
+   */
+  decisionButtons?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -117,12 +123,13 @@ function HumanInputRequestForm({
   messages: messageOverrides,
   autoFocus = true,
   defaultCollapsed = false,
+  decisionButtons = false,
   className,
 }: HumanInputFormProps) {
   const formatError = useErrorMessage();
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
-  const decision = binaryDecision(request.questions);
+  const decision = decisionButtons ? binaryDecision(request.questions) : null;
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   const resolvedTitle =
     title === undefined
@@ -509,6 +516,24 @@ function HumanInputRequestForm({
 
       {decision ? (
         <>
+          {decision.question.helpText ||
+          decision.accept.description ||
+          decision.decline.description ? (
+            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted">
+              {decision.question.label && decision.question.helpText ? (
+                <p>{decision.question.helpText}</p>
+              ) : null}
+              {[decision.accept, decision.decline].map((option) =>
+                option.description ? (
+                  <p key={option.id}>
+                    <span className="font-medium text-og-fg">{option.label}</span>
+                    {" · "}
+                    {option.description}
+                  </p>
+                ) : null,
+              )}
+            </div>
+          ) : null}
           {(error ?? submissionError) ? (
             <p role="alert" className="shrink-0 px-4 pt-3 text-og-sm text-og-status-failed">
               {error ?? submissionError}
@@ -535,7 +560,16 @@ function HumanInputRequestForm({
                   key={option.id}
                   type="button"
                   disabled={busy}
-                  title={option.description ?? undefined}
+                  ref={
+                    !primary && autoFocus
+                      ? (node) => {
+                          if (node && !node.dataset.ogFocused) {
+                            node.dataset.ogFocused = "";
+                            node.focus({ preventScroll: true });
+                          }
+                        }
+                      : undefined
+                  }
                   data-human-input-choice={option.id}
                   onClick={() => {
                     setDecisionChoice(option.id);
@@ -663,34 +697,10 @@ function HumanInputRequestForm({
   );
 }
 
-const ACCEPT_WORDS = new Set([
-  "approve",
-  "approved",
-  "yes",
-  "confirm",
-  "allow",
-  "accept",
-  "proceed",
-  "continue",
-  "ok",
-  "okay",
-  "apply",
-  "go",
-]);
-const DECLINE_WORDS = new Set([
-  "cancel",
-  "decline",
-  "reject",
-  "deny",
-  "no",
-  "don't",
-  "dont",
-  "abort",
-  "stop",
-  "skip",
-  "keep",
-  "leave",
-]);
+// Unambiguous approve/decline verbs only: "Continue with A" vs "Keep B" is a
+// real choice between two options, not a yes/no decision.
+const ACCEPT_WORDS = new Set(["approve", "approved", "yes", "confirm", "allow", "accept"]);
+const DECLINE_WORDS = new Set(["cancel", "decline", "reject", "deny", "no", "don't", "dont"]);
 
 function firstWord(label: string): string {
   return (
@@ -715,7 +725,14 @@ export function binaryDecision(questions: readonly HumanInputQuestion[]): {
 } | null {
   if (questions.length !== 1) return null;
   const question = questions[0]!;
-  if (question.kind !== "single_select" || question.skillReview || question.options.length !== 2)
+  if (
+    question.kind !== "single_select" ||
+    question.skillReview ||
+    // The runtime marks every choice question `allowOther`, so it is not a
+    // signal here; a different answer goes through the composer instead.
+    !question.required ||
+    question.options.length !== 2
+  )
     return null;
   const [first, second] = question.options as [
     HumanInputQuestion["options"][number],

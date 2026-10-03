@@ -2389,6 +2389,12 @@
 :where(.og-root).flex-\[1_1_5rem\],:where(.og-root) .flex-\[1_1_5rem\] {
     flex: 1 1 5rem;
   }
+:where(.og-root).flex-\[2\],:where(.og-root) .flex-\[2\] {
+    flex: 2;
+  }
+:where(.og-root).flex-\[3\],:where(.og-root) .flex-\[3\] {
+    flex: 3;
+  }
 :where(.og-root).flex-shrink,:where(.og-root) .flex-shrink {
     flex-shrink: 1;
   }
@@ -3785,9 +3791,6 @@
   }
 :where(.og-root).pb-\[8\%\],:where(.og-root) .pb-\[8\%\] {
     padding-bottom: 8%;
-  }
-:where(.og-root).pb-\[12vh\],:where(.og-root) .pb-\[12vh\] {
-    padding-bottom: 12vh;
   }
 :where(.og-root).pl-0\.5,:where(.og-root) .pl-0\.5 {
     padding-left: calc(var(--spacing) * 0.5);

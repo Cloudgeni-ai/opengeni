@@ -571,6 +571,16 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     );
     await press(textarea, {});
     expect(spy.sends).toEqual(["steer", "send"]);
+
+    // A direct pause this composer did not make (operator, API, agent) is never
+    // reinterpreted as a stopped response.
+    await mounted.unmount();
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={stopped} runControl="stop" />,
+    );
+    expect(mounted.container.querySelector("textarea")!.getAttribute("placeholder")).toBe(
+      "Message the agent — it will wait in the queue…",
+    );
   });
 
   test("runControl none hides every run control", async () => {

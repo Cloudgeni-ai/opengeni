@@ -756,6 +756,7 @@ describe("HumanInputForm yes/no decisions", () => {
     mounted = await renderComponent(
       createElement(HumanInputForm, {
         request: decision(["Cancel", "Approve"]),
+        decisionButtons: true,
         onSubmit: (response) => {
           submissions.push(response);
         },
@@ -764,6 +765,9 @@ describe("HumanInputForm yes/no decisions", () => {
     );
     const text = mounted.container.textContent ?? "";
     expect(text).not.toContain("Other");
+    // Option descriptions stay visible, not hover-only.
+    expect(text).toContain("first");
+    expect(text).toContain("second");
     expect(mounted.container.querySelector('input[type="radio"]')).toBeNull();
     const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
     // Decline first, the primary accept last.
@@ -781,6 +785,19 @@ describe("HumanInputForm yes/no decisions", () => {
     mounted = await renderComponent(
       createElement(HumanInputForm, {
         request: decision(["Blue", "Green"]),
+        decisionButtons: true,
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
+    expect(mounted.container.textContent).toContain("Other");
+  });
+
+  test("the console keeps the full form unless decision buttons are requested", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Cancel", "Approve"]),
         onSubmit: () => undefined,
         autoFocus: false,
       }),

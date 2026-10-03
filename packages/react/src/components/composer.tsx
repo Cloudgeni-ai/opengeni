@@ -412,14 +412,22 @@ export function useChatComposerController({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const listboxId = useId();
   const controlPaused = effectiveControl?.state === "paused";
-  // Under Stop, a pause owned by this conversation alone is the stopped
-  // response, not a state to manage: hide it and let the next message continue
-  // (a Steer resumes a paused branch). Any wider pause still shows.
+  // Set when this composer's Stop paused the conversation; cleared once it runs
+  // again. Pauses from anyone or anywhere else are never reinterpreted.
+  const [stoppedHere, setStoppedHere] = useState(false);
+  useEffect(() => {
+    if (!controlPaused) setStoppedHere(false);
+  }, [controlPaused]);
+  // Under Stop, the stopped response is not a state to manage: hide it and let
+  // the next message continue (a Steer resumes a paused branch). It applies
+  // only to this conversation's own pause with nothing queued behind it.
   const resumesOnSend =
-    runControl !== "pause" &&
+    runControl === "stop" &&
+    stoppedHere &&
     controlPaused &&
     effectiveControl?.directState === "paused" &&
-    effectiveControl.additionalBlockerCount === 0;
+    effectiveControl.additionalBlockerCount === 0 &&
+    queuedAheadCount === 0;
   const paused = controlPaused && !resumesOnSend;
   const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
   const [paletteMounted, setPaletteMounted] = useState(false);
@@ -754,6 +762,12 @@ export function useChatComposerController({
     [control, runControlOperation],
   );
 
+  const stop = useCallback(async (): Promise<boolean> => {
+    const stopped = await pause();
+    if (stopped && mountedRef.current) setStoppedHere(true);
+    return stopped;
+  }, [pause]);
+
   return {
     id,
     rootRef,
@@ -783,6 +797,7 @@ export function useChatComposerController({
     pausing: control?.pausing ?? false,
     resuming: control?.resuming ?? false,
     pause,
+    stop,
     resume,
     resumeScope,
     paused,
@@ -1388,7 +1403,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
           {...props}
           ref={ref}
           type="button"
-          onClick={() => void controller.pause()}
+          onClick={() => void controller.stop()}
           disabled={busy}
           aria-label={label}
           className={cn(

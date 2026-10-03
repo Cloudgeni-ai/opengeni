@@ -44,6 +44,18 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 
+export type SessionConversationLabels = {
+  /** Banner action after a refresh failure; the conversation stays mounted. */
+  retry: string;
+  /** Action when the conversation could not load at all. */
+  tryAgain: string;
+};
+
+const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
+  retry: "Retry",
+  tryAgain: "Try again",
+};
+
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
   /** Host-owned artifact links, previews and other message presentation. */
@@ -107,6 +119,8 @@ export type SessionConversationProps = ClientOverride & {
    * as they are. Customized surface tokens are always kept.
    */
   surface?: HostSurfacePreference | undefined;
+  /** Conversation-owned copy (error actions). */
+  labels?: Partial<SessionConversationLabels> | undefined;
   /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
   composerProps?: Omit<
     ChatComposerProps,
@@ -148,6 +162,7 @@ function Conversation({
   height = "100%",
   theme,
   surface,
+  labels: labelOverrides,
   composerProps,
   onRetry,
 }: SessionConversationProps & { onRetry: () => void }) {
@@ -227,8 +242,16 @@ function Conversation({
     () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
+  const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
   const error = detail.error ?? feed.error ?? human.error;
-  const loadFailed = error !== null && error !== undefined && feed.events.length === 0;
+  // Only an event feed that never loaded replaces the timeline; anything else
+  // is a refresh failure shown above a conversation that stays usable.
+  const loadFailed = Boolean(feed.error) && feed.events.length === 0;
+  const retryInPlace = () => {
+    if (detail.error) void detail.refresh();
+    if (human.error) void human.refresh();
+    if (feed.error) void feed.jumpToLatest();
+  };
   const running = status === "running" || status === "recovering" || status === "waiting_capacity";
   return (
     <div
@@ -239,6 +262,7 @@ function Conversation({
       ref={region}
       style={{ ...hostTheme.style, height }}
       data-og-theme={hostTheme.attribute}
+      data-og-host-theme=""
       data-og-conversation=""
     >
       {error && !loadFailed ? (
@@ -250,10 +274,10 @@ function Conversation({
           <span className="min-w-0 flex-1">{formatError(error)}</span>
           <button
             type="button"
-            onClick={onRetry}
+            onClick={retryInPlace}
             className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
           >
-            Retry
+            {labels.retry}
           </button>
         </div>
       ) : null}
@@ -263,13 +287,13 @@ function Conversation({
           className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
           data-og-conversation-error=""
         >
-          <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(error)}</p>
+          <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
           <button
             type="button"
             onClick={onRetry}
             className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
           >
-            Try again
+            {labels.tryAgain}
           </button>
         </div>
       ) : (
@@ -303,6 +327,8 @@ function Conversation({
           loadingOldest={feed.loadingOldest}
           onJumpToLatest={feed.jumpToLatest}
           onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+          // A narrow embed above a decision card has no room for the pill.
+          questionNavMinViewportHeight={320}
         />
       )}
       {importedArchive ? (
@@ -341,6 +367,7 @@ function Conversation({
               respondingRequestId={human.respondingRequestId}
               error={human.mutationError ? formatError(human.mutationError) : null}
               autoFocus={false}
+              decisionButtons
             />
             {terminal ? (
               <SessionChrome queue={queue} sessionStatus={status} readOnly />

@@ -7,6 +7,8 @@ import {
   hostTokenOverrides,
   parseComputedColor,
   resolveHostTheme,
+  resolveHostThemeState,
+  themeForBackground,
 } from "../src/lib/host-theme";
 import { registerDom } from "./render-hook";
 
@@ -115,5 +117,44 @@ describe("host surfaces", () => {
       expect([token, dark[token]]).toEqual([token, darkValue]);
       expect([token, light[token]]).toEqual([token, lightValue]);
     }
+  });
+});
+
+describe("review regressions", () => {
+  test("a stylesheet color-scheme does not outrank the painted background", () => {
+    // tokens.css declares `:root { color-scheme: dark }` on Tailwind hosts.
+    document.documentElement.style.colorScheme = "dark";
+    expect(
+      resolveHostTheme(
+        mount(`<div style="background-color: rgb(255, 255, 255)"><div data-embed></div></div>`),
+      ),
+    ).toBe("light");
+  });
+
+  test("mid-tone and saturated backgrounds pick the legible text", () => {
+    expect(themeForBackground({ r: 0x99, g: 0x99, b: 0x99 })).toBe("light");
+    expect(themeForBackground({ r: 0x3b, g: 0x82, b: 0xf6 })).toBe("light");
+    expect(themeForBackground({ r: 0x0b, g: 0x10, b: 0x20 })).toBe("dark");
+  });
+
+  test("surfaces never blend from a background that contradicts the theme", () => {
+    const embed = mount(
+      `<div style="background-color: rgb(11, 16, 32)"><div data-embed></div></div>`,
+    );
+    const forced = resolveHostThemeState(embed, "light", "host");
+    expect(forced.style?.["--og-color-canvas"]).toBeUndefined();
+    const auto = resolveHostThemeState(embed, "auto", "host");
+    expect(auto.theme).toBe("dark");
+    expect(auto.style?.["--og-color-canvas"]).toBe("rgb(11 16 32)");
+  });
+
+  test("light-designed neutrals stay behind when a root is forced dark; brand colors travel", () => {
+    const embed = mount(
+      `<div data-og-theme="light" style="--og-color-fg: #111111; --og-color-accent: #7c3aed"><div data-embed></div></div>`,
+    );
+    const state = resolveHostThemeState(embed, "dark", "theme");
+    expect(state.style?.["--og-color-fg"]).toBe("#e6e6e6");
+    expect(state.style?.["--og-color-accent"]).toBe("#7c3aed");
+    expect(state.style?.["--og-session-chrome-surface"]).toContain("--og-color-surface-2");
   });
 });

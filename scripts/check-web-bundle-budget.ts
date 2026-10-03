@@ -680,9 +680,9 @@ const effectiveBudgets = {
     // Embedded-chat defaults: the shared composer's Stop control and the
     // human-input yes/no decision buttons join this graph (theme resolution
     // stays in the embed roots, outside it). macOS/arm64 Bun 1.4 measures
-    // 2,613,949 raw / 737,446 gzip on main c7c717790 (+1,785 raw / +351 gzip).
+    // 2,614,314 raw / 737,561 gzip on main c7c717790 (+2,150 raw / +466 gzip).
     // Keep the established 1.5 KiB allowance; every other cap stays fixed.
-    wholeKibEnvelope(2_613_949, 1.5 * kib),
+    wholeKibEnvelope(2_614_314, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
