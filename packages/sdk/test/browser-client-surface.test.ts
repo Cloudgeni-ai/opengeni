@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import { OpenGeniBrowserClient } from "../src/browser";
+import { OpenGeniClient } from "../src/index";
 
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
@@ -103,6 +105,18 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test.each(["getOrganizationApiKey", "updateOrganizationApiKey"] as const)(
+    "keeps %s on the public root client but out of the browser client",
+    (methodName) => {
+      const options = { baseUrl: "https://api.example.test" };
+      const rootClient = new OpenGeniClient(options);
+      const browserClient = new OpenGeniBrowserClient(options);
+
+      expect(rootClient[methodName]).toBeFunction();
+      expect(browserClient).not.toHaveProperty(methodName);
+    },
+  );
+
   test("rejects new SDK methods that the browser does not use", async () => {
     const [clientSource, browserSource] = await Promise.all([
       Bun.file(clientPath).text(),

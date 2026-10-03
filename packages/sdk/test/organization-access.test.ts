@@ -147,6 +147,43 @@ describe("organization API-key requests", () => {
     expect(await requests[0]!.json()).toEqual({ name: key.name });
   });
 
+  test("PATCH preserves explicit empty permissions and selected workspace IDs", async () => {
+    const emptyPolicy: OrganizationAccessPolicy = {
+      preset: "custom",
+      permissions: [],
+      workspaceScope: { kind: "selected", workspaceIds: [] },
+    };
+    const key = apiKey({
+      permissions: [],
+      policy: emptyPolicy,
+      workspaceScope: emptyPolicy.workspaceScope,
+    });
+    const { client, requests } = makeClient(() => Response.json(key));
+
+    const result = await client.updateOrganizationApiKey(ORGANIZATION_ID, KEY_ID, {
+      policy: emptyPolicy,
+    });
+
+    expect(result).toEqual(key);
+    expect(await requests[0]!.json()).toEqual({ policy: emptyPolicy });
+    expect(requests).toHaveLength(1);
+  });
+
+  test("a 409 PATCH conflict is surfaced without an automatic retry", async () => {
+    const { client, requests } = makeClient(() =>
+      Response.json({ error: "Organization key policy conflict" }, { status: 409 }),
+    );
+
+    await expect(
+      client.updateOrganizationApiKey(ORGANIZATION_ID, KEY_ID, { policy }),
+    ).rejects.toMatchObject({ status: 409, outcomeUnknown: false });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PATCH");
+    expect(new URL(requests[0]!.url).pathname).toBe(keyPath);
+    expect(await requests[0]!.json()).toEqual({ policy });
+  });
+
   test("an uncertain PATCH is not replayed", async () => {
     let requests = 0;
     const client = new OpenGeniClient({
