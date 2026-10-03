@@ -92,7 +92,7 @@ export {
 } from "./human-input-model";
 export type { HumanInputAnswerDraft, HumanInputFormMessages } from "./human-input-model";
 export { isActionableHumanInputRequest } from "./human-input";
-export { SESSION_STATUS_PRESENTATION } from "./session-status-model";
+export { SESSION_STATUS_BADGE, SESSION_STATUS_PRESENTATION } from "./session-status-model";
 export type { SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
 export { noticeDisplayText, noticeTone } from "./timeline/notice-presentation";

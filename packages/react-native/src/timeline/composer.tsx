@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { Platform, Text, TextInput, View } from "react-native";
+import { Platform, Pressable, Text, TextInput, View } from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { IconButton } from "./controls";
+import { Icon } from "./icon";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -162,26 +163,40 @@ export function ComposerPill({
 }: {
   label: string;
   onPress?: (() => void) | undefined;
+  /** Shown before the label (the web picker's maker mark). */
   leading?: ReactNode;
 }) {
   const theme = useNativeTimelineTheme();
   return (
-    <View style={{ flexShrink: 1 }}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      disabled={!onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 4,
+        flexShrink: 1,
+        minHeight: 44,
+        paddingHorizontal: 8,
+        borderRadius: 999,
+        backgroundColor: pressed ? theme.colors["surface-2"] : "transparent",
+      })}
+    >
+      {leading}
       <Text
-        onPress={onPress}
-        accessibilityRole="button"
         numberOfLines={1}
         style={{
           ...fontStyle(theme, 500),
           fontSize: theme.size.sm,
-          lineHeight: 44,
-          paddingHorizontal: 8,
           color: theme.colors.fg,
+          flexShrink: 1,
         }}
       >
-        {leading}
-        {label} ⌄
+        {label}
       </Text>
-    </View>
+      <Icon name="chevron-down" size={12} color={theme.colors["fg-muted"]} />
+    </Pressable>
   );
 }

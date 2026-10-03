@@ -17,3 +17,46 @@ export const SESSION_STATUS_PRESENTATION: Record<
   failed: { label: "Failed", tone: "failed", pulse: false },
   cancelled: { label: "Cancelled", tone: "cancelled", pulse: false },
 };
+
+/**
+ * The status badge's color tokens (text, border and its alpha); the fill is the
+ * status color at 10%. Mirrors the web badge classes, for non-DOM renderers.
+ */
+export const SESSION_STATUS_BADGE: Record<
+  SessionStatus,
+  { text: string; border: string; borderAlpha: number; fill: string }
+> = {
+  queued: { text: "fg-muted", border: "border", borderAlpha: 1, fill: "status-queued" },
+  running: {
+    text: "status-running",
+    border: "status-running",
+    borderAlpha: 0.3,
+    fill: "status-running",
+  },
+  recovering: {
+    text: "status-running",
+    border: "status-running",
+    borderAlpha: 0.3,
+    fill: "status-running",
+  },
+  waiting_capacity: {
+    text: "status-waiting",
+    border: "status-waiting",
+    borderAlpha: 0.35,
+    fill: "status-waiting",
+  },
+  idle: { text: "status-idle", border: "status-idle", borderAlpha: 0.3, fill: "status-idle" },
+  requires_action: {
+    text: "status-waiting",
+    border: "status-waiting",
+    borderAlpha: 0.35,
+    fill: "status-waiting",
+  },
+  failed: {
+    text: "status-failed",
+    border: "status-failed",
+    borderAlpha: 0.35,
+    fill: "status-failed",
+  },
+  cancelled: { text: "fg-subtle", border: "border", borderAlpha: 1, fill: "status-cancelled" },
+};

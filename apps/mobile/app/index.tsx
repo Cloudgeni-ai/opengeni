@@ -4,6 +4,7 @@ import type { ReasoningEffort, Session } from "@opengeni/sdk";
 import {
   ComposerPill,
   fontStyle,
+  ModelMark,
   Icon,
   SectionLabel,
   SessionComposer,
@@ -137,7 +138,10 @@ function Home() {
             bottomInset={0}
             options={
               pill ? (
-                <ComposerPill label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name} />
+                <ComposerPill
+                  label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
+                  leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
+                />
               ) : null
             }
           />

@@ -2,12 +2,14 @@ import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
+  ModelMark,
   NativeSessionScreen,
+  SessionStatusBadge,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { Stack, router, useLocalSearchParams } from "expo-router";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
@@ -55,11 +57,27 @@ function LiveSession(props: {
   const pill = session?.model
     ? compactModelPill(props.models, session.model, session.reasoningEffort)
     : null;
+  const status = controller.sessionStatus;
+  const paused = controller.queue.effectiveControl?.state === "paused";
+  // Web header: the status badge beside the title (a paused workstream says so).
+  const headerRight = useCallback(
+    () =>
+      status ? (
+        <AppThemeProvider>
+          <SessionStatusBadge
+            status={paused ? "queued" : status}
+            label={paused ? "Paused" : undefined}
+          />
+        </AppThemeProvider>
+      ) : null,
+    [paused, status],
+  );
   return (
     <>
       <Stack.Screen
         options={{
           title: session?.title ?? "",
+          headerRight,
           headerStyle: { backgroundColor: theme.colors.bg },
           headerTintColor: theme.colors.fg,
           headerShadowVisible: false,
@@ -74,7 +92,10 @@ function LiveSession(props: {
         feedback={feedback}
         composer={{
           options: pill ? (
-            <ComposerPill label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name} />
+            <ComposerPill
+              label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
+              leading={<ModelMark model={session?.model ?? ""} size={14} color={theme.colors.fg} />}
+            />
           ) : null,
         }}
       />

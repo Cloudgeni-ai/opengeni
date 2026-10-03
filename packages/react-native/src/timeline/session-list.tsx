@@ -1,4 +1,5 @@
-import type { ClientModel, Session } from "@opengeni/sdk";
+import type { ClientModel, Session, SessionStatus } from "@opengeni/sdk";
+import { SESSION_STATUS_BADGE, SESSION_STATUS_PRESENTATION } from "@opengeni/react/timeline-model";
 import { MODEL_MARK_PATHS, modelMarkVendor } from "@opengeni/react/model-mark-paths";
 import { projectClientModelRows } from "@opengeni/react/model-policy";
 import {
@@ -22,6 +23,7 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
+import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -41,7 +43,15 @@ const TONE_COLOR: Record<SessionStatusTone, WebColorToken> = {
 };
 
 /** The web StatusDot: an 8pt dot with a gentle pulse for live states. */
-export function StatusDot({ tone, pulse }: { tone: SessionStatusTone; pulse?: boolean }) {
+export function StatusDot({
+  tone,
+  pulse,
+  size = 8,
+}: {
+  tone: SessionStatusTone;
+  pulse?: boolean;
+  size?: number;
+}) {
   const theme = useNativeTimelineTheme();
   const reduceMotion = useReducedMotion();
   const opacity = useSharedValue(1);
@@ -65,7 +75,12 @@ export function StatusDot({ tone, pulse }: { tone: SessionStatusTone; pulse?: bo
       accessibilityElementsHidden
       importantForAccessibility="no"
       style={[
-        { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.colors[TONE_COLOR[tone]] },
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          backgroundColor: theme.colors[TONE_COLOR[tone]],
+        },
         style,
       ]}
     />
@@ -220,7 +235,35 @@ export function SessionRowList(props: {
   );
 }
 
-function withAlpha(color: string, alpha: number): string {
-  const rgb = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(color);
-  return rgb ? `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})` : color;
+/** The web session status badge: tinted pill, breathing dot for live states. */
+export function SessionStatusBadge({ status, label }: { status: SessionStatus; label?: string }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const presentation = SESSION_STATUS_PRESENTATION[status];
+  const badge = SESSION_STATUS_BADGE[status];
+  const color = (token: string) => c[token as WebColorToken] ?? c["fg-muted"];
+  return (
+    <View
+      accessibilityRole="text"
+      accessibilityLabel={`Status: ${label ?? presentation.label}`}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: withAlpha(color(badge.border), badge.borderAlpha),
+        backgroundColor: withAlpha(color(badge.fill), 0.1),
+      }}
+    >
+      <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
+      <Text
+        style={{ ...fontStyle(theme, 500), fontSize: 12, lineHeight: 16, color: color(badge.text) }}
+      >
+        {label ?? presentation.label}
+      </Text>
+    </View>
+  );
 }
