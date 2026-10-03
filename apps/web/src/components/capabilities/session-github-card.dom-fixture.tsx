@@ -79,7 +79,7 @@ const context = {
   githubRepos: [] as Repo[],
   githubCatalogReady: true,
   githubStatusFailed: false,
-  repoBusy: false,
+  repoBusy: false as boolean,
   personalGitHubBusy: false,
   refreshGitHub,
   refreshPersonalGitHub,
@@ -133,7 +133,12 @@ beforeEach(() => {
   context.workspaces = [{ id: "workspace", kind: "shared" }];
 });
 
-async function render(resources: unknown[] = [], connectionAccounts?: () => unknown[]) {
+type SendContext = {
+  blocked: string | null;
+  awaitingHuman: boolean;
+  extras: Record<string, unknown>;
+};
+async function render(resources: unknown[] = [], sendContext?: () => SendContext) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -146,7 +151,7 @@ async function render(resources: unknown[] = [], connectionAccounts?: () => unkn
           workspaceId="workspace"
           sessionId="session"
           resources={next as never}
-          connectionAccounts={connectionAccounts as never}
+          sendContext={sendContext as never}
           onConfigured={onConfigured}
         />,
       ),
@@ -203,16 +208,90 @@ describe("GitHub conversation card", () => {
     }
   });
 
-  test("the composer's connection-account choices ride along, read at click time", async () => {
+  test("the composer's policy, control and account choices ride along, read at click time", async () => {
     context.githubRepos = [repo(101, "acme/api")];
-    let selections: unknown[] = [];
-    const h = await render([], () => selections);
+    let chat: SendContext = { blocked: null, awaitingHuman: false, extras: {} };
+    const h = await render([], () => chat);
     try {
-      selections = [{ serverId: "linear", connectionId: "00000000-0000-4000-8000-000000000002" }];
+      const extras = {
+        model: "gpt-5.6",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+        controlEtag: "etag-1",
+        connectionAccounts: [
+          { serverId: "linear", connectionId: "00000000-0000-4000-8000-000000000002" },
+        ],
+      };
+      chat = { blocked: null, awaitingHuman: false, extras };
       await click(h.byLabel("Use acme/api in this chat"));
-      const input = sendMessage.mock.calls[0]![2] as { connectionAccounts?: unknown[] };
-      expect(input.connectionAccounts).toEqual(selections);
+      const input = sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      expect(input).toMatchObject({ ...extras, text: "Use acme/api" });
     } finally {
+      await h.close();
+    }
+  });
+
+  test("a chat that cannot take a Send says why and sends nothing", async () => {
+    context.githubRepos = [repo(101, "acme/api")];
+    const h = await render([], () => ({
+      blocked: "This chat has ended. Start a new chat to use a repository.",
+      awaitingHuman: false,
+      extras: {},
+    }));
+    try {
+      await click(h.byLabel("Use acme/api in this chat"));
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(h.container.querySelector('[role="alert"]')?.textContent).toContain(
+        "This chat has ended.",
+      );
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a chat waiting on a human answer confirms before replacing that request", async () => {
+    routing = "accepted_for_steering";
+    context.githubRepos = [repo(101, "acme/api"), repo(102, "acme/web")];
+    const h = await render([], () => ({ blocked: null, awaitingHuman: true, extras: {} }));
+    try {
+      await click(h.byLabel("Use acme/api in this chat"));
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(h.text()).toContain("This chat is waiting for your answer.");
+      await click(h.buttons().find((node) => node.textContent === "Cancel")!);
+      expect(h.text()).not.toContain("This chat is waiting for your answer.");
+      await click(h.byLabel("Use acme/api in this chat"));
+      await click(h.buttons().find((node) => node.textContent === "Use anyway")!);
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      expect(h.text()).toContain("acme/api replaced the request this chat was waiting on.");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("an accepted attach stays accepted when the session re-read fails", async () => {
+    context.githubRepos = [repo(101, "acme/api")];
+    const h = await render();
+    h.onConfigured.mockImplementationOnce(async () => {
+      throw new Error("reload failed");
+    });
+    try {
+      await click(h.byLabel("Use acme/api in this chat"));
+      expect(h.container.querySelector('[role="alert"]')).toBeNull();
+      expect(h.text()).toContain("Using acme/api in this chat");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a catalog mid-refresh is loading, never proof that access was removed", async () => {
+    context.repoBusy = true;
+    const h = await render([resourceFor(repo(101, "acme/api"))]);
+    try {
+      expect(h.text()).not.toContain("no longer shares");
+      expect(h.text()).not.toContain("No repositories shared yet");
+      expect(h.container.querySelector('[aria-busy="true"]')).not.toBeNull();
+    } finally {
+      context.repoBusy = false;
       await h.close();
     }
   });
@@ -260,7 +339,7 @@ describe("GitHub conversation card", () => {
     const h = await render();
     try {
       await click(h.byLabel("Use acme/web in this chat"));
-      expect(h.text()).toContain("It picks up acme/web after its current step.");
+      expect(h.text()).toContain("Queued. The agent picks up acme/web on its next turn.");
       expect(h.text()).toContain("Using acme/web in this chat");
     } finally {
       await h.close();
@@ -281,9 +360,8 @@ describe("GitHub conversation card", () => {
       expect(h.onConfigured).not.toHaveBeenCalled();
       await click(h.byLabel("Use acme/api in this chat"));
       expect(sendMessage).toHaveBeenCalledTimes(2);
-      const first = sendMessage.mock.calls[0]![2] as { clientEventId: string };
-      const second = sendMessage.mock.calls[1]![2] as { clientEventId: string };
-      expect(second.clientEventId).toBe(first.clientEventId);
+      // The retry resends the exact first request, not a rebuilt one.
+      expect(sendMessage.mock.calls[1]![2]).toEqual(sendMessage.mock.calls[0]![2]);
       expect(h.text()).toContain("Using acme/api in this chat");
     } finally {
       await h.close();
@@ -303,11 +381,11 @@ describe("GitHub conversation card", () => {
     try {
       await click(h.byLabel("Use acme/api in this chat"));
       expect(h.byLabel("Adding acme/api")).not.toBeNull();
-      expect(h.byLabel("Use acme/web in this chat")?.disabled).toBe(true);
+      expect(h.byLabel("Use acme/web in this chat")?.getAttribute("aria-disabled")).toBe("true");
       await click(h.byLabel("Use acme/web in this chat"));
       expect(sendMessage).toHaveBeenCalledTimes(1);
       await act(async () => release());
-      expect(h.byLabel("Use acme/web in this chat")?.disabled).toBe(false);
+      expect(h.byLabel("Use acme/web in this chat")?.hasAttribute("aria-disabled")).toBe(false);
     } finally {
       await h.close();
     }

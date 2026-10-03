@@ -127,11 +127,13 @@ conversation shows the GitHub App card. Connecting binds the workspace, as
 above; it does not give the chat a repository. Once the workspace is bound, the
 same card lists the repositories the binding shares. **Use** (**Use in this
 chat** when only one is shared) sends an ordinary human message
-(`Use owner/repo`) carrying that repository resource, exactly the request the
-composer repository picker produces. The server
-validates it as any other Send (`sessions:control`, the workspace allowlist);
-on a running chat it queues behind the current step. Clone, push, and the
-`github_app` pull-request tools are available from the next turn. The agent
+(`Use owner/repo`) carrying the same repository resource the composer picker
+builds, through the same Send endpoint, with the composer's model, control and
+connection-account choices. The server validates it as any other Send
+(`sessions:control`, the workspace allowlist). On a running or paused chat it
+queues like Send; on a chat waiting for a human answer the card first confirms,
+because the Send replaces that request; an ended chat explains instead. Clone,
+push, and the `github_app` pull-request tools are available from the next turn. The agent
 cannot attach a repository itself: the card only offers the human action.
 
 The card updates in place when GitHub status changes, including after a

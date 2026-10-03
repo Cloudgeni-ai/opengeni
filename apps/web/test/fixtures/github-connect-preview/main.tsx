@@ -49,6 +49,13 @@ function Preview() {
           workspaceId="sample"
           sessionId="sample-session"
           resources={resources as never}
+          sendContext={() => ({
+            blocked: params.has("ended")
+              ? "This chat has ended. Start a new chat to use a repository."
+              : null,
+            awaitingHuman: params.has("awaiting"),
+            extras: {},
+          })}
           onConfigured={async () => {}}
         />
       </div>

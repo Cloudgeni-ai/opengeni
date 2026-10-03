@@ -192,7 +192,9 @@ import {
   firstPartySessionToolOptionsFor,
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
+import { stableJson } from "@opengeni/contracts";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import type { ChatSendContext } from "@/components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
   useFixedResourceScopes,
@@ -1921,13 +1923,19 @@ function SessionChatPane(props: {
           "connections:read",
         ),
   );
-  // The card's human attach carries the composer's account choices, read at click time.
-  const connectionAccountSelections = useRef(connectionAccounts.selections);
-  connectionAccountSelections.current = connectionAccounts.selections;
-  const readConnectionAccountSelections = useCallback(
-    () => connectionAccountSelections.current,
-    [],
-  );
+  // A conversation card's human attach is an ordinary Send. It reads the
+  // composer's policy, control and account choices at click time.
+  const chatSendContext = useRef<ChatSendContext>({
+    blocked: null,
+    awaitingHuman: false,
+    extras: {},
+  });
+  const readChatSendContext = useCallback(() => chatSendContext.current, []);
+  // Session reads return a new resources array; keep the identity while the
+  // contents match so timeline renderers keyed on it do not reset.
+  const sessionResourcesKey = stableJson(props.session.resources);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by content
+  const stableSessionResources = useMemo(() => props.session.resources, [sessionResourcesKey]);
   const reloadSessionAfterSetup = props.onReloadSession;
   const refreshConnectionAccounts = connectionAccounts.refresh;
   const afterConnectionSetup = useCallback(async () => {
@@ -1953,8 +1961,8 @@ function SessionChatPane(props: {
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
             visibility={props.session.tenancy?.visibility ?? "workspace"}
-            resources={props.session.resources}
-            connectionAccounts={readConnectionAccountSelections}
+            resources={stableSessionResources}
+            sendContext={readChatSendContext}
             onConfigured={afterConnectionSetup}
           />
         </Suspense>
@@ -1966,8 +1974,8 @@ function SessionChatPane(props: {
       props.session.workspaceId,
       props.session.tenancy?.visibility,
       props.session.tenancy?.authorityEpoch,
-      props.session.resources,
-      readConnectionAccountSelections,
+      stableSessionResources,
+      readChatSendContext,
       afterConnectionSetup,
     ],
   );
@@ -2262,6 +2270,28 @@ function SessionChatPane(props: {
         }
       : null;
   });
+  chatSendContext.current = {
+    blocked: isTerminalSessionStatus(props.session.status)
+      ? "This chat has ended. Start a new chat to use a repository."
+      : connectionAccounts.requiresAccountChoice
+        ? "Choose an account for this chat's connected tools in the composer first."
+        : personalAttachment.requiresDecision
+          ? "Finish the personal access choice in the composer first."
+          : null,
+    awaitingHuman: props.session.status === "requires_action",
+    extras: {
+      ...(composer.policy ?? {}),
+      ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
+        ? {
+            controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!
+              .controlEtag,
+          }
+        : {}),
+      ...(connectionAccounts.selections.length > 0
+        ? { connectionAccounts: connectionAccounts.selections }
+        : {}),
+    },
+  };
   const composerPolicy = composer.policy;
   const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
   const pendingRetryInput =

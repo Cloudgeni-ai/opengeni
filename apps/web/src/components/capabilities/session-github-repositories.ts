@@ -5,12 +5,34 @@ import {
   isRepositoryResourceForGitHubRepo,
   repositoryDisplayName,
 } from "@/lib/session-tools";
+import type { SendMessageInput } from "@opengeni/sdk";
+
 import type { GitHubRepository, ResourceRef } from "@/types";
 
 type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
 
-/** Rows shown before "Show more"; one more page is revealed per click. */
+/**
+ * What an ordinary composer Send would carry right now, read at click time, so
+ * a card's human attach follows the composer's own Send rules.
+ */
+export type ChatSendContext = {
+  /** Why the chat cannot take a Send now, in words; null when it can. */
+  blocked: string | null;
+  /** The chat waits on a human answer; a Send replaces that request. */
+  awaitingHuman: boolean;
+  extras: Partial<{
+    model: string;
+    reasoningEffort: SendMessageInput["reasoningEffort"];
+    latencyMode: SendMessageInput["latencyMode"];
+    controlEtag: string;
+    connectionAccounts: NonNullable<SendMessageInput["connectionAccounts"]>;
+  }>;
+};
+
+/** Rows shown before "Show more". */
 export const GITHUB_CARD_PAGE_SIZE = 5;
+/** Rows each "Show more" click reveals. */
+export const GITHUB_CARD_MORE_SIZE = 20;
 /** The list offers search once scanning it by eye stops being quick. */
 export const GITHUB_CARD_SEARCH_THRESHOLD = 6;
 
@@ -42,6 +64,7 @@ export function gitHubRepositoryChatState(
   repository: GitHubRepository,
   mounted: readonly ResourceRef[],
   accountLabel: (installationId: number) => string,
+  catalog: readonly GitHubRepository[],
 ): GitHubRepositoryChatState {
   const repositories = repositoryResources(mounted);
   if (repositories.some((resource) => isRepositoryResourceForGitHubRepo(resource, repository))) {
@@ -56,10 +79,13 @@ export function gitHubRepositoryChatState(
   ) {
     return { kind: "attached" };
   }
+  // As in the composer picker, only a mount the catalog still lists holds the
+  // chat's App token; a revoked mount does not block another account.
   const otherInstallation = repositories.find(
     (resource) =>
       resource.githubInstallationId !== undefined &&
-      resource.githubInstallationId !== repository.installationId,
+      resource.githubInstallationId !== repository.installationId &&
+      catalog.some((candidate) => isRepositoryResourceForGitHubRepo(resource, candidate)),
   )?.githubInstallationId;
   if (otherInstallation !== undefined) {
     const usingAccount = accountLabel(otherInstallation);

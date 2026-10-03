@@ -14,7 +14,8 @@ import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import type { CapabilityCatalogItem, McpConnectionAccountSelection, ResourceRef } from "@/types";
+import type { CapabilityCatalogItem, ResourceRef } from "@/types";
+import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 
 const CodexSubscriptionsCard = lazy(async () => ({
@@ -31,8 +32,8 @@ type SessionCapabilityCardProps = {
   sessionId: string;
   /** The chat's mounted resources, for cards that add a resource to this chat. */
   resources?: readonly ResourceRef[] | undefined;
-  /** The composer's current connection-account choices, sent with a card's message. */
-  connectionAccounts?: (() => McpConnectionAccountSelection[]) | undefined;
+  /** What a composer Send would carry now, for cards that send a human message. */
+  sendContext?: (() => ChatSendContext) | undefined;
 };
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
@@ -76,7 +77,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         workspaceId={props.workspaceId}
         sessionId={props.sessionId}
         resources={props.resources}
-        connectionAccounts={props.connectionAccounts}
+        sendContext={props.sendContext}
         onConfigured={props.onConfigured}
       />
     );

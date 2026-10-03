@@ -98,6 +98,10 @@ export function useRepositoryCatalogRefresh(
   };
 }
 
+function withoutMounted<T>(pending: ReadonlySet<T>, mounted: ReadonlySet<T>): Set<T> {
+  return new Set([...pending].filter((id) => !mounted.has(id)));
+}
+
 function manualDraftSignature(draft: RepoDraft): string | null {
   try {
     const uri = normalizeRepositoryTransportUri(
@@ -216,10 +220,19 @@ export function useFollowUpRepositories(
           mountedResources,
           manualRepos: pendingManualRepos,
           repositories: context.githubRepos,
-          selectedRepoIds: pendingRepoIds,
+          // A pending pick that became mounted elsewhere (for example from a
+          // conversation card) is already in the chat; never resend or
+          // conflict-check it against its own mount.
+          selectedRepoIds: withoutMounted(
+            pendingRepoIds,
+            mountedRepositorySelection.selectedRepoIds,
+          ),
           selectedRepoRefs: pendingRepoRefs,
           personalRepositories: context.personalGitHubRepositories,
-          selectedPersonalRepositoryIds: pendingPersonalRepoIds,
+          selectedPersonalRepositoryIds: withoutMounted(
+            pendingPersonalRepoIds,
+            mountedPersonalRepoIds,
+          ),
           selectedPersonalRepositoryRefs: pendingPersonalRepoRefs,
           personalCredentialBindingId: context.personalGitHubSelection?.credentialBindingId,
         }),
@@ -236,6 +249,8 @@ export function useFollowUpRepositories(
     context.personalGitHubRepositories,
     context.personalGitHubSelection?.credentialBindingId,
     mountedResources,
+    mountedPersonalRepoIds,
+    mountedRepositorySelection.selectedRepoIds,
     pendingManualRepos,
     pendingPersonalRepoIds,
     pendingPersonalRepoRefs,

@@ -160,8 +160,9 @@ try {
     const { page, errors } = await open(viewport, "connected-many", "&send=pending");
     await page.getByRole("button", { name: "Use acme/billing in this chat" }).click();
     await page.getByRole("button", { name: "Adding acme/billing" }).waitFor();
+    // Locked, not disabled: focus stays on the pressed control.
     for (const button of await card(page).getByRole("button", { name: /^Use / }).all()) {
-      assert.equal(await button.isDisabled(), true);
+      assert.equal(await button.getAttribute("aria-disabled"), "true");
     }
     await shoot(page, errors, "attaching", viewport.width);
     await page.close();
@@ -170,7 +171,7 @@ try {
   await check("a running chat queues the repository like Send", async (viewport) => {
     const { page, errors } = await open(viewport, "connected-many", "&send=queued");
     await page.getByRole("button", { name: "Use acme/cli in this chat" }).click();
-    await card(page).getByText("It picks up acme/cli after its current step.").waitFor();
+    await card(page).getByText("Queued. The agent picks up acme/cli on its next turn.").waitFor();
     await shoot(page, errors, "queued", viewport.width);
     await page.close();
   });
@@ -180,14 +181,14 @@ try {
     await page.getByRole("button", { name: "Use acme/api in this chat" }).click();
     await card(page).getByRole("alert").getByText("Couldn't add acme/api to this chat.").waitFor();
     const retry = page.getByRole("button", { name: "Use acme/api in this chat" });
-    assert.equal(await retry.isDisabled(), false);
+    assert.equal(await retry.getAttribute("aria-disabled"), null);
     await retry.click();
     await page.waitForFunction(
       () => (window as unknown as { __githubCard: Control }).__githubCard.store().sent.length === 2,
     );
     const { sent } = await control(page);
-    // The retry reuses the idempotency key, so an unknown outcome cannot post twice.
-    assert.equal(sent[0]!.clientEventId, sent[1]!.clientEventId);
+    // The retry resends the exact request, so an unknown outcome cannot post twice.
+    assert.deepEqual(sent[1], sent[0]);
     // A rejected request logs a console error by design; only page errors fail here.
     await page.screenshot({ path: `${output}/attach-error-${viewport.width}.png`, fullPage: true });
     await page.close();
@@ -211,6 +212,30 @@ try {
       await page.close();
     },
   );
+
+  await check("a chat waiting on an answer confirms before replacing it", async (viewport) => {
+    const { page, errors } = await open(viewport, "connected-many", "&awaiting=1");
+    await page.getByRole("button", { name: "Use acme/api in this chat" }).click();
+    await card(page).getByText("This chat is waiting for your answer.", { exact: false }).waitFor();
+    assert.equal((await control(page)).sent.length, 0);
+    await shoot(page, errors, "awaiting-confirm", viewport.width);
+    await page.getByRole("button", { name: "Use anyway" }).click();
+    await card(page).getByText("Using acme/api in this chat").waitFor();
+    assert.equal((await control(page)).sent.length, 1);
+    await page.close();
+  });
+
+  await check("an ended chat explains instead of sending", async (viewport) => {
+    const { page, errors } = await open(viewport, "connected-many", "&ended=1");
+    await page.getByRole("button", { name: "Use acme/api in this chat" }).click();
+    await card(page)
+      .getByRole("alert")
+      .getByText("This chat has ended.", { exact: false })
+      .waitFor();
+    assert.equal((await control(page)).sent.length, 0);
+    await shoot(page, errors, "ended", viewport.width);
+    await page.close();
+  });
 
   await check("keyboard reaches and activates Use", async (viewport) => {
     const { page } = await open(viewport, "attach-one");

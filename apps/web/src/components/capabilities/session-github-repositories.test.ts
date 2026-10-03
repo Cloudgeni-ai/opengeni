@@ -36,7 +36,7 @@ const account = (installationId: number) => (installationId === 42 ? "acme" : "n
 describe("GitHub card repository rules", () => {
   test("an available repository yields exactly the composer picker's resource", () => {
     const api = repo(101, "acme/api");
-    expect(gitHubRepositoryChatState(api, [], account)).toEqual({
+    expect(gitHubRepositoryChatState(api, [], account, [api])).toEqual({
       kind: "available",
       resource: {
         kind: "repository",
@@ -52,18 +52,20 @@ describe("GitHub card repository rules", () => {
 
   test("a mounted repository is attached even on another branch", () => {
     const api = repo(101, "acme/api");
-    expect(gitHubRepositoryChatState(api, [mounted(api, "release")], account)).toEqual({
+    expect(gitHubRepositoryChatState(api, [mounted(api, "release")], account, [api])).toEqual({
       kind: "attached",
     });
   });
 
   test("one App token per chat: another account's repository is blocked with its reason", () => {
-    const state = gitHubRepositoryChatState(
-      repo(201, "northwind/notes", 77),
-      [mounted(repo(101, "acme/api"))],
-      account,
-    );
+    const api = repo(101, "acme/api");
+    const notes = repo(201, "northwind/notes", 77);
+    const state = gitHubRepositoryChatState(notes, [mounted(api)], account, [api, notes]);
     expect(state).toMatchObject({ kind: "blocked", cause: "other_account", usingAccount: "acme" });
+    // A mount GitHub no longer shares holds no token, so it blocks nothing.
+    expect(gitHubRepositoryChatState(notes, [mounted(api)], account, [notes]).kind).toBe(
+      "available",
+    );
   });
 
   test("a mount-path collision with a manual repository is refused before Send", () => {
@@ -73,7 +75,7 @@ describe("GitHub card repository rules", () => {
       ref: "main",
       mountPath: "repos/github.com/acme/api",
     };
-    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [manual], account)).toMatchObject({
+    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [manual], account, [])).toMatchObject({
       kind: "blocked",
       cause: "mount_conflict",
     });
@@ -81,7 +83,7 @@ describe("GitHub card repository rules", () => {
 
   test("files and other resources never block a repository", () => {
     const file = { kind: "file", fileId: "00000000-0000-4000-8000-000000000001" } as ResourceRef;
-    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [file], account).kind).toBe(
+    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [file], account, []).kind).toBe(
       "available",
     );
   });

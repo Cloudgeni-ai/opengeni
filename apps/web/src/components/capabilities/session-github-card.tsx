@@ -1,4 +1,5 @@
 import type { AuthNeededItem } from "@opengeni/react";
+import type { SendMessageInput } from "@opengeni/sdk";
 import { ArrowUpRightIcon, BookMarkedIcon, CheckIcon, Loader2Icon, LockIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
@@ -13,15 +14,12 @@ import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type {
-  GitHubAppInfo,
-  GitHubRepository,
-  McpConnectionAccountSelection,
-  ResourceRef,
-} from "@/types";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import type { GitHubAppInfo, GitHubRepository, ResourceRef } from "@/types";
 import { capabilityLogoSource } from "./capability-logo-source";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import {
+  GITHUB_CARD_MORE_SIZE,
   GITHUB_CARD_PAGE_SIZE,
   GITHUB_CARD_SEARCH_THRESHOLD,
   gitHubRepositoryChatState,
@@ -30,6 +28,7 @@ import {
   repositoryUseMessage,
   revokedGitHubRepositoryResources,
   usingRepositoriesLabel,
+  type ChatSendContext,
   type GitHubRepositoryChatState,
 } from "./session-github-repositories";
 
@@ -38,6 +37,8 @@ type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
 /** Refresh on return to the tab: quickly while setup is pending, rarely after. */
 const AWAITING_REFRESH_MS = 3_000;
 const SETTLED_REFRESH_MS = 60_000;
+/** A trip to GitHub from this card stays "pending" this long. */
+const AWAITING_GITHUB_MS = 15 * 60_000;
 const lastForegroundRefresh = new Map<string, number>();
 
 export type SessionGitHubCapabilityCardProps = {
@@ -46,8 +47,8 @@ export type SessionGitHubCapabilityCardProps = {
   sessionId: string;
   /** The chat's mounted resources; repository rows are additive and immutable. */
   resources?: readonly ResourceRef[] | undefined;
-  /** The composer's connection-account choices, so this Send matches a composer Send. */
-  connectionAccounts?: (() => McpConnectionAccountSelection[]) | undefined;
+  /** What a composer Send would carry now, so this Send follows the same rules. */
+  sendContext?: (() => ChatSendContext) | undefined;
   /** Re-read the session after a human attach or setup lands. */
   onConfigured?: (() => Promise<void>) | undefined;
 };
@@ -63,7 +64,7 @@ export function SessionGitHubCapabilityCard({
   workspaceId,
   sessionId,
   resources,
-  connectionAccounts,
+  sendContext,
   onConfigured,
 }: SessionGitHubCapabilityCardProps) {
   const context = useAppContext();
@@ -84,8 +85,8 @@ export function SessionGitHubCapabilityCard({
   const inFlight = useRef(false);
   const requestSequence = useRef(0);
   const active = useRef(true);
-  // Set when this card sent the person to GitHub, so the return refreshes promptly.
-  const awaitingGitHub = useRef(false);
+  // When this card last sent the person to GitHub, so the return refreshes promptly.
+  const sentToGitHubAt = useRef(0);
   useEffect(() => {
     active.current = true;
     return () => {
@@ -102,28 +103,30 @@ export function SessionGitHubCapabilityCard({
   // Only the server mints the signed connect link, and only for a principal
   // that may manage this workspace's GitHub App.
   const canManage = Boolean(status?.linkUrl);
-  const personal =
-    context.workspaces?.find((entry) => entry.id === workspaceId)?.kind === "personal";
+  const personal = isPersonalWorkspace(
+    context.workspaces?.find((entry) => entry.id === workspaceId) ?? null,
+    null,
+  );
 
-  // Explicit refresh semantics of the composer picker: managers re-sync from
-  // GitHub, members re-read the workspace's repository rows.
+  // Re-sync from GitHub only while a connect or repository change is pending
+  // (the composer picker's explicit refresh); otherwise re-read stored rows.
   const canSyncGitHub = can("github:manage");
-  const refreshCatalog = useCallback(async () => {
-    if (!canUseGitHub || context.repoBusy) return;
-    await refreshGitHub(workspaceId, undefined, { sync: canSyncGitHub });
-  }, [canSyncGitHub, canUseGitHub, context.repoBusy, refreshGitHub, workspaceId]);
   const awaitingChange = !bound || context.githubRepos.length === 0;
+  const repoBusy = context.repoBusy;
   useEffect(() => {
+    if (!canUseGitHub) return;
     const onForeground = () => {
-      if (document.visibilityState === "hidden") return;
+      if (document.visibilityState === "hidden" || repoBusy) return;
       const now = Date.now();
-      const interval =
-        awaitingChange || awaitingGitHub.current ? AWAITING_REFRESH_MS : SETTLED_REFRESH_MS;
+      const awaiting = awaitingChange || now - sentToGitHubAt.current < AWAITING_GITHUB_MS;
+      const interval = awaiting ? AWAITING_REFRESH_MS : SETTLED_REFRESH_MS;
       if (now - (lastForegroundRefresh.get(workspaceId) ?? 0) < interval) return;
       lastForegroundRefresh.set(workspaceId, now);
       // Another tab or popup may have connected GitHub or changed the
-      // repositories it shares. Refresh failures keep the last snapshot.
-      void refreshCatalog().catch(() => {});
+      // repositories it shares. A failed refresh keeps the last snapshot.
+      void refreshGitHub(workspaceId, undefined, { sync: awaiting && canSyncGitHub }).catch(
+        () => {},
+      );
     };
     window.addEventListener("focus", onForeground);
     document.addEventListener("visibilitychange", onForeground);
@@ -131,7 +134,7 @@ export function SessionGitHubCapabilityCard({
       window.removeEventListener("focus", onForeground);
       document.removeEventListener("visibilitychange", onForeground);
     };
-  }, [awaitingChange, refreshCatalog, workspaceId]);
+  }, [awaitingChange, canSyncGitHub, canUseGitHub, refreshGitHub, repoBusy, workspaceId]);
 
   useEffect(() => {
     const onPageShow = (event: PageTransitionEvent) => {
@@ -172,7 +175,7 @@ export function SessionGitHubCapabilityCard({
             : "GitHub is not configured on this deployment.",
         );
       navigating = true;
-      awaitingGitHub.current = true;
+      sentToGitHubAt.current = Date.now();
       window.location.assign(next.linkUrl);
     } catch (failure) {
       navigating = false;
@@ -201,11 +204,11 @@ export function SessionGitHubCapabilityCard({
     workspaceId,
     sessionId,
     resources,
-    connectionAccounts,
+    sendContext,
     onConfigured,
     cardRef,
     onOpenedGitHub: () => {
-      awaitingGitHub.current = true;
+      sentToGitHubAt.current = Date.now();
     },
   });
 
@@ -300,7 +303,7 @@ function useRepositoryChooser({
   workspaceId,
   sessionId,
   resources,
-  connectionAccounts,
+  sendContext,
   onConfigured,
   cardRef,
   onOpenedGitHub,
@@ -309,7 +312,7 @@ function useRepositoryChooser({
   workspaceId: string;
   sessionId: string;
   resources: readonly ResourceRef[] | undefined;
-  connectionAccounts: (() => McpConnectionAccountSelection[]) | undefined;
+  sendContext: (() => ChatSendContext) | undefined;
   onConfigured: (() => Promise<void>) | undefined;
   cardRef: RefObject<HTMLElement | null>;
   onOpenedGitHub: () => void;
@@ -319,12 +322,15 @@ function useRepositoryChooser({
   const [optimistic, setOptimistic] = useState<RepositoryResource[]>([]);
   const [attaching, setAttaching] = useState<number | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
-  const [queued, setQueued] = useState<string | null>(null);
+  // What happened to the last accepted message, in words for the live region.
+  const [outcome, setOutcome] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<number | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [openingInstallation, setOpeningInstallation] = useState<number | null>(null);
-  // One idempotency key per repository until its message is accepted, so a
-  // retry after an unknown outcome cannot post the message twice.
-  const clientEventIds = useRef(new Map<number, string>());
+  // One exact request per repository until it is accepted: a retry after an
+  // unknown outcome resends the same input under the same idempotency key.
+  const pendingInputs = useRef(new Map<number, SendMessageInput & { clientEventId: string }>());
+  const inFlight = useRef(false);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -371,55 +377,84 @@ function useRepositoryChooser({
     const states = new Map(
       repositories.map((repository) => [
         repository.id,
-        gitHubRepositoryChatState(repository, mounted, accountLabel),
+        gitHubRepositoryChatState(repository, mounted, accountLabel, repositories),
       ]),
     );
     return orderRepositoriesForChat(repositories, (repository) =>
       leading.has(`${repository.installationId}:${repository.id}`),
     ).map((repository) => ({ repository, state: states.get(repository.id)! }));
   }, [accountLabel, leading, mounted, repositories]);
+  // A catalog mid-refresh is unknown, never proof that access was removed.
+  const catalogSettled = context.githubCatalogReady && !context.repoBusy;
   const revoked = useMemo(
-    () => revokedGitHubRepositoryResources(mounted, repositories, context.githubCatalogReady),
-    [context.githubCatalogReady, mounted, repositories],
+    () => revokedGitHubRepositoryResources(mounted, repositories, catalogSettled),
+    [catalogSettled, mounted, repositories],
   );
   const attachedNames = rows
     .filter((row) => row.state.kind === "attached")
     .map((row) => row.repository.fullName);
 
-  async function attach(repository: GitHubRepository, resource: RepositoryResource) {
-    if (attaching !== null) return;
-    setAttaching(repository.id);
+  async function attach(
+    repository: GitHubRepository,
+    resource: RepositoryResource,
+    confirmed = false,
+  ) {
+    if (inFlight.current) return;
     setAttachError(null);
-    const clientEventId = clientEventIds.current.get(repository.id) ?? crypto.randomUUID();
-    clientEventIds.current.set(repository.id, clientEventId);
-    const buttonHadFocus = document.activeElement instanceof HTMLButtonElement;
-    const accounts = connectionAccounts?.() ?? [];
+    const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
+    if (chat.blocked) {
+      setAttachError(chat.blocked);
+      return;
+    }
+    // Like a composer Send, this replaces a request the chat is waiting on.
+    if (chat.awaitingHuman && !confirmed) {
+      setConfirming(repository.id);
+      return;
+    }
+    setConfirming(null);
+    inFlight.current = true;
+    setAttaching(repository.id);
+    const input = pendingInputs.current.get(repository.id) ?? {
+      text: repositoryUseMessage(repository),
+      resources: [resource],
+      ...chat.extras,
+      clientEventId: crypto.randomUUID(),
+    };
+    pendingInputs.current.set(repository.id, input);
+    let accepted: Awaited<ReturnType<typeof context.client.sendMessage>>;
     try {
-      const accepted = await context.client.sendMessage(workspaceId, sessionId, {
-        text: repositoryUseMessage(repository),
-        resources: [resource],
-        ...(accounts.length > 0 ? { connectionAccounts: accounts } : {}),
-        clientEventId,
-      });
-      clientEventIds.current.delete(repository.id);
-      if (!alive.current) return;
-      setOptimistic((current) => [...current, resource]);
-      const payload = accepted.payload as { routing?: unknown } | null;
-      setQueued(payload?.routing === "queued_for_execution" ? repository.fullName : null);
-      // The pressed button is replaced by "In this chat"; keep focus in the card
-      // where the status line announces the change.
-      if (buttonHadFocus && !(document.activeElement instanceof HTMLButtonElement)) {
-        cardRef.current?.focus();
-      }
-      await onConfigured?.();
+      accepted = await context.client.sendMessage(workspaceId, sessionId, input);
     } catch (failure) {
-      if (alive.current)
+      inFlight.current = false;
+      if (alive.current) {
+        setAttaching(null);
         setAttachError(
           `Couldn't add ${repository.fullName} to this chat. ${userErrorText(failure, "Try again.")}`,
         );
-    } finally {
-      if (alive.current) setAttaching(null);
+      }
+      return;
     }
+    pendingInputs.current.delete(repository.id);
+    inFlight.current = false;
+    if (!alive.current) return;
+    setAttaching(null);
+    setOptimistic((current) => [...current, resource]);
+    const routing = (accepted.payload as { routing?: unknown } | null)?.routing;
+    setOutcome(
+      routing === "queued_for_execution"
+        ? `Queued. The agent picks up ${repository.fullName} on its next turn.`
+        : routing === "accepted_for_steering"
+          ? `Sent. ${repository.fullName} replaced the request this chat was waiting on.`
+          : null,
+    );
+    // The pressed button becomes "In this chat" on the next render; keep focus
+    // in the card, where the status line announces the change.
+    requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (!focused || focused === document.body) cardRef.current?.focus();
+    });
+    // The message is accepted; a failed re-read only delays the session view.
+    await onConfigured?.().catch(() => {});
   }
 
   async function openGitHub(installationId: number) {
@@ -448,7 +483,7 @@ function useRepositoryChooser({
   return {
     rows,
     revoked,
-    loading: !context.githubCatalogReady && repositories.length === 0,
+    loading: repositories.length === 0 && (!context.githubCatalogReady || context.repoBusy),
     loadFailed:
       context.githubStatusFailed && !context.githubCatalogReady && repositories.length === 0,
     retry: () => void context.refreshGitHub(workspaceId),
@@ -457,13 +492,15 @@ function useRepositoryChooser({
     ),
     attaching,
     attachError,
-    queued,
+    outcome,
+    confirming,
+    cancelConfirm: () => setConfirming(null),
     linkError,
     openingInstallation,
     statusLabel: usingRepositoriesLabel(attachedNames),
     accountLabel,
-    attach: (repository: GitHubRepository, resource: RepositoryResource) =>
-      void attach(repository, resource),
+    attach: (repository: GitHubRepository, resource: RepositoryResource, confirmed = false) =>
+      void attach(repository, resource, confirmed),
     openGitHub: (installationId: number) => void openGitHub(installationId),
   };
 }
@@ -481,12 +518,17 @@ function GitHubRepositoryPanel({
 }) {
   const [query, setQuery] = useState("");
   const [visible, setVisible] = useState(GITHUB_CARD_PAGE_SIZE);
+  const listRef = useRef<HTMLDivElement>(null);
   const total = chooser.rows.length;
   const matches = chooser.rows.filter((row) => matchesRepositorySearch(row.repository, query));
   const shown = matches.slice(0, visible);
   const hidden = matches.length - shown.length;
   const available = chooser.rows.filter((row) => row.state.kind === "available");
   const groups = repositoryGroups(shown, chooser.accountLabel);
+  const confirmRow =
+    chooser.confirming === null
+      ? null
+      : (chooser.rows.find((row) => row.repository.id === chooser.confirming) ?? null);
   // With exactly one usable repository the row's action is the card's primary one.
   const single = available.length === 1 && total === 1;
 
@@ -616,36 +658,67 @@ function GitHubRepositoryPanel({
               ))}
             </RowList>
           ) : null}
-          {groups.map((group) => (
-            <section key={group.installationId} aria-label={group.label ?? undefined}>
-              {group.label ? (
-                <h5 className="m-0 mt-2 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
-                  {group.label}
-                </h5>
-              ) : null}
-              {group.note ? (
-                <p className="m-0 mt-0.5 text-xs leading-[1.6] text-fg-muted">{group.note}</p>
-              ) : null}
-              <RowList
-                label={group.label ? `${group.label} repositories` : "GitHub repositories"}
-                flush
-              >
-                {group.rows.map(({ repository, state }) => (
-                  <RepositoryListRow
-                    key={`${repository.installationId}:${repository.id}`}
-                    repository={repository}
-                    state={state}
-                    explained={Boolean(group.note)}
-                    canMessage={canMessage}
-                    primary={single}
-                    busy={chooser.attaching === repository.id}
-                    locked={chooser.attaching !== null}
-                    onUse={(resource) => chooser.attach(repository, resource)}
-                  />
-                ))}
-              </RowList>
-            </section>
-          ))}
+          {confirmRow ? (
+            <Notice
+              tone="waiting"
+              live="polite"
+              className="my-2 text-xs"
+              actionLayout="responsive"
+              action={
+                <span className="flex gap-1.5">
+                  <RowButton className="h-7" onClick={chooser.cancelConfirm}>
+                    Cancel
+                  </RowButton>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 rounded-[10px] text-xs"
+                    onClick={() =>
+                      confirmRow.state.kind === "available" &&
+                      chooser.attach(confirmRow.repository, confirmRow.state.resource, true)
+                    }
+                  >
+                    Use anyway
+                  </Button>
+                </span>
+              }
+            >
+              This chat is waiting for your answer. Using {confirmRow.repository.fullName} now
+              replaces that request, like sending a message.
+            </Notice>
+          ) : null}
+          <div ref={listRef} tabIndex={-1} className="outline-none">
+            {groups.map((group) => (
+              <section key={group.installationId} aria-label={group.label ?? undefined}>
+                {group.label ? (
+                  <h5 className="m-0 mt-2 text-2xs font-medium tracking-wide text-fg-subtle uppercase">
+                    {group.label}
+                  </h5>
+                ) : null}
+                {group.note ? (
+                  <p className="m-0 mt-0.5 text-xs leading-[1.6] text-fg-muted">{group.note}</p>
+                ) : null}
+                <RowList
+                  label={group.label ? `${group.label} repositories` : "GitHub repositories"}
+                  flush
+                >
+                  {group.rows.map(({ repository, state }) => (
+                    <RepositoryListRow
+                      key={`${repository.installationId}:${repository.id}`}
+                      repository={repository}
+                      state={state}
+                      explained={Boolean(group.note)}
+                      canMessage={canMessage}
+                      primary={single}
+                      busy={chooser.attaching === repository.id}
+                      locked={chooser.attaching !== null}
+                      onUse={(resource) => chooser.attach(repository, resource)}
+                    />
+                  ))}
+                </RowList>
+              </section>
+            ))}
+          </div>
           {query.trim() && matches.length === 0 ? (
             <p className="py-3 text-center text-xs text-fg-muted">
               No repositories match “{query.trim()}”.
@@ -657,16 +730,24 @@ function GitHubRepositoryPanel({
               variant="ghost"
               size="sm"
               className="mt-1 w-full text-xs text-fg-muted pointer-coarse:h-11"
-              onClick={() => setVisible((current) => current + 20)}
+              onClick={() => {
+                // The button leaves with the last page; keep focus in the list.
+                if (hidden <= GITHUB_CARD_MORE_SIZE) listRef.current?.focus();
+                setVisible((current) => current + GITHUB_CARD_MORE_SIZE);
+              }}
             >
-              Show {Math.min(hidden, 20)} more
+              Show {Math.min(hidden, GITHUB_CARD_MORE_SIZE)} more
             </Button>
           ) : null}
-          {chooser.queued ? (
-            <p role="status" className="m-0 mt-2 text-xs leading-[1.6] text-fg-muted">
-              The agent is still working. It picks up {chooser.queued} after its current step.
-            </p>
-          ) : null}
+          <p
+            role="status"
+            className={cn(
+              "m-0 text-xs leading-[1.6] text-fg-muted",
+              chooser.outcome ? "mt-2" : "sr-only",
+            )}
+          >
+            {chooser.outcome}
+          </p>
           <div className="mt-3 space-y-1.5 border-t border-border pt-3 text-xs leading-[1.6] text-fg-muted">
             <p className="m-0">
               {!canMessage
@@ -695,6 +776,10 @@ function GitHubRepositoryPanel({
   );
 }
 
+// Locked while another attach is in flight: focusable (so focus is not lost)
+// but visibly and functionally inactive.
+const LOCKED = "aria-disabled:cursor-not-allowed aria-disabled:opacity-50";
+
 function RepositoryListRow({
   repository,
   state,
@@ -717,7 +802,7 @@ function RepositoryListRow({
 }) {
   const meta = [repository.defaultBranch, repository.private ? null : "Public"].filter(Boolean);
   const titleAddon = repository.private ? (
-    <LockIcon aria-label="Private" className="size-3 shrink-0 text-fg-subtle" />
+    <LockIcon role="img" aria-label="Private" className="size-3 shrink-0 text-fg-subtle" />
   ) : null;
   const common = {
     leading: <LogoTile icon={<BookMarkedIcon />} />,
@@ -756,24 +841,28 @@ function RepositoryListRow({
           <Button
             type="button"
             size="sm"
-            disabled={locked}
+            aria-disabled={locked || undefined}
             aria-label={
               busy ? `Adding ${repository.fullName}` : `Use ${repository.fullName} in this chat`
             }
-            className="rounded-[10px] pointer-coarse:h-11"
-            onClick={() => onUse(state.resource)}
+            className={cn("rounded-[10px] pointer-coarse:h-11", LOCKED)}
+            onClick={() => {
+              if (!locked) onUse(state.resource);
+            }}
           >
             {busy ? <Loader2Icon aria-hidden="true" className="animate-spin" /> : null}
             {busy ? "Adding…" : "Use in this chat"}
           </Button>
         ) : (
           <RowButton
-            disabled={locked}
+            aria-disabled={locked || undefined}
             aria-label={
               busy ? `Adding ${repository.fullName}` : `Use ${repository.fullName} in this chat`
             }
-            className={cn(busy && "text-fg-muted")}
-            onClick={() => onUse(state.resource)}
+            className={cn(LOCKED, busy && "text-fg-muted")}
+            onClick={() => {
+              if (!locked) onUse(state.resource);
+            }}
           >
             {busy ? <Loader2Icon aria-hidden="true" className="animate-spin" /> : null}
             {busy ? "Adding…" : "Use"}
