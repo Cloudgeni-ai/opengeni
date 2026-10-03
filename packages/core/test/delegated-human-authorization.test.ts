@@ -570,6 +570,20 @@ describe("request-local verified delegated native human", () => {
   });
 
   test("account permissions intersect literally: workspace admin never implies account admin or billing", async () => {
+    // The person's own organization grant holds workspace:admin too (legacy
+    // shape); the agent's grant still never reads it as account:admin.
+    live.accountGrants[0]!.permissions = ["workspace:admin", "account:read"];
+    expect(
+      (await app().fetch(stampedRequest({ permissions: ["workspace:admin", "account:read"] })))
+        .status,
+    ).toBe(200);
+    const legacyShaped = observed.at(-1)!;
+    expect(legacyShaped.accountGrant?.permissions).toEqual(["account:read", "workspace:admin"]);
+    for (const permission of ["account:admin", "billing:manage", "members:manage"] as const)
+      expect(hasPermission(legacyShaped.accountGrant!.permissions, permission)).toBe(false);
+    expect(() => requireAccountAdminAuthorizationStamp(legacyShaped)).toThrow();
+    observed.length = 0;
+
     live.accountGrants[0]!.permissions = [
       "account:read",
       "account:admin",

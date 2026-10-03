@@ -1303,12 +1303,15 @@ async function resolveDelegatedHumanAccessContext(
     );
   const accountGrant: AccountGrant = {
     ...accounts[0]!,
-    // Organization/billing authority must be literal on BOTH sides. A
-    // workspace:admin ceiling is never an account:admin or billing grant.
-    permissions: Permission.options.filter(
-      (permission) =>
-        hasLiteralPermission(accounts[0]!.permissions, permission) &&
-        hasLiteralPermission(verifiedPermissions, permission),
+    // Organization/billing authority must be literal on BOTH sides, and so is
+    // the result: a workspace:admin entry here never reads as account:admin or
+    // billing to a later permission check.
+    permissions: explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasLiteralPermission(accounts[0]!.permissions, permission) &&
+          hasLiteralPermission(verifiedPermissions, permission),
+      ),
     ),
   };
   const workspaceGrants = live.workspaceGrants
