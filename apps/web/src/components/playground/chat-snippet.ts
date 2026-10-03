@@ -23,23 +23,6 @@ export function chatSnippet(style: ChatStyle): string[] {
   ];
 }
 
-/**
- * The one server route that connects it to Opengeni's managed service. The API
- * key stays here; the page's client talks to this route as the signed-in user.
- */
-export function serverSnippet(apiOrigin: string): string[] {
-  return [
-    "const og = new OpenGeniClient({",
-    `  baseUrl: "${apiOrigin}",`,
-    "  apiKey: process.env.OPENGENI_API_KEY,",
-    "});",
-    "// Serve at /api/opengeni, as the signed-in user",
-    "export const handler = createSessionProxyHandler(og, {",
-    "  resolve: signedInUser, // { workspaceId, user, source }",
-    "});",
-  ];
-}
-
 /** The lines a change added or edited: what the snippet marks. */
 export function changedLines(previous: readonly string[], next: readonly string[]): number[] {
   const seen = new Set(previous);

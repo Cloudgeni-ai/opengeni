@@ -145,7 +145,24 @@
   background: color-mix(in oklch, var(--color-status-idle) 18%, transparent);
   transition: none;
 }
+/* The first thing to press pulses gently while the first tip points at it. */
+.og-pulse[data-pulse] {
+  animation: og-pulse 1.6s ease-out infinite;
+  border-color: var(--color-fg);
+}
+@keyframes og-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-fg) 35%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 8px color-mix(in oklch, var(--color-fg) 0%, transparent);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .og-pulse[data-pulse] {
+    animation: none;
+  }
   .og-playground-product,
   .og-code-line {
     transition: none;

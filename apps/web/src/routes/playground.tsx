@@ -12,7 +12,7 @@ import {
   ADD_TO_PRODUCT_INSTRUCTIONS,
 } from "@/components/playground/add-to-product";
 import { Callout, type CalloutSide } from "@/components/playground/callout";
-import { chatSnippet, serverSnippet } from "@/components/playground/chat-snippet";
+import { chatSnippet } from "@/components/playground/chat-snippet";
 import { ChatSnippetView } from "@/components/playground/chat-snippet-view";
 import { createRecordedClient } from "@/components/playground/recorded-client";
 import {
@@ -34,7 +34,6 @@ import { Input } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
-import { MANAGED_API_ORIGIN } from "@/lib/coding-agent-setup";
 import { useFirstRunStarters } from "@/lib/first-run-starters";
 import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-journey";
 import { cn } from "@/lib/utils";
@@ -42,7 +41,7 @@ import { cn } from "@/lib/utils";
 /** The callouts, in order. Each moves on only when the person acts. */
 export type Tip = "chat" | "color" | "code" | "ship";
 const SIDES: Record<Tip, readonly CalloutSide[]> = {
-  chat: ["right", "above"],
+  chat: ["right", "below"],
   color: ["below", "right"],
   code: ["left", "above"],
   ship: ["right", "below"],
@@ -54,21 +53,6 @@ const TARGETS: Record<Tip, string> = {
   code: "[data-snippet='page'] [data-changed]",
   ship: "[data-callout-target='ship']",
 };
-
-function storageGet(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function storageSet(key: string, value: string): void {
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    // Private windows: the callouts just show again next time.
-  }
-}
 
 /**
  * The playground: Acme, a sample product with Opengeni's `<OpenGeniChat />`
@@ -97,12 +81,10 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     captureAnalyticsEvent("playground_step_completed", { step });
   }, []);
 
-  const tipsKey = `og.playground:v4:${encodeURIComponent(accessContext.subjectId)}:tips`;
-  const [tip, setTip] = useState<Tip | null>(() => (storageGet(tipsKey) === "off" ? null : "chat"));
-  const endTips = () => {
-    setTip(null);
-    storageSet(tipsKey, "off");
-  };
+  // Every visit starts with the tips; Skip hides them for this visit only,
+  // and "Show tips" brings them back.
+  const [tip, setTip] = useState<Tip | null>("chat");
+  const endTips = () => setTip(null);
 
   const [style, setStyle] = useState<ChatStyle>(() =>
     defaultChatStyle(document.documentElement.dataset.ogTheme === "light" ? "light" : "dark"),
@@ -114,8 +96,6 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
   };
   const [hex, setHex] = useState("");
   const lines = useMemo(() => chatSnippet(style), [style]);
-  const server = useMemo(() => serverSnippet(MANAGED_API_ORIGIN), []);
-  const [device, setDevice] = useState<"desktop" | "phone">("desktop");
 
   const [playing, setPlaying] = useState(0);
   const onAnswered = useRef(() => {});
@@ -244,10 +224,41 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
         <span aria-hidden="true" className="hidden h-5 w-px bg-border sm:block" />
         <h1 className="truncate text-sm font-semibold text-fg">Playground</h1>
         <p className="hidden truncate text-xs text-fg-muted sm:block">A recorded demo</p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="ml-auto"
+          onClick={() => setTip(tip ? null : sessionId ? "color" : "chat")}
+        >
+          {tip ? "Hide tips" : "Show tips"}
+        </Button>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto" data-playground-scroll="">
         <div className="mx-auto grid w-full max-w-[1320px] gap-4 p-3 sm:p-4 lg:h-full lg:grid-cols-[minmax(0,1fr)_500px] lg:gap-6 lg:p-6">
           <section aria-label="Sample product" className="flex min-h-0 flex-col gap-3">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <p className="text-sm font-medium text-fg">Ask the chat</p>
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-label="Suggested questions"
+                data-callout-target="questions"
+              >
+                {[QUESTIONS.order, QUESTIONS.charged].map((question, index) => (
+                  <button
+                    key={question}
+                    type="button"
+                    disabled={playing > 0}
+                    onClick={() => ask(question)}
+                    data-pulse={showTip === "chat" && index === 0 ? "" : undefined}
+                    className="og-pulse rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-fg transition-colors duration-[120ms] outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50 pointer-coarse:min-h-11"
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <p className="text-sm font-medium text-fg">Try a color</p>
               <div
@@ -296,11 +307,11 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
               </div>
               <Input
                 aria-label="Your brand color"
-                placeholder="#your color"
+                placeholder="#hex"
                 value={hex}
                 spellCheck={false}
                 maxLength={7}
-                className="h-8 w-28 font-mono text-xs"
+                className="h-8 w-20 font-mono text-xs"
                 onChange={(event) => {
                   const value = event.target.value.trim();
                   setHex(value);
@@ -318,24 +329,10 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                   { value: "dark", label: "Dark", icon: <MoonIcon aria-hidden="true" /> },
                 ]}
               />
-              <SegmentedControl
-                aria-label="Preview size"
-                size="sm"
-                className="max-sm:hidden"
-                value={device}
-                onValueChange={setDevice}
-                options={[
-                  { value: "desktop", label: "Desktop" },
-                  { value: "phone", label: "Phone" },
-                ]}
-              />
             </div>
             <div
               data-callout-target="chat"
-              className={cn(
-                "flex h-[min(64dvh,560px)] min-h-[380px] w-full overflow-hidden rounded-[14px] border border-border lg:h-auto lg:min-h-0 lg:flex-1",
-                device === "phone" && "max-w-[390px] self-center",
-              )}
+              className="flex h-[min(64dvh,560px)] min-h-[360px] w-full overflow-hidden rounded-[14px] border border-border lg:h-auto lg:min-h-0 lg:flex-1"
             >
               <AcmeProduct
                 client={client}
@@ -345,24 +342,6 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                 epoch={epoch}
                 person={person}
               />
-            </div>
-            <div
-              className="flex flex-wrap gap-2 self-start"
-              role="group"
-              aria-label="Suggested questions"
-              data-callout-target="questions"
-            >
-              {[QUESTIONS.order, QUESTIONS.charged].map((question) => (
-                <button
-                  key={question}
-                  type="button"
-                  disabled={playing > 0}
-                  onClick={() => ask(question)}
-                  className="rounded-full border border-border bg-surface px-3 py-1.5 text-xs text-fg transition-colors duration-[120ms] outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-50 pointer-coarse:min-h-11"
-                >
-                  {question}
-                </button>
-              ))}
             </div>
           </section>
           <section aria-label="The code" className="flex min-w-0 flex-col gap-4 lg:pt-11">
@@ -379,12 +358,6 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
                 className={cn("max-w-56 text-xs text-fg-muted", showTip === "ship" && "invisible")}
               >
                 Opens a chat where an agent adds it to your product with you.
-              </p>
-            </div>
-            <div className="grid gap-1.5">
-              <ChatSnippetView lines={server} label="server.ts" quiet />
-              <p className="text-xs text-fg-muted">
-                Runs on Opengeni's managed service. Your server just adds this route.
               </p>
             </div>
           </section>

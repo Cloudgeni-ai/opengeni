@@ -14,13 +14,10 @@ export function ChatSnippetView({
   lines,
   label,
   marks = false,
-  quiet = false,
 }: {
   lines: readonly string[];
   label: string;
   marks?: boolean;
-  /** A secondary block: smaller presence. */
-  quiet?: boolean;
 }) {
   const previous = useRef(lines);
   const [marked, setMarked] = useState<number[]>([]);
@@ -49,12 +46,8 @@ export function ChatSnippetView({
       <pre
         tabIndex={0}
         aria-label={label}
-        data-snippet={marks ? "page" : "server"}
-        className={
-          quiet
-            ? "m-0 max-w-full overflow-x-auto rounded-[14px] border border-border bg-surface-2/60 py-3 font-mono text-xs leading-[18px] text-fg-muted focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none max-sm:whitespace-pre-wrap"
-            : "m-0 max-w-full overflow-x-auto rounded-[14px] border border-border bg-surface py-3 font-mono text-xs leading-[20px] text-fg focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none max-sm:whitespace-pre-wrap"
-        }
+        data-snippet="page"
+        className="m-0 max-w-full overflow-x-auto rounded-[14px] border border-border bg-surface py-3 font-mono text-xs leading-[20px] text-fg focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none max-sm:whitespace-pre-wrap"
       >
         <code className="block sm:min-w-max">
           {lines.map((line, index) => (

@@ -150,9 +150,9 @@ describe("playground", () => {
       // No steps, tabs or settings: two small Copy buttons, one primary action.
       expect(container.querySelector("[role='tab'], [role='switch'], [data-step]")).toBeNull();
       expect(buttonIn(container, "Copy Support.jsx")).toBeTruthy();
-      expect(container.querySelector('pre[data-snippet="server"]')!.textContent).toContain(
-        "process.env.OPENGENI_API_KEY",
-      );
+      // The only code is the component snippet.
+      expect(container.querySelectorAll("pre").length).toBe(1);
+      expect(container.textContent).not.toContain("server.ts");
       expect(buttonIn(container, "Add it to your product")).toBeTruthy();
       expect(container.textContent).toContain(
         "Opens a chat where an agent adds it to your product with you.",
@@ -235,6 +235,13 @@ describe("playground", () => {
     const { container, unmount } = await mount();
     try {
       expect(callout(container)!.dataset.callout).toBe("chat");
+      // The question it points at is the first thing on the page, and pulses.
+      const questions = container.querySelector('[aria-label="Suggested questions"]')!;
+      expect(
+        questions.compareDocumentPosition(container.querySelector("[data-playground-product]")!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(questions.querySelector("[data-pulse]")!.textContent).toBe("Where is my order #4417?");
       expect(callout(container)!.textContent).toContain("<OpenGeniChat />");
       expect(callout(container)!.textContent).toContain("chat list, new chat");
       await press(
@@ -261,16 +268,28 @@ describe("playground", () => {
       ).toContain("invisible");
       await press(buttonIn(callout(container)!, "Skip"));
       expect(callout(container)).toBeNull();
-      expect(localStorage.getItem(`og.playground:v4:${encodeURIComponent(SUBJECT)}:tips`)).toBe(
-        "off",
-      );
+      // Skip is for this visit only, and the tips can come back.
+      await press(buttonIn(container.querySelector("header")!, "Show tips"));
+      expect(callout(container)!.dataset.callout).toBe("color");
     } finally {
       await unmount();
     }
   });
 
-  test("your own brand color and the phone preview", async () => {
-    localStorage.setItem(`og.playground:v4:${encodeURIComponent(SUBJECT)}:tips`, "off");
+  test("a new visit starts with the tips again, even after Skip", async () => {
+    const first = await mount();
+    await press(buttonIn(callout(first.container)!, "Skip"));
+    expect(callout(first.container)).toBeNull();
+    await first.unmount();
+    const { container, unmount } = await mount();
+    try {
+      expect(callout(container)!.dataset.callout).toBe("chat");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("your own brand color", async () => {
     const { container, unmount } = await mount();
     try {
       const input = container.querySelector<HTMLInputElement>(
@@ -286,10 +305,6 @@ describe("playground", () => {
       const product = container.querySelector<HTMLElement>("[data-playground-product]")!;
       expect(product.style.getPropertyValue("--og-color-accent")).toBe("#ff5a1f");
       expect(marked(container)).toContain('    "--og-color-accent": "#ff5a1f",');
-      await press(buttonIn(container.querySelector('[aria-label="Preview size"]')!, "Phone"));
-      expect(
-        container.querySelector<HTMLElement>("[data-callout-target='chat']")!.className,
-      ).toContain("max-w-[390px]");
     } finally {
       await unmount();
     }
