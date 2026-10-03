@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  DEFAULT_AGENT_SETTINGS,
   QUESTIONS,
   matchQuestion,
   replyBeats,
@@ -24,31 +23,16 @@ describe("Acme's recorded answers", () => {
     expect(matchQuestion("hello")).toBe("other");
   });
 
-  test("without tools the agent can only talk; with tools it calls Acme's", () => {
-    expect(tools(replyBeats("order", DEFAULT_AGENT_SETTINGS))).toEqual([]);
-    expect(said(replyBeats("order", DEFAULT_AGENT_SETTINGS))).toContain("can't see orders yet");
-    const on = { ...DEFAULT_AGENT_SETTINGS, tools: true };
-    expect(tools(replyBeats("order", on))).toEqual(["acme__get_order"]);
-    expect(tools(replyBeats("charged", on))).toEqual(["acme__list_charges"]);
-    expect(tools(replyBeats("refund", on))).toEqual(["acme__refund_charge"]);
-  });
-
-  test("memory looks the customer up and uses it; thinking reasons first", () => {
-    const remembered = replyBeats("order", { ...DEFAULT_AGENT_SETTINGS, memory: true });
-    expect(tools(remembered)).toEqual(["knowledge_search"]);
-    expect(said(remembered)).toContain("You're on Pro");
-    const thought = replyBeats("order", { ...DEFAULT_AGENT_SETTINGS, thinking: true });
-    expect(thought[0]!.kind).toBe("think");
-    expect(replyBeats("order", DEFAULT_AGENT_SETTINGS).some((beat) => beat.kind === "think")).toBe(
-      false,
-    );
+  test("each answer uses Acme's own tool first", () => {
+    expect(tools(replyBeats("order"))).toEqual(["acme__get_order"]);
+    expect(said(replyBeats("order"))).toContain("out for delivery");
+    expect(tools(replyBeats("charged"))).toEqual(["acme__list_charges"]);
+    expect(tools(replyBeats("refund"))).toEqual(["acme__refund_charge"]);
+    expect(tools(replyBeats("other"))).toEqual([]);
   });
 
   test("an answer is a whole turn: started, streamed, completed and idle", () => {
-    const events = replyTimeline(
-      replyBeats("order", { ...DEFAULT_AGENT_SETTINGS, tools: true }),
-      "t1",
-    );
+    const events = replyTimeline(replyBeats("order"), "t1");
     const types = events.map((event) => event.type);
     expect(types[0]).toBe("turn.queued");
     expect(types).toContain("turn.started");

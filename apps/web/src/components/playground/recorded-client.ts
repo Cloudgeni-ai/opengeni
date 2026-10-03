@@ -14,7 +14,6 @@ import {
   matchQuestion,
   replyBeats,
   replyTimeline,
-  type AgentSettings,
   type QuestionId,
 } from "./acme-script";
 
@@ -32,18 +31,12 @@ export const DEMO_WORKSPACE_ID = "00000000-0000-4000-8000-00000000ac3e";
 type Chat = {
   session: Session;
   events: SessionEvent[];
-  /** The settings this chat was created with: a real session keeps its own. */
-  settings: AgentSettings;
   waiters: Set<() => void>;
   timers: ReturnType<typeof setTimeout>[];
   turn: number;
 };
 
-export type RecordedAnswer = Readonly<{
-  sessionId: string;
-  question: QuestionId;
-  settings: AgentSettings;
-}>;
+export type RecordedAnswer = Readonly<{ sessionId: string; question: QuestionId }>;
 
 export type RecordedClient = SessionClientLike & {
   /** Ask in an existing chat, as if typed into its composer. */
@@ -52,8 +45,6 @@ export type RecordedClient = SessionClientLike & {
   startChat: (text: string) => string;
   /** Whether an answer is playing in that chat. */
   isPlaying: (sessionId: string) => boolean;
-  /** The settings a chat was started with (a real session keeps its own). */
-  settingsOf: (sessionId: string) => AgentSettings | null;
   /** Stops every timer (on unmount). */
   dispose: () => void;
 };
@@ -105,12 +96,9 @@ function waitForAbort(signal: AbortSignal | undefined): Promise<void> {
 }
 
 export function createRecordedClient({
-  settings,
   onAnswered,
   onAsked,
 }: {
-  /** The current playground settings; new chats take a copy. */
-  settings: () => AgentSettings;
   /** An answer finished playing. */
   onAnswered?: (answer: RecordedAnswer) => void;
   /** A question was asked (typed or picked). */
@@ -164,7 +152,7 @@ export function createRecordedClient({
       tools: [],
       toolsProvided: false,
       model: "acme-agent",
-      reasoningEffort: chat.settings.thinking ? "high" : "low",
+      reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
       sandboxOs: null,
@@ -188,11 +176,7 @@ export function createRecordedClient({
     chat.turn += 1;
     const turnId = `${chat.session.id}:turn-${chat.turn}`;
     const question = matchQuestion(text);
-    const answer: RecordedAnswer = {
-      sessionId: chat.session.id,
-      question,
-      settings: chat.settings,
-    };
+    const answer: RecordedAnswer = { sessionId: chat.session.id, question };
     const accepted = append(
       chat,
       "user.message",
@@ -207,7 +191,7 @@ export function createRecordedClient({
       updatedAt: new Date().toISOString(),
     } as Session;
     onAsked?.(answer);
-    for (const timed of replyTimeline(replyBeats(question, chat.settings), turnId)) {
+    for (const timed of replyTimeline(replyBeats(question), turnId)) {
       chat.timers.push(
         setTimeout(() => {
           append(chat, timed.type, timed.payload, timed.turnId);
@@ -221,10 +205,7 @@ export function createRecordedClient({
     return { accepted, turn: turnRecord(chat, turnId, text) };
   };
 
-  const create = (
-    title: string,
-    options: { minutesAgo?: number; settings?: AgentSettings } = {},
-  ): Chat => {
+  const create = (title: string, options: { minutesAgo?: number } = {}): Chat => {
     const at = minutesAgo(now, options.minutesAgo ?? 0);
     const id = newId();
     const chat: Chat = {
@@ -243,7 +224,6 @@ export function createRecordedClient({
         updatedAt: at,
       } as unknown as Session,
       events: [],
-      settings: options.settings ?? settings(),
       waiters: new Set(),
       timers: [],
       turn: 0,
@@ -496,7 +476,6 @@ export function createRecordedClient({
     },
     startChat,
     isPlaying: (sessionId: string) => chats.get(sessionId)?.session.status === "running",
-    settingsOf: (sessionId: string) => chats.get(sessionId)?.settings ?? null,
     dispose: () => {
       for (const chat of chats.values()) {
         for (const timer of chat.timers) clearTimeout(timer);

@@ -100,10 +100,6 @@ async function mount() {
   };
 }
 
-const currentStep = (container: HTMLElement) =>
-  container.querySelector<HTMLElement>("[data-step][data-current]")?.dataset.step ?? null;
-const step = (container: HTMLElement, id: string) =>
-  container.querySelector<HTMLElement>(`[data-step="${id}"]`)!;
 const chat = (container: HTMLElement) =>
   container.querySelector("[data-playground-product]")!.textContent ?? "";
 const buttonIn = (root: ParentNode, text: string) =>
@@ -115,97 +111,83 @@ async function press(element: HTMLElement | null | undefined) {
   await act(async () => element.click());
   await settle();
 }
-const code = (container: HTMLElement) =>
-  container.querySelector("[data-slot='line-tabs-content'][data-state='active'] pre")
-    ?.textContent ?? "";
+const snippet = (container: HTMLElement) =>
+  container.querySelector('pre[aria-label="The code for this chat"]')!;
+const marked = (container: HTMLElement) =>
+  Array.from(snippet(container).querySelectorAll("[data-changed]"), (line) => line.textContent);
 
 describe("playground", () => {
-  test("is Acme with the real chat, four steps, and the code beside it", async () => {
+  test("is one screen: Acme with the real chat, two questions, the snippet, one button", async () => {
     const { container, unmount } = await mount();
     try {
       expect(container.querySelector("h1")!.textContent).toBe("Playground");
-      expect(container.textContent).toContain("A recording: no model, nothing saved.");
+      expect(container.textContent).toContain("Try a color");
       // The stock OpenGeniChat: its chat list and new-chat composer.
       expect(chat(container)).toContain("Delivery address");
       expect(container.querySelector("[data-og-new-chat-composer] textarea")).not.toBeNull();
-      expect(currentStep(container)).toBe("ask");
-      expect(
-        Array.from(container.querySelectorAll("[data-step] h2"), (heading) =>
-          heading.textContent?.replace(/^Step \d:\s*/u, ""),
-        ),
-      ).toEqual([
-        "Send a message",
-        "Click a color to restyle the chat",
-        "Turn on tools",
-        "Add it to your product",
-      ]);
-      expect(code(container)).toContain("<OpenGeniChat />");
-      expect(container.textContent).toContain("npm i @opengeni/sdk @opengeni/react");
+      expect(container.querySelectorAll('[aria-label="Suggested questions"] button').length).toBe(
+        2,
+      );
+      const code = snippet(container).textContent ?? "";
+      expect(code).toContain("<OpenGeniChat />");
+      expect(snippet(container).querySelectorAll(".og-code-line").length).toBeLessThanOrEqual(12);
+      // No steps, tabs or settings any more.
+      expect(container.querySelector("[role='tab'], [role='switch'], [data-step]")).toBeNull();
+      expect(buttonIn(container, "Add it to your product")).toBeTruthy();
       expect(unexpected).not.toHaveBeenCalled();
     } finally {
       await unmount();
     }
   });
 
-  test("ask, restyle, turn on tools, then add it: each step explains what happened", async () => {
+  test("a question plays in the real chat with Acme's tool, without calling the API", async () => {
     journeys.writeOnboardingJourney(
       journeys.onboardingJourneyStorageKey(SUBJECT, ORG),
       journeys.newOnboardingJourney({ intents: ["build"] }),
     );
     const { container, unmount } = await mount();
     try {
-      // 1. Ask: the answer streams into the real conversation. No tools yet.
-      await press(buttonIn(step(container, "ask"), "Where is my order #4417?"));
+      await press(
+        buttonIn(
+          container.querySelector('[aria-label="Suggested questions"]')!,
+          "Where is my order #4417?",
+        ),
+      );
       expect(chat(container)).toContain("Where is my order #4417?");
-      expect(chat(container)).toContain("I can't see orders yet.");
-      expect(step(container, "ask").textContent).toContain("That's <OpenGeniChat />");
-      // Nothing moves on by itself: the step waits for Next.
-      expect(currentStep(container)).toBe("ask");
-      await press(buttonIn(step(container, "ask"), "Next"));
-      expect(currentStep(container)).toBe("style");
+      expect(chat(container)).toContain("out for delivery with UPS");
       expect(
         journeys.readOnboardingJourney(journeys.onboardingJourneyStorageKey(SUBJECT, ORG))!.marks
           .playground,
       ).toBeString();
+      expect(unexpected).not.toHaveBeenCalled();
+    } finally {
+      await unmount();
+    }
+  });
 
-      // 2. Restyle: the product's tokens change, and the component file marks
-      // the line, right next to <OpenGeniChat />, until the next change.
-      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Indigo"]'));
+  test("a color and light restyle the chat live and mark the lines they change", async () => {
+    const { container, unmount } = await mount();
+    try {
       const product = container.querySelector<HTMLElement>("[data-playground-product]")!;
+      expect(marked(container)).toEqual([]);
+      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Indigo"]'));
       expect(product.style.getPropertyValue("--og-color-accent")).toBe("#5b4bff");
-      expect(container.querySelector("[role='tab'][aria-selected='true']")!.textContent).toBe(
-        "Support.jsx",
-      );
-      expect(code(container)).toContain('"--og-color-accent": "#5b4bff",');
-      expect(
-        Array.from(
-          container.querySelectorAll("[data-state='active'] pre [data-changed]"),
-          (line) => line.textContent,
-        ),
-      ).toEqual([
-        '        "--og-color-accent": "#5b4bff",',
-        '        "--og-color-primary": "#5b4bff",',
+      expect(marked(container)).toEqual([
+        '    "--og-color-accent": "#5b4bff",',
+        '    "--og-color-primary": "#5b4bff",',
       ]);
-      expect(currentStep(container)).toBe("style");
-      await press(buttonIn(step(container, "style"), "Next"));
-      expect(currentStep(container)).toBe("tools");
+      await press(buttonIn(container.querySelector('[aria-label="Theme"]')!, "Light"));
+      expect(product.dataset.ogTheme).toBe("light");
+      expect(marked(container)).toEqual(['  <div data-og-theme="light" style={{']);
+    } finally {
+      await unmount();
+    }
+  });
 
-      // 3. Tools: new chats get them, and the code gains the MCP server line.
-      await press(
-        step(container, "tools").querySelector<HTMLElement>(
-          '[data-setting="tools"] button[role="switch"]',
-        ),
-      );
-      expect(code(container)).toContain("mcpServers");
-      await press(buttonIn(step(container, "tools"), "Ask in a new chat"));
-      expect(chat(container)).toContain("out for delivery with UPS");
-      expect(step(container, "tools").textContent).toContain("through your MCP server");
-      await press(buttonIn(step(container, "tools"), "Next"));
-      expect(currentStep(container)).toBe("ship");
-
-      // 4. Add it to your product: a real chat in this workspace that guides them.
-      expect(startSession).not.toHaveBeenCalled();
-      await press(buttonIn(step(container, "ship"), "Add it to your product"));
+  test("Add it to your product starts a guided chat in this workspace", async () => {
+    const { container, unmount } = await mount();
+    try {
+      await press(buttonIn(container, "Add it to your product"));
       expect(startSession).toHaveBeenCalledTimes(1);
       const [workspace, submission, options] = startSession.mock.calls[0]!;
       expect(workspace).toBe(DEVELOPMENT);
@@ -217,28 +199,6 @@ describe("playground", () => {
         to: "/workspaces/$workspaceId/sessions/$sessionId",
         params: { workspaceId: DEVELOPMENT, sessionId: "00000000-0000-4000-8000-0000000000f1" },
       });
-      expect(unexpected).not.toHaveBeenCalled();
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("Skip moves on, and Start over resets the steps, style and settings", async () => {
-    const { container, unmount } = await mount();
-    try {
-      await press(buttonIn(step(container, "ask"), "Skip"));
-      expect(currentStep(container)).toBe("style");
-      expect(
-        JSON.parse(localStorage.getItem(`og.playground:v3:${encodeURIComponent(SUBJECT)}:guide`)!),
-      ).toEqual({ current: "style", done: ["ask"] });
-      await press(container.querySelector<HTMLElement>('[role="radio"][aria-label="Rose"]'));
-      await press(buttonIn(container.querySelector("header")!, "Start over"));
-      expect(currentStep(container)).toBe("ask");
-      expect(
-        container
-          .querySelector<HTMLElement>("[data-playground-product]")!
-          .style.getPropertyValue("--og-color-accent"),
-      ).toBe("#1f8f7a");
     } finally {
       await unmount();
     }

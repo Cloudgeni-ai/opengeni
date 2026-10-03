@@ -5,7 +5,7 @@ import { chatTokens, type ChatStyle } from "./style-knobs";
 
 /**
  * Acme, the sample product: its own nav and page, with Opengeni's
- * `<OpenGeniChat />` embedded exactly as the code panel shows, running on the
+ * `<OpenGeniChat />` embedded exactly as the snippet shows, running on the
  * recorded client.
  */
 export function AcmeProduct({

@@ -2,9 +2,9 @@
    Playground: Acme, a sample product with the Opengeni chat inside.
 
    Acme is styled only through --og-* tokens, exactly as an integration would
-   style its own page, so the restyle controls change Acme and the embedded
-   <OpenGeniChat /> together. The playground's own chrome (top bar, steps,
-   code panel) uses the app's Tailwind tokens instead.
+   style its own page, so the color and theme controls change Acme and the
+   embedded <OpenGeniChat /> together. The playground's own chrome (top bar,
+   controls, snippet) uses the app's Tailwind tokens instead.
    --------------------------------------------------------------------------- */
 
 /* Dark inside a light app. The tokens' dark palette lives on :root only, so a
@@ -133,7 +133,7 @@
   }
 }
 
-/* The code panel marks the lines a change just wrote. */
+/* The snippet marks the lines a change just wrote. */
 .og-code-line {
   transition: background-color 600ms ease-out;
 }
@@ -141,17 +141,6 @@
   background: color-mix(in oklch, var(--color-status-idle) 18%, transparent);
   transition: none;
 }
-[data-slot="line-tabs-trigger"][data-changed]::after {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 6px;
-  border-radius: 999px;
-  background: var(--color-status-idle);
-  vertical-align: middle;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .og-playground-product,
   .og-code-line {

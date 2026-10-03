@@ -1,37 +1,26 @@
 import type { CSSProperties } from "react";
 
 /**
- * The restyle controls: what a product changes to make the embedded chat its
- * own. Every knob is an `--og-*` custom property on an ancestor of the
- * `@opengeni/react` components, the same thing an integration sets.
+ * The playground's two styling controls, a brand color and light or dark.
+ * Each is what an integration sets on the element around `<OpenGeniChat />`:
+ * `--og-*` custom properties and `data-og-theme`.
  */
 export type Accent = { name: string; value: string };
-export type Corners = { name: string; sm: number; md: number; lg: number };
-export type ChatStyle = {
-  accent: Accent;
-  corners: Corners;
-  theme: "light" | "dark";
-};
+export type ChatStyle = { accent: Accent; theme: "light" | "dark" };
 
 export const ACCENTS: readonly Accent[] = [
   { name: "Teal", value: "#1f8f7a" },
   { name: "Indigo", value: "#5b4bff" },
   { name: "Peach", value: "#e07b3c" },
   { name: "Rose", value: "#cf3f73" },
-  { name: "Graphite", value: "#3d4644" },
-];
-export const CORNERS: readonly Corners[] = [
-  { name: "Sharp", sm: 2, md: 4, lg: 6 },
-  { name: "Soft", sm: 6, md: 10, lg: 14 },
-  { name: "Round", sm: 10, md: 18, lg: 24 },
 ];
 
 export function defaultChatStyle(theme: "light" | "dark"): ChatStyle {
-  return { accent: ACCENTS[0]!, corners: CORNERS[1]!, theme };
+  return { accent: ACCENTS[0]!, theme };
 }
 
 /**
- * The custom properties for one style. The snippet shows the base tokens;
+ * The custom properties for one style. The snippet shows the two base tokens;
  * the derived shades are set here too because the app's own stylesheet
  * computes them once, at the page root.
  */
@@ -48,8 +37,5 @@ export function chatTokens(style: ChatStyle): CSSProperties {
     "--og-color-primary-fg": "#ffffff",
     "--og-color-primary-border": accent,
     "--og-color-primary-hover": `color-mix(in oklch, ${accent} 88%, black)`,
-    "--og-radius-sm": `${style.corners.sm}px`,
-    "--og-radius-md": `${style.corners.md}px`,
-    "--og-radius-lg": `${style.corners.lg}px`,
   } as CSSProperties;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { DEFAULT_AGENT_SETTINGS, QUESTIONS, type AgentSettings } from "./acme-script";
+import { QUESTIONS } from "./acme-script";
 import { DEMO_WORKSPACE_ID, createRecordedClient, type RecordedAnswer } from "./recorded-client";
 
 const until = async (check: () => boolean, ms = 8000) => {
@@ -13,7 +13,7 @@ const until = async (check: () => boolean, ms = 8000) => {
 
 describe("the playground's recorded client", () => {
   test("lists two earlier chats, and a new chat first", async () => {
-    const client = createRecordedClient({ settings: () => DEFAULT_AGENT_SETTINGS });
+    const client = createRecordedClient({});
     const before = await client.listSessionPage(DEMO_WORKSPACE_ID, {});
     expect(before.sessions.map((session) => session.title)).toEqual([
       "Delivery address",
@@ -26,17 +26,10 @@ describe("the playground's recorded client", () => {
     client.dispose();
   });
 
-  test("streams the answer and reports it with the chat's own settings", async () => {
-    let settings: AgentSettings = { ...DEFAULT_AGENT_SETTINGS, tools: true };
+  test("streams the answer and reports it", async () => {
     const answers: RecordedAnswer[] = [];
-    const client = createRecordedClient({
-      settings: () => settings,
-      onAnswered: (answer) => answers.push(answer),
-    });
+    const client = createRecordedClient({ onAnswered: (answer) => answers.push(answer) });
     const id = client.startChat(QUESTIONS.order);
-    // Changing settings later doesn't change a chat already started.
-    settings = DEFAULT_AGENT_SETTINGS;
-    expect(client.settingsOf(id)!.tools).toBe(true);
     expect(client.isPlaying(id)).toBe(true);
 
     const abort = new AbortController();
@@ -51,8 +44,7 @@ describe("the playground's recorded client", () => {
     })();
     await until(() => answers.length === 1);
     await reading;
-    expect(answers[0]).toMatchObject({ sessionId: id, question: "order" });
-    expect(answers[0]!.settings.tools).toBe(true);
+    expect(answers[0]).toEqual({ sessionId: id, question: "order" });
     expect(seen[0]).toBe("user.message");
     expect(seen).toContain("agent.toolCall.created");
     expect(client.isPlaying(id)).toBe(false);
@@ -64,14 +56,11 @@ describe("the playground's recorded client", () => {
     const older = await client.listEvents(DEMO_WORKSPACE_ID, id, { before: 3, limit: 1 });
     expect(older.map((event) => event.sequence)).toEqual([2]);
     client.dispose();
-  });
+  }, 20_000);
 
   test("the composer's send plays an answer in the same chat", async () => {
     const answers: RecordedAnswer[] = [];
-    const client = createRecordedClient({
-      settings: () => DEFAULT_AGENT_SETTINGS,
-      onAnswered: (answer) => answers.push(answer),
-    });
+    const client = createRecordedClient({ onAnswered: (answer) => answers.push(answer) });
     const id = client.startChat(QUESTIONS.order);
     await until(() => answers.length === 1);
     const sent = await client.submitComposerDraft(DEMO_WORKSPACE_ID, id, {
@@ -85,5 +74,5 @@ describe("the playground's recorded client", () => {
     await until(() => answers.length === 2);
     expect(answers[1]).toMatchObject({ sessionId: id, question: "charged" });
     client.dispose();
-  });
+  }, 20_000);
 });
