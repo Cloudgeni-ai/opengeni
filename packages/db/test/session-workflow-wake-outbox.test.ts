@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { and, eq, sql } from "drizzle-orm";
+import { and, DrizzleQueryError, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import {
   readTurnExecutionPolicyV1,
@@ -155,7 +155,7 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 
 describe("transactional session workflow wake outbox", () => {
   test.each([false, true])(
-    "a real restricted DB connection loss recovers the same turn; authoritative Pause wins (%s)",
+    "a restricted own-client server 57P01 recovers the same turn; authoritative Pause wins (%s)",
     async (paused) => {
       const ctx = await fixture();
       const workspaceId = ctx.grant.workspaceId!;
@@ -203,8 +203,9 @@ describe("transactional session workflow wake outbox", () => {
       `;
       if (!beforeAuthority) throw new Error("Missing accepted authority");
 
-      // Kill only this test's dedicated restricted connection, never the
-      // shared fixture's application pool or another suite's connection.
+      // PostgreSQL, not a fabricated Error/message, supplies the allowed
+      // SQLSTATE through this dedicated restricted ORM client. This is a
+      // classification/control regression, not a live failover claim.
       const applicationName = `outage-fixture-${crypto.randomUUID()}`;
       const isolated = postgres(shared.appUrl, {
         max: 1,
@@ -212,34 +213,18 @@ describe("transactional session workflow wake outbox", () => {
       });
       let error: unknown;
       try {
-        const [owner] = await isolated`select pg_backend_pid() as pid`;
-        if (!owner) throw new Error("Missing dedicated fixture connection");
-        const pending = drizzle(isolated)
-          .execute(sql`select pg_sleep(5)`)
+        await drizzle(isolated)
+          .execute(sql`do $$ begin
+            raise exception using errcode = '57P01', message = 'own-client outage fixture';
+          end $$`)
           .catch((cause) => {
             error = cause;
           });
-        await waitFor(
-          async () => {
-            const [active] = await shared.admin`
-            select state from pg_stat_activity where pid = ${owner.pid}
-              and application_name = ${applicationName} and datname = current_database()
-          `;
-            return active?.state === "active";
-          },
-          { timeoutMs: 1000, intervalMs: 5 },
-        );
-        const [terminated] = await shared.admin`
-          select pg_terminate_backend(pid) as terminated from pg_stat_activity
-          where pid = ${owner.pid} and application_name = ${applicationName}
-            and datname = current_database() and usename = ${new URL(shared.appUrl).username}
-        `;
-        expect(terminated?.terminated).toBe(true);
-        await pending;
       } finally {
         await isolated.end({ timeout: 1 });
       }
-      expect(error).toBeDefined();
+      expect(error).toBeInstanceOf(DrizzleQueryError);
+      expect((error as DrizzleQueryError).cause).toMatchObject({ code: "57P01" });
       const failure = postClaimDatabaseRecoveryFailure({
         error,
         turnId: claim.turn.id,
@@ -333,6 +318,60 @@ describe("transactional session workflow wake outbox", () => {
     },
     30_000,
   );
+
+  test("a real restricted connection termination stays outside the running-turn closed allowlist", async () => {
+    // Kill only this exact dedicated fixture connection. postgres.js reports
+    // CONNECTION_CLOSED here; never rename it to an allowed code or infer a
+    // server SQLSTATE/exit proof that was not actually returned.
+    const applicationName = `excluded-outage-fixture-${crypto.randomUUID()}`;
+    const isolated = postgres(shared.appUrl, {
+      max: 1,
+      connection: { application_name: applicationName },
+    });
+    let error: unknown;
+    try {
+      const [owner] = await isolated`select pg_backend_pid() as pid`;
+      if (!owner) throw new Error("Missing dedicated fixture connection");
+      const pending = drizzle(isolated)
+        .execute(sql`select pg_sleep(5)`)
+        .catch((cause) => {
+          error = cause;
+        });
+      await waitFor(
+        async () => {
+          const [active] = await shared.admin`
+            select state from pg_stat_activity where pid = ${owner.pid}
+              and application_name = ${applicationName} and datname = current_database()
+          `;
+          return active?.state === "active";
+        },
+        { timeoutMs: 1000, intervalMs: 5 },
+      );
+      const [terminated] = await shared.admin`
+        select pg_terminate_backend(pid) as terminated from pg_stat_activity
+        where pid = ${owner.pid} and application_name = ${applicationName}
+          and datname = current_database() and usename = ${new URL(shared.appUrl).username}
+      `;
+      expect(terminated?.terminated).toBe(true);
+      await pending;
+    } finally {
+      await isolated.end({ timeout: 1 });
+    }
+    expect(error).toBeInstanceOf(DrizzleQueryError);
+    expect((error as DrizzleQueryError).cause).toMatchObject({ code: "CONNECTION_CLOSED" });
+    const identity = {
+      error,
+      turnId: crypto.randomUUID(),
+      triggerEventId: crypto.randomUUID(),
+      executionGeneration: 1,
+    };
+    expect(
+      postClaimDatabaseRecoveryFailure({ ...identity, requireDatabaseProvenance: true }),
+    ).toBeNull();
+    expect(postClaimDatabaseRecoveryFailure(identity)?.type).toBe(
+      "OpenGeniPostClaimDatabaseRecovery",
+    );
+  }, 30_000);
 
   test.each([
     "client-only",

@@ -405,20 +405,41 @@ function retryableDatabaseFailureCode(
     if (!graph) return null;
     const transports = new Set<object>();
     const boundaries = new Set<object>();
+    const ownDatabaseNodes = new Set<object>();
     const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
     // Ask the canonical transport predicate about ONLY this node's facts. Its
     // recursive search must not pair a DB sibling with an unrelated provider.
     for (const node of graph.keys()) {
       if (isRoutingMutationOutcomeUnknownError(node)) return null;
       const record = node as Record<string, unknown>;
-      if (isRetryableDatabaseTransportFailure({ code: record.code, errno: record.errno }))
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseTransportFailure(record)
+          : isRetryableDatabaseTransportFailure({ code: record.code, errno: record.errno })
+      )
         transports.add(node);
       const sqlState = isSessionEventPersistenceError(node)
         ? node.details.sqlState
         : record.name === "PostgresError" && typeof record.code === "string"
           ? record.code
           : null;
-      if (isDatabaseConnectionSqlState(sqlState)) transports.add(node);
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+          : isDatabaseConnectionSqlState(sqlState)
+      )
+        transports.add(node);
+      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+        // Only actual errors raised at our ORM/typed persistence boundary own
+        // their driver subtree. A PostgresError name, SDK wrapper or provider
+        // socket by itself is never own-client provenance for a running turn.
+        const queue: object[] = [node];
+        for (const source of queue) {
+          if (ownDatabaseNodes.has(source)) continue;
+          ownDatabaseNodes.add(source);
+          queue.push(...graph.get(source)!);
+        }
+      }
     }
     const hasOwnTransport = (boundary: object): boolean => {
       const seen = new Set<object>();
@@ -448,7 +469,9 @@ function retryableDatabaseFailureCode(
         : typeof record.code === "string"
           ? record.code
           : null;
-      const connectionOutage = isDatabaseConnectionSqlState(sqlState);
+      const connectionOutage = requireDatabaseProvenance
+        ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+        : isDatabaseConnectionSqlState(sqlState);
       const code = typed
         ? retryablePersistenceFailureCode(sqlState)
         : connectionOutage || isRetryablePersistenceSqlState(sqlState)
@@ -461,7 +484,7 @@ function retryableDatabaseFailureCode(
           !(sqlState === null && hasOwnTransport(node)))
       )
         return null;
-      codes.add(code);
+      if (!requireDatabaseProvenance || ownDatabaseNodes.has(node)) codes.add(code);
     }
     // Preserve the legacy pre-execution transport-only allowance, but never
     // borrow it across an explicit DB boundary with no eligible own evidence.
@@ -475,6 +498,25 @@ function retryableDatabaseFailureCode(
     // Unreadable structured facts are no more authority than unreadable edges.
     return null;
   }
+}
+
+const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "CONNECT_TIMEOUT",
+]);
+
+function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>): boolean {
+  return [record.code, record.errno].some(
+    (code) => typeof code === "string" && RUNNING_TURN_DATABASE_TRANSPORT_CODES.has(code),
+  );
+}
+
+function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+  );
 }
 
 function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
@@ -508,15 +550,16 @@ function retryablePersistenceFailureCode(
 
 /**
  * Carry one exact claimed attempt into the workflow's DB-only
- * recovery lane. Permanent database/state failures remain terminal; only the
- * same operational outage classes that are safe before claim are admitted.
+ * recovery lane. Permanent database/state failures remain terminal. The
+ * running-turn lane additionally requires a closed own-client outage class;
+ * existing pre-execution recovery classifications are unchanged.
  */
 export function postClaimDatabaseRecoveryFailure(input: {
   error: unknown;
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
-  /** After execution starts, a provider socket failure is not DB provenance. */
+  /** Require an actual own-client boundary and the closed running-turn allowlist. */
   requireDatabaseProvenance?: boolean;
   sandboxSetupOutcomeUnknown?: true;
   sandboxSetupRecoveryExhausted?: true;

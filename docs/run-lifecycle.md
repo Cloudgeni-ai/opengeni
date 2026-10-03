@@ -587,8 +587,10 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
-During an executing turn, structured PostgreSQL connection outages (driver
-transport codes, connection SQLSTATEs, or server restart/failover) use the same
+During an executing turn, own-client PostgreSQL connection outages use only
+`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
+through an actual ORM or typed persistence boundary, never a driver name alone.
+These closed outage classes use the same
 exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
 mandatory-history wrappers. The activity exits without `turn.failed`, without
 retrying a possibly committed delta/tool-ledger write, and without manufacturing

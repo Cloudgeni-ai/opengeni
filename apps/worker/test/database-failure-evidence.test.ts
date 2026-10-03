@@ -111,8 +111,6 @@ test("running-turn outages use structured database causes through SDK and histor
     "ECONNREFUSED",
     "ECONNRESET",
     "CONNECT_TIMEOUT",
-    "CONNECTION_CLOSED",
-    "ETIMEDOUT",
     "57P01",
     "57P02",
     "57P03",
@@ -195,6 +193,79 @@ test("running-turn recovery rejects permanent errors, provider sockets and messa
 function runningDatabaseRecovery(error: unknown) {
   return postClaimDatabaseRecoveryFailure({ error, ...identity, requireDatabaseProvenance: true });
 }
+
+test("running-turn DB transport recovery has a closed allowlist without changing the legacy lane", () => {
+  for (const code of [
+    "CONNECTION_CLOSED",
+    "CONNECTION_DESTROYED",
+    "CONNECTION_ENDED",
+    "EAI_AGAIN",
+    "ECONNABORTED",
+    "EHOSTDOWN",
+    "EHOSTUNREACH",
+    "ENETDOWN",
+    "ENETRESET",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "EPIPE",
+    "ETIMEDOUT",
+  ]) {
+    const orm = new DrizzleQueryError(
+      "select account_id from workspaces",
+      [],
+      Object.assign(new Error("own DB connection"), { code }),
+    );
+    const persistence = new SessionEventPersistenceError(
+      {
+        code: "db_failure",
+        sqlState: null,
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.reasoning.delta"],
+        correlationId: "excluded-transport",
+        attempts: 1,
+        retryOutcome: "not_retryable",
+        database: {},
+      },
+      orm,
+    );
+    for (const error of [orm, persistence, new ToolCallError("SDK wrapper", persistence)]) {
+      expect(runningDatabaseRecovery(error)).toBeNull();
+      expect(postClaimDatabaseRecoveryFailure({ error, ...identity })).toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+      });
+    }
+  }
+  for (const code of ["57P00", "0800", "08001extra", "08garbage", "0800!"])
+    expect(runningDatabaseRecovery(rawDatabaseFailure(code))).toBeNull();
+  for (const code of ["ECONNREFUSED", "ECONNRESET", "CONNECT_TIMEOUT"])
+    expect(
+      runningDatabaseRecovery(
+        new DrizzleQueryError("select 1", [], Object.assign(new Error("own DB"), { errno: code })),
+      ),
+    ).toMatchObject({ type: "OpenGeniPostClaimDatabaseRecovery" });
+});
+
+test("running-turn own-client provenance cannot be supplied by names or presentation wrappers", () => {
+  for (const code of ["57P01", "57P02", "57P03", "08006"]) {
+    const lookalike = rawDatabaseFailure(code).cause;
+    for (const error of [
+      lookalike,
+      new ToolCallError("SDK error", lookalike),
+      new MandatoryHistoryPersistenceError("history_append", lookalike),
+      Object.assign(new Error("ORM name only", { cause: lookalike }), {
+        name: "DrizzleQueryError",
+      }),
+      Object.assign(new Error("typed name only", { cause: lookalike }), {
+        name: "SessionEventPersistenceError",
+        details: { sqlState: code },
+      }),
+    ])
+      expect(runningDatabaseRecovery(error)).toBeNull();
+    expect(runningDatabaseRecovery(rawDatabaseFailure(code))).toMatchObject({
+      type: "OpenGeniPostClaimDatabaseRecovery",
+    });
+  }
+});
 
 test("a DB wrapper cannot lend transport provenance to an unrelated provider sibling", () => {
   const ordinaryDbError = new DrizzleQueryError("select 1", [], new Error("ordinary"));
