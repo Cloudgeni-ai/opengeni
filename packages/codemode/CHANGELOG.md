@@ -1,5 +1,16 @@
 # @opengeni/codemode
 
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [14e95e9]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/sdk@7.8.0
+  - @opengeni/tool-gateway@0.1.20
+
 ## 0.7.0
 
 ### Minor Changes

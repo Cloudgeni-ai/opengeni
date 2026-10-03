@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 7.8.0
+
+### Patch Changes
+
+- 49fc1c0: `SessionCapabilityFrame` accepts optional `details` content inside the card and an `actionUnavailable` explanation that replaces the action when the viewer cannot start setup.
+- fe1739f: Use neutral model-group labels and icons in the stock embedded picker, while keeping explicit host branding and external-provider identities. Expose appearance-only picker customization on the complete conversation and preserve explicit first-party console branding.
+- 978981a: Present expected sandbox lifecycle waits during model preparation as waiting rather than failed. Retain technical failure receipts and keep actual model and provider failures visible.
+- 272c016: Expose command readiness separately from edit permission. Pause presentation mutations while earlier changes await settlement, preserving drafts, slide navigation, and zoom.
+- bb52f56: Open the whole desktop by default, show a screen selector for multiple displays, and move app/window views into the Advanced menu. Preserve explicit target choices and existing input authority across refreshes.
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [14e95e9]
+  - @opengeni/sdk@7.8.0
+
 ## 7.7.0
 
 ### Minor Changes

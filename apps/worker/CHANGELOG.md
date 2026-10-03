@@ -1,5 +1,38 @@
 # @opengeni/worker-bundle
 
+## 2.3.3
+
+### Patch Changes
+
+- c82f66a: Clarify the default result for an explicitly rejected tool approval: that proposed call was not executed. Preserve custom rejection reasons, intervention results and approved-call outcomes.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+- 978981a: Present expected sandbox lifecycle waits during model preparation as waiting rather than failed. Retain technical failure receipts and keep actual model and provider failures visible.
+- ac20181: Recognize documented OpenAI and Claude spend limits, ramp/overload and safety failures. Keep payment refusals distinct from exhausted credits and unknown Claude stream errors conservative, preserve authoritative HTTP refusals, and honor Azure millisecond retry hints without changing side-effect recovery boundaries.
+- Updated dependencies [981ba72]
+- Updated dependencies [f38dac6]
+- Updated dependencies [7705d65]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [ac20181]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [14e95e9]
+- Updated dependencies [44d5ee5]
+  - @opengeni/runtime@4.7.1
+  - @opengeni/config@3.4.0
+  - @opengeni/contracts@5.8.0
+  - @opengeni/db@6.7.0
+  - @opengeni/sdk@7.8.0
+  - @opengeni/core@5.2.1
+  - @opengeni/documents@0.8.42
+  - @opengeni/github@0.8.4
+  - @opengeni/storage@0.2.140
+  - @opengeni/codemode@0.7.1
+  - @opengeni/codex@0.2.33
+  - @opengeni/events@0.4.40
+  - @opengeni/interaction@0.4.47
+  - @opengeni/observability@0.8.39
+  - @opengeni/tool-gateway@0.1.20
+
 ## 2.3.2
 
 ### Patch Changes
