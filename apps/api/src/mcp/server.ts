@@ -5307,7 +5307,9 @@ function registerWorkspaceOrchestrationTools(
         latencyMode: z4
           .enum(["standard", "priority", "fast"])
           .optional()
-          .describe("Omit to inherit the exact calling turn's latency mode."),
+          .describe(
+            "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
+          ),
         sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
         // Model-only structural coupling: workingDir cannot exist without a
         // targetSandboxId because both live inside one optional object. The
