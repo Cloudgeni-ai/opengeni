@@ -1266,10 +1266,15 @@ Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
 Insights comparisons use `configuredModelListPricingSchedules` and
-`calculateModelListUsageCostBreakdown`. These project reviewed upstream rates
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
+Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+project reviewed upstream rates
 onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
 product routes without adding comparison-only prices to debit authority or
-changing frozen execution-definition hashes. Registry prices and explicit
+changing frozen execution-definition hashes, including bare built-in models.
+New bare rates require a configured model on the official OpenAI API route;
+custom proxies and Azure do not inherit them by matching a model name.
+Registry prices and explicit
 product-ID overrides still win. External metering never becomes a credit debit.
 
 Forward fact writers may use `calculateModelListUsageCostSnapshot` with
@@ -1319,8 +1324,10 @@ The added Standard rates were reviewed on 2026-10-03 against
 [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), and
 the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
 [OpenRouter](https://openrouter.ai/api/v1/models) catalogs. GPT-6.1 Sol uses a
-5% cache-read rate and the exclusive 272K long-context boundary; Grok 4.5–4.7
-double their token rates above 200K; the reviewed native Claude models have no
+5% cache-read rate and the exclusive 272K long-context boundary; native Grok
+4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
+Gateway's separate greater-than-200K schedule must not replace the native one.
+The reviewed native Claude models have no
 long-context premium. Claude 1-hour native cache writes use 2x base input,
 rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
 has an explicit zero list price, not an unknown price.
@@ -1334,10 +1341,12 @@ usage facts.
 
 ### Price audit (llm-prices canary)
 
-OpenGeni debit authority is the hand-maintained
-`defaultModelPricing` map in `packages/config/src/index.ts` (plus registry /
-`OPENGENI_MODEL_PRICING_JSON` overrides). Do not generate that map from an
-external feed.
+OpenGeni debit authority is the unchanged hand-maintained `defaultModelPricing`
+map in `packages/config/src/index.ts` (plus registry /
+`OPENGENI_MODEL_PRICING_JSON` overrides). New comparison-only rates live in
+`reviewedModelListPricing` and reach callers only through provider-gated list
+resolution. The canary inspects both tables without promoting comparison rates
+to debit authority. Do not generate either map from an external feed.
 
 When you add a billed model or want to verify list rates are still current:
 

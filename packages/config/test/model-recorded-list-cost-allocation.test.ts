@@ -10,7 +10,20 @@ import {
   type ModelUsageInput,
 } from "../src";
 
-const base = getSettings({ OPENGENI_ENV: "test" });
+const base = getSettings({
+  OPENGENI_ENV: "test",
+  OPENGENI_OPENAI_MODEL: "gpt-6.1-sol",
+  OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-6.1-sol",
+  OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+    {
+      id: "xai-list-test",
+      api: "responses",
+      baseUrl: "https://api.x.ai/v1",
+      apiKey: "xai_mock_only",
+      models: [{ id: "grok-4.6" }],
+    },
+  ]),
+});
 const usage: ModelUsageInput = {
   inputTokens: 300,
   outputTokens: 100,

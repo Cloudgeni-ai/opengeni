@@ -5,7 +5,7 @@ import {
   configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   configuredModels,
-  defaultModelPricing,
+  reviewedModelListPricing,
   getSettings,
   parseModelProvidersJson,
   selectModelPricing,
@@ -86,7 +86,7 @@ describe("reviewed supported-model list prices", () => {
   test.each(reviewedRows)(
     "pins the exact primary-source Standard row for %s",
     (id, input, cache, write, output) => {
-      expect(defaultModelPricing[id]?.default).toEqual({
+      expect(reviewedModelListPricing[id]?.default).toEqual({
         inputMicrosPerMillionTokens: Math.round(input * 1_000_000),
         cachedInputMicrosPerMillionTokens: Math.round(cache * 1_000_000),
         ...(write === null
@@ -99,7 +99,7 @@ describe("reviewed supported-model list prices", () => {
   );
 
   test("uses GPT-6.1 Sol's own cache rate and the exclusive 272K boundary", () => {
-    const schedule = defaultModelPricing["gpt-6.1-sol"]!;
+    const schedule = reviewedModelListPricing["gpt-6.1-sol"]!;
     expect(selectModelPricing(schedule, 272_000)).toEqual(schedule.default);
     expect(selectModelPricing(schedule, 272_001)).toEqual({
       inputMicrosPerMillionTokens: 4_000_000,
@@ -111,11 +111,11 @@ describe("reviewed supported-model list prices", () => {
   });
 
   test.each(["grok-4.5", "grok-4.6", "grok-4.7"])(
-    "uses the exclusive 200K boundary for %s",
+    "preserves the native API's inclusive 200K boundary for %s",
     (id) => {
-      const schedule = defaultModelPricing[id]!;
-      expect(selectModelPricing(schedule, 200_000)).toEqual(schedule.default);
-      expect(selectModelPricing(schedule, 200_001)).toEqual({
+      const schedule = reviewedModelListPricing[id]!;
+      expect(selectModelPricing(schedule, 199_999)).toEqual(schedule.default);
+      expect(selectModelPricing(schedule, 200_000)).toEqual({
         inputMicrosPerMillionTokens: 4_000_000,
         cachedInputMicrosPerMillionTokens: id === "grok-4.5" ? 600_000 : 1_000_000,
         outputMicrosPerMillionTokens: 12_000_000,
@@ -147,8 +147,8 @@ describe("reviewed supported-model list prices", () => {
         expect(model.cost).toBe("workspace");
       }
     }
-    expect(prices["codex/gpt-6.1-sol"]).toEqual(defaultModelPricing["gpt-6.1-sol"]);
-    expect(prices["supergrok/grok-4.7"]).toEqual(defaultModelPricing["grok-4.7"]);
+    expect(prices["codex/gpt-6.1-sol"]).toEqual(reviewedModelListPricing["gpt-6.1-sol"]);
+    expect(prices["supergrok/grok-4.7"]).toEqual(reviewedModelListPricing["grok-4.7"]);
   });
 
   test("keeps Claude's no-premium long context and prices 1h cache writes only on that native route", () => {
@@ -184,7 +184,7 @@ describe("reviewed supported-model list prices", () => {
       creditCostMicros: 1323,
     });
     expect(configuredModelListPricingSchedules(settings)["codex/gpt-6.1-sol"]).toEqual(schedule);
-    const captured = structuredClone(defaultModelPricing["gpt-6.1-sol"]!);
+    const captured = structuredClone(reviewedModelListPricing["gpt-6.1-sol"]!);
     const changed = {
       ...settings,
       modelPricingJson: JSON.stringify({
@@ -195,7 +195,7 @@ describe("reviewed supported-model list prices", () => {
       configuredModelListPricingSchedules(changed)["codex/gpt-6.1-sol"]!.default
         .inputMicrosPerMillionTokens,
     ).toBe(99);
-    expect(captured).toEqual(defaultModelPricing["gpt-6.1-sol"]);
+    expect(captured).toEqual(reviewedModelListPricing["gpt-6.1-sol"]);
   });
 
   test("retains registry and explicit product-ID precedence, including an explicit zero price", () => {
@@ -245,7 +245,7 @@ describe("reviewed supported-model list prices", () => {
       ...settings,
       modelProvidersJson: JSON.stringify([provider]),
     });
-    expect(known["xai/grok-4.6"]).toEqual(defaultModelPricing["grok-4.6"]);
+    expect(known["xai/grok-4.6"]).toEqual(reviewedModelListPricing["grok-4.6"]);
     expect(known["my-grok"]).toBeUndefined();
     const proxy = configuredModelListPricingSchedules({
       ...settings,
@@ -281,7 +281,10 @@ describe("reviewed supported-model list prices", () => {
   test("distinguishes the verified free OpenRouter route from an unknown rate", () => {
     // https://openrouter.ai/api/v1/models: prompt=0 and completion=0,
     // checked 2026-10-03. Never generalize zero to arbitrary :free suffixes.
-    const prices = configuredModelListPricingSchedules(catalogSettings());
+    const prices = configuredModelListPricingSchedules({
+      ...catalogSettings(),
+      openrouterApiKey: "openrouter_mock_only",
+    });
     for (const prefix of ["openrouter/", "workspace-openrouter/", "organization-openrouter/"]) {
       expect(
         prices[`${prefix}nvidia/nemotron-3-super-120b-a12b:free`]?.default

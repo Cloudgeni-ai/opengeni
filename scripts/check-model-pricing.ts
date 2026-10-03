@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Compare hand-maintained OpenGeni credit list prices against llm-prices.com.
+ * Compare hand-maintained debit/list comparison rates against llm-prices.com.
  *
  * OpenGeni debit authority stays in `defaultModelPricing`
  * (`packages/config/src/index.ts`). llm-prices is an external ground-truth
  * canary for Standard short/long-context rates — never a generator or runtime
- * source. Fast multipliers, Fireworks, and marginBps are OpenGeni-owned and
+ * source. New comparison metadata stays separate in reviewedModelListPricing.
+ * Fast multipliers, Fireworks, and marginBps are OpenGeni-owned and
  * are not asserted here.
  *
  * Usage:
@@ -14,7 +15,11 @@
  *   bun run check:model-pricing -- --help
  */
 
-import { defaultModelPricing, type ModelPricing } from "@opengeni/config";
+import { defaultModelPricing, reviewedModelListPricing, type ModelPricing } from "@opengeni/config";
+
+// The canary may inspect comparison metadata, but never promotes it to debit
+// authority or bypasses the runtime list resolver's provider-route validation.
+const AUDIT_PRICING = { ...defaultModelPricing, ...reviewedModelListPricing };
 
 const LLM_PRICES_URL = "https://www.llm-prices.com/current-v1.json";
 
@@ -149,7 +154,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
   }
 
   for (const entry of AUDIT_MODELS) {
-    const schedule = defaultModelPricing[entry.productId];
+    const schedule = AUDIT_PRICING[entry.productId];
     if (!schedule) {
       errors.push(`missing OpenGeni schedule for ${entry.productId}`);
       continue;

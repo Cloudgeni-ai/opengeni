@@ -11,7 +11,20 @@ import {
   type ModelUsageInput,
 } from "../src";
 
-const base = getSettings({ OPENGENI_ENV: "test" });
+const base = getSettings({
+  OPENGENI_ENV: "test",
+  OPENGENI_OPENAI_MODEL: "gpt-6.1-sol",
+  OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-6.1-sol",
+  OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+    {
+      id: "xai-list-test",
+      api: "responses",
+      baseUrl: "https://api.x.ai/v1",
+      apiKey: "xai_mock_only",
+      models: [{ id: "grok-4.6" }],
+    },
+  ]),
+});
 const known = { priceContextKnown: true };
 const usage: ModelUsageInput = {
   inputTokens: 200,
@@ -50,7 +63,13 @@ describe("forward list-price class snapshots", () => {
   test("keeps debit/totals-only result shapes unchanged and requires request price provenance", () => {
     const totals = calculateModelListUsageCostBreakdown(base, "gpt-6.1-sol", usage);
     expect(totals).toEqual({ providerCostMicros: 1260, creditCostMicros: 1323 });
-    expect(calculateModelUsageCostBreakdown(base, "gpt-6.1-sol", usage)).toEqual(totals);
+    expect(() => calculateModelUsageCostBreakdown(base, "gpt-6.1-sol", usage)).toThrow(
+      "Missing model pricing",
+    );
+    expect(Object.keys(calculateModelUsageCostBreakdown(base, "gpt-6-luna", usage))).toEqual([
+      "providerCostMicros",
+      "creditCostMicros",
+    ]);
     expect(calculateModelListUsageCostSnapshot(base, "gpt-6.1-sol", usage)).toEqual({
       ...totals,
       listByClassMicros: null,
@@ -331,7 +350,7 @@ describe("forward list-price class snapshots", () => {
 
   test("an unverified latency multiplier cannot produce an exact class split", () => {
     expect(
-      calculateModelListUsageCostSnapshot(base, "gpt-6.1-sol", usage, {
+      calculateModelListUsageCostSnapshot(claudeSettings(), claudeId, nativeUsage, {
         ...known,
         latencyMode: "fast",
       }).listByClassMicros,

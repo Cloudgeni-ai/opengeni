@@ -3043,30 +3043,6 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * llm-prices.com as a ground-truth canary; it does not generate this table.
  */
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
-  // Reviewed 2026-10-03 against https://developers.openai.com/api/docs/pricing
-  // and https://ai-gateway.vercel.sh/v1/models. GPT-6.1 Sol's cache-read rate
-  // is 5% of input, not GPT-6 Sol's 10%. The long-context boundary is >272K.
-  "gpt-6.1-sol": {
-    default: {
-      inputMicrosPerMillionTokens: 2_000_000,
-      cachedInputMicrosPerMillionTokens: 100_000,
-      cacheWriteMicrosPerMillionTokens: 2_500_000,
-      outputMicrosPerMillionTokens: 10_000_000,
-      marginBps: 500,
-    },
-    inputTokenTiers: [
-      {
-        minimumInputTokens: 272_001,
-        pricing: {
-          inputMicrosPerMillionTokens: 4_000_000,
-          cachedInputMicrosPerMillionTokens: 200_000,
-          cacheWriteMicrosPerMillionTokens: 5_000_000,
-          outputMicrosPerMillionTokens: 15_000_000,
-          marginBps: 500,
-        },
-      },
-    ],
-  },
   "gpt-6-astra": {
     default: {
       // OpenAI list price: $10 / $1 cached / $12.50 cache write / $50 output.
@@ -3232,9 +3208,38 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       marginBps: 500,
     },
   },
+};
+
+/** Reviewed comparison rates only; never debit or execution-definition defaults. */
+export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = {
+  // Reviewed 2026-10-03 against https://developers.openai.com/api/docs/pricing
+  // and https://ai-gateway.vercel.sh/v1/models. GPT-6.1 Sol's cache-read rate
+  // is 5% of input, not GPT-6 Sol's 10%. The long-context boundary is >272K.
+  "gpt-6.1-sol": {
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 200_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
   // xAI Standard API list rates, reviewed 2026-10-03:
   // https://docs.x.ai/developers/models/grok-4.5 (and grok-4.6 / grok-4.7).
-  // All three double input, cache reads and output above 200K input tokens.
+  // Preserve the native API's established >=200K boundary. Gateway's separately
+  // configured >200K schedule is not interchangeable with this native schedule.
   // xAI's automatic caching has no separate cache-write surcharge.
   ...Object.fromEntries(
     (
@@ -3254,7 +3259,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         },
         inputTokenTiers: [
           {
-            minimumInputTokens: 200_001,
+            minimumInputTokens: 200_000,
             pricing: {
               inputMicrosPerMillionTokens: 4_000_000,
               cachedInputMicrosPerMillionTokens: cachedInput * 2,
@@ -6236,13 +6241,29 @@ export function configuredModelListPricingSchedules(
   settings: Settings,
 ): Record<string, ModelPricingScheduleV1> {
   const prices = configuredModelPricingSchedules(settings);
-  prices[DEFAULT_OPENROUTER_MODEL_ID] ??= reviewedFreeOpenRouterListPricing;
   const configured = Object.fromEntries(
     Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
       model,
       normalizeModelPricingSchedule(pricing),
     ]),
   );
+  // Bare new IDs need the actual configured public OpenAI route, not merely a
+  // familiar model name. Azure/custom endpoints do not inherit these API rates.
+  if (
+    settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl ?? "https://api.openai.com/v1")
+  ) {
+    for (const model of configuredModels(settings)) {
+      if (
+        model.providerId !== builtinProviderId(settings) ||
+        !model.upstreamModelId.startsWith("gpt-") ||
+        prices[model.id] !== undefined
+      )
+        continue;
+      const reviewed = reviewedModelListPricing[model.upstreamModelId];
+      if (reviewed) prices[model.id] = reviewed;
+    }
+  }
   for (const provider of configuredRegistryProviders(settings)) {
     for (const model of provider.models) {
       if (prices[model.id] !== undefined) continue;
@@ -6270,6 +6291,14 @@ function reviewedProviderModelPricing(
   let priceId: string | undefined;
   let nativeClaude = false;
   switch (provider.kind) {
+    case "anonymous":
+      if (
+        provider.baseUrl.replace(/\/$/u, "") === OPENROUTER_BASE_URL &&
+        upstream === DEFAULT_OPENROUTER_MODEL_ID.slice(OPENROUTER_MODEL_ID_PREFIX.length)
+      ) {
+        priceId = DEFAULT_OPENROUTER_MODEL_ID;
+      }
+      break;
     case "codex-subscription":
       if (upstream.startsWith("gpt-")) priceId = upstream;
       break;
@@ -6335,6 +6364,7 @@ function reviewedProviderModelPricing(
   // a product-ID override or inline registry rate still has higher precedence.
   if (configured[priceId]) return configured[priceId];
   const schedule =
+    reviewedModelListPricing[priceId] ??
     defaultModelPricing[priceId] ??
     (priceId === DEFAULT_OPENROUTER_MODEL_ID ? reviewedFreeOpenRouterListPricing : undefined);
   if (!schedule) return undefined;
@@ -6715,7 +6745,7 @@ function nativeClaudeListWriteContext(
       provider.kind === "claude-subscription-organization" ||
       (provider.kind === "api-key" &&
         provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1");
-    const published = defaultModelPricing[upstream]?.default;
+    const published = reviewedModelListPricing[upstream]?.default;
     if (
       !official ||
       !claudeNativeModelProfile(upstream) ||
