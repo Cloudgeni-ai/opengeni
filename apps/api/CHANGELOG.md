@@ -1,5 +1,23 @@
 # @opengeni/api-router
 
+## 5.5.1
+
+### Patch Changes
+
+- Updated dependencies [981ba72]
+- Updated dependencies [f38dac6]
+- Updated dependencies [7705d65]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [44d5ee5]
+  - @opengeni/runtime@4.7.1
+  - @opengeni/config@3.3.1
+  - @opengeni/core@5.2.1
+  - @opengeni/db@6.6.1
+  - @opengeni/documents@0.8.42
+  - @opengeni/github@0.8.4
+  - @opengeni/storage@0.2.140
+  - @opengeni/events@0.4.40
+
 ## 5.5.0
 
 ### Minor Changes

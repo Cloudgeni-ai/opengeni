@@ -1,5 +1,19 @@
 # @opengeni/runtime
 
+## 4.7.1
+
+### Patch Changes
+
+- 981ba72: Allow automation and session startup with an empty first-party permission ceiling without minting a delegated token or connecting to OpenGeni MCP. Preserve host-owned adapters, independent connection credentials, and existing nonempty permission behavior; requested first-party capabilities without authority remain unavailable.
+- f38dac6: Add a nonactivating, synchronous compiler for the explicit known-ID native fresh-create recipe. Retain the full pre-election origin, stable operation IDs, declared sleep entrypoint and create workdir, pinned SDK defaults, and exact normalized create-JSON correlation.
+
+  Compilation performs no provider, database or configuration I/O and supplies no credential, reservation, dispatch permission, physical receipt or helper-continuation authority. Export the compiler, descriptor and their types passively from `@opengeni/runtime/sandbox`; existing Modal helpers remain unchanged and no production caller is activated.
+
+- 7705d65: Add a passive, issuer-bound preflight descriptor for the exact native Modal readiness Start profile without consuming the prepared handle or changing dispatch behavior.
+- 44d5ee5: Clarify the bundled client Skill's stock-versus-custom appearance guidance: use theme tokens for custom-branded embeds, and keep stock UI free of cosmetic host CSS or token overrides.
+- Updated dependencies [fa0a9ef]
+  - @opengeni/config@3.3.1
+
 ## 4.7.0
 
 ### Minor Changes
