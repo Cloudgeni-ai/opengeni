@@ -78,6 +78,11 @@ import {
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
+import { createManagedAuth } from "../src/auth/managed-auth";
+import {
+  createBetterAuthSessionAdapter,
+  managedAuthSelectedProofHeaders,
+} from "../src/auth/managed-auth-session-adapter";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const signingMaterial = ["slack", "interaction", crypto.randomUUID()].join("-");
@@ -2823,6 +2828,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const requesterId = `slack-access-requester-${crypto.randomUUID()}`;
     const otherId = `slack-access-other-${crypto.randomUUID()}`;
     const ownerId = value.owner.subjectId.replace(/^user:/, "");
+    const nativeSessionTokens = new Map<string, string>();
     for (const userId of [requesterId, otherId, ownerId]) {
       await shared!.admin`
         insert into auth_users (id, name, email, email_verified)
@@ -2838,40 +2844,44 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
       `;
       const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      const sessionToken = crypto.randomUUID();
+      nativeSessionTokens.set(userId, sessionToken);
       await shared!.admin`
         insert into auth_sessions (
           id, user_id, token, expires_at,
           identity_id, identity_revision, auth_revision
         ) values (
-          ${`session-${userId}`}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+          ${`session-${userId}`}, ${userId}, ${sessionToken}, now() + interval '1 hour',
           ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
         )
       `;
     }
-    Reflect.set(value.deps, "managedAuth", {
-      api: {
-        getSession: async ({ headers }: { headers: Headers }) => {
-          const userId = headers.get("x-test-managed-user");
-          return {
-            headers: new Headers(),
-            response: userId
-              ? {
-                  session: {
-                    id: `session-${userId}`,
-                    userId,
-                    expiresAt: new Date(Date.now() + 60_000),
-                  },
-                  user: {
-                    id: userId,
-                    email: `${userId}@example.test`,
-                    name: userId === ownerId ? "Slack access admin" : "Slack access requester",
-                  },
-                }
-              : null,
-          };
-        },
-      },
+    value.deps.settings = {
+      ...value.deps.settings,
+      databaseUrl: shared!.appUrl,
+      betterAuthSecret: "slack-link-native-fixture-secret-at-least-32-bytes",
+      managedAuthSessionSetMode: "legacy",
+    };
+    const managedAuth = createManagedAuth(value.deps.settings, client.db, {
+      sender: "auth@example.test",
+      idempotency: { scope: "test:slack-link-native", retentionSeconds: 86400 },
+      send: async () => ({ status: "sent", providerMessageId: null }),
     });
+    if (!managedAuth) throw new Error("managed Slack link fixture requires managed auth");
+    const sessionAdapter = createBetterAuthSessionAdapter(managedAuth, client.db);
+    value.deps.managedAuth = managedAuth;
+    value.deps.managedAuthSessionAdapter = sessionAdapter;
+    const nativeCookies = new Map<string, string>();
+    for (const [userId, token] of nativeSessionTokens) {
+      const proofHeaders = await managedAuthSelectedProofHeaders(managedAuth, token);
+      expect(await sessionAdapter.resolveAmbientSession(proofHeaders)).toMatchObject({
+        session: { id: `session-${userId}` },
+        user: { id: userId },
+      });
+      const cookie = proofHeaders.get("cookie");
+      if (!cookie) throw new Error("managed Slack link fixture did not mint a native cookie");
+      nativeCookies.set(userId, cookie);
+    }
 
     const slackUserId = `U_ACCESS_${crypto.randomUUID()}`;
     const linkToken = createSlackUserLinkToken(signingMaterial, {
@@ -2883,12 +2893,25 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
     const requesterHeaders = {
       "content-type": "application/json",
-      "x-test-managed-user": requesterId,
+      cookie: nativeCookies.get(requesterId)!,
+      origin: value.deps.settings.publicBaseUrl!,
+      "sec-fetch-site": "same-origin",
     };
     const ownerHeaders = {
-      "content-type": "application/json",
-      "x-test-managed-user": ownerId,
+      ...requesterHeaders,
+      cookie: nativeCookies.get(ownerId)!,
     };
+    const otherHeaders = {
+      ...requesterHeaders,
+      cookie: nativeCookies.get(otherId)!,
+    };
+
+    const headerOnlyRejected = await value.app.request(basePath, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-managed-user": requesterId },
+      body: JSON.stringify({ linkToken }),
+    });
+    expect(headerOnlyRejected.status).toBe(401);
 
     const bearerRejected = await value.app.request(basePath, {
       method: "POST",
@@ -2957,7 +2980,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
 
     const crossUser = await value.app.request(`${basePath}/${prepared.id}`, {
-      headers: { "x-test-managed-user": otherId },
+      headers: otherHeaders,
     });
     expect(crossUser.status).toBe(400);
     const crossUserBody = await crossUser.text();
@@ -2975,7 +2998,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     const listResponse = await value.app.request(
       `/v1/workspaces/${value.owner.workspaceId}/members/access-requests/slack`,
-      { headers: { "x-test-managed-user": ownerId } },
+      { headers: ownerHeaders },
     );
     expect(listResponse.status).toBe(200);
     const listed = (await listResponse.json()) as { requests: Array<{ id: string }> };
@@ -3014,7 +3037,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ).toMatchObject({ subjectId: requesterSubjectId });
 
     const completedResponse = await value.app.request(`${basePath}/${prepared.id}`, {
-      headers: { "x-test-managed-user": requesterId },
+      headers: requesterHeaders,
     });
     expect(completedResponse.status).toBe(200);
     expect(await completedResponse.json()).toMatchObject({ status: "completed", version: 3 });
@@ -3028,14 +3051,14 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     const cancelPrepare = await value.app.request(basePath, {
       method: "POST",
-      headers: { ...requesterHeaders, "x-test-managed-user": otherId },
+      headers: otherHeaders,
       body: JSON.stringify({ linkToken: cancelToken }),
     });
     expect(cancelPrepare.status).toBe(201);
     const cancelPrepared = (await cancelPrepare.json()) as { id: string; version: number };
     const cancelResponse = await value.app.request(`${basePath}/${cancelPrepared.id}/cancel`, {
       method: "POST",
-      headers: { ...requesterHeaders, "x-test-managed-user": otherId },
+      headers: otherHeaders,
       body: JSON.stringify({
         expectedVersion: cancelPrepared.version,
         idempotencyKey: crypto.randomUUID(),

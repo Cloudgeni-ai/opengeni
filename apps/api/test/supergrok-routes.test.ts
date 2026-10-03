@@ -758,10 +758,16 @@ test("organization subscriptions use device login, multiple accounts, inherited 
       (await managedApp.request(accessPath(id), { method: "PUT", headers: accessHeaders, body }))
         .status,
     ).toBe(409);
-    expect(
-      (await managedApp.request(accessPath(id), { headers: { authorization: `Bearer ${token}` } }))
-        .status,
-    ).toBe(401);
+    const deniedLegacyAccess = await managedApp.request(accessPath(id), {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    // Authentication-shaped legacy claims do not supply verified administration.
+    expect(deniedLegacyAccess.status).toBe(403);
+    const nativePolicyAfterDenial = await managedApp.request(accessPath(id), {
+      headers: accessHeaders,
+    });
+    expect(nativePolicyAfterDenial.status).toBe(200);
+    expect((await nativePolicyAfterDenial.json()).policy.allowedModels).toEqual([]);
   }
   const restrictedCatalog = await managedRequest("/model-catalog");
   expect(restrictedCatalog.status).toBe(200);

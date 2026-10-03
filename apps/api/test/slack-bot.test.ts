@@ -74,6 +74,7 @@ type NativeBrowser = {
 };
 const nativeBrowsers = new Map<string, NativeBrowser>();
 const callbackBrowsers = new Map<string, string>();
+const fixtureAccountIds = new Set<string>();
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -107,7 +108,8 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  if (!shared) return;
+  if (!shared || fixtureAccountIds.size === 0) return;
+  const accountIds = [...fixtureAccountIds];
   // The publication configuration and receipt records are intentionally
   // append-only in production. This test file owns a disposable database, so
   // temporarily disable only those immutability triggers while removing its
@@ -116,15 +118,22 @@ afterEach(async () => {
   await shared.admin.begin(async (sql) => {
     await sql`alter table memory_slack_publication_receipts disable trigger memory_slack_publication_receipts_immutable`;
     await sql`alter table memory_slack_publication_configurations disable trigger memory_slack_publication_configurations_immutable`;
-    await sql`delete from memory_slack_publication_receipts where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
-    await sql`delete from memory_slack_publications where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
-    await sql`delete from memory_slack_publication_configurations where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
-    await sql`delete from external_identities where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
-    await sql`delete from organization_memberships where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
-    await sql`delete from managed_accounts where name = 'slack bot acct'`;
+    await sql`delete from memory_slack_publication_receipts where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from memory_slack_publications where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from memory_slack_publication_configurations where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from external_identities where account_id = any(${accountIds}::uuid[])`;
+    // Personal connection authorities retain their membership via RESTRICT.
+    // Dispose only this fixture's connection children before those authorities
+    // and memberships; unexpected retained references still fail the cleanup.
+    await sql`delete from connections where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from organization_user_resource_authorities
+      where account_id = any(${accountIds}::uuid[]) and resource_kind = 'connection'`;
+    await sql`delete from organization_memberships where account_id = any(${accountIds}::uuid[])`;
+    await sql`delete from managed_accounts where id = any(${accountIds}::uuid[])`;
     await sql`alter table memory_slack_publication_configurations enable trigger memory_slack_publication_configurations_immutable`;
     await sql`alter table memory_slack_publication_receipts enable trigger memory_slack_publication_receipts_immutable`;
   });
+  fixtureAccountIds.clear();
 });
 
 async function freshWorkspace(): Promise<{
@@ -133,6 +142,7 @@ async function freshWorkspace(): Promise<{
 }> {
   const [account] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('slack bot acct') returning id`;
+  fixtureAccountIds.add(account!.id);
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'slack bot ws') returning id`;
   await shared!
@@ -2025,12 +2035,30 @@ describe("OpenGeni Slack bot connection", () => {
     const connected = await completeBotInstall(slack.fetch, state);
     expect(connected.status).toBe(302);
     expect(connected.headers.get("location")).toContain("slack=connected");
+    expect(await callbackFailureAudits(workspace.workspaceId)).toEqual([]);
+    const providerCallsBeforeReplay = slack.calls.length;
 
     const replay = await completeBotInstall(slack.fetch, state);
     expect(replay.status).toBe(302);
     expect(replay.headers.get("location")).toContain("slack=error");
     expect(replay.headers.get("location")).toContain("reason=http_400");
-    expect(await callbackFailureAudits(workspace.workspaceId)).toHaveLength(0);
+    expect(slack.calls).toHaveLength(providerCallsBeforeReplay);
+    // Unlike the native preflight denial, replay enters the lower adapter and
+    // emits one content-free nonce-consumption failure audit.
+    expect(await callbackFailureAudits(workspace.workspaceId)).toEqual([
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: SUBJECT_A,
+        targetId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        metadata: {
+          outcome: "failed",
+          installMode: "connect",
+          stage: "nonce_consume",
+          reason: "state_replayed",
+        },
+      },
+    ]);
   });
 
   test("rechecks native authority after a slow provider verification without persisting the bot", async () => {
