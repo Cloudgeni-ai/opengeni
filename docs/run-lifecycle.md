@@ -3520,6 +3520,20 @@ preparation, not just JSON serialization CPU time. When reported,
 the beginning of its first MCP tools snapshot; waiting for deferred catalog
 preparation inside tool resolution therefore appears in this runner gap.
 These spans overlap model-request preparation and must not be added to it.
+For generic fallback request events, including credits-billed Azure, the optional
+`initialWireDispatchedAt` field on the existing first-byte or terminal event is
+the first underlying fetch-entry clock of this worker attempt, after required
+admission/audit and request-capture setup. It is observed synchronously, immutable
+across retries and later tool/model requests, and matched to the event's provider,
+dispatch, attempt and execution identity. It is not the time bytes leave the
+kernel or reach the provider. The historical `provider_dispatch` milestone
+remains the durable started-audit checkpoint, not this post-audit fetch clock;
+no old phase or duration boundary changes. The field adds no awaited work or
+event publication. Native Codex/Xai request events and transports bypassing
+`instrumentedModelFetch` do not publish it: their separate physical request
+identities are not inferred from this generic observer. Absence is unsupported
+or unobserved, never evidence of a zero startup duration. Comparing its worker
+wall clock with database event times still requires accounting for clock skew.
 A definite path miss answering a read-only first routed sandbox
 operation (usually repository skill discovery listing an absent
 `.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
