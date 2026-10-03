@@ -5,8 +5,6 @@ locals {
   manages_system_pool = var.environment == "staging"
   expected_cluster_id = "/subscriptions/${var.subscription_id}/resourceGroups/${local.resource_group_name}/providers/Microsoft.ContainerService/managedClusters/${local.cluster_name}"
   system_identity_is_preserved = (
-    lower(data.azurerm_kubernetes_cluster.existing.id) == lower(local.expected_cluster_id) &&
-    data.azurerm_kubernetes_cluster.existing.location == "northeurope" &&
     lower(data.azurerm_kubernetes_cluster_node_pool.system.id) == lower("${local.expected_cluster_id}/agentPools/system") &&
     data.azurerm_kubernetes_cluster_node_pool.system.name == "system" &&
     data.azurerm_kubernetes_cluster_node_pool.system.mode == "System" &&
@@ -20,13 +18,10 @@ locals {
   )
 }
 
-# Existing clusters are read, never imported into this narrow capacity root.
-# Production's default pool remains owned by deploy/terraform/azure.
-data "azurerm_kubernetes_cluster" "existing" {
-  name                = local.cluster_name
-  resource_group_name = local.resource_group_name
-}
-
+# The existing pool read proves the exact parent cluster and pool identity.
+# Do not use the full-cluster data source: it reads kubeconfig credentials even
+# when the caller needs only an ARM ID. Live region admission stays in the
+# protected workflow. Production's default pool stays in the full Azure root.
 data "azurerm_kubernetes_cluster_node_pool" "system" {
   name                    = "system"
   kubernetes_cluster_name = local.cluster_name
@@ -34,18 +29,19 @@ data "azurerm_kubernetes_cluster_node_pool" "system" {
 }
 
 import {
-  for_each = local.manages_system_pool ? { system = "${data.azurerm_kubernetes_cluster.existing.id}/agentPools/system" } : {}
+  for_each = local.manages_system_pool ? { system = "${local.expected_cluster_id}/agentPools/system" } : {}
   to       = azurerm_kubernetes_cluster_node_pool.system[0]
   id       = each.value
 }
 
 # Staging has no full-cluster Terraform state. Adopt only its existing pool.
-# Count is deliberately null: neither this root nor later applies repin it.
+# Configured count is deliberately null; the provider's GET/PUT race is
+# documented in README.md and must not be mistaken for HTTP count omission.
 resource "azurerm_kubernetes_cluster_node_pool" "system" {
   count = local.manages_system_pool ? 1 : 0
 
   name                  = "system"
-  kubernetes_cluster_id = data.azurerm_kubernetes_cluster.existing.id
+  kubernetes_cluster_id = local.expected_cluster_id
   mode                  = "System"
   vm_size               = "Standard_D4ds_v4"
   auto_scaling_enabled  = true
@@ -113,7 +109,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "system" {
 # is required of the existing application, platform, or geni canary workloads.
 resource "azurerm_kubernetes_cluster_node_pool" "launch" {
   name                  = "launch"
-  kubernetes_cluster_id = data.azurerm_kubernetes_cluster.existing.id
+  kubernetes_cluster_id = local.expected_cluster_id
   mode                  = "User"
   vm_size               = var.launch_vm_size
   auto_scaling_enabled  = true

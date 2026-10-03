@@ -8,6 +8,16 @@ only the existing staging `system` pool and tightens its autoscaler bounds.
 Never manage the production system pool from this root or put the same launch
 pool in the full Azure root.
 
+Cluster ARM IDs are derived from the validated subscription UUID and fixed
+environment-specific resource-group/cluster names. The existing system-pool
+data source verifies the exact pool and parent-cluster identity. Do not add the
+full `azurerm_kubernetes_cluster` data source: AzureRM 4.72.0 reads user and,
+when local accounts are enabled, admin kubeconfigs into its data-source state.
+This root needs no cluster-credential-list permissions. Live North Europe
+region admission remains a protected-workflow metadata check, not a claim
+inferred from the `neu` names. The `capacity_contract.cluster_id` output keeps
+the same ARM-ID contract.
+
 | Environment | Existing system bounds | Additive launch bounds | Warm total | Simultaneous maximum |
 | --- | --- | --- | --- | --- |
 | Staging | 4–5 D4ds_v4 nodes | 3–6 D4ds_v5 nodes | 7 | 11 |
@@ -65,7 +75,7 @@ a provider race, not eliminated by `ignore_changes`. A real guarded saved plan,
 refreshed count admission, and post-apply readback/no-op remain mandatory; mocks
 prove neither an imported no-op nor real count preservation.
 
-The staging import rejects wrong cluster/pool IDs, region, pool name, mode, OS
+The staging import rejects wrong cluster/pool IDs, pool name, mode, OS
 type, priority, SKU, disk, pod density, or disabled autoscaling. It admits only
 monotonic bounds tightening and a live count within four to five, rather than
 forcing either a scale-up or scale-down. Every other optional imported field,
