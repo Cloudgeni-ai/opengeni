@@ -342,20 +342,38 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
-  test("correlates backlog and freshness before fleet aggregation", async () => {
+  test("requires complete fresh ready-worker telemetry before global MAX queue records", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
-    const oldest = alertExpression(template, "OpenGeniTurnEligibleBacklogOld");
+    const freshness = recordExpression(template, "opengeni:turn_capacity_monitor:fresh");
     const saturation = alertExpression(template, "OpenGeniTurnSlotsSaturated");
-
-    expect(oldest.split(SCRAPE_IDENTITY)).toHaveLength(4);
     expect(saturation.split(SCRAPE_IDENTITY)).toHaveLength(4);
-    for (const expression of [oldest, saturation]) {
-      expect(expression.trimStart()).toStartWith("max(");
-      expect(expression).not.toContain("and on()");
-      expect(expression).not.toMatch(/max\(opengeni_turn_(eligible_backlog|capacity_monitor)/);
+    expect(freshness).toContain("min(opengeni_turn_capacity_monitor_fresh");
+    expect(freshness).toContain(
+      "time() - min(opengeni_turn_capacity_monitor_last_success_timestamp_seconds",
+    );
+    expect(freshness).toContain("< 60");
+    expect(freshness).toContain("min(up{");
+    expect(freshness).toContain("and on(namespace, release, instance)");
+    expect(freshness).toContain("kube_deployment_status_replicas_available");
+    expect(freshness).toContain('deployment="{{ $fullName }}-worker-turns"');
+    for (const gauge of [
+      "opengeni_turn_eligible_backlog",
+      "opengeni_turn_eligible_backlog_oldest_age_seconds",
+    ]) {
+      const expression = recordExpression(
+        template,
+        `${gauge.replace("opengeni_", "opengeni:")}:fresh_max`,
+      );
+      expect(expression.trimStart()).toStartWith(`max(${gauge}{`);
+      expect(expression).toContain("opengeni:turn_capacity_monitor:fresh");
+      expect(expression).not.toContain(`sum(${gauge}`);
+      expect(freshness).toContain(gauge);
+    }
+    for (const expression of [freshness, saturation]) {
+      expect(expression).not.toContain("vector(0)");
     }
   });
 
@@ -364,7 +382,10 @@ describe("turn-capacity Prometheus alerts", () => {
       readFile(new URL("../templates/prometheusrule.yaml", import.meta.url), "utf8"),
       readFile(new URL("../templates/servicemonitor.yaml", import.meta.url), "utf8"),
     ]);
-    const stale = alertExpression(ruleTemplate, "OpenGeniTurnCapacityMonitorStale");
+    const stale = recordExpression(ruleTemplate, "opengeni:turn_capacity_monitor:fresh");
+    expect(alertExpression(ruleTemplate, "OpenGeniTurnCapacityMonitorStale")).toContain(
+      "absent(opengeni:turn_capacity_monitor:fresh",
+    );
 
     expect(stale).toContain("min(opengeni_turn_capacity_monitor_fresh");
     expect(stale).toContain(
@@ -374,13 +395,74 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(stale).toContain('opengeni_workload_component="worker-turns"');
     expect(stale).toContain("count(opengeni_turn_capacity_monitor_fresh");
     expect(stale).not.toContain("max(opengeni_turn_capacity_monitor_fresh");
-    expect(stale).not.toContain(
-      "max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds",
+    // MIN catches the worst old sample; MAX is used only to reject clocks more
+    // than five seconds in the future, never to mask an old replica.
+    expect(stale).toContain(
+      "time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds",
     );
+    expect(stale).toContain(">= -5");
     expect(monitorTemplate).toContain(
       "sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]\n" +
         "          targetLabel: opengeni_workload_component",
     );
+  });
+
+  test("makes launch queue tiers prompt, sustained and mutually exclusive", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const warning = ruleBlock(template, "alert", "OpenGeniTurnEligibleBacklogOld");
+    const critical = ruleBlock(template, "alert", "OpenGeniTurnEligibleBacklogCritical");
+    const saturation = ruleBlock(template, "alert", "OpenGeniTurnSlotsSaturated");
+    const ceiling = ruleBlock(template, "alert", "OpenGeniTurnWorkersAtScalingCeiling");
+    expect(warning).toContain("> 30");
+    expect(warning).toContain("unless\n");
+    expect(warning).toContain("> 120");
+    expect(warning).toContain("for: 1m");
+    expect(warning).toContain("notification_policy: investigate");
+    expect(critical).toContain("> 120");
+    expect(critical).toContain("for: 30s");
+    expect(critical).toContain("notification_policy: page");
+    for (const early of [saturation, ceiling]) {
+      expect(early).toContain("unless on()");
+      expect(early).toContain("opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max");
+      expect(early).toContain("> 30");
+      expect(early).toContain("for: 1m");
+    }
+    expect(saturation).toContain("kube_horizontalpodautoscaler_spec_max_replicas");
+    expect(ceiling).toContain("deriv(opengeni:turn_eligible_backlog:fresh_max");
+    expect(ceiling).toContain("[2m]) > 0");
+    for (const name of [
+      "OpenGeniTurnEligibleBacklogOld",
+      "OpenGeniTurnEligibleBacklogCritical",
+      "OpenGeniTurnSlotsSaturated",
+      "OpenGeniTurnCapacityMonitorStale",
+      "OpenGeniTurnWorkerPodPending",
+      "OpenGeniTurnWorkersAtScalingCeiling",
+    ]) {
+      const block = ruleBlock(template, "alert", name);
+      expect(block).toContain("action:");
+      expect(block).toContain(
+        "runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md",
+      );
+      expect(block).not.toContain("vector(0)");
+    }
+    expect(critical).toContain("legacy video/retry");
+    expect(ruleBlock(template, "alert", "OpenGeniTurnCapacityMonitorStale")).toContain("for: 30s");
+  });
+
+  test("scopes sustained Pending worker alerts to the exact release, not every Pod", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const block = ruleBlock(template, "alert", "OpenGeniTurnWorkerPodPending");
+    expect(block).toContain('phase="Pending"');
+    expect(block).toContain("label_app_kubernetes_io_instance={{ .Release.Name | quote }}");
+    expect(block).toContain('label_app_kubernetes_io_component="worker-turns"');
+    expect(block).toContain("* on(namespace, pod) group_left()");
+    expect(block).toContain("for: 2m");
   });
 
   test("alerts on durable recovery backlog only while its global projection is fresh", async () => {
@@ -530,6 +612,21 @@ describe("Codex pool Prometheus alerts", () => {
     );
   });
 });
+
+function ruleBlock(template: string, kind: "record" | "alert", name: string): string {
+  const start = template.indexOf(`        - ${kind}: ${name}\n`);
+  if (start < 0) throw new Error(`Missing ${kind} ${name}`);
+  const remainder = template.slice(start + 1);
+  const next = remainder.search(/\n        - (?:alert|record):/);
+  return next < 0 ? template.slice(start) : template.slice(start, start + 1 + next);
+}
+
+function recordExpression(template: string, name: string): string {
+  const block = ruleBlock(template, "record", name);
+  const start = block.indexOf("          expr: |\n");
+  if (start < 0) throw new Error(`Missing recording expression ${name}`);
+  return block.slice(start + "          expr: |\n".length);
+}
 
 function alertExpression(template: string, alertName: string): string {
   const marker = `- alert: ${alertName}\n`;
