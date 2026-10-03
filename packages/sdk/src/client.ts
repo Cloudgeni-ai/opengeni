@@ -4631,13 +4631,20 @@ export class OpenGeniClient {
     request: ComputerSessionAttachmentRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionAttachment> {
-    return await this.requestJson<ComputerSessionAttachment>(
+    const attachment = await this.requestJson<ComputerSessionAttachment>(
       "POST",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/attachments`,
       request,
       {},
       options,
     );
+    if (attachment.stream.kind === "direct_rfb") {
+      return {
+        ...attachment,
+        stream: { ...attachment.stream, inputAllowed: attachment.stream.inputAllowed === true },
+      };
+    }
+    return attachment;
   }
 
   async heartbeatComputerSession(

@@ -2702,6 +2702,8 @@ const DirectComputerRfbAttachment = z
     kind: z.literal("direct_rfb"),
     url: boundedUrl,
     protocols: z.array(z.string().min(1).max(2_048)).min(2).max(3),
+    /** Absent on an older API means pixel viewing only. */
+    inputAllowed: z.boolean().default(false),
   })
   .strict();
 

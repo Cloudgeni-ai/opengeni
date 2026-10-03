@@ -1371,6 +1371,15 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+Managed Linux RFB input requires a server-enforced view grant bound to the exact
+screen target and generation, native keyboard/pointer support, and source-session
+control authority. Session view tokens remain pixel-only. The controller parses
+client packets and rechecks authority before forwarding; clipboard, power and
+display changes do not gain authority through RFB. Older controllers use the
+canonical server-only frame stream through an encrypted API proxy, with human
+input retaining the existing ComputerSession action path. This transport fence
+does not complete the legacy desktop-seat and producer migration.
+
 Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
 
 Linux managed-browser cleanup and recovery share exact profile/executable and
