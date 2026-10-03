@@ -214,10 +214,20 @@ if (!fixture.seeded) {
       from generate_series(${start}::int,${end}::int)i join sessions s on s.id=md5('insights-scale-session-'||(i%4096))::uuid`;
     console.log(JSON.stringify({ phase: "facts", rows: end + 1 }));
   }
-  await admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
-    select account_id,workspace_id,'model_usage_debit',case when (substring(source_key from '[0-9]+$'))::int%17=0 then -37 else -101 end,
-      'model_response',turn_id::text||':'||source_key,'scale-debit-'||source_key,occurred_at
-    from model_call_facts where account_id=${accountId} and billing_path='opengeni_credits' and (substring(source_key from '[0-9]+$'))::int%101<>0 on conflict do nothing`;
+  // Bound transactions: the real allowance trigger updates a hot workspace
+  // counter. A single 276k-row transaction creates a long MVCC version chain.
+  // Keep every trigger enabled and retain exactly the same independent debits.
+  for (let start = 0; start < facts; start += 1000) {
+    const end = Math.min(facts - 1, start + 999);
+    await admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      select f.account_id,f.workspace_id,'model_usage_debit',case when i%17=0 then -37 else -101 end,
+        'model_response',f.turn_id::text||':'||f.source_key,'scale-debit-'||f.source_key,f.occurred_at
+      from generate_series(${start}::int,${end}::int)i join sessions s on s.id=md5('insights-scale-session-'||(i%4096))::uuid
+      join model_call_facts f on f.workspace_id=s.workspace_id and f.turn_id=md5('insights-scale-turn-'||s.id)::uuid and f.source_key='scale-call-'||i
+      where f.account_id=${accountId} and i%3=0 and i%101<>0 on conflict do nothing`;
+    if (end % 50_000 === 49_999 || end === facts - 1)
+      console.log(JSON.stringify({ phase: "debits", callsCovered: end + 1 }));
+  }
   for (const [kind, count] of [
     ["sandbox.warm_seconds", warmEvents],
     ["model.usage", otherEvents],
@@ -369,6 +379,19 @@ try {
       availableParallelism: availableParallelism(),
       memoryBytes: totalmem(),
       cgroupCpuMax: await readFile("/sys/fs/cgroup/cpu.max", "utf8").catch(() => null),
+      cgroupCpuQuotaV1: await readFile("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "utf8").catch(
+        () => null,
+      ),
+      cgroupCpuPeriodV1: await readFile("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "utf8").catch(
+        () => null,
+      ),
+      cgroupMemoryLimitV1: await readFile(
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        "utf8",
+      ).catch(() => null),
+      processAffinity: Bun.spawnSync(["taskset", "-pc", String(process.pid)], { stdout: "pipe" })
+        .stdout.toString()
+        .trim(),
       note: "Not proven4vCPU equivalent; no synthetic admin read actor, fixture administrator only seeds",
     },
     results,
