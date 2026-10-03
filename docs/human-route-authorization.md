@@ -98,6 +98,13 @@ stampDelegatedHumanAuthorization(request, {
 The resolver reloads native access, intersects both ceilings and scope, and
 stamps exact resolved authorization objects separately. Restamping, late
 stamping, cloned requests and cloned grant/context objects fail closed.
+Buffered in-process dispatch must preserve that final Request through middleware,
+including the correct UTF-8 body Content-Length. Body-limit middleware can clone
+a Request without that length; its clone has no proof. Headers never create or
+transfer authorization.
+Verified external owners retain their separate non-cookie transport. Private
+SuperGrok resolves the named workspace grant before recognizing that origin;
+host-key headers alone neither exempt CSRF nor create owning-person proof.
 Account permissions intersect literally; `workspace:admin` never confers
 organization ownership, billing or key control. Personal settings additionally
 need the proof's literal `workspace:admin` ceiling and the live exact owner;

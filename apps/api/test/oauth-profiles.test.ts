@@ -1,25 +1,39 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   createDb,
   createImportBatch,
   decryptEnvironmentValue,
+  deleteWorkspace,
+  ensureManagedAccessForUser,
   getGlobalCatalogOAuthProfile,
   loadIntegrationOAuthPendingState,
   upsertRegistryCapabilityCatalogItem,
   type DbClient,
 } from "@opengeni/db";
+import {
+  getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
+} from "@opengeni/db/canonical-human-identities";
 import { readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   startTestMcpServer,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
+import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
+import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 import { buildAuthorizationUrl } from "../src/integrations/oauth-client";
 import {
   DEFAULT_OAUTH_PROFILE,
@@ -40,6 +54,11 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
+let managedAuth: NonNullable<ReturnType<typeof createManagedAuth>>;
+let managedAuthSessionAdapter: ReturnType<typeof createBetterAuthSessionAdapter>;
+let fixturePasswordHash: string;
+const workspaceIds: string[] = [];
+const authUserIds: string[] = [];
 
 const rawKey = randomBytes(32);
 
@@ -74,7 +93,10 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   settings = testSettings({
+    databaseUrl: shared.appUrl,
     productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+    betterAuthSecret: "oauth-profiles-native-browser-secret-at-least-32-bytes",
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: rawKey.toString("base64"),
     integrationsEnabled: true,
@@ -82,9 +104,20 @@ beforeAll(async () => {
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
+  managedAuth = createManagedAuth(settings, client.db, {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:oauth-profiles", retentionSeconds: 86400 },
+    send: async () => ({ status: "sent", providerMessageId: null }),
+  })!;
+  managedAuthSessionAdapter = createBetterAuthSessionAdapter(managedAuth, client.db);
+  fixturePasswordHash = await hashManagedAuthPassword("oauth-profiles-fixture-password");
 }, 180_000);
 
 afterAll(async () => {
+  for (const workspaceId of workspaceIds)
+    await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
+  for (const userId of authUserIds)
+    await shared!.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
   try {
     await client?.close();
   } catch {
@@ -329,50 +362,103 @@ describe("catalog-profile-driven OAuth start", () => {
     return createApp({
       settings: { ...settings, ...overrides },
       db: client.db,
-      bus: {} as never,
+      bus: new MemoryEventBus(),
       workflowClient: {} as never,
-      managedAuth: null,
+      managedAuth,
     } as never);
   }
 
-  async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-    const [account] = await shared!.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('acct') returning id`;
-    const [workspace] = await shared!.admin<{ id: string }[]>`
-      insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
-    await shared!
-      .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
-    await shared!.admin`
-      insert into workspace_memberships (
-        account_id, workspace_id, subject_id, subject_label, role, permissions
-      ) values (
-        ${account!.id}, ${workspace!.id}, 'subject-a', 'subject-a', 'member',
-        ${shared!.admin.json(["connections:read", "connections:write"])}
-      )`;
-    return { accountId: account!.id, workspaceId: workspace!.id };
+  async function freshWorkspace() {
+    const userId = `oauth-profiles-${randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const email = `${userId}@example.test`;
+    await shared!.admin`insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'OAuth profiles user', ${email}, true)`;
+    authUserIds.push(userId);
+    await shared!.admin`insert into auth_identities (id, user_id, provider_id, account_id, password)
+      values (${randomUUID()}, ${userId}, 'credential', ${userId}, ${fixturePasswordHash})`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email,
+      name: "OAuth profiles user",
+      emailVerified: true,
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    )!;
+    workspaceIds.push(...access.workspaceGrants.map((candidate) => candidate.workspaceId));
+    await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+    const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
+    const binding = projection.loginBindings.find(
+      (candidate) => candidate.providerId === "credential" && candidate.status === "active",
+    )!;
+    expect(binding).toBeDefined();
+    const sessionId = randomUUID(),
+      token = randomUUID();
+    await shared!.admin`insert into auth_sessions (
+      id, user_id, token, expires_at, identity_id, identity_revision,
+      auth_revision, login_binding_id, login_binding_revision
+    ) values (
+      ${sessionId}, ${userId}, ${token}, now() + interval '1 hour',
+      ${projection.activeIdentity.id}, ${projection.activeIdentity.identityRevision},
+      ${projection.activeIdentity.authRevision}, ${binding.id}, ${binding.revision}
+    )`;
+    const cookie = (
+      await managedAuthSessionAdapter.createLegacySelectedSessionCookies({ token } as never, null)
+    )
+      .map((value) => value.split(";", 1)[0])
+      .join("; ");
+    return { accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId, cookie };
+  }
+
+  function nativeHeaders(workspace: Awaited<ReturnType<typeof freshWorkspace>>) {
+    return {
+      cookie: workspace.cookie,
+      origin: settings.publicBaseUrl!,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+  }
+
+  function assertNativeConsentBinding(response: Response, state: string) {
+    const bindingName = `opengeni_oauth_mcp_oauth_${createHash("sha256")
+      .update(state)
+      .digest("hex")
+      .slice(0, 24)}`;
+    const bindings = response.headers
+      .getSetCookie()
+      .filter((value) => value.slice(0, value.indexOf("=")) === bindingName);
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]).toContain("HttpOnly");
+    expect(bindings[0]).toContain("Secure");
+    expect(response.headers.get("cache-control")).toBe("no-store");
   }
 
   async function bearer(
-    workspace: { accountId: string; workspaceId: string },
+    workspace: Awaited<ReturnType<typeof freshWorkspace>>,
     permissions: Permission[],
+    principalKind: "human_session" | "service" = "human_session",
   ): Promise<string> {
     const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       permissions,
-      principalKind: "human_session",
+      principalKind,
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     return `Bearer ${token}`;
   }
 
   function startFakeAuthorizationServer() {
+    const requests: string[] = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      async fetch(request) {
+      async fetch(request): Promise<Response> {
         const url = new URL(request.url);
+        requests.push(url.pathname);
         const origin = `http://127.0.0.1:${server.port}`;
         if (url.pathname === "/.well-known/oauth-protected-resource") {
           return Response.json({
@@ -397,7 +483,7 @@ describe("catalog-profile-driven OAuth start", () => {
         return new Response("not found", { status: 404 });
       },
     });
-    return { url: `http://127.0.0.1:${server.port}`, close: () => server.stop(true) };
+    return { url: `http://127.0.0.1:${server.port}`, requests, close: () => server.stop(true) };
   }
 
   async function insertCatalogProfileRow(
@@ -440,10 +526,7 @@ describe("catalog-profile-driven OAuth start", () => {
         extraAuthorizeParams: { audience: "pinned" },
       });
 
-      const headers = {
-        authorization: await bearer(workspace, ["connections:write"]),
-        "content-type": "application/json",
-      };
+      const headers = nativeHeaders(workspace);
       const start = (body: Record<string, unknown>) =>
         app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
           method: "POST",
@@ -454,9 +537,9 @@ describe("catalog-profile-driven OAuth start", () => {
       // An explicit choice overrides the suggested personal default.
       const workspaceStart = await start({ ownership: "workspace" });
       expect(workspaceStart.status).toBe(200);
-      const workspaceState = await readMcpOAuthState(
-        ((await workspaceStart.json()) as { state: string }).state,
-      );
+      const workspaceBody = (await workspaceStart.json()) as { state: string };
+      assertNativeConsentBinding(workspaceStart, workspaceBody.state);
+      const workspaceState = await readMcpOAuthState(workspaceBody.state);
       expect(workspaceState?.ownership).toBe("workspace");
 
       // Omitted ownership defaults to personal; scopes and authorize params
@@ -464,9 +547,12 @@ describe("catalog-profile-driven OAuth start", () => {
       const accepted = await start({ requestedScopes: ["files:write"] });
       expect(accepted.status).toBe(200);
       const body = (await accepted.json()) as { state: string; authorizationUrl: string };
+      assertNativeConsentBinding(accepted, body.state);
       const authUrl = new URL(body.authorizationUrl);
       expect(authUrl.searchParams.get("scope")).toBe("files:read");
       expect(authUrl.searchParams.get("audience")).toBe("pinned");
+      expect(authUrl.searchParams.get("state")).toBe(body.state);
+      expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
       const state = await readMcpOAuthState(body.state);
       expect(state?.ownership).toBe("personal");
       expect(state?.requestedScopes).toEqual(["files:read"]);
@@ -493,10 +579,7 @@ describe("catalog-profile-driven OAuth start", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({ mcpUrl: mcp.url, returnPath: "/integrations" }),
         },
       );
@@ -557,10 +640,7 @@ describe("catalog-profile-driven OAuth start", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             mcpUrl: `${mcp.url}#setup`,
             returnPath: "/integrations",
@@ -569,6 +649,7 @@ describe("catalog-profile-driven OAuth start", () => {
       );
       expect(response.status).toBe(200);
       const body = (await response.json()) as { state: string };
+      assertNativeConsentBinding(response, body.state);
       expect((await readMcpOAuthState(body.state)).ownership).toBe("personal");
     } finally {
       as.close();
@@ -590,10 +671,7 @@ describe("catalog-profile-driven OAuth start", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({ mcpUrl: mcp.url, returnPath: "/integrations" }),
         },
       );
@@ -619,10 +697,7 @@ describe("catalog-profile-driven OAuth start", () => {
       slackClientSecret: "slack-client-secret",
     }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
       method: "POST",
-      headers: {
-        authorization: await bearer(workspace, ["connections:write"]),
-        "content-type": "application/json",
-      },
+      headers: nativeHeaders(workspace),
       body: JSON.stringify({
         mcpUrl: OFFICIAL_SLACK_MCP_URL,
         ownership: "workspace",
@@ -634,5 +709,46 @@ describe("catalog-profile-driven OAuth start", () => {
     expect(await response.text()).toContain(
       "Slack OAuth client credentials are deployment-managed",
     );
+  });
+
+  test("legacy human-shaped or service bearer proofs cannot substitute for a native START", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer();
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer pinned-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="files:read"`,
+    });
+    try {
+      for (const principalKind of ["human_session", "service"] as const) {
+        for (const withNativeCookie of [false, true]) {
+          const headers: Record<string, string> = {
+            ...nativeHeaders(workspace),
+            authorization: await bearer(workspace, ["connections:write"], principalKind),
+            "x-opengeni-canonical-human": "true",
+            "x-opengeni-browser-session": "fabricated-session",
+          };
+          if (!withNativeCookie) delete headers.cookie;
+          const response = await app().request(
+            `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ mcpUrl: mcp.url, returnPath: "/integrations" }),
+            },
+          );
+          expect(response.status).toBe(403);
+          expect(as.requests).toEqual([]);
+          expect(
+            response.headers
+              .getSetCookie()
+              .some((value) => value.startsWith("opengeni_oauth_mcp_oauth_")),
+          ).toBe(false);
+        }
+      }
+    } finally {
+      as.close();
+      mcp.close();
+    }
   });
 });

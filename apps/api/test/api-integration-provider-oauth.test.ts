@@ -60,7 +60,10 @@ let managedAuthSessionAdapter: ReturnType<typeof createBetterAuthSessionAdapter>
 let fixturePasswordHash: string;
 const workspaceIds: string[] = [];
 const authUserIds: string[] = [];
-const nativeFlows = new Map<string, { nativeCookie: string; flowCookie: string }>();
+const nativeFlows = new Map<
+  string,
+  { nativeCookie: string; flowCookie: string; responseCookies: string }
+>();
 
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_ADMIN_URL;
@@ -395,13 +398,23 @@ function recordNativeFlow(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   response: Response,
 ) {
-  const flowCookie = response.headers
-    .getSetCookie()
-    .map((value) => value.split(";", 1)[0])
-    .join("; ");
-  expect(flowCookie).toContain("opengeni_oauth_provider_oauth_");
-  expect(response.headers.get("set-cookie")).toContain("HttpOnly");
-  nativeFlows.set(state, { nativeCookie: workspace.cookie, flowCookie });
+  const cookieHeaders = response.headers.getSetCookie();
+  const bindingName = `opengeni_oauth_provider_oauth_${createHash("sha256")
+    .update(state)
+    .digest("hex")
+    .slice(0, 24)}`;
+  const bindingCookies = cookieHeaders.filter(
+    (value) => value.slice(0, value.indexOf("=")) === bindingName,
+  );
+  expect(bindingCookies).toHaveLength(1);
+  expect(bindingCookies[0]).toContain("HttpOnly");
+  // START can also renew login cookies. They belong only in the positive
+  // browser jar, never in a supposedly unauthenticated flow-cookie fixture.
+  nativeFlows.set(state, {
+    nativeCookie: workspace.cookie,
+    flowCookie: bindingCookies[0]!.split(";", 1)[0]!,
+    responseCookies: cookieHeaders.map((value) => value.split(";", 1)[0]).join("; "),
+  });
 }
 
 async function bindParserFixtureState(
@@ -485,7 +498,7 @@ async function callback(
     flow
       ? {
           headers: {
-            cookie: `${flow.nativeCookie}; ${flow.flowCookie}`,
+            cookie: `${flow.nativeCookie}; ${flow.responseCookies}`,
             [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
         }
@@ -881,25 +894,36 @@ describe("API Integration provider OAuth", () => {
     const state = authorizationUrl.searchParams.get("state")!;
     const flow = nativeFlows.get(state)!;
     const callbackUrl = `${settings.publicBaseUrl}/v1/integrations/oauth/callback?code=fixture-code&state=${encodeURIComponent(state)}`;
-    for (const headers of [
-      undefined,
-      { cookie: workspace.cookie },
-      { cookie: flow.flowCookie },
+    for (const { label, headers } of [
+      { label: "anonymous", headers: undefined },
+      { label: "native cookie without consent binding", headers: { cookie: workspace.cookie } },
+      { label: "consent binding without native cookie", headers: { cookie: flow.flowCookie } },
       {
-        cookie: workspace.cookie,
-        "x-opengeni-canonical-human": "true",
-        "x-opengeni-browser-session": "fabricated-session",
+        label: "native cookie with forged browser metadata but no consent binding",
+        headers: {
+          cookie: workspace.cookie,
+          "x-opengeni-canonical-human": "true",
+          "x-opengeni-browser-session": "fabricated-session",
+        },
       },
     ]) {
       const denied = await testApp(fixture).fetch(
         new Request(callbackUrl, headers ? { headers } : undefined),
       );
-      expect(denied.status).toBeOneOf([401, 403]);
+      const landing = denied.headers.get("location");
+      const landingUrl = landing ? new URL(landing, callbackUrl) : null;
+      expect(
+        denied.status,
+        `${label}; redirect path: ${landingUrl?.pathname ?? "none"}; reason: ${landingUrl?.searchParams.get("reason") ?? "none"}`,
+      ).toBeOneOf([401, 403]);
       expect(fixture.tokenRequests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
     }
     const typed = new Request(callbackUrl, {
       headers: {
-        cookie: `${workspace.cookie}; ${flow.flowCookie}`,
+        cookie: `${workspace.cookie}; ${flow.responseCookies}`,
         [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
     });
@@ -911,6 +935,9 @@ describe("API Integration provider OAuth", () => {
     });
     expect((await testApp(fixture).fetch(typed)).status).toBe(403);
     expect(fixture.tokenRequests).toHaveLength(0);
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toEqual([]);
     const connected = await callback(
       fixture,
       state,

@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mcpAccountRouteId } from "@opengeni/core";
+import {
+  mcpAccountRouteId,
+  requireAccessGrantAuthorization,
+  stampDelegatedHumanAuthorization,
+} from "@opengeni/core";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -22,6 +26,10 @@ import {
   createApiKey,
   createConnection,
   createOrganizationApiKey,
+  createOrganizationInvitation,
+  acceptOrganizationInvitation,
+  deleteWorkspace,
+  ensureManagedAccessForUser,
   ensureExternalIdentity,
   grantWorkspaceAccess,
   createDb,
@@ -39,6 +47,10 @@ import {
   revokeWorkspaceVercelAiGatewayConnections,
   type DbClient,
 } from "@opengeni/db";
+import {
+  getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
+} from "@opengeni/db/canonical-human-identities";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
@@ -48,6 +60,10 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
+import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
+import { bindNativeProviderStart } from "../src/integrations/delegated-native-provider-handoff";
+import { HTTPException } from "hono/http-exception";
 import postgres from "postgres";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
@@ -67,6 +83,12 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
+let managedAuth: NonNullable<ReturnType<typeof createManagedAuth>>;
+let managedAuthSessionAdapter: ReturnType<typeof createBetterAuthSessionAdapter>;
+let fixturePasswordHash: string;
+const nativeWorkspaceIds: string[] = [];
+const nativeAuthUserIds: string[] = [];
+const nativeFlowCookies = new Map<string, string>();
 
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
@@ -135,10 +157,7 @@ describe("OAuth self-registration selection", () => {
 
   test("uses the only advertised self-registration mechanism", () => {
     expect(
-      preferredOAuthSelfRegistration(
-        { registrationEndpoint: undefined, clientIdMetadataDocumentSupported: true },
-        undefined,
-      ),
+      preferredOAuthSelfRegistration({ clientIdMetadataDocumentSupported: true }, undefined),
     ).toBe("cimd");
     expect(
       preferredOAuthSelfRegistration(
@@ -162,7 +181,10 @@ beforeAll(async () => {
   }
   client = createDb(shared.appUrl);
   settings = testSettings({
+    databaseUrl: shared.appUrl,
     productAccessMode: "managed",
+    managedAuthSessionSetMode: "legacy",
+    betterAuthSecret: "connections-native-browser-secret-at-least-32-bytes",
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: encryptionKey,
     integrationsEnabled: true,
@@ -170,9 +192,21 @@ beforeAll(async () => {
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
+  managedAuth = createManagedAuth(settings, client.db, {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:connections-routes", retentionSeconds: 86400 },
+    send: async () => ({ status: "sent", providerMessageId: null }),
+  })!;
+  managedAuthSessionAdapter = createBetterAuthSessionAdapter(managedAuth, client.db);
+  fixturePasswordHash = await hashManagedAuthPassword("connections-fixture-password");
 }, 180_000);
 
 afterAll(async () => {
+  for (const nativeWorkspaceId of nativeWorkspaceIds)
+    await deleteWorkspace(client.db, nativeWorkspaceId).catch(() => undefined);
+  for (const userId of nativeAuthUserIds)
+    await shared!.admin`delete from auth_users where id = ${userId}`.catch(() => undefined);
+  nativeFlowCookies.clear();
   try {
     await client?.close();
   } catch {
@@ -182,24 +216,28 @@ afterAll(async () => {
 }, 180_000);
 
 function app(overrides: Partial<Settings> = {}) {
-  return createApp({
-    settings: { ...settings, ...overrides },
-    db: client.db,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-  } as never);
+  return nativeBrowserFixture(
+    createApp({
+      settings: { ...settings, ...overrides },
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedAuth,
+    } as never),
+  );
 }
 
 function appWithDeps(overrides: Partial<Settings>, extraDeps: Record<string, unknown>) {
-  return createApp({
-    settings: { ...settings, ...overrides },
-    db: client.db,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-    ...extraDeps,
-  } as never);
+  return nativeBrowserFixture(
+    createApp({
+      settings: { ...settings, ...overrides },
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth,
+      ...extraDeps,
+    } as never),
+  );
 }
 
 function publicApp(dbOverride: unknown = client?.db ?? {}, overrides: Partial<Settings> = {}) {
@@ -214,13 +252,15 @@ function publicApp(dbOverride: unknown = client?.db ?? {}, overrides: Partial<Se
     publicBaseUrl: "https://api.opengeni.test",
     ...overrides,
   }) as Settings;
-  return createApp({
-    settings: publicSettings,
-    db: dbOverride as never,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-  } as never);
+  return nativeBrowserFixture(
+    createApp({
+      settings: publicSettings,
+      db: dbOverride as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth,
+    } as never),
+  );
 }
 
 function publicAppWithDeps(
@@ -239,14 +279,202 @@ function publicAppWithDeps(
     publicBaseUrl: "https://api.opengeni.test",
     ...overrides,
   }) as Settings;
-  return createApp({
-    settings: publicSettings,
-    db: dbOverride as never,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-    ...extraDeps,
-  } as never);
+  return nativeBrowserFixture(
+    createApp({
+      settings: publicSettings,
+      db: dbOverride as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth,
+      ...extraDeps,
+    } as never),
+  );
+}
+
+/** Keep the actual browser's START cookies; never synthesize native proof. */
+function nativeBrowserFixture(application: ReturnType<typeof createApp>) {
+  const originalRequest = application.request.bind(application);
+  application.request = async (input, init, env, executionContext) => {
+    const url = new URL(
+      input instanceof Request ? input.url : String(input),
+      "https://api.opengeni.test",
+    );
+    const state = url.searchParams.get("state");
+    const storedCookies = state ? nativeFlowCookies.get(state) : undefined;
+    // Explicit transports are left untouched, including negative fixtures.
+    const requestInit =
+      storedCookies && !(input instanceof Request) && !init?.headers
+        ? {
+            ...init,
+            headers: {
+              cookie: storedCookies,
+              [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+            },
+          }
+        : init;
+    const response = await originalRequest(input, requestInit, env, executionContext);
+    const originalCookies = new Headers(requestInit?.headers).get("cookie");
+    if (
+      response.status === 200 &&
+      originalCookies &&
+      (url.pathname.endsWith("/oauth/start") || url.pathname === "/fixture/native-state-binding")
+    ) {
+      const body = (await response.clone().json()) as { state?: string };
+      const consentCookies = response.headers.getSetCookie();
+      if (body.state && consentCookies.some((value) => value.startsWith("opengeni_oauth_"))) {
+        nativeFlowCookies.set(
+          body.state,
+          [originalCookies, ...consentCookies.map((value) => value.split(";", 1)[0])].join("; "),
+        );
+      }
+    }
+    return response;
+  };
+  // Only hand-signed parser/redirect fixtures use this shim. Native cookie
+  // resolution and exact owner/scope must precede the real binding helper.
+  application.post("/fixture/native-state-binding", async (context) => {
+    const input = await context.req.json<{
+      state: string;
+      provider: "mcp-oauth" | "atlassian" | "social";
+    }>();
+    const payload = readSignedState(input.state, STATE_SECRET);
+    if (
+      !payload ||
+      typeof payload.workspaceId !== "string" ||
+      !["mcp-oauth", "atlassian", "social"].includes(input.provider)
+    )
+      throw new HTTPException(400);
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      {
+        db: client.db,
+        settings,
+        managedAuth,
+      },
+      payload.workspaceId,
+      "connections:write",
+    );
+    if (
+      payload.accountId !== authorization.grant.accountId ||
+      payload.subjectId !== authorization.grant.subjectId
+    )
+      throw new HTTPException(403);
+    const url = new URL("https://provider.example.test/authorize");
+    url.searchParams.set("state", input.state);
+    bindNativeProviderStart(context, { db: client.db, settings, managedAuth } as never, {
+      authorization,
+      provider: input.provider,
+      authorizationUrl: url.toString(),
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    return context.json({ state: input.state });
+  });
+  return application;
+}
+
+async function nativePerson() {
+  const userId = `connections-${randomUUID()}`,
+    email = `${userId}@example.test`,
+    subjectId = `user:${userId}`;
+  await shared!
+    .admin`insert into auth_users (id, name, email, email_verified) values (${userId}, 'Connections user', ${email}, true)`;
+  nativeAuthUserIds.push(userId);
+  await shared!
+    .admin`insert into auth_identities (id, user_id, provider_id, account_id, password) values (${randomUUID()}, ${userId}, 'credential', ${userId}, ${fixturePasswordHash})`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email,
+    name: "Connections user",
+    emailVerified: true,
+  });
+  nativeWorkspaceIds.push(...access.workspaceGrants.map((grant) => grant.workspaceId));
+  await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+  const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
+  const binding = projection.loginBindings.find(
+    (entry) => entry.providerId === "credential" && entry.status === "active",
+  )!;
+  const token = randomUUID();
+  await shared!
+    .admin`insert into auth_sessions (id, user_id, token, expires_at, identity_id, identity_revision, auth_revision, login_binding_id, login_binding_revision) values (${randomUUID()}, ${userId}, ${token}, now() + interval '1 hour', ${projection.activeIdentity.id}, ${projection.activeIdentity.identityRevision}, ${projection.activeIdentity.authRevision}, ${binding.id}, ${binding.revision})`;
+  const cookie = (
+    await managedAuthSessionAdapter.createLegacySelectedSessionCookies({ token } as never, null)
+  )
+    .map((value) => value.split(";", 1)[0])
+    .join("; ");
+  return { access, userId, email, subjectId, cookie };
+}
+
+async function freshNativeWorkspace() {
+  const person = await nativePerson();
+  const grant = person.access.workspaceGrants.find(
+    (entry) => entry.workspaceId === person.access.defaultWorkspaceId,
+  )!;
+  // Non-OAuth list controls retain their existing opaque bearer member.
+  await grantWorkspaceAccess(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: "subject-b",
+    permissions: ["connections:read", "connections:write"],
+  });
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: person.subjectId,
+    cookie: person.cookie,
+  };
+}
+
+function nativeHeaders(workspace: Awaited<ReturnType<typeof freshNativeWorkspace>>) {
+  return {
+    cookie: workspace.cookie,
+    origin: settings.publicBaseUrl!,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/json",
+    "x-opengeni-access-key": "deployment-key",
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  };
+}
+
+async function nativeWorkspaceMember(workspace: Awaited<ReturnType<typeof freshNativeWorkspace>>) {
+  const person = await nativePerson();
+  const invitation = await createOrganizationInvitation(client.db, {
+    organizationId: workspace.accountId,
+    actorSubjectId: workspace.subjectId,
+    operationId: randomUUID(),
+    targetSubjectId: person.subjectId,
+    targetEmail: person.email,
+    initialWorkspaceIds: [workspace.workspaceId],
+    role: "member",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  const accepted = await acceptOrganizationInvitation(client.db, {
+    organizationId: workspace.accountId,
+    actorSubjectId: person.subjectId,
+    operationId: randomUUID(),
+    invitationId: invitation.id,
+    expectedRevision: invitation.revision,
+  });
+  nativeWorkspaceIds.push(accepted.membership.personalWorkspaceId!);
+  await grantWorkspaceAccess(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: person.subjectId,
+    permissions: ["workspace:read", "connections:read", "connections:write"],
+  });
+  return { ...workspace, subjectId: person.subjectId, cookie: person.cookie };
+}
+
+async function bindParserFixtureState(
+  workspace: Awaited<ReturnType<typeof freshNativeWorkspace>>,
+  state: string,
+  provider: "mcp-oauth" | "atlassian" | "social" = "mcp-oauth",
+) {
+  const response = await app().request("/fixture/native-state-binding", {
+    method: "POST",
+    headers: nativeHeaders(workspace),
+    body: JSON.stringify({ state, provider }),
+  });
+  expect(response.status).toBe(200);
 }
 
 async function freshWorkspace(): Promise<{
@@ -319,7 +547,7 @@ function startFakeAuthorizationServer(
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    async fetch(request) {
+    async fetch(request): Promise<Response> {
       const url = new URL(request.url);
       const origin = `http://127.0.0.1:${server.port}`;
       if (url.pathname === "/") {
@@ -651,7 +879,7 @@ describe("connections routes", () => {
 
   test("the MCP OAuth callback refuses a legacy in-flight personal state", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       scopesSupported: ["documents:read"],
@@ -665,10 +893,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "mcp.example.com",
             mcpUrl: mcp.url,
@@ -685,14 +910,14 @@ describe("connections routes", () => {
 
       // An older deployment signed no `personalOwnerVerified` claim, and the
       // legacy decode reads a missing `ownership` as "personal". The callback
-      // has no live principal, so the signed claim is what it enforces.
+      // still requires native browser admission before enforcing that claim.
       const { personalOwnerVerified: _dropped, ...legacyPayload } = payload;
+      const legacyState = createSignedState(STATE_SECRET, legacyPayload);
+      await bindParserFixtureState(workspace, legacyState);
       const refused = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
       }).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(
-          createSignedState(STATE_SECRET, legacyPayload),
-        )}`,
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyState)}`,
       );
       expect(refused.status).toBe(302);
       const refusedLocation = refused.headers.get("location")!;
@@ -700,18 +925,16 @@ describe("connections routes", () => {
       expect(refusedLocation).toContain("stage=state_verify");
       // Refused before any provider traffic, and no row was written.
       expect(as.tokenRequests).toHaveLength(0);
-      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-        [],
-      );
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
 
-      // Positive control: the identical hand-minted state with the claim
-      // restored gets past state_verify, so the claim is the only difference.
+      // Positive control retains the original native START state, PKCE and
+      // nonce. The parser-negative refusal did not consume that nonce.
       const accepted = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
       }).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(
-          createSignedState(STATE_SECRET, { ...legacyPayload, personalOwnerVerified: true }),
-        )}`,
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
       const acceptedLocation = accepted.headers.get("location")!;
       expect(acceptedLocation).toContain("integration_oauth=success");
@@ -724,7 +947,7 @@ describe("connections routes", () => {
 
   test("the Atlassian callback refuses a legacy in-flight state", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     // Atlassian is personal-only and its callback fence runs before the OAuth
     // client settings are needed, so no Atlassian client config is required to
     // reach it. `subject-a` is host-opaque and passes the subject-shape check,
@@ -733,60 +956,71 @@ describe("connections routes", () => {
       kind: "atlassian_oauth",
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       returnPath: `/workspaces/${workspace.workspaceId}/capabilities`,
     });
+    await bindParserFixtureState(workspace, legacyState, "atlassian");
     const refused = await publicApp(client.db, {
       webBaseUrl: "http://127.0.0.1:3000",
     }).request(
       `/v1/integrations/atlassian/callback?code=abc&state=${encodeURIComponent(legacyState)}`,
       // This callback path is not on the deployment perimeter's exempt list.
-      { headers: { "x-opengeni-access-key": "deployment-key" } },
+      { headers: { ...nativeHeaders(workspace), cookie: nativeFlowCookies.get(legacyState)! } },
     );
     expect(refused.status).toBe(302);
     expect(refused.headers.get("location")).toContain("atlassian=error");
     expect(refused.headers.get("location")).toContain("reason=http_422");
-    expect(await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")).toEqual(
-      [],
-    );
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+    ).toEqual([]);
   });
 
   test("the social start stamps the claim from the live principal, not a constant", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const socialApp = app({
       socialOauthClientsJson: JSON.stringify({ x: { clientId: "x-client", clientSecret: "s" } }),
     });
-    const start = async (principalKind: "human_session" | "service") => {
+    const start = async (principalKind?: "human_session" | "service") => {
       const response = await socialApp.request(
         `/v1/workspaces/${workspace.workspaceId}/social/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(
-              workspace,
-              "subject-a",
-              // Workspace ownership needs workspace:admin on this route.
-              ["connections:write", "workspace:read", "workspace:admin"],
-              principalKind,
-            ),
-            "content-type": "application/json",
-          },
-          // Workspace ownership, which BOTH principals may request - so the
-          // route's personal fence never fires and the only thing under test is
-          // whether the signed claim tracks the principal.
+          headers: principalKind
+            ? {
+                authorization: await bearer(
+                  workspace,
+                  workspace.subjectId,
+                  ["connections:write", "workspace:read", "workspace:admin"],
+                  principalKind,
+                ),
+                "content-type": "application/json",
+              }
+            : nativeHeaders(workspace),
+          // A service may not impersonate the person connecting even a
+          // workspace-owned account. Actual native admission stays separate.
           body: JSON.stringify({ provider: "x", ownership: "workspace" }),
         },
       );
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as { state: string };
-      return readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      return response;
     };
 
-    expect((await start("human_session")).personalOwnerVerified).toBe(true);
-    // A constant `true` here would silently pre-authorize personal ownership on
-    // any future state this machine principal mints.
-    expect((await start("service")).personalOwnerVerified).toBe(false);
+    const native = await start();
+    expect(native.status).toBe(200);
+    const nativeState = readSignedState(
+      ((await native.json()) as { state: string }).state,
+      STATE_SECRET,
+    )!;
+    expect(nativeState.personalOwnerVerified).toBe(true);
+    expect(nativeState.subjectId).toBe(workspace.subjectId);
+    for (const kind of ["human_session", "service"] as const) {
+      const refused = await start(kind);
+      expect(refused.status).toBe(403);
+      expect(((await refused.json()) as { state?: string }).state).toBeUndefined();
+      expect(
+        refused.headers.getSetCookie().some((value) => value.startsWith("opengeni_oauth_social_")),
+      ).toBe(false);
+    }
   });
 
   test("an MCP state cannot be presented to the Atlassian callback", async () => {
@@ -873,7 +1107,7 @@ describe("connections routes", () => {
 
   test("social OAuth start and callback both refuse a machine personal owner", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     // Start fence: a non-human principal explicitly asking for personal.
     const refusedStart = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/social/oauth/start`,
@@ -882,7 +1116,7 @@ describe("connections routes", () => {
         headers: {
           authorization: await bearer(
             workspace,
-            "subject-a",
+            workspace.subjectId,
             ["connections:write", "workspace:read"],
             "service",
           ),
@@ -891,8 +1125,7 @@ describe("connections routes", () => {
         body: JSON.stringify({ provider: "x", ownership: "personal" }),
       },
     );
-    expect(refusedStart.status).toBe(422);
-    expect(await refusedStart.text()).toContain("requires an authenticated human");
+    expect(refusedStart.status).toBe(403);
 
     // Callback fence: a legacy in-flight personal state carries no claim. The
     // fence runs before the grant re-check and before any provider traffic.
@@ -900,12 +1133,13 @@ describe("connections routes", () => {
       kind: "social_oauth",
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       ownership: "personal",
       provider: "x",
       scopes: ["tweet.read"],
       returnPath: "/integrations",
     });
+    await bindParserFixtureState(workspace, legacyState, "social");
     const refusedCallback = await publicApp(client.db, {
       webBaseUrl: "http://127.0.0.1:3000",
     }).request(`/v1/social/oauth/callback?code=abc&state=${encodeURIComponent(legacyState)}`);
@@ -967,8 +1201,7 @@ describe("connections routes", () => {
         }),
       },
     );
-    expect(gmail.status).toBe(422);
-    expect(await gmail.text()).toContain("requires an authenticated human");
+    expect(gmail.status).toBe(403);
 
     // The two personal-only first-party connectors carry no ownership field at
     // all, so their start routes fence the principal directly.
@@ -977,8 +1210,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/${path}/install`,
         { method: "POST", headers, body: JSON.stringify({}) },
       );
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("requires an authenticated human");
+      expect(response.status).toBe(403);
     }
   });
 
@@ -1928,7 +2160,7 @@ describe("connections routes", () => {
             body: JSON.stringify(body),
           });
         const approval = await post("approvals", call);
-        expect(approval.status).toBe(422);
+        expect(approval.status).toBe(kind === "organization_service" ? 403 : 422);
         expect(mcp.calls).toHaveLength(0);
         expect((await post("calls", call)).status).toBe(200);
         expect(mcp.calls).toEqual([{ tool: "search_documents", args: call.arguments }]);
@@ -2159,7 +2391,7 @@ describe("connections routes", () => {
             {
               id: "provisioned",
               url: mcp.url,
-              transport: "streamable_http",
+              cacheToolsList: true,
               connectionRef: {
                 subjectScope: "subject",
                 providerDomain: "provisioned-mcp.example",
@@ -2200,8 +2432,8 @@ describe("connections routes", () => {
         originWorkspaceId: provisionedBody.connection.workspaceId,
         ownerSubjectId: identity.subjectId,
         providerDomain: "provisioned-mcp.example",
-        kind: "oauth2",
-        connectionType: "mcp",
+        kind: "oauth2" as const,
+        connectionType: "mcp" as const,
       };
       const capturedOAuth = await shared!.admin`
         select personal_connection_delegations, mcp_account_bindings from session_turns
@@ -2459,8 +2691,18 @@ describe("connections routes", () => {
       await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
       const third = await begin();
       await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
-      expect((await callback(third)).headers.get("location")).toBe(returnUrl);
+      const beforeEarlyRevocation = await listConnectionsMetadata(
+        client.db,
+        workspace.workspaceId,
+        identity.subjectId,
+      );
+      const refusedBeforeExchange = await callback(third);
+      expect(refusedBeforeExchange.status).toBe(403);
+      expect(refusedBeforeExchange.headers.get("location")).toBeNull();
       expect(as.tokenRequests).toHaveLength(2);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId),
+      ).toEqual(beforeEarlyRevocation);
       await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
       const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
       const customBegin = await api.request(base, {
@@ -2752,7 +2994,7 @@ describe("connections routes", () => {
 
   test("oauth start/callback defaults to a verified workspace oauth2 connection and keeps PKCE verifier out of URLs", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       scopesSupported: ["documents:read", "documents:write"],
@@ -2765,10 +3007,7 @@ describe("connections routes", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
       {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "mcp.example.com",
           mcpUrl: mcp.url,
@@ -2807,7 +3046,7 @@ describe("connections routes", () => {
       const state = await readMcpOAuthState(body.state);
       expect(state?.workspaceId).toBe(workspace.workspaceId);
       expect(state?.accountId).toBe(workspace.accountId);
-      expect(state?.subjectId).toBe("subject-a");
+      expect(state?.subjectId).toBe(workspace.subjectId);
       expect(state?.ownership).toBe("workspace");
       expect(state?.providerDomain).toBe("mcp.example.com");
       expect(state?.mcpUrl).toBe(mcp.url);
@@ -2818,6 +3057,59 @@ describe("connections routes", () => {
       expect(verifier.length).toBeGreaterThanOrEqual(43);
       expect(body.authorizationUrl).not.toContain(verifier);
       expect(JSON.stringify(state)).not.toContain(verifier);
+
+      const callbackUrl = `https://api.opengeni.test/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`;
+      const browserCookies = nativeFlowCookies.get(body.state)!;
+      const bindingName = `opengeni_oauth_mcp_oauth_${createHash("sha256").update(body.state).digest("hex").slice(0, 24)}`;
+      const flowCookie = browserCookies
+        .split("; ")
+        .find((value) => value.slice(0, value.indexOf("=")) === bindingName)!;
+      expect(flowCookie).toBeDefined();
+      for (const headers of [
+        undefined,
+        { cookie: workspace.cookie },
+        { cookie: flowCookie },
+        {
+          cookie: workspace.cookie,
+          "x-opengeni-canonical-human": "true",
+          "x-opengeni-browser-session": "fabricated-session",
+        },
+        {
+          cookie: browserCookies,
+          authorization: await bearer(
+            workspace,
+            workspace.subjectId,
+            ["connections:write"],
+            "service",
+          ),
+        },
+      ]) {
+        const refused = await publicApp(client.db).fetch(
+          new Request(callbackUrl, headers ? { headers } : undefined),
+        );
+        expect(refused.status).toBeOneOf([401, 403]);
+        expect(as.tokenRequests).toHaveLength(0);
+        expect(
+          await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+        ).toEqual([]);
+      }
+      const typed = new Request(callbackUrl, {
+        headers: {
+          cookie: browserCookies,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      });
+      stampDelegatedHumanAuthorization(typed, {
+        organizationId: workspace.accountId,
+        subjectId: workspace.subjectId,
+        permissions: ["connections:write"],
+        workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+      });
+      expect((await publicApp(client.db).fetch(typed)).status).toBe(403);
+      expect(as.tokenRequests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
 
       const callback = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
@@ -2887,10 +3179,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({ providerDomain: "mcp.example.com", mcpUrl: mcp.url }),
         },
       );
@@ -2914,7 +3203,7 @@ describe("connections routes", () => {
 
   test("oauth start/callback supports legacy metadata behind a protected API catch-all", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const upstreamMcp = startTestMcpServer();
     const tokenRequests: URLSearchParams[] = [];
     const metadataRequests: string[] = [];
@@ -2981,10 +3270,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "legacy.example.com",
             mcpUrl,
@@ -3051,7 +3337,7 @@ describe("connections routes", () => {
 
   test("oauth start fails promptly with a structured stage when metadata streaming stalls", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     let origin = "";
     const source = Bun.serve({
       port: 0,
@@ -3092,10 +3378,7 @@ describe("connections routes", () => {
         { oauthStartDeadlineMs: 3_000 },
       ).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "stalled.example.test",
           mcpUrl: `${origin}/mcp`,
@@ -3136,7 +3419,7 @@ describe("connections routes", () => {
     "oauth start reports %s HTTP %s (retryable: %s)",
     async (stage, status, retryable) => {
       if (!available) return;
-      const workspace = await freshWorkspace();
+      const workspace = await freshNativeWorkspace();
       let origin = "";
       const requestedPaths: string[] = [];
       const source = Bun.serve({
@@ -3170,10 +3453,7 @@ describe("connections routes", () => {
           `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
           {
             method: "POST",
-            headers: {
-              authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-              "content-type": "application/json",
-            },
+            headers: nativeHeaders(workspace),
             body: JSON.stringify({
               providerDomain: "denied.example.test",
               mcpUrl: `${origin}/mcp`,
@@ -3214,7 +3494,7 @@ describe("connections routes", () => {
 
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       tokenAccessToken: (body) => `token-for-${body.get("resource")}`,
@@ -3228,10 +3508,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "linear.app",
             mcpUrl: mcp.url,
@@ -3263,7 +3540,7 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "linear.app",
         kind: "oauth2",
-        subjectId: "subject-a",
+        subjectId: workspace.subjectId,
         allowSubjectOwned: true,
       });
       expect(loaded?.credential).toMatchObject({
@@ -3280,9 +3557,9 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth callback still writes a workspace connection for an API key that can start OAuth", async () => {
+  test("oauth refuses service-key START and retains workspace ownership for an independently consenting native user", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const token = `ogk_${randomUUID().replaceAll("-", "")}`;
     const apiKey = await createApiKey(client.db, {
       accountId: workspace.accountId,
@@ -3292,6 +3569,7 @@ describe("connections routes", () => {
       keyHash: createHash("sha256").update(token).digest("hex"),
       permissions: ["connections:read", "connections:write", "workspace:read"],
     });
+    expect(apiKey.id).toBeDefined();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
     });
@@ -3300,7 +3578,7 @@ describe("connections routes", () => {
       unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
     });
     try {
-      const response = await app().request(
+      const refused = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -3316,11 +3594,31 @@ describe("connections routes", () => {
           }),
         },
       );
+      expect(refused.status).toBe(403);
+      expect(as.tokenRequests).toHaveLength(0);
+      expect(as.registrations).toHaveLength(0);
+      expect(mcp.requests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: nativeHeaders(workspace),
+          body: JSON.stringify({
+            providerDomain: "linear.app",
+            mcpUrl: mcp.url,
+            ownership: "workspace",
+            returnPath: "/integrations?connect_item=linear",
+          }),
+        },
+      );
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
       const body = (await response.json()) as { state: string };
       const state = await readMcpOAuthState(body.state);
-      expect(state.subjectId).toBe(`api_key:${apiKey.id}`);
+      expect(state.subjectId).toBe(workspace.subjectId);
       expect(state.ownership).toBe("workspace");
 
       const callback = await publicApp(client.db).request(
@@ -3334,7 +3632,7 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "linear.app",
         kind: "oauth2",
-        subjectId: `api_key:${apiKey.id}`,
+        subjectId: workspace.subjectId,
         allowSubjectOwned: false,
       });
       expect(loaded?.credential).toMatchObject({
@@ -3349,7 +3647,7 @@ describe("connections routes", () => {
 
   test("oauth callback logs token exchange failures and redirects with a machine-readable reason", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       scopesSupported: ["documents:read"],
@@ -3375,10 +3673,7 @@ describe("connections routes", () => {
       `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
       {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "mcp.example.com",
           mcpUrl: mcp.url,
@@ -3423,7 +3718,7 @@ describe("connections routes", () => {
 
   test("oauth callback aborts a stalled token response and redirects with its exact stage", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       tokenResponseStalls: true,
@@ -3437,10 +3732,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "stalled-token.example.com",
             mcpUrl: mcp.url,
@@ -3477,13 +3769,15 @@ describe("connections routes", () => {
 
   test("oauth callback revalidates membership before nonce consumption and before persistence", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const owner = await freshNativeWorkspace();
+    // Exercise revocable member permissions, not the organization's owner role.
+    const workspace = await nativeWorkspaceMember(owner);
     const setPermissions = async (next: string[]) => {
       await shared!.admin`
         update workspace_memberships
         set permissions = ${shared!.admin.json(next)}
         where workspace_id = ${workspace.workspaceId}
-          and subject_id = 'subject-a'`;
+          and subject_id = ${workspace.subjectId}`;
     };
 
     const firstAs = startFakeAuthorizationServer({
@@ -3498,10 +3792,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "grant-before.example.com",
             mcpUrl: firstMcp.url,
@@ -3513,8 +3804,12 @@ describe("connections routes", () => {
       const denied = await publicApp(client.db).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
       );
-      expect(denied.headers.get("location")).toContain("reason=state_invalid");
+      expect(denied.status).toBe(403);
+      expect(denied.headers.get("location")).toBeNull();
       expect(firstAs.tokenRequests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
 
       await setPermissions(["connections:read", "connections:write"]);
       const retried = await publicApp(client.db).request(
@@ -3541,10 +3836,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "grant-persist.example.com",
             mcpUrl: secondMcp.url,
@@ -3561,7 +3853,7 @@ describe("connections routes", () => {
           workspaceId: workspace.workspaceId,
           providerDomain: "grant-persist.example.com",
           kind: "oauth2",
-          subjectId: "subject-a",
+          subjectId: workspace.subjectId,
           allowSubjectOwned: true,
         }),
       ).toBeNull();
@@ -3574,10 +3866,10 @@ describe("connections routes", () => {
 
   test("oauth reconnect is exact-subject and preserves the owner", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const seeded = await createConnection(client.db, {
       ...workspace,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       providerDomain: "subject-oauth.example.com",
       kind: "oauth2",
       credentialEncrypted: encryptEnvironmentValue(
@@ -3585,7 +3877,7 @@ describe("connections routes", () => {
         JSON.stringify({ access_token: "old", token_type: "Bearer" }),
       ),
       metadata: { mcpUrl: "https://subject-oauth.example.com/mcp" },
-      createdBySubjectId: "subject-a",
+      createdBySubjectId: workspace.subjectId,
     });
 
     const as = startFakeAuthorizationServer({
@@ -3595,22 +3887,14 @@ describe("connections routes", () => {
       requiredAuthorization: "Bearer mcp-access-token",
       unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
     });
-    const aliceHeaders = {
-      authorization: await bearer(workspace, "subject-a", [
-        "connections:read",
-        "connections:write",
-      ]),
-      "content-type": "application/json",
-    };
+    const aliceHeaders = nativeHeaders(workspace);
+    const bob = await nativeWorkspaceMember(workspace);
     try {
       const bobReconnect = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-b", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(bob),
           body: JSON.stringify({
             providerDomain: "subject-oauth.example.com",
             mcpUrl: mcp.url,
@@ -3662,10 +3946,10 @@ describe("connections routes", () => {
         client.db,
         workspace.workspaceId,
         seeded.id,
-        "subject-a",
+        workspace.subjectId,
       );
       expect(updated).toMatchObject({
-        subjectId: "subject-a",
+        subjectId: workspace.subjectId,
         kind: "oauth2",
         status: "active",
         version: seeded.version + 1,
@@ -3681,7 +3965,7 @@ describe("connections routes", () => {
 
   test("oauth start uses DCR fallback when CIMD is unavailable", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: false,
       dcr: true,
@@ -3695,10 +3979,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "dcr.example.com",
             mcpUrl: mcp.url,
@@ -3735,7 +4016,7 @@ describe("connections routes", () => {
 
   test("oauth start never replays dynamic client registration to a redirect origin", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const hits: string[] = [];
     const registrations: Array<{
       method: string;
@@ -3754,7 +4035,7 @@ describe("connections routes", () => {
     const source = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      async fetch(request) {
+      async fetch(request): Promise<Response> {
         const url = new URL(request.url);
         const origin = `http://127.0.0.1:${source.port}`;
         hits.push(url.pathname);
@@ -3804,10 +4085,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "dcr-redirect.example.com",
             mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
@@ -3845,7 +4123,7 @@ describe("connections routes", () => {
     "Slack MCP uses configured operator credentials with %s ownership",
     async (ownership) => {
       if (!available) return;
-      const workspace = await freshWorkspace();
+      const workspace = await freshNativeWorkspace();
       const as = startFakeAuthorizationServer({
         issuer: "https://slack.com/mcp",
         clientIdMetadataDocumentSupported: false,
@@ -3863,10 +4141,7 @@ describe("connections routes", () => {
           slackClientSecret: "slack-client-secret",
         }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "slack.com",
             mcpUrl: mcp.url,
@@ -3904,9 +4179,14 @@ describe("connections routes", () => {
         const connectionId = callbackLocation.searchParams.get("connectionId");
         expect(connectionId).not.toBeNull();
         expect(
-          await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
+          await getConnectionMetadata(
+            client.db,
+            workspace.workspaceId,
+            connectionId!,
+            workspace.subjectId,
+          ),
         ).toMatchObject({
-          subjectId: ownership === "personal" ? "subject-a" : null,
+          subjectId: ownership === "personal" ? workspace.subjectId : null,
           providerDomain: "slack.com",
           kind: "oauth2",
         });
@@ -3923,16 +4203,13 @@ describe("connections routes", () => {
 
   test("Slack MCP rejects browser-provided OAuth clients before discovery", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const response = await app({
       slackClientId: "deployment-slack-client-id",
       slackClientSecret: "deployment-slack-client-secret",
     }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
       method: "POST",
-      headers: {
-        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-        "content-type": "application/json",
-      },
+      headers: nativeHeaders(workspace),
       body: JSON.stringify({
         providerDomain: "slack.com",
         mcpUrl: "https://mcp.slack.com/mcp",
@@ -3950,15 +4227,11 @@ describe("connections routes", () => {
 
   test("Slack MCP requires deployment OAuth settings and the exact hosted MCP resource", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const request = async (overrides: Partial<Settings>, mcpUrl: string) =>
       app(overrides).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({ providerDomain: "slack.com", mcpUrl }),
       });
 
@@ -3983,7 +4256,7 @@ describe("connections routes", () => {
 
   test("oauth start prefers DCR generically when DCR and CIMD are advertised", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       clientIdMetadataDocumentSupported: true,
       dcr: true,
@@ -3999,10 +4272,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "dual-registration.example.com",
             mcpUrl: mcp.url,
@@ -4043,7 +4313,7 @@ describe("connections routes", () => {
 
   test("oauth start replaces a stale DCR client when provider endpoints change", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const issuer = "https://stable-issuer.example.test";
     const firstAs = startFakeAuthorizationServer({
       issuer,
@@ -4068,10 +4338,7 @@ describe("connections routes", () => {
     const start = async (mcpUrl: string) =>
       await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "moving-provider.example.com",
           mcpUrl,
@@ -4121,12 +4388,12 @@ describe("connections routes", () => {
 
   test("oauth discovery validates redirect targets before following metadata redirects", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const hits: string[] = [];
     const source = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(request) {
+      fetch(request): Response {
         const url = new URL(request.url);
         const origin = `http://127.0.0.1:${source.port}`;
         hits.push(url.pathname);
@@ -4152,11 +4419,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "redirect.example.com",
             mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
@@ -4174,7 +4437,7 @@ describe("connections routes", () => {
 
   test("oauth callback never replays token exchange secrets to a redirect origin", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const redirectHits: string[] = [];
     const tokenRequests: Array<{
       authorization: string | null;
@@ -4212,7 +4475,7 @@ describe("connections routes", () => {
     const state = createSignedState(STATE_SECRET, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       ownership: "personal",
       personalOwnerVerified: true,
       providerDomain: "token-redirect.example.com",
@@ -4230,6 +4493,7 @@ describe("connections routes", () => {
       encryptedClientSecret: encryptEnvironmentValue(rawKey, "redirect-client-secret"),
       returnPath: "/integrations",
     });
+    await bindParserFixtureState(workspace, state);
     try {
       const response = await publicApp(client.db, {
         environment: "test",
@@ -4252,7 +4516,7 @@ describe("connections routes", () => {
 
   test("oauth callback records non-fatal verification failure without replaying its bearer to a redirect origin", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const hits: string[] = [];
     const redirectHits: string[] = [];
     const tokenBodies: URLSearchParams[] = [];
@@ -4296,7 +4560,7 @@ describe("connections routes", () => {
     const state = createSignedState(STATE_SECRET, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
+      subjectId: workspace.subjectId,
       ownership: "personal",
       personalOwnerVerified: true,
       providerDomain: "verify-redirect.example.com",
@@ -4313,6 +4577,7 @@ describe("connections routes", () => {
       tokenEndpointAuthMethod: "none",
       returnPath: "/integrations",
     });
+    await bindParserFixtureState(workspace, state);
     try {
       const response = await publicApp(client.db, {
         environment: "test",
@@ -4329,7 +4594,7 @@ describe("connections routes", () => {
         workspaceId: workspace.workspaceId,
         providerDomain: "verify-redirect.example.com",
         kind: "oauth2",
-        subjectId: "subject-a",
+        subjectId: workspace.subjectId,
         allowSubjectOwned: true,
       });
       expect(loaded?.credential).toMatchObject({
@@ -4347,7 +4612,7 @@ describe("connections routes", () => {
 
   test("oauth start refuses authorization servers that do not support S256", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer({
       codeChallengeMethods: ["plain"],
     });
@@ -4360,10 +4625,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "mcp.example.com",
             mcpUrl: mcp.url,
@@ -4385,7 +4647,7 @@ describe("connections routes", () => {
       { configuredSuffix: "", stateSuffix: "/" },
     ];
     for (const [index, entry] of cases.entries()) {
-      const workspace = await freshWorkspace();
+      const workspace = await freshNativeWorkspace();
       const as = startFakeAuthorizationServer();
       const mcp = startTestMcpServer({
         requiredAuthorization: "Bearer mcp-access-token",
@@ -4396,10 +4658,11 @@ describe("connections routes", () => {
       const state = createSignedState(STATE_SECRET, {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
-        subjectId: "subject-a",
+        subjectId: workspace.subjectId,
         ownership: "personal",
         personalOwnerVerified: true,
         providerDomain: `operator-${index}.example.com`,
+        mcpUrl: mcp.url,
         resource: mcp.url,
         requestedScopes: [],
         authorizeScopes: ["documents:read"],
@@ -4412,6 +4675,7 @@ describe("connections routes", () => {
         tokenEndpointAuthMethod: "none",
         returnPath: "/integrations",
       });
+      await bindParserFixtureState(workspace, state);
       try {
         const callback = await publicApp(client.db, {
           integrationsOauthClientsJson: JSON.stringify({
@@ -4430,15 +4694,12 @@ describe("connections routes", () => {
 
   test("oauth start rejects invalid resource URLs without a server error", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const response = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
       {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "invalid-resource.example.com",
           resource: "example.com",
@@ -4451,7 +4712,7 @@ describe("connections routes", () => {
 
   test("oauth routes are hidden while integrations are disabled and start does not discover", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     let fetchCalls = 0;
     const discoveryTarget = Bun.serve({
       hostname: "127.0.0.1",
@@ -4467,10 +4728,7 @@ describe("connections routes", () => {
         environment: "test",
       }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
+        headers: nativeHeaders(workspace),
         body: JSON.stringify({
           providerDomain: "disabled.example.com",
           mcpUrl: `http://127.0.0.1:${discoveryTarget.port}/mcp`,
@@ -4493,7 +4751,7 @@ describe("connections routes", () => {
 
   test("oauth callback rejects replayed and expired state and reports provider denial", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshNativeWorkspace();
     const as = startFakeAuthorizationServer();
     const mcp = startTestMcpServer({
       requiredAuthorization: "Bearer mcp-access-token",
@@ -4504,10 +4762,7 @@ describe("connections routes", () => {
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
-          headers: {
-            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-            "content-type": "application/json",
-          },
+          headers: nativeHeaders(workspace),
           body: JSON.stringify({
             providerDomain: "mcp.example.com",
             mcpUrl: mcp.url,
@@ -4600,7 +4855,7 @@ describe("connections routes", () => {
         {
           accountId: workspace.accountId,
           workspaceId: workspace.workspaceId,
-          subjectId: "subject-a",
+          subjectId: workspace.subjectId,
           providerDomain: "mcp.example.com",
           resource: mcp.url,
           requestedScopes: [],

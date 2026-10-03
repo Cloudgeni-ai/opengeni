@@ -21,6 +21,7 @@ import {
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireOwnerMigratedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -69,68 +70,71 @@ function jwt(payload: Record<string, unknown>): string {
   return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
 }
 
-const xaiFetch: typeof fetch = async (input, init) => {
-  const url = String(input);
-  if (url.endsWith("/oauth2/device/code")) {
-    deviceSequence += 1;
-    return Response.json({
-      device_code: `device-${deviceSequence}`,
-      user_code: `XAI-${deviceSequence}234`,
-      verification_uri: "https://accounts.x.ai/device",
-      verification_uri_complete: `https://accounts.x.ai/device?code=XAI-${deviceSequence}234`,
-      expires_in: 600,
-      interval: 1,
-    });
-  }
-  if (url.endsWith("/oauth2/token")) {
-    const body = String(init?.body ?? "");
-    if (body.includes("grant_type=refresh_token")) {
+const xaiFetch: typeof fetch = Object.assign(
+  async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/oauth2/device/code")) {
+      deviceSequence += 1;
       return Response.json({
-        access_token: "access-refreshed",
-        refresh_token: "refresh-refreshed",
+        device_code: `device-${deviceSequence}`,
+        user_code: `XAI-${deviceSequence}234`,
+        verification_uri: "https://accounts.x.ai/device",
+        verification_uri_complete: `https://accounts.x.ai/device?code=XAI-${deviceSequence}234`,
+        expires_in: 600,
+        interval: 1,
+      });
+    }
+    if (url.endsWith("/oauth2/token")) {
+      const body = String(init?.body ?? "");
+      if (body.includes("grant_type=refresh_token")) {
+        return Response.json({
+          access_token: "access-refreshed",
+          refresh_token: "refresh-refreshed",
+          expires_in: 3600,
+        });
+      }
+      return Response.json({
+        access_token: jwt({
+          principal_type: "User",
+          principal_id: providerSubject,
+          exp: Math.floor(Date.now() / 1_000) + 3_600,
+        }),
+        refresh_token: `refresh-${deviceSequence}`,
+        id_token: jwt({
+          sub: providerSubject,
+          email: "owner@example.com",
+          email_verified: true,
+          name: "Owner",
+        }),
         expires_in: 3600,
       });
     }
-    return Response.json({
-      access_token: jwt({
-        principal_type: "User",
-        principal_id: providerSubject,
-        exp: Math.floor(Date.now() / 1_000) + 3_600,
-      }),
-      refresh_token: `refresh-${deviceSequence}`,
-      id_token: jwt({
-        sub: providerSubject,
-        email: "owner@example.com",
-        email_verified: true,
-        name: "Owner",
-      }),
-      expires_in: 3600,
-    });
-  }
-  if (url.endsWith("/oauth2/userinfo")) {
-    userinfoRequests += 1;
-    throw new Error("device connection must not call xAI userinfo");
-  }
-  if (url.endsWith("/models")) {
-    return Response.json({
-      data: [
-        {
-          id: "grok-4.6",
-          name: "Grok 4.6",
-          contextWindow: 256_000,
-          apiBackend: "responses",
-        },
-        {
-          id: "grok-4.5",
-          name: "Grok 4.5",
-          contextWindow: 256_000,
-          apiBackend: "responses",
-        },
-      ],
-    });
-  }
-  throw new Error(`unexpected xAI request: ${url}`);
-};
+    if (url.endsWith("/oauth2/userinfo")) {
+      userinfoRequests += 1;
+      throw new Error("device connection must not call xAI userinfo");
+    }
+    if (url.endsWith("/models")) {
+      return Response.json({
+        data: [
+          {
+            id: "grok-4.6",
+            name: "Grok 4.6",
+            contextWindow: 256_000,
+            apiBackend: "responses",
+          },
+          {
+            id: "grok-4.5",
+            name: "Grok 4.5",
+            contextWindow: 256_000,
+            apiBackend: "responses",
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected xAI request: ${url}`);
+  },
+  { preconnect: () => undefined },
+);
 
 beforeAll(async () => {
   if ((externalAdminUrl === undefined) !== (externalAppUrl === undefined)) {
@@ -220,32 +224,37 @@ beforeAll(async () => {
   managedWorkspaceId = managedAccess.defaultWorkspaceId!;
   const managedAuth = {
     api: {
-      getSession: async () => ({
+      getSession: async (input: { headers: Headers }) => ({
         headers: new Headers(),
-        response: {
-          session: {
-            id: managedSessionId,
-            userId: managedUserId,
-            expiresAt: new Date(Date.now() + 3_600_000),
-          },
-          user: {
-            id: managedUserId,
-            email: managedEmail,
-            name: "Private Owner",
-          },
-        },
+        response:
+          input.headers.get("cookie") === "better-auth.session_token=private-owner"
+            ? {
+                session: {
+                  id: managedSessionId,
+                  userId: managedUserId,
+                  expiresAt: new Date(Date.now() + 3_600_000),
+                },
+                user: {
+                  id: managedUserId,
+                  email: managedEmail,
+                  name: "Private Owner",
+                },
+              }
+            : null,
       }),
     },
   };
   managedApp = new Hono();
   const managedDeps = {
     db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: {} as never,
     settings: managedSettings,
     resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, managedSettings),
     githubStateSecret: STATE_SECRET,
     xaiFetch,
     managedAuth: managedAuth as never,
-  } as ApiRouteDeps;
+  } as unknown as ApiRouteDeps;
   registerSuperGrokRoutes(managedApp, managedDeps);
   registerModelConnectionAccessRoutes(managedApp, managedDeps);
   registerWorkspaceRoutes(managedApp, managedDeps);
@@ -695,7 +704,10 @@ test("organization subscriptions use device login, multiple accounts, inherited 
     subjectId: managedSubjectId,
     permissions: ["workspace:read", "workspace:admin"],
   });
-  expect((await requestOrganization("/accounts", "GET", undefined, token)).status).toBe(401);
+  const devicesBeforeBearerRead = deviceSequence;
+  const bearerRead = await requestOrganization("/accounts", "GET", undefined, token);
+  expect(bearerRead.status).toBe(403);
+  expect(deviceSequence).toBe(devicesBeforeBearerRead);
   const crossOrigin = await managedApp.request(
     `${PUBLIC_ORIGIN}/v1/organizations/${managedAccountId}/supergrok/connect/start`,
     {
