@@ -128,6 +128,7 @@ import {
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
+  withSessionAuthorizationReadReuse,
   SessionAuthorizationUnavailableError,
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
@@ -1439,77 +1440,86 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
-    return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
-      const boundSessionId = grant.metadata?.sessionId;
-      if (typeof boundSessionId === "string") {
-        try {
-          await requireSessionAuthorization(routeDeps, grant, {
-            sessionId: boundSessionId,
-            operation: "session.first_party_mcp.call",
-            surface: "first_party_mcp",
-          });
-        } catch (error) {
-          if (error instanceof SessionAuthorizationDeniedError) {
-            throw new HTTPException(404, { message: "session not found" });
-          }
-          if (error instanceof SessionAuthorizationUnavailableError) {
-            throw new HTTPException(503, {
-              message: "session authorization is unavailable",
+    // The agent-attempt context, this route check, and a tool's own entry check
+    // re-read the same caller session and attempt; share those reads.
+    return await withSessionAuthorizationReadReuse((reads) =>
+      withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+        const boundSessionId = grant.metadata?.sessionId;
+        if (typeof boundSessionId === "string") {
+          try {
+            await requireSessionAuthorization(routeDeps, grant, {
+              sessionId: boundSessionId,
+              operation: "session.first_party_mcp.call",
+              surface: "first_party_mcp",
             });
+          } catch (error) {
+            if (error instanceof SessionAuthorizationDeniedError) {
+              throw new HTTPException(404, { message: "session not found" });
+            }
+            if (error instanceof SessionAuthorizationUnavailableError) {
+              throw new HTTPException(503, {
+                message: "session authorization is unavailable",
+              });
+            }
+            throw error;
           }
-          throw error;
         }
-      }
-      const workspace = await getWorkspace(routeDeps.db, workspaceId);
-      const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        enableJsonResponse: true,
-      });
-      if (!grantUsesAttemptScopedMcp(grant)) {
-        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
-        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+        reads.handOffToToolDispatch();
+        const workspace = await getWorkspace(routeDeps.db, workspaceId);
+        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        if (!grantUsesAttemptScopedMcp(grant)) {
+          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+          const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+          try {
+            await mcp.connect(transport);
+            return await handleMcpRequestWithClientAbort(
+              transport,
+              boundedRequest,
+              c.req.raw.signal,
+            );
+          } finally {
+            await Promise.allSettled([mcp.close(), prepared.close()]);
+          }
+        }
+        const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+        // The bound session's frozen Memory selector (migration 0427) decides
+        // which Memory tools the attempt receives and which typed layers they
+        // read and write. A missing row resolves to no Memory tools.
+        const sessionMemory =
+          typeof boundSessionId === "string"
+            ? ((await resolveSessionMemoryAgentScope(
+                routeDeps.db,
+                workspaceId,
+                boundSessionId,
+                grant.metadata,
+              )) ?? {
+                mode: "off" as const,
+                userSubjectId: null,
+                rootSessionId: null,
+              })
+            : null;
+        const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
+          requestOrigin: new URL(c.req.url).origin,
+          workspaceMemoryEnabled,
+          workspaceMemoryPromptMode,
+          sessionMemory,
+        });
+        // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
+        // worker that drops the call (Steer/Pause) aborts a blocking tool here.
+        // Each POST builds a fresh server; close it once the JSON response is
+        // ready, like the gateway paths above, so it can't outlive the request.
         try {
           await mcp.connect(transport);
           return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
         } finally {
-          await Promise.allSettled([mcp.close(), prepared.close()]);
+          await mcp.close().catch(() => undefined);
         }
-      }
-      const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-      // The bound session's frozen Memory selector (migration 0427) decides
-      // which Memory tools the attempt receives and which typed layers they
-      // read and write. A missing row resolves to no Memory tools.
-      const sessionMemory =
-        typeof boundSessionId === "string"
-          ? ((await resolveSessionMemoryAgentScope(
-              routeDeps.db,
-              workspaceId,
-              boundSessionId,
-              grant.metadata,
-            )) ?? {
-              mode: "off" as const,
-              userSubjectId: null,
-              rootSessionId: null,
-            })
-          : null;
-      const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
-        requestOrigin: new URL(c.req.url).origin,
-        workspaceMemoryEnabled,
-        workspaceMemoryPromptMode,
-        sessionMemory,
-      });
-      // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
-      // worker that drops the call (Steer/Pause) aborts a blocking tool here.
-      // Each POST builds a fresh server; close it once the JSON response is
-      // ready, like the gateway paths above, so it can't outlive the request.
-      try {
-        await mcp.connect(transport);
-        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
-      } finally {
-        await mcp.close().catch(() => undefined);
-      }
-    });
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
