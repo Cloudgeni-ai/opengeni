@@ -15,6 +15,8 @@ import {
   formatClockTime,
   formatRelativeTime,
   isPreparingWork,
+  noticeDisplayText,
+  noticeTone,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
   readableWorkStatus,
@@ -90,13 +92,29 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ScrollView>(null);
   const following = useRef(true);
+  // Only reader gestures change follow intent; layout-driven scroll events
+  // (content growing before the first scroll-to-end) must not unstick it.
+  const readerScrolling = useRef(false);
   const [showJump, setShowJump] = useState(false);
-  const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+  const measure = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const distance = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    following.current = distance < 48;
-    setShowJump(distance > 240);
+    return contentSize.height - layoutMeasurement.height - contentOffset.y;
   }, []);
+  const onScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const distance = measure(event);
+      if (readerScrolling.current) following.current = distance < 48;
+      setShowJump(distance > 240 && !following.current);
+    },
+    [measure],
+  );
+  const onScrollEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      following.current = measure(event) < 48;
+      readerScrolling.current = false;
+    },
+    [measure],
+  );
   const onContentSizeChange = useCallback(() => {
     if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
   }, []);
@@ -123,6 +141,14 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           <ScrollView
             ref={scrollRef}
             onScroll={onScroll}
+            onScrollBeginDrag={() => {
+              readerScrolling.current = true;
+            }}
+            onScrollEndDrag={onScrollEnd}
+            onMomentumScrollEnd={onScrollEnd}
+            onLayout={() => {
+              if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+            }}
             scrollEventThrottle={32}
             onContentSizeChange={onContentSizeChange}
             keyboardDismissMode="interactive"
@@ -354,39 +380,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "context-compaction":
       return <SeparatorRow text="context compacted" />;
     case "notice":
-      return (
-        <View
-          style={{
-            flexDirection: "row",
-            gap: 10,
-            borderRadius: theme.radius.md,
-            borderWidth: 1,
-            paddingHorizontal: 14,
-            paddingVertical: 10,
-            borderColor:
-              item.tone === "failed"
-                ? withAlpha(theme.colors["status-failed"], 0.35)
-                : theme.colors.border,
-            backgroundColor:
-              item.tone === "failed"
-                ? withAlpha(theme.colors["status-failed"], 0.1)
-                : theme.colors["surface-1"],
-          }}
-        >
-          <Text
-            style={{
-              ...fontStyle(theme),
-              flex: 1,
-              fontSize: 14,
-              lineHeight: 20,
-              color:
-                item.tone === "failed" ? theme.colors["status-failed"] : theme.colors["fg-muted"],
-            }}
-          >
-            {item.text}
-          </Text>
-        </View>
-      );
+      return <NoticeRow item={item} />;
     case "goal":
       return item.text ? (
         <SeparatorRow text={`goal ${item.action} · ${item.text}`} />
@@ -460,6 +454,41 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
  */
 function nativeClockTime(iso: string): string {
   return formatClockTime(iso).replace(" at ", ", ");
+}
+
+function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const tone = noticeTone(item);
+  const accent =
+    tone === "failed"
+      ? c["status-failed"]
+      : tone === "waiting"
+        ? c["status-waiting"]
+        : c["fg-muted"];
+  return (
+    <View
+      accessibilityRole="text"
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 10,
+        borderRadius: theme.radius.md,
+        borderWidth: 1,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderColor: tone === "neutral" ? c.border : withAlpha(accent, 0.35),
+        backgroundColor: tone === "neutral" ? c["surface-1"] : withAlpha(accent, 0.1),
+      }}
+    >
+      <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
+        <Icon name="triangle-alert" size={16} color={accent} />
+      </View>
+      <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
+        {noticeDisplayText(item)}
+      </Text>
+    </View>
+  );
 }
 
 function SeparatorRow({ text, dot }: { text: string; dot?: string | undefined }) {
@@ -569,17 +598,21 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
           }}
         >
           {item.text ? (
-            <Text
-              selectable
-              style={{
-                ...fontStyle(theme),
-                fontSize: theme.size.md,
-                lineHeight: 28,
-                color: theme.colors.fg,
-              }}
-            >
-              {item.text}
-            </Text>
+            context.renderMarkdown ? (
+              context.renderMarkdown(item.text, { tone: "body" })
+            ) : (
+              <Text
+                selectable
+                style={{
+                  ...fontStyle(theme),
+                  fontSize: theme.size.md,
+                  lineHeight: 28,
+                  color: theme.colors.fg,
+                }}
+              >
+                {item.text}
+              </Text>
+            )
           ) : null}
         </View>
         <MessageFooter

@@ -6,12 +6,15 @@ import { fontStyle, useNativeTimelineTheme } from "./theme";
 /* Web Button variants at `size="sm"` (h-9, rounded-og-md, text-og-sm font-medium). */
 
 export type ButtonVariant = "primary" | "secondary" | "destructive" | "ghost";
+/** `sm`: web Button size="sm" (h-8, text 14). `form`: the question-form action (h-9, text 12). */
+export type ButtonSize = "sm" | "form";
 
 export function Button({
   label,
   icon,
   onPress,
   variant = "secondary",
+  size = "sm",
   disabled,
   busy,
   style,
@@ -21,6 +24,7 @@ export function Button({
   icon?: NativeIconName | undefined;
   onPress?: (() => void) | undefined;
   variant?: ButtonVariant;
+  size?: ButtonSize;
   disabled?: boolean | undefined;
   busy?: boolean | undefined;
   style?: ViewStyle | undefined;
@@ -45,11 +49,11 @@ export function Button({
       onPress={onPress}
       style={({ pressed }) => [
         {
-          minHeight: 36,
+          minHeight: size === "form" ? 36 : 32,
           minWidth: label ? undefined : 44,
-          paddingHorizontal: label ? 12 : 0,
+          paddingHorizontal: label ? (size === "form" ? 12 : 10) : 0,
           borderRadius: theme.radius.md,
-          borderWidth: 1,
+          borderWidth: variant === "destructive" ? 0 : 1,
           borderColor: palette.border,
           backgroundColor: palette.bg,
           flexDirection: "row",

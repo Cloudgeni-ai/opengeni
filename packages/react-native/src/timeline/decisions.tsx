@@ -267,6 +267,7 @@ function HumanInputForm({
               <Button
                 label={messages.skip}
                 variant="ghost"
+                size="form"
                 disabled={busy}
                 onPress={() =>
                   void submit({ outcome: "skipped" } as SubmitHumanInputResponseRequest)
@@ -276,6 +277,7 @@ function HumanInputForm({
             <Button
               label={busy ? messages.submitting : messages.submit}
               variant="primary"
+              size="form"
               busy={busy}
               onPress={send}
             />
@@ -542,65 +544,69 @@ export function ApprovalStrip({ approvals, onDecide }: ApprovalStripProps) {
           <View
             key={approval.id}
             style={{
-              borderRadius: theme.radius.md,
+              borderRadius: theme.radius.lg,
               borderWidth: 1,
-              borderColor: tone.border,
-              backgroundColor: tone.surface,
-              padding: 14,
+              borderColor: withAlpha(tone.waiting, 0.3),
+              backgroundColor: withAlpha(tone.waiting, 0.06),
+              padding: 12,
+              flexDirection: "row",
+              gap: 10,
             }}
           >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Icon name="triangle-alert" size={14} color={tone.waiting} />
+            <View style={{ paddingTop: 2 }}>
+              <Icon name="circle-alert" size={16} color={tone.waiting} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
               <Text
-                style={{ ...fontStyle(theme, 600), flex: 1, fontSize: 14, color: tone.waiting }}
-                numberOfLines={1}
+                style={{ ...fontStyle(theme, 500), fontSize: 14, lineHeight: 20, color: c.fg }}
+                numberOfLines={2}
               >
                 {approval.name}
               </Text>
-            </View>
-            <ScrollView
-              style={{
-                marginTop: 8,
-                maxHeight: 160,
-                borderRadius: theme.radius.md,
-                borderWidth: 1,
-                borderColor: c.border,
-                backgroundColor: withAlpha(c["surface-2"], 0.6),
-              }}
-              contentContainerStyle={{ padding: 10 }}
-              nestedScrollEnabled
-            >
-              <Text
-                selectable
+              <ScrollView
                 style={{
-                  ...fontStyle(theme, 400, "mono"),
-                  fontSize: theme.size.sm,
-                  lineHeight: 20,
-                  color: c["fg-muted"],
+                  marginTop: 8,
+                  maxHeight: 160,
+                  borderRadius: theme.radius.md,
+                  borderWidth: 1,
+                  borderColor: c.border,
+                  backgroundColor: withAlpha(c["surface-2"], 0.6),
                 }}
+                contentContainerStyle={{ padding: 10 }}
+                nestedScrollEnabled
               >
-                {payload}
-              </Text>
-            </ScrollView>
-            <View
-              style={{ marginTop: 12, flexDirection: "row", justifyContent: "flex-end", gap: 8 }}
-            >
-              <Button
-                icon="check"
-                variant="primary"
-                label={settled[approval.id] === "approve" ? "Approved" : "Approve"}
-                busy={pending[approval.id] === "approve"}
-                disabled={busy}
-                onPress={() => void decide(approval.id, "approve")}
-              />
-              <Button
-                icon="x"
-                variant="destructive"
-                label={settled[approval.id] === "reject" ? "Rejected" : "Reject"}
-                busy={pending[approval.id] === "reject"}
-                disabled={busy}
-                onPress={() => void decide(approval.id, "reject")}
-              />
+                <Text
+                  selectable
+                  style={{
+                    ...fontStyle(theme, 400, "mono"),
+                    fontSize: theme.size.sm,
+                    lineHeight: 20,
+                    color: c["fg-muted"],
+                  }}
+                >
+                  {payload}
+                </Text>
+              </ScrollView>
+              <View
+                style={{ marginTop: 12, flexDirection: "row", justifyContent: "flex-end", gap: 8 }}
+              >
+                <Button
+                  icon="check"
+                  variant="primary"
+                  label={settled[approval.id] === "approve" ? "Approved" : "Approve"}
+                  busy={pending[approval.id] === "approve"}
+                  disabled={busy}
+                  onPress={() => void decide(approval.id, "approve")}
+                />
+                <Button
+                  icon="x"
+                  variant="destructive"
+                  label={settled[approval.id] === "reject" ? "Rejected" : "Reject"}
+                  busy={pending[approval.id] === "reject"}
+                  disabled={busy}
+                  onPress={() => void decide(approval.id, "reject")}
+                />
+              </View>
             </View>
           </View>
         );

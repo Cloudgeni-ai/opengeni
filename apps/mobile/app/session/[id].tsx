@@ -6,7 +6,7 @@ import {
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { Stack, router, useLocalSearchParams } from "expo-router";
-import { Text, View } from "react-native";
+import { Platform, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { copyText } from "@/clipboard";
@@ -38,7 +38,8 @@ function LiveSession(props: {
 }) {
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
-  const headerHeight = insets.top + 44;
+  // Native-stack header: 44pt on iOS, 64dp (Material 3) on Android, below the status bar.
+  const headerHeight = insets.top + (Platform.OS === "ios" ? 44 : 64);
   const controller = useOpenGeniNativeSession({
     client: props.client,
     sessionId: props.sessionId,

@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Platform, Text, TextInput, View } from "react-native";
+import { useEffect, useState, type ReactNode } from "react";
+import { Keyboard, Platform, Text, TextInput, View } from "react-native";
 import { IconButton } from "./controls";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -40,6 +40,7 @@ export function SessionComposer(props: SessionComposerProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const [height, setHeight] = useState(24);
+  const keyboardOpen = useKeyboardOpen();
   // Web shows the workstream control whenever the host can pause or resume.
   const showPause = Boolean(props.paused ? props.onResume : props.onPause);
   return (
@@ -47,7 +48,7 @@ export function SessionComposer(props: SessionComposerProps) {
       style={{
         paddingHorizontal: 16,
         paddingTop: 4,
-        paddingBottom: Math.max(16, (props.bottomInset ?? 0) + 4),
+        paddingBottom: keyboardOpen ? 8 : Math.max(16, (props.bottomInset ?? 0) + 4),
         backgroundColor: c.bg,
       }}
     >
@@ -129,6 +130,26 @@ export function SessionComposer(props: SessionComposerProps) {
       </View>
     </View>
   );
+}
+
+/** The home-indicator inset only applies while the keyboard is closed. */
+function useKeyboardOpen(): boolean {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => setOpen(true),
+    );
+    const hide = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setOpen(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  return open;
 }
 
 /** The web model pill ("6 Luna ⌄"): a quiet toolbar chip that opens host options. */

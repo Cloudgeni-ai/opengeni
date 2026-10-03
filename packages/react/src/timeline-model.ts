@@ -95,3 +95,4 @@ export { isActionableHumanInputRequest } from "./human-input";
 export { SESSION_STATUS_PRESENTATION } from "./session-status-model";
 export type { SessionStatusTone } from "./session-status-model";
 export { formatRelativeTime } from "./lib/format";
+export { noticeDisplayText, noticeTone } from "./timeline/notice-presentation";

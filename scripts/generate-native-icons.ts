@@ -30,6 +30,7 @@ const ICONS: Record<string, string> = {
   "chevron-left": "ChevronLeftIcon",
   "chevron-right": "ChevronRightIcon",
   "chevron-up": "ChevronUpIcon",
+  "circle-alert": "CircleAlertIcon",
   "circle-slash": "CircleSlashIcon",
   copy: "CopyIcon",
   "file-diff": "FileDiffIcon",
