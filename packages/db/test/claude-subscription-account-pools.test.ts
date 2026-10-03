@@ -915,6 +915,87 @@ test("accepted private authority survives disconnect while catalog access closes
   expect(restrictions["organization-claude-subscription/"]).toEqual([]);
 });
 
+test("same-generation renewal clears obsolete reconnect evidence and fences old refusals", async () => {
+  const input = await fixture(),
+    { a } = await pool(input),
+    running = await turn(input);
+  const authority = { ...input, credentialId: a.account.id };
+  const original = await materializeClaudeSubscriptionAccountForRun(client.db, {
+    ...authority,
+    encryptionKey,
+  });
+  const holderId = "fixture-holder-" + randomUUID();
+  const lease = await acquireClaudeCredentialLease(client.db, {
+    ...input,
+    ...running,
+    holderId,
+    upstreamModelId: "claude-opus-fixture",
+    pinnedCredentialId: a.account.id,
+    pinSource: "manual",
+  });
+  await rejectOpus(input, a.account.id, original.version);
+  const cooldown = new Date(Date.now() + 120_000);
+  await recordClaudeAccountUsage(client.db, authority, {
+    encryptionKey,
+    token: original.secret.token,
+    expectedCredentialVersion: original.version,
+    refresh: { status: "reconnect", checkedAt: new Date().toISOString() },
+    modelCooldown: { upstreamModelId: "claude-sonnet-fixture", until: cooldown },
+  });
+  const before = await listClaudeAccountUsage(client.db, input, [a.account]);
+  const renewed = await refreshClaudeSubscriptionAccountSerialized(client.db, {
+    ...authority,
+    encryptionKey,
+    observedAccessToken: original.secret.token,
+    observedRefreshToken: original.secret.oauth!.refreshToken,
+    refresh: async () => ({
+      secret: { ...original.secret, token: "sk-ant-oat01-fixture-" + randomUUID() },
+      expiresAt: new Date(original.secret.oauth!.expiresAt),
+    }),
+  });
+  expect(renewed.credential.version).toBe(original.version);
+  const after = (await listClaudeAccountUsage(client.db, input, [a.account])).get(a.account.id)!;
+  expect(after.refreshStatus).toBe("not_checked");
+  expect(after.refreshCheckedAt).toBeNull();
+  expect(after.windows).toEqual(before.get(a.account.id)!.windows);
+  const [retained] =
+    await shared.admin`select model_cooldowns from claude_subscription_account_usage where credential_id = ${a.account.id}`;
+  expect(retained!.model_cooldowns["claude-sonnet-fixture"]).toBe(cooldown.toISOString());
+  const wait = {
+    ...input,
+    ...running,
+    earliestResetAt: null,
+    failurePayload: { code: "claude_relogin_required" },
+    leaseFence: { holderId, generation: lease.generation! },
+    expectedCredentialVersion: original.version,
+    credentialQuarantine: {
+      kind: "status" as const,
+      status: "needs_relogin" as const,
+      lastError: "Synthetic refusal",
+    },
+  };
+  expect(
+    await armClaudeCapacityWait(client.db, {
+      ...wait,
+      credentialTokenFence: { encryptionKey, observedAccessToken: original.secret.token },
+    }),
+  ).toMatchObject({ action: "stale" });
+  expect(
+    await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
+  ).toBeNull();
+  expect(
+    (await listClaudeSubscriptionAccountsMetadata(client.db, input)).find(
+      (value) => value.id === a.account.id,
+    )?.status,
+  ).toBe("active");
+  expect(
+    await armClaudeCapacityWait(client.db, {
+      ...wait,
+      credentialTokenFence: { encryptionKey, observedAccessToken: renewed.credential.secret.token },
+    }),
+  ).toMatchObject({ action: "waiting" });
+});
+
 test("an old attempt cannot quarantine a replaced subscription generation", async () => {
   const input = await fixture(),
     { a } = await pool(input),
@@ -929,6 +1010,11 @@ test("an old attempt cannot quarantine a replaced subscription generation", asyn
     pinSource: "manual",
   });
   const credential = secret();
+  const original = await materializeClaudeSubscriptionAccountForRun(client.db, {
+    ...input,
+    credentialId: a.account.id,
+    encryptionKey,
+  });
   const replacement = await upsertClaudeSubscriptionAccount(client.db, {
     ...input,
     credentialId: a.account.id,
@@ -945,6 +1031,7 @@ test("an old attempt cannot quarantine a replaced subscription generation", asyn
       failurePayload: { code: "claude_relogin_required" },
       leaseFence: { holderId, generation: lease.generation! },
       expectedCredentialVersion: a.account.version,
+      credentialTokenFence: { encryptionKey, observedAccessToken: original.secret.token },
       credentialQuarantine: {
         kind: "status",
         status: "needs_relogin",
@@ -1127,6 +1214,85 @@ test("Claude waiter keeps a manual pin binding and resumes after the explicit pi
     action: "resumed",
   });
 });
+
+test.each(["pool", "credential", "without quarantine"])(
+  "capacity settlement rejects a lease expiring during %s contention",
+  async (contention) => {
+    const input = await fixture(),
+      { a } = await pool(input),
+      running = await turn(input);
+    const holderId = "fixture-holder-" + randomUUID();
+    const lease = await acquireClaudeCredentialLease(client.db, {
+      ...input,
+      ...running,
+      holderId,
+      upstreamModelId: "claude-opus-fixture",
+      pinnedCredentialId: a.account.id,
+      pinSource: "manual",
+    });
+    const credential = await materializeClaudeSubscriptionAccountForRun(client.db, {
+      ...input,
+      credentialId: a.account.id,
+      encryptionKey,
+    });
+    let unlock!: () => void, locked!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const holding = shared.admin.begin(async (tx) => {
+      if (contention === "credential")
+        await tx`select id from claude_subscription_credentials where id = ${a.account.id} for update`;
+      else
+        await tx`select id from claude_rotation_settings where workspace_id = ${input.workspaceId} for update`;
+      locked();
+      await release;
+    });
+    await ready;
+    try {
+      await shared.admin`update claude_credential_leases set leased_until = clock_timestamp() + interval '300 milliseconds' where turn_id = ${running.turnId}`;
+      const pending = armClaudeCapacityWait(client.db, {
+        ...input,
+        ...running,
+        earliestResetAt: null,
+        now: new Date(),
+        failurePayload: { code: "claude_relogin_required" },
+        leaseFence: { holderId, generation: lease.generation! },
+        expectedCredentialVersion: credential.version,
+        ...(contention === "without quarantine"
+          ? {}
+          : {
+              credentialTokenFence: { encryptionKey, observedAccessToken: credential.secret.token },
+              credentialQuarantine: {
+                kind: "status" as const,
+                status: "needs_relogin" as const,
+                lastError: "Synthetic refusal",
+              },
+            }),
+      });
+      await Bun.sleep(700);
+      unlock();
+      await holding;
+      expect(await pending).toMatchObject({ action: "stale" });
+      expect(
+        await getClaudeCapacityWaitForSession(client.db, input.workspaceId, running.sessionId),
+      ).toBeNull();
+      expect(
+        (await listClaudeSubscriptionAccountsMetadata(client.db, input)).find(
+          (value) => value.id === a.account.id,
+        )?.status,
+      ).toBe("active");
+      const [attempt] =
+        await shared.admin`select state from session_turn_attempts where id = ${running.attemptId}`;
+      expect(attempt!.state).toBe("running");
+    } finally {
+      unlock();
+      await holding;
+    }
+  },
+);
 
 test("pool lock contention does not consume lease TTL and expired holders advance generation", async () => {
   const input = await fixture(),
