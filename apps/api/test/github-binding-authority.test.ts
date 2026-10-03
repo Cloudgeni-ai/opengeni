@@ -109,7 +109,8 @@ afterAll(async () => {
   if (shared) {
     await shared.admin`delete from organization_memberships where account_id = ${accountId}`;
     await shared.admin`delete from managed_accounts where id = ${accountId}`;
-    await shared.admin`delete from auth_users where id = ${userId}`;
+    // Retain the unique auth user with its canonical subject; their FK is
+    // intentional. The disposable test database owns identity cleanup.
   }
   await client?.close();
   await shared?.release();

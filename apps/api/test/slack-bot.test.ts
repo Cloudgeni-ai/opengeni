@@ -90,6 +90,7 @@ beforeAll(async () => {
   client = createDb(shared.appUrl);
   settings = testSettings({
     productAccessMode: "managed",
+    integrationsEnabled: true,
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: ENCRYPTION_KEY,
     publicBaseUrl: "https://app.example.test",
@@ -118,6 +119,7 @@ afterEach(async () => {
     await sql`delete from memory_slack_publication_receipts where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from memory_slack_publications where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from memory_slack_publication_configurations where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from external_identities where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from organization_memberships where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from managed_accounts where name = 'slack bot acct'`;
     await sql`alter table memory_slack_publication_configurations enable trigger memory_slack_publication_configurations_immutable`;

@@ -1203,14 +1203,55 @@ describe("connections routes", () => {
     );
     expect(gmail.status).toBe(403);
 
-    // The two personal-only first-party connectors carry no ownership field at
-    // all, so their start routes fence the principal directly.
-    for (const path of ["google-drive", "atlassian"]) {
-      const response = await app().request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/${path}/install`,
-        { method: "POST", headers, body: JSON.stringify({}) },
+    // Personal-only connectors reject a service at the ownership-value fence
+    // (422), before parsing the payload or checking verified-person authority.
+    let providerCalls = 0;
+    const refuseProviderFetch = async () => {
+      providerCalls += 1;
+      throw new Error("a refused first-party install must not call its provider");
+    };
+    const installApp = appWithDeps(
+      {},
+      { googleDriveFetch: refuseProviderFetch, atlassianFetch: refuseProviderFetch },
+    );
+    const beforeInstall = await listConnectionsMetadata(client.db, workspace.workspaceId, null);
+    const legacyHumanHeaders = {
+      ...headers,
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+    };
+    for (const { path, payload } of [
+      { path: "google-drive", payload: { capability: "source_read" } },
+      { path: "atlassian", payload: {} },
+    ]) {
+      const installPath = `/v1/workspaces/${workspace.workspaceId}/connections/${path}/install`;
+      for (const servicePayload of [{}, payload]) {
+        const response = await installApp.request(installPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(servicePayload),
+        });
+        expect(response.status).toBe(422);
+        expect(await response.text()).toContain("requires an authenticated human");
+        expect(response.headers.get("set-cookie")).toBeNull();
+      }
+
+      // A human-shaped bearer passes the ownership-value check, but is not a
+      // verified owning person. A valid payload must reach that separate gate.
+      const legacyHuman = await installApp.request(installPath, {
+        method: "POST",
+        headers: legacyHumanHeaders,
+        body: JSON.stringify(payload),
+      });
+      expect(legacyHuman.status).toBe(403);
+      expect(await legacyHuman.text()).toContain("Verified owning-user authority required");
+      expect(legacyHuman.headers.get("set-cookie")).toBeNull();
+      expect(providerCalls).toBe(0);
+      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, null)).toEqual(
+        beforeInstall,
       );
-      expect(response.status).toBe(403);
     }
   });
 
