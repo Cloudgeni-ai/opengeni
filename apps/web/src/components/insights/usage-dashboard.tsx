@@ -46,6 +46,7 @@ import {
   type UsageFilterField,
   type UsageGroupBy,
   type UsageMeasures,
+  type UsagePayerId,
   type UsageResponse,
   type UsageScope,
 } from "./usage-contract";
@@ -412,7 +413,9 @@ function FilterBar(props: {
   );
   push(
     "payer",
-    facets.payers.map((p) => ({ ids: [p], label: payerName(p) })),
+    facets.payers
+      .filter((p): p is UsagePayerId => (PAYER_IDS as readonly string[]).includes(p))
+      .map((p) => ({ ids: [p], label: payerName(p) })),
   );
   push(
     "projectId",
