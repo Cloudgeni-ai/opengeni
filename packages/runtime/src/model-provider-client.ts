@@ -26,7 +26,10 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
-import { recordModelTransportStarted } from "./model-preparation-diagnostics";
+import {
+  recordModelTransportDispatched,
+  recordModelTransportStarted,
+} from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -417,6 +420,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
+    recordModelTransportDispatched(started);
     try {
       const response = await inner(input, capture.init);
       prepared.observe(response, claudeRequestToken);
