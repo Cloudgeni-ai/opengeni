@@ -68,6 +68,11 @@ const LazyOrganizationConnectedAgents = lazy(async () => {
   return { default: module.OrganizationConnectedAgents };
 });
 
+const LazyOrganizationServiceAccounts = lazy(async () => {
+  const module = await import("@/components/organization-access/organization-service-accounts");
+  return { default: module.OrganizationServiceAccounts };
+});
+
 const LazyOrganizationInsightsPage = lazy(async () => {
   const module = await import("@/components/organization/insights-page");
   return { default: module.OrganizationInsightsPage };
@@ -291,7 +296,18 @@ export function OrgSettingsRoute({
     Boolean(accountId) &&
     hasAccountPermission(context.accessContext, accountId, "account:admin");
   // A webhook or provider page, or a form, brings its own back link and title.
-  const developerSubPage = Boolean(developer?.view || developer?.webhook || developer?.agent);
+  // Create API key may name a service account to hold the key; that is the key
+  // form, not the service account's page.
+  const keyServiceAccount = organizationView === "new-key" ? developer?.serviceAccount : undefined;
+  const serviceAccountsLocation =
+    developer?.view === "new-service-account"
+      ? { view: "new-service-account" as const }
+      : developer?.serviceAccount && !keyServiceAccount
+        ? { serviceAccount: developer.serviceAccount }
+        : null;
+  const developerSubPage = Boolean(
+    developer?.view || developer?.webhook || developer?.agent || serviceAccountsLocation,
+  );
   // Connected agents belong to the people who connect them, so any signed-in
   // member sees their own; keys and services have none.
   const showConnectedAgents =
@@ -310,6 +326,10 @@ export function OrgSettingsRoute({
       : developer?.agent
         ? { agent: developer.agent }
         : {};
+  const listServiceAccounts = useCallback(
+    async () => (await client.listOrganizationServiceAccounts(accountId)).serviceAccounts,
+    [accountId, client],
+  );
   const navigateDeveloper = (next: DeveloperLocation) =>
     void navigate({
       to: "/workspaces/$workspaceId/organization",
@@ -467,6 +487,27 @@ export function OrgSettingsRoute({
                   : {})}
               />
             </Suspense>
+          ) : !modelsRefused &&
+            section === "developer" &&
+            canManageOrganizationApiKeys &&
+            serviceAccountsLocation ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationServiceAccounts
+                key={`${identityKey}:service-accounts`}
+                client={client}
+                organizationId={accountId}
+                canMakeAdmin={canManageOrganizationIntegrations}
+                location={serviceAccountsLocation}
+                onNavigate={navigateDeveloper}
+                onCreateKey={(serviceAccount) =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: { section: "developer", view: "new-key", serviceAccount },
+                  })
+                }
+              />
+            </Suspense>
           ) : !modelsRefused && section === "developer" && developerSubPage ? (
             <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
               <OrganizationDeveloperIntegrations
@@ -492,6 +533,25 @@ export function OrgSettingsRoute({
                   />
                 </Suspense>
               ) : null}
+              {organizationView !== "new-key" && canManageOrganizationApiKeys && accountId ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationServiceAccounts
+                    key={`${identityKey}:service-accounts`}
+                    client={client}
+                    organizationId={accountId}
+                    canMakeAdmin={canManageOrganizationIntegrations}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                    onCreateKey={(serviceAccount) =>
+                      void navigate({
+                        to: "/workspaces/$workspaceId/organization",
+                        params: { workspaceId },
+                        search: { section: "developer", view: "new-key", serviceAccount },
+                      })
+                    }
+                  />
+                </Suspense>
+              ) : null}
               <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
                 <LazyOrganizationApiKeysSection
                   key={`${identityKey}:organization-api-keys`}
@@ -514,6 +574,8 @@ export function OrgSettingsRoute({
                     await client.deleteOrganizationApiKey(accountId, apiKeyId)
                   }
                   workspaces={organizationWorkspaces.workspaces}
+                  listServiceAccounts={listServiceAccounts}
+                  {...(keyServiceAccount ? { initialServiceAccountId: keyServiceAccount } : {})}
                 />
               </Suspense>
               {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
