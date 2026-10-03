@@ -12170,6 +12170,11 @@ export const modelCallFacts = pgTable(
       mode: "number",
     }),
     pricingSource: text("pricing_source"),
+    listUncachedInputCostMicros: bigint("list_uncached_input_cost_micros", { mode: "number" }),
+    listCacheReadCostMicros: bigint("list_cache_read_cost_micros", { mode: "number" }),
+    listCacheWriteCostMicros: bigint("list_cache_write_cost_micros", { mode: "number" }),
+    listOutputCostMicros: bigint("list_output_cost_micros", { mode: "number" }),
+    listCostIsApprox: boolean("list_cost_is_approx"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
@@ -12222,6 +12227,34 @@ export const modelCallFacts = pgTable(
       sql`(${table.estimatedProviderCostMicros} is null and ${table.pricingSource} is null)
         or (${table.estimatedProviderCostMicros} is not null
           and ${table.pricingSource} in ('configured_list_price', 'gateway_reported'))`,
+    ),
+    listUncachedInputCostValid: check(
+      "model_call_facts_list_uncached_input_cost_micros_check",
+      sql`${table.listUncachedInputCostMicros} >= 0`,
+    ),
+    listCacheReadCostValid: check(
+      "model_call_facts_list_cache_read_cost_micros_check",
+      sql`${table.listCacheReadCostMicros} >= 0`,
+    ),
+    listCacheWriteCostValid: check(
+      "model_call_facts_list_cache_write_cost_micros_check",
+      sql`${table.listCacheWriteCostMicros} >= 0`,
+    ),
+    listOutputCostValid: check(
+      "model_call_facts_list_output_cost_micros_check",
+      sql`${table.listOutputCostMicros} >= 0`,
+    ),
+    listClassesValid: check(
+      "model_call_facts_list_classes_check",
+      sql`
+      (${table.listUncachedInputCostMicros} is null and ${table.listCacheReadCostMicros} is null
+        and ${table.listCacheWriteCostMicros} is null and ${table.listOutputCostMicros} is null)
+      or (${table.estimatedProviderCostMicros} is not null and ${table.listCostIsApprox} is not null
+        and ${table.listUncachedInputCostMicros} is not null and ${table.listCacheReadCostMicros} is not null
+        and ${table.listCacheWriteCostMicros} is not null and ${table.listOutputCostMicros} is not null
+        and ${table.estimatedProviderCostMicros}::numeric = ${table.listUncachedInputCostMicros}::numeric
+          + ${table.listCacheReadCostMicros}::numeric + ${table.listCacheWriteCostMicros}::numeric
+          + ${table.listOutputCostMicros}::numeric)`,
     ),
     initiatorConsistent: check(
       "model_call_facts_initiator_check",

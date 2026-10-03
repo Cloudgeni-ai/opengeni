@@ -82,4 +82,6 @@ export const embeddingMigrationTail = [
   "0584_agent_instruction_size_parity.sql",
   // Extends the cursor table and meaningful index withheld by these fixtures.
   "0585_session_attention_cursor.sql",
+  // Uses the existing session inventory/capability routines withheld by these fixtures.
+  "0602_insights_raw_usage_api.sql",
 ];

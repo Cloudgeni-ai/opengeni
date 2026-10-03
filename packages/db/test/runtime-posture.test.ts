@@ -593,6 +593,14 @@ describe("runtime database posture evaluator", () => {
 
   const modelFactCapabilities = [
     {
+      name: "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+      violation: "Insights unified usage projection is missing or unsafe",
+    },
+    {
+      name: "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+      violation: "Insights unified visible calls projection is missing or unsafe",
+    },
+    {
       name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
       violation: "Insights complete usage amount projection is missing or unsafe",
     },

@@ -4051,6 +4051,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/insights/calls",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/insights/usage",
+      "sdk": [
+        "createSessionProxyHandler"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/instruction-policies",
       "sdk": [
         "OpenGeniClient.listWorkspaceInstructionPolicies"
@@ -14907,7 +14925,7 @@
         "$.estimatedProviderCostKnownCalls": "integer!",
         "$.estimatedProviderUsd": "number!",
         "$.id": "string!",
-        "$.kind": "enum!=[\"\\\"other\\\"\",\"\\\"project\\\"\",\"\\\"unavailable\\\"\",\"\\\"unfiled\\\"\"]",
+        "$.kind": "enum!=[\"\\\"deleted\\\"\",\"\\\"other\\\"\",\"\\\"project\\\"\",\"\\\"unavailable\\\"\",\"\\\"unfiled\\\"\"]",
         "$.label": "string!",
         "$.projects": "integer!",
         "$.rootSessions": "integer!",
@@ -24383,6 +24401,7 @@
         "$.models": "array!",
         "$.models[]": "ref(InsightsModelUsageRow)",
         "$.priorCacheHitPct": "integer!",
+        "$.priorCacheInputTokens": "number?",
         "$.priorCalls": "integer!",
         "$.priorCreditUsd": "number!",
         "$.priorEquivalentCreditCostKnownCalls": "integer!",

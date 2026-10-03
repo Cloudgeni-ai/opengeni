@@ -162,6 +162,13 @@
       "when": 1782864000000,
       "tag": "0022_sandbox_lease_terminal_url",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791028800000,
+      "tag": "0602_insights_raw_usage_api",
+      "breakpoints": true
     }
   ]
 }

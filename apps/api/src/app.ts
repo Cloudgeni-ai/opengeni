@@ -268,6 +268,7 @@ import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
+import { registerInsightsUsageRoutes } from "./routes/insights-usage";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
@@ -1698,6 +1699,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
+  registerInsightsUsageRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceLearningRoutes(app, routeDeps);
   registerCompanyProfileRoutes(app, routeDeps);
@@ -2492,6 +2494,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/insights$/,
     label: "/v1/workspaces/:workspaceId/insights",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights\/usage$/,
+    label: "/v1/workspaces/:workspaceId/insights/usage",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights\/calls$/,
+    label: "/v1/workspaces/:workspaceId/insights/calls",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/insights\/usage$/,
+    label: "/v1/organizations/:accountId/insights/usage",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/insights\/calls$/,
+    label: "/v1/organizations/:accountId/insights/calls",
   },
   {
     pattern: /^\/v1\/billing\/entitlements$/,

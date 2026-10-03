@@ -6,6 +6,15 @@ and reports success.
 
 ## The mechanism
 
+The rolling `0602_insights_raw_usage_api.sql` endpoint checkpoint performs no
+data backfill and does not relax FORCE RLS. Its scoped readers reuse the
+existing owner-only Insights read capability and session inventory windows;
+the raw intermediate helper additionally attests the schema owner, so direct
+application EXECUTE cannot expose unmasked rows. The owner/app fixture verifies
+historical rows remain readable, policies unchanged, and capabilities cleaned
+up. Daily rollup backfill remains a separate migration with its own owner
+posture/convergence gate.
+
 `FORCE ROW LEVEL SECURITY` binds the **table owner**, not merely ordinary roles.
 Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. OpenGeni's
 documented deployment posture ([`deployment.md`](deployment.md)) runs migrations

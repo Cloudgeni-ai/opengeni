@@ -41,6 +41,8 @@ export type ModelCallUsageTelemetry = {
 export type ModelCallUsageNormalization = {
   telemetry: ModelCallUsageTelemetry;
   totalTokens: number | null;
+  /** Validated provider TTL evidence for forward-only pricing snapshots, never a debit override. */
+  cacheWriteTokensByTtl?: { fiveMinute: number | null; oneHour: number | null };
   /** Complete normalized per-request usage for exact tiered pricing when available. */
   requestUsageEntries?: Array<{
     inputTokens: number;
@@ -49,6 +51,8 @@ export type ModelCallUsageNormalization = {
     inputTokensDetails?: {
       cached_tokens?: number;
       cache_write_tokens?: number;
+      cache_write_tokens_5m?: number;
+      cache_write_tokens_1h?: number;
     };
   }>;
   /** Bounded field paths only; raw provider values are never retained. */
@@ -152,6 +156,18 @@ export function normalizeModelCallUsage(
     requestEntries,
     ["outputTokensDetails", "output_tokens_details"],
   );
+  const fiveMinuteCacheWriteTokens = aggregateDetailTokenCount(
+    inputDetailSource,
+    ["cache_write_tokens_5m"],
+    "cacheWriteTokens5m",
+    rejectedFields,
+  );
+  const oneHourCacheWriteTokens = aggregateDetailTokenCount(
+    inputDetailSource,
+    ["cache_write_tokens_1h"],
+    "cacheWriteTokens1h",
+    rejectedFields,
+  );
   const normalizedRequestUsageEntries =
     requestEntries.length > 0 &&
     requestInputTokens.status === "complete" &&
@@ -171,6 +187,12 @@ export function normalizeModelCallUsage(
             ...(normalized.telemetry.cacheWriteTokens === null
               ? {}
               : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
+            ...(normalized.cacheWriteTokensByTtl?.fiveMinute == null
+              ? {}
+              : { cache_write_tokens_5m: normalized.cacheWriteTokensByTtl.fiveMinute }),
+            ...(normalized.cacheWriteTokensByTtl?.oneHour == null
+              ? {}
+              : { cache_write_tokens_1h: normalized.cacheWriteTokensByTtl.oneHour }),
           };
           return {
             inputTokens: normalized.telemetry.inputTokens!,
@@ -207,6 +229,14 @@ export function normalizeModelCallUsage(
       ),
     },
     totalTokens,
+    ...(fiveMinuteCacheWriteTokens === null && oneHourCacheWriteTokens === null
+      ? {}
+      : {
+          cacheWriteTokensByTtl: {
+            fiveMinute: fiveMinuteCacheWriteTokens,
+            oneHour: oneHourCacheWriteTokens,
+          },
+        }),
     ...(normalizedRequestUsageEntries
       ? { requestUsageEntries: normalizedRequestUsageEntries }
       : {}),
