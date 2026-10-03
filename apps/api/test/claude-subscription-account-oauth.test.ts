@@ -24,9 +24,9 @@ import {
 let shared: SharedTestDatabase, client: DbClient, deps: ApiRouteDeps;
 const encryptionKey = Buffer.alloc(32, 55);
 beforeAll(async () => {
-  const fixture = await acquireSharedTestDatabase("claude-account-oauth");
-  if (!fixture) throw new Error("Real PostgreSQL required");
-  shared = fixture;
+  const acquired = await acquireSharedTestDatabase("claude-account-oauth");
+  if (!acquired) throw new Error("Real PostgreSQL required");
+  shared = acquired;
   client = createDb(shared.appUrl);
   deps = {
     db: client.db,

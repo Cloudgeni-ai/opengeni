@@ -2,54 +2,31 @@ import { SubscriptionAccountPoolRows, subscriptionListedCount } from "./subscrip
 import { SubscriptionAccountPage } from "./subscription-account-detail";
 import type { SuperGrokAccount } from "@opengeni/sdk";
 import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
-import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
   ConnectionAccessFormPage,
-  ConnectionAccessRows,
   useConnectionAccess,
 } from "@/components/connection-access-settings";
 import {
   ModelsFormPage,
-  NOT_IN_USE,
   ProviderTile,
-  organizationReachLabel,
-  RenameAccountDialog,
   type ModelsScopeLabels,
-  useModelsListLabel,
 } from "@/components/models/models-ui";
-import { reachesWorkspace } from "@/components/models/organization-codex-models";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import {
   SuperGrokDeviceCodePanel,
   superGrokAccountName,
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
-import { Button } from "@/components/ui/button";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import {
-  DetailFact,
-  DetailFacts,
-  DetailSection,
-  DetailSkeleton,
-} from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
+import { DetailSection } from "@/components/ui/detail-sheet";
 import { FieldStack } from "@/components/ui/field";
-import { ListRow, ListRowSkeleton } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
+import { ListRow } from "@/components/ui/list-row";
 import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    SuperGrok on Settings > Models, at workspace and organization scope: the
@@ -279,10 +256,6 @@ export function formatReset(value: string): string {
   return Number.isNaN(date.getTime())
     ? value
     : date.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short" });
-}
-
-function ManagedNote({ children }: { children: ReactNode }) {
-  return <p className="m-0 pt-2 pb-6 text-sm leading-5 text-fg-muted">{children}</p>;
 }
 
 export function SuperGrokAccessPage({

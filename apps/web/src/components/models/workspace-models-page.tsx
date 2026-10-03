@@ -308,7 +308,7 @@ export function WorkspaceModelsPageBody({
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
       catalogConnection: {
-        connected: claude.accounts.some((account) => account.status === "active"),
+        connected: claude.accounts.some((candidate) => candidate.status === "active"),
         loaded: !claude.loading,
         error: claude.loadError ? new Error(claude.loadError) : null,
       },

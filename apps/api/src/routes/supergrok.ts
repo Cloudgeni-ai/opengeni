@@ -1,6 +1,5 @@
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 import {
-  managedCookieHuman,
   requireSameOriginBrowserMutation,
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -18,10 +17,7 @@ import {
   environmentsEncryptionKeyBytes,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
-import {
-  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-  type XaiProviderAccountAuthoritySnapshotV1,
-} from "@opengeni/contracts";
+import { type XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import {
   disconnectXaiSubscriptionCredentialAndRepick,
   ensureXaiRotationSettings,
@@ -40,12 +36,10 @@ import {
   wakeXaiCapacityWaiters,
   encryptEnvironmentValue,
   decryptEnvironmentValue,
-  getWorkspaceGrant,
   type XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
-  getManagedSession,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
@@ -87,12 +81,6 @@ const connectStartBody = z.object({
   scope: z.enum(["workspace", "user"]).default("workspace"),
 });
 const connectPollBody = z.object({ state: z.string().min(1).max(16_384) });
-const allocatorBody = z.object({
-  enabled: z.boolean(),
-  expectedVersion: z.number().int().positive(),
-});
-const settingsBody = z.object({ rotationEnabled: z.boolean() });
-const renameBody = z.object({ label: z.string().trim().max(200).nullable() });
 
 function requireEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.supergrokSubscriptionEnabled) {
@@ -263,27 +251,6 @@ async function materializedAuthContext(
       },
     },
   };
-}
-
-async function authorityForAccountMutation(
-  c: Context,
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  credentialId: string,
-): Promise<{
-  accountId: string;
-  subjectId: string;
-  snapshot: XaiAuthoritySnapshot;
-}> {
-  const readGrant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-  const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
-    workspaceId,
-    subjectId: readGrant.subjectId,
-    credentialId,
-  });
-  if (!snapshot) throw new HTTPException(404, { message: "SuperGrok account not found" });
-  const mutation = await requireScopeMutation(c, deps, workspaceId, snapshot.scope);
-  return { ...mutation, snapshot };
 }
 
 export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {

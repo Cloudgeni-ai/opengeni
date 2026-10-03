@@ -19,7 +19,7 @@ import {
   listClaudeSubscriptionAccountsMetadata,
   getClaudeRotationSettings,
   setInitialActiveClaudeCredential,
-  setActiveClaudeCredential,
+  setActiveClaudeCredential as pinClaudeCredential,
   updateClaudeRotationSettings,
   selectClaudeCredentialForUse,
   acquireClaudeCredentialLease,
@@ -31,8 +31,8 @@ import {
 } from "../src/claude-subscription-accounts";
 import { resolveClaudeAccountCredential } from "../src/claude-subscription-account-tokens";
 import {
-  recordClaudeAccountUsage,
-  listClaudeAccountUsage,
+  recordClaudeAccountUsage as recordAccountUsage,
+  listClaudeAccountUsage as listAccountUsage,
 } from "../src/claude-subscription-account-usage";
 
 let shared: SharedTestDatabase;
@@ -45,9 +45,9 @@ const tokenSettings = getSettings({
   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: encryptionKey.toString("base64"),
 });
 beforeAll(async () => {
-  const fixture = await acquireSharedTestDatabase("claude-account-pools");
-  if (!fixture) throw new Error("Real PostgreSQL required");
-  shared = fixture;
+  const acquired = await acquireSharedTestDatabase("claude-account-pools");
+  if (!acquired) throw new Error("Real PostgreSQL required");
+  shared = acquired;
   client = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {
@@ -219,7 +219,7 @@ test("forced OAuth renewal serializes rejected tokens without changing account i
   await resolveClaudeAccountCredential(client.db, tokenSettings, authority, options);
   expect(refreshes).toBe(1);
   expect(
-    await recordClaudeAccountUsage(client.db, authority, {
+    await recordAccountUsage(client.db, authority, {
       encryptionKey,
       token: before.secret.token,
       expectedCredentialVersion: before.version,
@@ -252,7 +252,7 @@ test("setup tokens never refresh and invalid OAuth grants become ineligible", as
   expect(refreshes).toBe(0);
   const connected = await account(input);
   const authority = { ...input, credentialId: connected.account.id };
-  await setActiveClaudeCredential(client.db, { ...input, credentialId: connected.account.id });
+  await pinClaudeCredential(client.db, { ...input, credentialId: connected.account.id });
   const rotation = (await getClaudeRotationSettings(client.db, input))!;
   await updateClaudeRotationSettings(client.db, {
     ...input,
@@ -296,7 +296,7 @@ test("local model backpressure preserves reported usage and cannot cross account
     expectedCredentialVersion: credential.version,
     token: credential.secret.token,
   };
-  await recordClaudeAccountUsage(client.db, authority, {
+  await recordAccountUsage(client.db, authority, {
     ...receipt,
     observation: {
       source: "response_headers",
@@ -312,16 +312,14 @@ test("local model backpressure preserves reported usage and cannot cross account
       ],
     },
   });
-  const before = (await listClaudeAccountUsage(client.db, input, [a.account])).get(a.account.id)!;
-  await recordClaudeAccountUsage(client.db, authority, {
+  const before = (await listAccountUsage(client.db, input, [a.account])).get(a.account.id)!;
+  await recordAccountUsage(client.db, authority, {
     ...receipt,
     modelCooldown: { upstreamModelId: "claude-opus-fixture", until },
   });
-  expect((await listClaudeAccountUsage(client.db, input, [a.account])).get(a.account.id)).toEqual(
-    before,
-  );
+  expect((await listAccountUsage(client.db, input, [a.account])).get(a.account.id)).toEqual(before);
   expect(
-    await recordClaudeAccountUsage(
+    await recordAccountUsage(
       client.db,
       { ...authority, credentialId: b.account.id },
       { ...receipt, modelCooldown: { upstreamModelId: "claude-opus-fixture", until } },
@@ -780,23 +778,23 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
   };
   const policy = (await getModelConnectionAccess(client.db, target))!;
   await updateModelConnectionAccess(client.db, target, { ...policy, allowedModels: [sonnet] });
-  const turn = {
+  const turnInput = {
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     modelId: opus,
     claudeCredentialId: a.account.id,
     claudeAuthoritySnapshot: authoritySnapshot,
   };
-  await expect(assertModelConnectionAllowsTurn(client.db, turn)).rejects.toThrow("disabled");
+  await expect(assertModelConnectionAllowsTurn(client.db, turnInput)).rejects.toThrow("disabled");
   await expect(
-    assertModelConnectionAllowsTurn(client.db, { ...turn, claudeCredentialId: b.account.id }),
+    assertModelConnectionAllowsTurn(client.db, { ...turnInput, claudeCredentialId: b.account.id }),
   ).resolves.toBeUndefined();
   await expect(
-    assertModelConnectionAllowsTurn(client.db, { ...turn, modelId: sonnet }),
+    assertModelConnectionAllowsTurn(client.db, { ...turnInput, modelId: sonnet }),
   ).resolves.toBeUndefined();
   await expect(
     assertModelConnectionAllowsTurn(client.db, {
-      ...turn,
+      ...turnInput,
       claudeAuthoritySnapshot: { version: 1, scope: "organization" },
     }),
   ).rejects.toThrow("accepted");
