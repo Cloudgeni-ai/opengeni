@@ -617,3 +617,230 @@ test("HTTP readers preserve actual debit totals while enforcing the delegated de
     nextCursor: null,
   });
 }, 120_000);
+
+test("daily HTTP reads retain ledger-period money and live selected-key, project and visibility ceilings", async () => {
+  const scope = await fixture();
+  const outside = { ...scope, workspaceId: crypto.randomUUID() };
+  await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by)
+    values(${scope.accountId},1,${"0".repeat(64)},${"1".repeat(64)},'isolated-daily-http-test')`;
+  await shared.admin`insert into workspaces(id,account_id,name)
+    values(${outside.workspaceId},${scope.accountId},'OUTSIDE DAILY WORKSPACE')`;
+  await shared.admin`insert into workspace_inference_controls(workspace_id,account_id)
+    values(${outside.workspaceId},${scope.accountId})`;
+  await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
+    values(${scope.accountId},${outside.workspaceId},${scope.subjectId},'owner','[]'::jsonb)`;
+  const sessions = [];
+  for (const [index, selected] of [scope, scope, outside].entries()) {
+    const session = await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      createSession(client.db, {
+        accountId: scope.accountId,
+        workspaceId: selected.workspaceId,
+        initialMessage: "Daily HTTP fixture",
+        resources: [],
+        metadata: {},
+        model: "fixture",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: scope.subjectId },
+        createdByContext: {},
+      }),
+    );
+    const title = `DAILY HTTP TITLE ${index}`;
+    const turnId = crypto.randomUUID();
+    const sourceKey = `daily-http:${crypto.randomUUID()}`;
+    await withSessionRlsActorContext({ subjectId: scope.subjectId }, async () => {
+      await updateSessionTitle(client.db, {
+        workspaceId: selected.workspaceId,
+        sessionId: session.id,
+        title,
+        source: "user",
+      });
+      await recordModelCallFact(client.db, {
+        accountId: scope.accountId,
+        workspaceId: selected.workspaceId,
+        sessionId: session.id,
+        turnId,
+        sourceKey,
+        provider: index === 2 ? "outside-daily-provider" : "daily-provider",
+        providerApi: "responses",
+        model: "daily-http-unpriced-fixture",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: 23,
+        pricingSource: "configured_list_price",
+        inputTokens: 100,
+        outputTokens: 30,
+        cachedTokens: 20,
+        cacheWriteTokens: 10,
+        reasoningTokens: 5,
+        totalTokens: 130,
+      });
+    });
+    // The source mutation deliberately moves an old-writer fact into a complete
+    // UTC day. The trigger, not a test-populated aggregate, must maintain it.
+    await shared.admin`update model_call_facts set occurred_at='2026-09-29T03:00:00Z',
+      recorded_at='2026-09-29T03:01:00Z' where account_id=${scope.accountId} and turn_id=${turnId}`;
+    sessions.push({ id: session.id, title, workspaceId: selected.workspaceId, turnId, sourceKey });
+  }
+  for (const [index, amount] of [
+    [0, 7],
+    [2, 11],
+  ] as const) {
+    const session = sessions[index]!;
+    await applyCreditLedgerEntry(client.db, {
+      accountId: scope.accountId,
+      workspaceId: session.workspaceId,
+      type: "model_usage_debit",
+      amountMicros: -amount,
+      sourceType: "model_response",
+      sourceId: `${session.turnId}:${session.sourceKey}`,
+      idempotencyKey: `credit:daily-http:${session.sourceKey}`,
+      metadata: { sessionId: session.id },
+    });
+    await shared.admin`update credit_ledger_entries set occurred_at='2026-09-30T04:00:00Z'
+      where account_id=${scope.accountId} and idempotency_key=${`credit:daily-http:${session.sourceKey}`}`;
+  }
+  for (const [suffix, amount, occurredAt] of [
+    ["current", 13, "2026-09-30T00:00:00Z"],
+    ["prior", 17, "2026-09-25T00:00:00Z"],
+  ] as const) {
+    const idempotencyKey = `credit:daily-http-orphan:${scope.accountId}:${suffix}`;
+    await applyCreditLedgerEntry(client.db, {
+      accountId: scope.accountId,
+      workspaceId: null,
+      type: "model_usage_debit",
+      amountMicros: -amount,
+      sourceType: "model_response",
+      sourceId: idempotencyKey,
+      idempotencyKey,
+      metadata: {},
+    });
+    await shared.admin`update credit_ledger_entries set occurred_at=${occurredAt}::timestamptz
+      where account_id=${scope.accountId} and idempotency_key=${idempotencyKey}`;
+  }
+  const [maintained] = await shared.admin`select
+    (select sum((measures->>'calls')::bigint)::int from opengeni_private.insights_model_daily
+      where account_id=${scope.accountId}) as calls,
+    (select sum(quantity)::int from opengeni_private.insights_charge_daily
+      where account_id=${scope.accountId}) as charged`;
+  expect(maintained).toMatchObject({ calls: 3, charged: 48 });
+
+  const rawKey = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+  const permissions: Permission[] = [
+    "billing:read",
+    "workspace:read",
+    "workspace:admin",
+    "sessions:read",
+  ];
+  const key = await createOrganizationApiKey(client.db, {
+    accountId: scope.accountId,
+    name: "Daily HTTP selected key",
+    prefix: rawKey.slice(0, 14),
+    keyHash: createHash("sha256").update(rawKey).digest("hex"),
+    permissions,
+    policy: {
+      preset: "custom",
+      permissions,
+      workspaceScope: { kind: "selected", workspaceIds: [scope.workspaceId] },
+    },
+  });
+  const originalUsage = core.getInsightsUsage;
+  const usage = spyOn(core, "getInsightsUsage").mockImplementation((db, input) =>
+    originalUsage(db, { ...input, now: new Date("2026-10-03T12:00:00Z") }),
+  );
+  const read = async (organization: boolean, query = "range=week&groupBy=rootSession") => {
+    // Each read has a new cache: a hit must not conceal a stale daily projection.
+    const app = createApp({
+      db: client.db,
+      settings: testSettings({ productAccessMode: "managed", delegationSecret: secret }),
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const response = await app.request(path(scope, organization, "usage", query), {
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return InsightsUsageResponse.parse(await response.json());
+  };
+  try {
+    for (const groupBy of ["model", "person", "rootSession", "project"] as const) {
+      const workspace = await read(false, `range=week&groupBy=${groupBy}&seriesGroups=true`);
+      expect(workspace.totals).toMatchObject({ calls: 2, chargedMicros: 7, listMicros: 46 });
+      expect(workspace.prior).toBeNull();
+      const organization = await read(true, `range=week&groupBy=${groupBy}&seriesGroups=true`);
+      expect(organization.totals).toMatchObject({ calls: 3, chargedMicros: 31, listMicros: 69 });
+      expect(organization.prior).toMatchObject({ calls: 0, chargedMicros: 17, listMicros: 0 });
+      expect(JSON.stringify(organization.facets)).not.toContain(outside.workspaceId);
+      expect(JSON.stringify(organization)).not.toContain(sessions[2]!.id);
+      expect(JSON.stringify(organization)).not.toContain(sessions[2]!.title);
+      expect(organization.facets.providers).toEqual(["daily-provider"]);
+    }
+    const project = await createChannel(client.db, { ...scope, name: "LIVE DAILY PROJECT" });
+    await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
+      setSessionChannel(client.db, {
+        workspaceId: scope.workspaceId,
+        sessionId: sessions[0]!.id,
+        channelId: project.id,
+      }),
+    );
+    const moved = await read(false, "range=week&groupBy=project");
+    expect(moved.groups.some((group) => group.key === `item:${project.id}`)).toBe(true);
+    const setting = await getOrganizationPrivateSessionSettings(client.db, {
+      organizationId: scope.accountId,
+      actorSubjectId: scope.subjectId,
+    });
+    if (!setting.enabled)
+      await updateOrganizationPrivateSessionSettings(client.db, {
+        organizationId: scope.accountId,
+        actorSubjectId: scope.subjectId,
+        enabled: true,
+        expectedVersion: setting.version,
+        operationId: crypto.randomUUID(),
+      });
+    await transitionSessionVisibility(client.db, {
+      workspaceId: scope.workspaceId,
+      sessionId: sessions[0]!.id,
+      actorSubjectId: scope.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    const hidden = await read(false, "range=week&groupBy=project");
+    expect(hidden.totals).toMatchObject({ calls: 2, chargedMicros: 7, listMicros: 46 });
+    expect(JSON.stringify(hidden)).not.toContain(sessions[0]!.id);
+    expect(JSON.stringify(hidden)).not.toContain(sessions[0]!.title);
+    expect(JSON.stringify(hidden.facets)).not.toContain(project.id);
+    const guessed = await read(false, `range=week&rootSessionId=${sessions[0]!.id}`);
+    expect(guessed.totals).toMatchObject({ calls: 0, chargedMicros: 0, listMicros: 0 });
+
+    await updateOrganizationApiKey(client.db, scope.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["billing:read", "workspace:read", "workspace:admin"],
+        workspaceScope: { kind: "selected", workspaceIds: [scope.workspaceId] },
+      },
+    });
+    const noDetails = await read(true);
+    expect(noDetails.totals).toMatchObject({ calls: 3, chargedMicros: 31, listMicros: 69 });
+    expect(noDetails.facets.workspaces).toEqual([]);
+    expect(noDetails.facets.providers).toEqual([]);
+    expect(JSON.stringify(noDetails)).not.toContain(sessions[1]!.id);
+    await updateOrganizationApiKey(client.db, scope.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions,
+        workspaceScope: { kind: "selected", workspaceIds: [outside.workspaceId] },
+      },
+    });
+    const changedSelection = await read(true);
+    expect(changedSelection.totals).toMatchObject({ calls: 3, chargedMicros: 31, listMicros: 69 });
+    expect(changedSelection.facets.workspaces.map((item) => item.id)).toEqual([
+      outside.workspaceId,
+    ]);
+    expect(JSON.stringify(changedSelection)).not.toContain(sessions[1]!.id);
+    expect(JSON.stringify(changedSelection)).toContain(sessions[2]!.id);
+  } finally {
+    usage.mockRestore();
+  }
+}, 180_000);
