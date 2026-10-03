@@ -1,30 +1,27 @@
 /*
  * Organization access in product words: what an organization API key or a
- * connected agent can do (Read only, Full access, Custom), where (every
- * workspace including new ones, or selected ones) and as whom (the person who
- * connected it, or the organization).
+ * connected agent can do (Read only, Full access, Custom) and where (every
+ * workspace including new ones, or selected ones).
  *
- * The shapes mirror `OrganizationAccessPolicy` in @opengeni/contracts
- * (organization-access.ts). The server is the authority; these helpers only
- * label and preset what a person picks.
+ * Presets come from the shared contract (@opengeni/contracts
+ * organization-access.ts), so the form and the server always agree. The server
+ * is the authority; these helpers only label what a person picks.
  */
+
+import {
+  isReadOnlyPermissionSet,
+  organizationAccessPresetPermissions,
+  type Permission,
+} from "@opengeni/contracts";
+import type {
+  OrganizationAccessPolicy,
+  OrganizationAccessPreset,
+  OrganizationWorkspaceScope,
+} from "@opengeni/sdk";
 
 import { permissionLabel, WORKSPACE_KEY_PERMISSION_GROUPS } from "@/lib/api-key-presets";
 
-export type OrganizationAccessPreset = "read_only" | "full" | "custom";
-
-export type OrganizationWorkspaceScope =
-  | { kind: "all" }
-  | { kind: "selected"; workspaceIds: string[] };
-
-export type OrganizationAccessPolicy = {
-  preset: OrganizationAccessPreset;
-  permissions: string[];
-  workspaceScope: OrganizationWorkspaceScope;
-};
-
-/** Who the agent acts as: the person who connected it, or the organization. */
-export type OrganizationActor = "user" | "organization";
+export type { OrganizationAccessPolicy, OrganizationAccessPreset, OrganizationWorkspaceScope };
 
 /** Organization-wide scopes first, then everything a workspace key can carry. */
 export const ORGANIZATION_PERMISSION_GROUPS: ReadonlyArray<{
@@ -45,30 +42,14 @@ export const ORGANIZATION_PERMISSION_GROUPS: ReadonlyArray<{
   ...WORKSPACE_KEY_PERMISSION_GROUPS,
 ];
 
-const READ_ONLY_PERMISSIONS = new Set<string>([
-  "account:read",
-  "billing:read",
-  "workspace:read",
-  "sessions:read",
-  "stream:view",
-  "files:read",
-  "documents:search",
-  "artifacts:read",
-  "connections:read",
-  "variable-sets:list",
-  "secrets:list",
-  "enrollments:read",
-]);
-
-export function allOrganizationPermissions(): string[] {
-  return ORGANIZATION_PERMISSION_GROUPS.flatMap((group) => [...group.permissions]);
+export function allOrganizationPermissions(): Permission[] {
+  return organizationAccessPresetPermissions("full");
 }
 
-export function presetPermissions(preset: Exclude<OrganizationAccessPreset, "custom">): string[] {
-  const all = allOrganizationPermissions();
-  return preset === "full"
-    ? all
-    : all.filter((permission) => READ_ONLY_PERMISSIONS.has(permission));
+export function presetPermissions(
+  preset: Exclude<OrganizationAccessPreset, "custom">,
+): Permission[] {
+  return organizationAccessPresetPermissions(preset);
 }
 
 /** The preset these permissions match exactly, or custom. */
@@ -82,9 +63,9 @@ export function presetFor(permissions: readonly string[]): OrganizationAccessPre
   return "custom";
 }
 
-/** True when nothing in the set can start, change or delete anything. */
+/** True when nothing in the set can start, change or delete anything. Secret reads count as reads. */
 export function isReadOnly(permissions: readonly string[]): boolean {
-  return permissions.every((permission) => READ_ONLY_PERMISSIONS.has(permission));
+  return isReadOnlyPermissionSet(permissions as Permission[]);
 }
 
 export const ACCESS_PRESET_COPY: Record<
@@ -94,12 +75,11 @@ export const ACCESS_PRESET_COPY: Record<
   read_only: {
     label: "Read only",
     description:
-      "See sessions, files, knowledge and settings. Can't start, change or delete anything.",
+      "See sessions, files, knowledge and settings. Can't change anything or read secret values.",
   },
   full: {
     label: "Full access",
-    description:
-      "Everything a person with full access can do, including managing people, keys, billing and secret values.",
+    description: "Everything, including people, keys, billing and secret values.",
   },
   custom: {
     label: "Custom",
@@ -137,11 +117,6 @@ export function scopeSummary(
   return `${scope.workspaceIds.length} ${scope.workspaceIds.length === 1 ? "workspace" : "workspaces"}`;
 }
 
-/** "Acts as Maja Berg" or "Acts as the organization". */
-export function actorSummary(actor: OrganizationActor, names: { person: string }): string {
-  return `Acts as ${actor === "user" ? names.person : "the organization"}`;
-}
-
 export { permissionLabel };
 
 const EXTRA_LABELS: Record<string, string> = {
@@ -161,8 +136,11 @@ export function policyBlockedReason(policy: OrganizationAccessPolicy): string | 
   return null;
 }
 
-export const DEFAULT_POLICY: OrganizationAccessPolicy = {
-  preset: "read_only",
-  permissions: presetPermissions("read_only"),
-  workspaceScope: { kind: "all" },
-};
+/** Read only, every workspace: the least surprising starting point. Lazy for chunk order. */
+export function defaultPolicy(): OrganizationAccessPolicy {
+  return {
+    preset: "read_only",
+    permissions: presetPermissions("read_only"),
+    workspaceScope: { kind: "all" },
+  };
+}

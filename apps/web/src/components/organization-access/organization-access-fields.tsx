@@ -9,256 +9,237 @@ import {
   presetPermissions,
   type OrganizationAccessPolicy,
   type OrganizationAccessPreset,
-  type OrganizationActor,
+  type OrganizationWorkspaceScope,
 } from "@/lib/organization-access";
 
 /* ----------------------------------------------------------------------------
-   What an organization key or a connected agent can do, where, and as whom.
-   One block shared by the consent page, a connected agent's page and the
+   What an organization key or a connected agent can do, and where. One block
+   shared by the agent sign-in page, a connected agent's page and the
    organization API key form, so the same choice reads the same everywhere:
 
-     Acts as        You / the organization          (agents only)
      Access         Read only / Full access / Custom (+ grouped checkboxes)
      Available in   All workspaces, new ones too / Only selected workspaces
+
+   For an agent acting as a person, `ceiling` is what that person can do:
+   permissions beyond it stay visible but off, and the server caps the rest.
    -------------------------------------------------------------------------- */
 
 export type AccessWorkspace = { id: string; name: string; personal?: boolean };
 
-export type ActorChoice = {
-  value: OrganizationActor;
-  onChange: (next: OrganizationActor) => void;
-  /** The person's name, for "You (Maja Berg)". */
-  personName: string;
-  /** Why acting as the organization isn't offered (not an owner or admin), or null. */
-  organizationUnavailableReason: string | null;
-};
-
 export function OrganizationAccessFields({
   organizationName,
-  actor,
-  fixedActor,
   policy,
   onPolicyChange,
   workspaces,
   workspacesError = false,
   onRetryWorkspaces,
-  grantable,
+  ceiling,
+  includesPersonal = false,
   errors,
   disabled = false,
 }: {
   organizationName: string;
-  /** Omit for organization API keys, which always act as the organization. */
-  actor?: ActorChoice;
-  /** Who an existing agent acts as, when that can't change here. */
-  fixedActor?: OrganizationActor;
   policy: OrganizationAccessPolicy;
   onPolicyChange: (next: OrganizationAccessPolicy) => void;
-  /** Workspaces it could reach; null while loading. Personal ones only show when acting as you. */
   workspaces: AccessWorkspace[] | null;
   workspacesError?: boolean;
   onRetryWorkspaces?: () => void;
-  /** What the person can do themselves: the ceiling when the agent acts as them. */
-  grantable?: ReadonlySet<string>;
+  /** What the person can do themselves, when the agent acts as them. */
+  ceiling?: ReadonlySet<string>;
+  /** Acting as a person reaches their Personal workspace too. */
+  includesPersonal?: boolean;
   errors?: { permissions?: string; workspaces?: string };
   disabled?: boolean;
 }) {
-  const actsAsYou = (actor?.value ?? fixedActor) === "user";
-  const ceilingFor = (asYou: boolean) => (permission: string) =>
-    !asYou || !grantable || grantable.has(permission);
-  const canGrant = ceilingFor(actsAsYou);
-  // Acting as you, a preset is stored whole and the server caps it by your live access,
-  // so "Full access" keeps meaning "everything you can do" as that changes.
-  const presetAllowed = (preset: Exclude<OrganizationAccessPreset, "custom">) =>
-    actsAsYou || presetPermissions(preset).every(canGrant);
-  const choosePreset = (next: OrganizationAccessPreset) => {
-    if (next === "custom") {
-      onPolicyChange({
-        ...policy,
-        preset: "custom",
-        permissions: policy.permissions.filter(canGrant),
-      });
-      return;
-    }
-    onPolicyChange({
-      ...policy,
-      preset: next,
-      permissions: presetPermissions(next),
-    });
-  };
-  const visibleWorkspaces =
-    workspaces?.filter((workspace) => actsAsYou || !workspace.personal) ?? null;
-  const selected = policy.workspaceScope.kind === "selected" ? policy.workspaceScope : null;
-
   return (
     <div className="flex min-w-0 flex-col gap-8">
-      {actor ? (
-        <ChoiceCards
-          label="Acts as"
-          value={actor.value}
-          disabled={disabled}
-          onValueChange={(next) => {
-            const value = next as OrganizationActor;
-            actor.onChange(value);
-            const fits = ceilingFor(value === "user");
-            const personal = new Set((workspaces ?? []).filter((w) => w.personal).map((w) => w.id));
-            onPolicyChange({
-              ...policy,
-              // A preset keeps its meaning under the new identity.
-              permissions:
-                policy.preset === "custom"
-                  ? policy.permissions.filter(fits)
-                  : presetPermissions(policy.preset),
-              // The organization can't open anyone's Personal workspace.
-              workspaceScope:
-                value === "organization" && selected
-                  ? {
-                      kind: "selected",
-                      workspaceIds: selected.workspaceIds.filter((id) => !personal.has(id)),
-                    }
-                  : policy.workspaceScope,
-            });
-          }}
-        >
-          <ChoiceCard
-            value="user"
-            title={`You (${actor.personName})`}
-            description="Uses your own access, including your Personal workspace and private chats. Stops working if you leave or lose access."
-          />
-          <ChoiceCard
-            value="organization"
-            title={`The organization (${organizationName})`}
-            description="Like an organization API key: keeps working when people change. Can't open Personal workspaces or private chats."
-            disabled={actor.organizationUnavailableReason !== null}
-            {...(actor.organizationUnavailableReason
-              ? { disabledReason: actor.organizationUnavailableReason }
-              : {})}
-          />
-        </ChoiceCards>
-      ) : null}
-
-      <div className="flex min-w-0 flex-col gap-4">
-        <ChoiceCards
-          label="Access"
-          value={policy.preset}
-          disabled={disabled}
-          onValueChange={(next) => choosePreset(next as OrganizationAccessPreset)}
-          {...(policy.preset !== "custom" && errors?.permissions
-            ? { error: errors.permissions }
-            : {})}
-        >
-          {(["read_only", "full", "custom"] as const).map((preset) => {
-            const allowed = preset === "custom" || presetAllowed(preset);
-            return (
-              <ChoiceCard
-                key={preset}
-                value={preset}
-                title={ACCESS_PRESET_COPY[preset].label}
-                description={
-                  actsAsYou && preset === "full"
-                    ? "Everything you can do yourself, in the workspaces below."
-                    : ACCESS_PRESET_COPY[preset].description
-                }
-                disabled={!allowed}
-                {...(allowed
-                  ? {}
-                  : {
-                      disabledReason:
-                        "Needs more access than you have. An organization admin can give it.",
-                    })}
-              />
-            );
-          })}
-        </ChoiceCards>
-        {policy.preset === "custom" ? (
-          <Field label="Permissions" group error={errors?.permissions}>
-            <PermissionChecklist
-              selected={policy.permissions}
-              canGrant={canGrant}
-              disabled={disabled}
-              onChange={(permissions) => onPolicyChange({ ...policy, permissions })}
-            />
-          </Field>
-        ) : null}
-      </div>
-
-      <div className="flex min-w-0 flex-col gap-3">
-        <ChoiceCards
-          label="Available in"
-          value={policy.workspaceScope.kind}
-          disabled={disabled}
-          onValueChange={(next) =>
-            onPolicyChange({
-              ...policy,
-              workspaceScope:
-                next === "selected" ? { kind: "selected", workspaceIds: [] } : { kind: "all" },
-            })
-          }
-        >
-          <ChoiceCard
-            value="all"
-            title={`All workspaces in ${organizationName}`}
-            description={
-              actsAsYou
-                ? "Every workspace you can open, including new ones and your Personal workspace."
-                : "Every shared workspace, including new ones."
-            }
-          />
-          <ChoiceCard
-            value="selected"
-            title="Only selected workspaces"
-            description="Workspaces added later aren't included."
-          />
-        </ChoiceCards>
-        {selected ? (
-          <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-            <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Workspaces</legend>
-            {visibleWorkspaces === null && workspacesError ? (
-              <div className="flex min-w-0 flex-wrap items-center gap-3">
-                <p className="m-0 text-sm leading-5 text-fg-muted">
-                  Couldn't load the organization's workspaces.
-                </p>
-                {onRetryWorkspaces ? (
-                  <Button type="button" variant="outline" size="sm" onClick={onRetryWorkspaces}>
-                    Try again
-                  </Button>
-                ) : null}
-              </div>
-            ) : visibleWorkspaces === null ? (
-              <Skeleton className="h-5 w-48 rounded-md" />
-            ) : (
-              visibleWorkspaces.map((workspace) => (
-                <CheckboxField
-                  key={workspace.id}
-                  label={workspace.personal ? "Your Personal workspace" : workspace.name}
-                  disabled={disabled}
-                  checked={selected.workspaceIds.includes(workspace.id)}
-                  onCheckedChange={(checked) =>
-                    onPolicyChange({
-                      ...policy,
-                      workspaceScope: {
-                        kind: "selected",
-                        workspaceIds: checked
-                          ? [...new Set([...selected.workspaceIds, workspace.id])]
-                          : selected.workspaceIds.filter((id) => id !== workspace.id),
-                      },
-                    })
-                  }
-                />
-              ))
-            )}
-            {errors?.workspaces ? (
-              <p role="alert" className="m-0 text-sm leading-5 text-danger">
-                {errors.workspaces}
-              </p>
-            ) : null}
-          </fieldset>
-        ) : null}
-      </div>
+      <AccessPresetFields
+        policy={policy}
+        onPolicyChange={onPolicyChange}
+        {...(ceiling ? { ceiling } : {})}
+        {...(errors?.permissions ? { error: errors.permissions } : {})}
+        actsAsPerson={includesPersonal}
+        disabled={disabled}
+      />
+      <WorkspaceScopeFields
+        organizationName={organizationName}
+        scope={policy.workspaceScope}
+        onScopeChange={(workspaceScope) => onPolicyChange({ ...policy, workspaceScope })}
+        workspaces={
+          includesPersonal
+            ? workspaces
+            : (workspaces?.filter((workspace) => !workspace.personal) ?? null)
+        }
+        workspacesError={workspacesError}
+        {...(onRetryWorkspaces ? { onRetryWorkspaces } : {})}
+        includesPersonal={includesPersonal}
+        {...(errors?.workspaces ? { error: errors.workspaces } : {})}
+        disabled={disabled}
+      />
     </div>
   );
 }
 
-/** Every permission in groups people recognise; ones beyond your own access stay visible, off. */
+/** Read only, Full access or Custom; Custom reveals the grouped checklist. */
+export function AccessPresetFields({
+  policy,
+  onPolicyChange,
+  ceiling,
+  actsAsPerson = false,
+  error,
+  disabled = false,
+}: {
+  policy: OrganizationAccessPolicy;
+  onPolicyChange: (next: OrganizationAccessPolicy) => void;
+  ceiling?: ReadonlySet<string>;
+  actsAsPerson?: boolean;
+  error?: string;
+  disabled?: boolean;
+}) {
+  const canGrant = (permission: string) => !ceiling || ceiling.has(permission);
+  const choose = (next: OrganizationAccessPreset) =>
+    onPolicyChange(
+      next === "custom"
+        ? { ...policy, preset: "custom", permissions: policy.permissions.filter(canGrant) }
+        : // A preset is stored whole; acting as a person, the server caps it by
+          // their live access, so "Full access" keeps meaning "all you can do".
+          { ...policy, preset: next, permissions: presetPermissions(next) },
+    );
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <ChoiceCards
+        label="Access"
+        value={policy.preset}
+        disabled={disabled}
+        onValueChange={(next) => choose(next as OrganizationAccessPreset)}
+        {...(policy.preset !== "custom" && error ? { error } : {})}
+      >
+        {(["full", "read_only", "custom"] as const).map((preset) => (
+          <ChoiceCard
+            key={preset}
+            value={preset}
+            title={ACCESS_PRESET_COPY[preset].label}
+            description={
+              actsAsPerson && preset === "full"
+                ? "Everything you can do yourself, including people, keys, billing and secret values."
+                : ACCESS_PRESET_COPY[preset].description
+            }
+          />
+        ))}
+      </ChoiceCards>
+      {policy.preset === "custom" ? (
+        <Field label="Permissions" group error={error}>
+          <PermissionChecklist
+            selected={policy.permissions}
+            canGrant={canGrant}
+            disabled={disabled}
+            onChange={(permissions) =>
+              onPolicyChange({ ...policy, permissions: permissions as typeof policy.permissions })
+            }
+          />
+        </Field>
+      ) : null}
+    </div>
+  );
+}
+
+/** "All workspaces, new ones too" or a picked list. */
+export function WorkspaceScopeFields({
+  organizationName,
+  scope,
+  onScopeChange,
+  workspaces,
+  workspacesError = false,
+  onRetryWorkspaces,
+  includesPersonal = false,
+  error,
+  disabled = false,
+}: {
+  organizationName: string;
+  scope: OrganizationWorkspaceScope;
+  onScopeChange: (next: OrganizationWorkspaceScope) => void;
+  /** Workspaces it could reach; null while loading. */
+  workspaces: AccessWorkspace[] | null;
+  workspacesError?: boolean;
+  onRetryWorkspaces?: () => void;
+  includesPersonal?: boolean;
+  error?: string;
+  disabled?: boolean;
+}) {
+  const selected = scope.kind === "selected" ? scope : null;
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <ChoiceCards
+        label="Available in"
+        value={scope.kind}
+        disabled={disabled}
+        onValueChange={(next) =>
+          onScopeChange(
+            next === "selected" ? { kind: "selected", workspaceIds: [] } : { kind: "all" },
+          )
+        }
+      >
+        <ChoiceCard
+          value="all"
+          title={`All workspaces in ${organizationName}`}
+          description={
+            includesPersonal
+              ? "Every workspace you can open, including new ones and your Personal workspace."
+              : "Every shared workspace, including new ones."
+          }
+        />
+        <ChoiceCard
+          value="selected"
+          title="Only selected workspaces"
+          description="Workspaces added later aren't included."
+        />
+      </ChoiceCards>
+      {selected ? (
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
+          <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Workspaces</legend>
+          {workspaces === null && workspacesError ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              <p className="m-0 text-sm leading-5 text-fg-muted">
+                Couldn't load the organization's workspaces.
+              </p>
+              {onRetryWorkspaces ? (
+                <Button type="button" variant="outline" size="sm" onClick={onRetryWorkspaces}>
+                  Try again
+                </Button>
+              ) : null}
+            </div>
+          ) : workspaces === null ? (
+            <Skeleton className="h-5 w-48 rounded-md" />
+          ) : (
+            workspaces.map((workspace) => (
+              <CheckboxField
+                key={workspace.id}
+                label={workspace.personal ? "Your Personal workspace" : workspace.name}
+                disabled={disabled}
+                checked={selected.workspaceIds.includes(workspace.id)}
+                onCheckedChange={(checked) =>
+                  onScopeChange({
+                    kind: "selected",
+                    workspaceIds: checked
+                      ? [...new Set([...selected.workspaceIds, workspace.id])]
+                      : selected.workspaceIds.filter((id) => id !== workspace.id),
+                  })
+                }
+              />
+            ))
+          )}
+          {error ? (
+            <p role="alert" className="m-0 text-sm leading-5 text-danger">
+              {error}
+            </p>
+          ) : null}
+        </fieldset>
+      ) : null}
+    </div>
+  );
+}
+
+/** Every permission in groups people recognise; ones beyond the ceiling stay visible, off. */
 export function PermissionChecklist({
   selected,
   canGrant,

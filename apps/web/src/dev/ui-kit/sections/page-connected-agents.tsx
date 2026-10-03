@@ -47,7 +47,7 @@ const CONNECTIONS: McpConnection[] = [
     id: "7a2e1d5b-2c3d-4e4f-9a0b-1c2d3e4f5a61",
     clientName: "Cursor",
     clientHost: "cursor.com",
-    actor: "organization",
+    actor: "user",
     connectedBy: { subjectId: "person-maria", name: "Maria Chen" },
     policy: {
       preset: "read_only",
@@ -63,7 +63,7 @@ const CONNECTIONS: McpConnection[] = [
     id: "8b3f2e6c-3d4e-4f5a-8b1c-2d3e4f5a6b72",
     clientName: "Release bot",
     clientHost: "ci.acme.dev",
-    actor: "organization",
+    actor: "user",
     connectedBy: { subjectId: "person-jonas", name: "Jonas Berg" },
     policy: {
       preset: "custom",
@@ -80,7 +80,7 @@ const CONNECTIONS: McpConnection[] = [
 function fakeApi(initial: McpConnection[]): McpConnectionsApi {
   let rows = [...initial];
   return {
-    list: async () => rows,
+    list: async () => ({ connections: rows, canManageAll: true }),
     update: async (id, change) => {
       rows = rows.map((row) => (row.id === id ? { ...row, policy: change.policy } : row));
       return rows.find((row) => row.id === id)!;
@@ -108,7 +108,7 @@ function AgentsPreview({
         organizationName={organization.name}
         mcpUrl={MCP_URL}
         api={api}
-        canManageAll
+        currentSubjectId="person-bendik"
         workspaces={accessWorkspaces}
         location={location}
         onNavigate={setLocation}
@@ -132,7 +132,7 @@ export default function PageConnectedAgentsSection() {
     <KitSection sectionKey="page-connected-agents">
       <KitBlock
         title="Connected agents"
-        description="Organization settings > Developer. Each row says as whom the agent acts, what it can do and where. A row opens the agent's page."
+        description="Organization settings > Developer. Each row says whose agent it is, what it can do and where. A row opens the agent's page."
       >
         <PagePreview label="Connected agents" height={520}>
           <AgentsPreview initial={CONNECTIONS} />
@@ -161,7 +161,7 @@ export default function PageConnectedAgentsSection() {
       </KitBlock>
       <KitBlock
         title="Sign-in: choose its access"
-        description="Opens in the browser when the agent signs in. Read only, all workspaces and acting as you is the default. A member can't act as the organization."
+        description="Opens in the browser when the agent signs in. It acts as the person; Read only in every workspace is the default. Permissions beyond their own access stay off."
       >
         <PagePreview label="Connect Claude Code" height={1300}>
           <McpConsentPage
@@ -173,14 +173,12 @@ export default function PageConnectedAgentsSection() {
                 {
                   id: organization.id,
                   name: organization.name,
-                  canActAsOrganization: false,
                   workspaces: accessWorkspaces,
                   grantable: MEMBER_GRANTABLE,
                 },
               ],
             }}
-            onAllow={async () => {}}
-            onCancel={() => {}}
+            onAnswer={async () => {}}
           />
         </PagePreview>
       </KitBlock>

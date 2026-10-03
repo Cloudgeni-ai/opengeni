@@ -41,7 +41,6 @@ import {
   type McpConnectionsApi,
 } from "@/lib/mcp-connections";
 import {
-  actorSummary,
   policyBlockedReason,
   policySummary,
   scopeSummary,
@@ -69,8 +68,8 @@ export type ConnectedAgentsProps = {
   /** The organization's MCP server URL. */
   mcpUrl: string;
   api: McpConnectionsApi;
-  /** Owners and admins see everyone's agents; others see their own. */
-  canManageAll: boolean;
+  /** The signed-in person: only they change what their own agents can do. */
+  currentSubjectId: string;
   workspaces: AccessWorkspace[] | null;
   workspacesError?: boolean;
   onRetryWorkspaces?: () => void;
@@ -92,18 +91,19 @@ function AgentTile() {
 function useConnections(api: McpConnectionsApi) {
   const [state, setState] = useState<{
     connections: McpConnection[] | null;
+    canManageAll: boolean;
     error: Error | null;
-  }>({ connections: null, error: null });
+  }>({ connections: null, canManageAll: false, error: null });
   const sequence = useRef(0);
   const refresh = useCallback(async () => {
     const current = ++sequence.current;
     try {
-      const connections = await api.list();
-      if (sequence.current === current) setState({ connections, error: null });
+      const { connections, canManageAll } = await api.list();
+      if (sequence.current === current) setState({ connections, canManageAll, error: null });
     } catch (caught) {
       if (sequence.current === current)
         setState((previous) => ({
-          connections: previous.connections,
+          ...previous,
           error: caught instanceof Error ? caught : new Error(String(caught)),
         }));
     }
@@ -125,7 +125,7 @@ function useConnections(api: McpConnectionsApi) {
 
 export function ConnectedAgents(props: ConnectedAgentsProps) {
   const { api, location, onNavigate } = props;
-  const { connections, error, refresh, replace } = useConnections(api);
+  const { connections, canManageAll, error, refresh, replace } = useConnections(api);
 
   if (location.view === "connect-agent") {
     return (
@@ -142,6 +142,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     return (
       <ConnectedAgentPage
         {...props}
+        canManageAll={canManageAll}
         connection={connection}
         loading={connections === null && !error}
         onClose={() => onNavigate({})}
@@ -216,7 +217,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
                 ) : undefined
               }
               description={[
-                actorSummary(connection.actor, { person: connection.connectedBy.name }),
+                `Acts as ${connection.connectedBy.subjectId === props.currentSubjectId ? "you" : connection.connectedBy.name}`,
                 policySummary(connection.policy),
                 scopeSummary(connection.policy.workspaceScope, props.workspaces),
               ].join(" · ")}
@@ -239,7 +240,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     <Section
       title="Connected agents"
       description={
-        props.canManageAll
+        canManageAll
           ? "Outside agents that can work in this organization, and as whom."
           : "Outside agents you connected. Owners and admins see everyone's."
       }
@@ -360,19 +361,22 @@ function samePolicy(a: OrganizationAccessPolicy, b: OrganizationAccessPolicy): b
   );
 }
 
-/** One connected agent: what it can do (editable), and Disconnect. */
+/** One connected agent: what it can do (editable by its person), and Disconnect. */
 export function ConnectedAgentPage({
   organizationName,
   api,
   workspaces,
   workspacesError,
   onRetryWorkspaces,
+  currentSubjectId,
+  canManageAll,
   connection,
   loading,
   onClose,
   onSaved,
   onDisconnected,
 }: ConnectedAgentsProps & {
+  canManageAll: boolean;
   connection: McpConnection | null;
   loading: boolean;
   onClose: () => void;
@@ -413,7 +417,7 @@ export function ConnectedAgentPage({
 
   const status = mcpConnectionStatus(connection);
   const blocked = policyBlockedReason(draft);
-  const actor = actorSummary(connection.actor, { person: connection.connectedBy.name });
+  const mine = connection.connectedBy.subjectId === currentSubjectId;
 
   return (
     <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -432,17 +436,19 @@ export function ConnectedAgentPage({
           ) : undefined
         }
         meta={[
-          actor,
+          mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`,
           <>
-            Connected by {connection.connectedBy.name} <RelativeTime date={connection.createdAt} />
+            Connected <RelativeTime date={connection.createdAt} />
           </>,
         ]}
         actions={
-          <MoreMenu label={`More for ${connection.clientName}`}>
-            <DropdownMenuItem variant="destructive" onSelect={() => setConfirming(true)}>
-              Disconnect
-            </DropdownMenuItem>
-          </MoreMenu>
+          mine || canManageAll ? (
+            <MoreMenu label={`More for ${connection.clientName}`}>
+              <DropdownMenuItem variant="destructive" onSelect={() => setConfirming(true)}>
+                Disconnect
+              </DropdownMenuItem>
+            </MoreMenu>
+          ) : undefined
         }
       />
       <DetailPageBody
@@ -460,73 +466,80 @@ export function ConnectedAgentPage({
         <DetailSection
           title="What it can do"
           description={
-            connection.actor === "user"
-              ? `Never more than ${connection.connectedBy.name} can do. Changes apply to its next request.`
-              : "Changes apply to its next request."
+            mine
+              ? "Never more than you can do. Changes apply to its next request."
+              : `Never more than ${connection.connectedBy.name} can do. Only they can change it.`
           }
         >
-          <div className="flex min-w-0 flex-col gap-6">
-            <OrganizationAccessFields
-              organizationName={organizationName}
-              fixedActor={connection.actor}
-              policy={draft}
-              onPolicyChange={(next) => {
-                setDraft(next);
-                setSaveError(null);
-              }}
-              workspaces={
-                connection.actor === "user"
-                  ? workspaces
-                  : (workspaces?.filter((workspace) => !workspace.personal) ?? null)
-              }
-              workspacesError={workspacesError ?? false}
-              {...(onRetryWorkspaces ? { onRetryWorkspaces } : {})}
-              disabled={saving}
-            />
-            {saveError ? (
-              <p role="alert" className="m-0 text-sm leading-5 text-danger">
-                {saveError}
-              </p>
-            ) : null}
-            {changed ? (
-              <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-                {blocked ? (
-                  <span className="mr-auto text-sm leading-5 text-fg-muted">{blocked}</span>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  disabled={saving}
-                  onClick={() => {
-                    setDraft(connection.policy);
-                    setSaveError(null);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  disabled={saving || blocked !== null}
-                  onClick={async () => {
-                    setSaving(true);
-                    try {
-                      const next = await api.update(connection.id, { policy: draft });
-                      onSaved(next);
-                      toast.success(`${connection.clientName} updated`);
-                    } catch (caught) {
-                      setSaveError(
-                        `The change wasn't saved. ${userErrorText(caught, "Try again.")}`,
-                      );
-                    } finally {
-                      setSaving(false);
-                    }
-                  }}
-                >
-                  {saving ? "Saving…" : "Save"}
-                </Button>
-              </div>
-            ) : null}
-          </div>
+          {mine ? (
+            <div className="flex min-w-0 flex-col gap-6">
+              <OrganizationAccessFields
+                organizationName={organizationName}
+                policy={draft}
+                onPolicyChange={(next) => {
+                  setDraft(next);
+                  setSaveError(null);
+                }}
+                workspaces={workspaces}
+                workspacesError={workspacesError ?? false}
+                {...(onRetryWorkspaces ? { onRetryWorkspaces } : {})}
+                includesPersonal
+                disabled={saving}
+              />
+              {saveError ? (
+                <p role="alert" className="m-0 text-sm leading-5 text-danger">
+                  {saveError}
+                </p>
+              ) : null}
+              {changed ? (
+                <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+                  {blocked ? (
+                    <span className="mr-auto text-sm leading-5 text-fg-muted">{blocked}</span>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={saving}
+                    onClick={() => {
+                      setDraft(connection.policy);
+                      setSaveError(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={saving || blocked !== null}
+                    onClick={async () => {
+                      setSaving(true);
+                      try {
+                        const next = await api.update(connection.id, { policy: draft });
+                        onSaved(next);
+                        toast.success(`${connection.clientName} updated`);
+                      } catch (caught) {
+                        setSaveError(
+                          `The change wasn't saved. ${userErrorText(caught, "Try again.")}`,
+                        );
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                  >
+                    {saving ? "Saving…" : "Save"}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <dl className="m-0 grid min-w-0 grid-cols-[max-content_1fr] gap-x-6 gap-y-3 text-sm leading-5">
+              <dt className="text-fg-muted">Access</dt>
+              <dd className="m-0 text-fg">{policySummary(connection.policy)}</dd>
+              <dt className="text-fg-muted">Available in</dt>
+              <dd className="m-0 text-fg">
+                {scopeSummary(connection.policy.workspaceScope, workspaces)}
+              </dd>
+            </dl>
+          )}
         </DetailSection>
       </DetailPageBody>
       <DestructiveConfirm

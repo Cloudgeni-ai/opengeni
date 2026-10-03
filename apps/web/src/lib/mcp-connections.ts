@@ -1,28 +1,17 @@
 /*
  * Connected agents: outside MCP clients (Claude Code, Cursor, Codex, ...)
- * a person allowed to work in an organization. Mirrors the organization MCP
- * connection contract; the server is the authority on what each can do.
+ * a person signed in to the organization MCP server. Each acts as that
+ * person, capped by its access setting; the server is the authority.
  */
 
-import type { OrganizationAccessPolicy, OrganizationActor } from "@/lib/organization-access";
+import type { OrganizationMcpConnection, OrganizationMcpConnectionList } from "@opengeni/sdk";
 
-export type McpConnection = {
-  id: string;
-  /** The name the client registered with ("Claude Code"). */
-  clientName: string;
-  /** Where sign-in returned to ("localhost", "cursor.com"), shown so people can spot a stranger. */
-  clientHost: string | null;
-  actor: OrganizationActor;
-  connectedBy: { subjectId: string; name: string };
-  policy: OrganizationAccessPolicy;
-  createdAt: string;
-  lastUsedAt: string | null;
-  expiresAt: string | null;
-  revokedAt: string | null;
-};
+import type { OrganizationAccessPolicy } from "@/lib/organization-access";
+
+export type McpConnection = OrganizationMcpConnection;
 
 export type McpConnectionsApi = {
-  list: () => Promise<McpConnection[]>;
+  list: () => Promise<OrganizationMcpConnectionList>;
   update: (id: string, change: { policy: OrganizationAccessPolicy }) => Promise<McpConnection>;
   disconnect: (id: string) => Promise<void>;
 };
