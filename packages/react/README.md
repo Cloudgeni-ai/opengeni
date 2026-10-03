@@ -1334,6 +1334,16 @@ model-picker visibility controlled by `modelPicker` and the client configuration
 
 For a rendered example, open the composer-responsive demo with `?branding=host`.
 
+Models always show their clean name and maker logo: picker rows carry
+`modelDisplayName(model)` (`claude-opus-4-8` and
+`organization-claude-subscription/claude-opus-5-5` read `Claude Opus 4.8` and
+`Claude Opus 5.5`) and a `ModelMark`. Organization- and workspace-connected API
+keys share one "API keys" group, and identical copies of one model in a
+connection group show once. Render a model anywhere else with
+`<ModelName model={id} />`, or `modelDisplayName` / `modelVendor` from
+`@opengeni/react` or `@opengeni/sdk/model-display`. The trigger keeps a host's
+explicit group icon; otherwise API-key models show the maker's logo.
+
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
 compatibility warning only when the selected model cannot view those images.

@@ -614,7 +614,7 @@ test("the complete conversation forwards only picker appearance without replacin
         `button[aria-label="${customized ? "Choose a model" : "Model and effort"}"]`,
       )!;
       expect(trigger).not.toBeNull();
-      expect(trigger.textContent).toContain("model-x");
+      expect(trigger.textContent).toContain("Model X");
       expect(trigger.textContent).not.toContain("untrusted/model");
       expect(
         trigger.querySelector(

@@ -77,6 +77,17 @@ describe("api errors in product words", () => {
     );
   });
 
+  test("a model refusal names the model, never its routing id", () => {
+    expect(apiErrorAdvice(apiError(422, "model is not selectable: codex/gpt-6.1-sol"))).toBe(
+      "GPT-6.1 Sol isn't available here. Choose another model.",
+    );
+    expect(
+      apiErrorAdvice(
+        apiError(422, "model is not available: organization-claude-subscription/claude-opus-5-5"),
+      ),
+    ).toBe("Claude Opus 5.5 isn't available here. Choose another model.");
+  });
+
   test("keeps the app's own messages and maps network failures", () => {
     expect(userErrorText(new Error("Pick a workspace first."))).toBe("Pick a workspace first.");
     expect(userErrorText(new TypeError("Failed to fetch"))).toBe(

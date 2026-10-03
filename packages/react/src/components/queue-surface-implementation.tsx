@@ -17,6 +17,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { SessionPendingInputPreview, SessionTurn, TimelineAnnotation } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import {
   ArrowDownToLineIcon,
   ArrowUpToLineIcon,
@@ -977,7 +978,7 @@ function ReadOnlyQueueRow({
               {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
             </span>
           ) : null}
-          <span className="min-w-0 truncate">{turn.model}</span>
+          <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
           <span className="shrink-0">{turn.reasoningEffort}</span>
         </div>
       </div>
@@ -1075,7 +1076,7 @@ function SortableQueueRow({
                 {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
               </span>
             ) : null}
-            <span className="min-w-0 truncate">{turn.model}</span>
+            <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
             <span className="shrink-0">{turn.reasoningEffort}</span>
           </div>
           {pending ? (

@@ -23,9 +23,12 @@ import {
   BillingClassMark,
   defaultModelPolicyPickerMessages,
   effectiveRows,
+  groupPresentationFor,
   PickerNavRow,
+  SCOPED_BILLING_HINTS,
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
+import { ModelMark } from "./model-mark";
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
@@ -36,23 +39,35 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const selected = findPickerRow(rows, props.model);
   const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const filtered = rows.filter((row) => {
-    const description = props.groupPresentation?.[row.billingClass]?.description;
+    const description = groupPresentationFor(props, row.billingClass)?.description;
     const text =
       `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(row.catalog) : (description ?? "")}`.toLowerCase();
     return words.every((word) => text.includes(word));
   });
   const matchingIds = new Set(filtered.map((row) => row.id));
-  const groups = groupPickerRowsByBillingClass(rows, { codexOnly: props.codexOnly === true })
+  const groups = groupPickerRowsByBillingClass(rows, {
+    codexOnly: props.codexOnly === true,
+    selectedId: props.model,
+    collapseScopes: props.collapseScopes !== false,
+  })
     .map((group) => {
-      const override = props.groupPresentation?.[group.billingClass]?.description;
+      const presentation = groupPresentationFor(props, group.billingClass);
+      const override = presentation?.description;
+      const defaultHint =
+        props.collapseScopes === false &&
+        messages.billingHints[group.billingClass] ===
+          defaultModelPolicyPickerMessages.billingHints[group.billingClass]
+          ? (SCOPED_BILLING_HINTS[group.billingClass] ?? messages.billingHints[group.billingClass])
+          : messages.billingHints[group.billingClass];
       return {
         ...group,
+        label: presentation?.label ?? group.label,
         rows: group.rows.filter((row) => matchingIds.has(row.id)),
         description:
           override === undefined
             ? group.billingClass === "opengeni_credits"
               ? null
-              : messages.billingHints[group.billingClass]
+              : defaultHint
             : override,
       };
     })
@@ -73,6 +88,11 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const modelRow = (row: ClientPickerModelRow) => (
     <PickerNavRow
       key={row.id}
+      icon={
+        props.collapseScopes === false ? undefined : (
+          <ModelMark model={row.catalog} className="size-4 text-og-fg-muted" />
+        )
+      }
       label={row.label}
       hint={row.unavailableReason ?? undefined}
       disabled={props.disabled || !row.selectable}
@@ -181,7 +201,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
                 <div className={cn(MENU_LABEL_CLASS, "flex items-center gap-2")}>
                   <BillingClassMark
                     billingClass={group.billingClass}
-                    presentation={props.groupPresentation?.[group.billingClass]}
+                    presentation={groupPresentationFor(props, group.billingClass)}
                     aria-label=""
                   />
                   <span className="min-w-0 break-words">{group.label}</span>

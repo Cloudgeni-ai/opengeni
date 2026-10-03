@@ -29,6 +29,8 @@ import {
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
+  ModelMark,
+  modelDisplayName,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
@@ -118,7 +120,6 @@ import {
   type CreateComposerFocusIntent,
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
-import { displayModel } from "@/lib/format";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
@@ -2044,7 +2045,7 @@ function recentSessionModelPresentation(
 ): { label: string; billingClass: PickerModelRow["billingClass"] } {
   const row = findPickerRow([...catalogRows], modelId);
   return {
-    label: row?.label ?? displayModel(modelId),
+    label: row?.label ?? modelDisplayName(modelId),
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
@@ -2080,10 +2081,16 @@ function RecentSessionRow({
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
-              <BillingClassMark
-                billingClass={model.billingClass}
+              <ModelMark
+                model={session.model}
                 className="size-3 text-fg-muted"
-                aria-label=""
+                fallback={
+                  <BillingClassMark
+                    billingClass={model.billingClass}
+                    className="size-3"
+                    aria-label=""
+                  />
+                }
               />
               <span className="truncate">{metaBits.join(" · ")}</span>
             </span>
