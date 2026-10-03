@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import type { SessionEvent } from "../../../packages/contracts/src/index";
+import {
+  coalesceSessionEventDeltasWithCoverage,
+  formatSessionEventSse,
+} from "../../../packages/events/src/index";
 import { Authorization, Cohort, digest, Intent, intentDigest, STAGING_ORIGIN } from "./config";
 import { verificationPath } from "./auth";
 import { HumanHttp, type FetchLike } from "./http";
@@ -118,32 +123,51 @@ function sample(): Sample {
   };
 }
 const turnId = "b1234567-1234-4234-8234-123456789abc";
-const event = (sequence: number, type: string, payload = {}, id: string | null = turnId) => ({
+const event = (
+  sequence: number,
+  type: SessionEvent["type"],
+  payload: Record<string, unknown> = {},
+  id: string | null = turnId,
+) => ({
+  id: crypto.randomUUID(),
+  workspaceId: parent,
+  sessionId: parent,
   sequence,
   type,
   payload,
   turnId: id,
   occurredAt: "2026-10-03T13:00:00.000Z",
 });
-function sse(events: object[]) {
-  const bytes = new TextEncoder().encode(
-    events.map((e) => `data: ${JSON.stringify(e)}\r\n\r\n`).join(""),
-  );
-  // Include chunk boundaries through JSON and CRLF; use the production SDK parser.
+function sseFrames(frames: string[], chunkBytes = 23) {
+  const bytes = new TextEncoder().encode(frames.join(""));
+  // Include chunk boundaries through ids and JSON; use the production SDK parser.
   return new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
-        for (let i = 0; i < bytes.length; i += 23) controller.enqueue(bytes.slice(i, i + 23));
+        for (let i = 0; i < bytes.length; i += chunkBytes)
+          controller.enqueue(bytes.slice(i, i + chunkBytes));
         controller.close();
       },
     }),
     { headers: { "content-type": "text/event-stream" } },
   );
 }
+function sse(events: SessionEvent[], compact = false) {
+  const projection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
+  return sseFrames(
+    (projection?.events ?? events).map((value) =>
+      formatSessionEventSse(
+        value,
+        projection?.coveredThroughBySequence.get(value.sequence) ?? value.sequence,
+      ),
+    ),
+  );
+}
 function fixtureFetch(
   mode: "plain" | "sandbox" | "fresh",
   outcome = "success",
   authMode = "legacy",
+  streamResponse: (events: ReturnType<typeof event>[]) => Response = sse,
 ) {
   const calls: Array<{
     path: string;
@@ -284,25 +308,44 @@ function fixtureFetch(
         event(1, "user.message", { text: "ignored user prompt" }),
         event(2, "turn.started", {}),
       ];
+      if (outcome === "commentary_empty")
+        events.push(
+          event(events.length + 1, "agent.message.delta", {
+            text: "Running /bin/true.",
+            phase: "commentary",
+          }),
+          event(events.length + 2, "agent.message.completed", {
+            text: "Running /bin/true.",
+            phase: "commentary",
+          }),
+        );
       if (mode !== "plain")
         events.push(
-          event(3, "agent.toolCall.created", {
+          event(events.length + 1, "agent.toolCall.created", {
             id: "command",
             name: "exec_command",
             arguments: { cmd: "/bin/true" },
           }),
-          event(4, "agent.toolCall.output", {
+          event(events.length + 2, "agent.toolCall.output", {
             id: "command",
             output: { type: "text", text: "Process exited with code 0\n\nOutput:\n" },
           }),
         );
-      if (outcome !== "empty")
-        events.push(event(events.length + 1, "agent.message.delta", { text: "OK" }));
+      if (outcome === "commentary_empty")
+        events.push(event(events.length + 1, "agent.message.completed", { text: "" }));
+      else if (outcome !== "empty")
+        events.push(
+          event(events.length + 1, "agent.message.delta", { text: "O" }),
+          event(events.length + 2, "agent.message.delta", { text: "K" }),
+        );
       if (outcome !== "closed")
         events.push(
-          event(events.length + 1, outcome === "failed" ? "turn.failed" : "turn.completed", {}),
+          event(events.length + 1, outcome === "failed" ? "turn.failed" : "turn.completed", {
+            output: outcome === "empty" || outcome === "commentary_empty" ? "" : "OK",
+            ...(outcome === "commentary_empty" ? { emptyFinalReply: true } : {}),
+          }),
         );
-      return sse(events);
+      return streamResponse(events);
     }
     if (method === "DELETE") return json({ deletedSessionCount: 1 });
     throw new Error("unexpected fixture request");
@@ -433,6 +476,141 @@ describe("offline launch burst safety", () => {
       }
     },
   );
+  test("commentary then canonical empty final is not a successful sandbox result", async () => {
+    const fixture = fixtureFetch("sandbox", "commentary_empty");
+    const result = (await runBurst({
+      ...(await setup("sandbox")),
+      fetchImpl: fixture.fetchImpl,
+    })) as { samples: Sample[]; summary: ReturnType<typeof summarize> };
+    expect(result.samples).toHaveLength(100);
+    for (const value of result.samples) {
+      expect(value).toMatchObject({
+        status: "empty_output",
+        commandCount: 1,
+        commandExitCode: 0,
+        cleanup: "requested",
+      });
+      expect(value.firstOutputMs).not.toBeNull();
+      expect(value.completionMs).not.toBeNull();
+    }
+    expect(result.summary).toMatchObject({
+      denominator: 100,
+      successes: 0,
+      failures: 100,
+      outcomes: { empty_output: 100 },
+      ttftMsAllUsers: { denominator: 100, observed: 100 },
+      completionMsAllUsers: {
+        denominator: 100,
+        observed: 0,
+        missing: 100,
+        p95: "unobserved_or_failed",
+      },
+      successfulOnlyTtftMs: { denominator: 0 },
+      verdict: { successRateAtLeast99Percent: false },
+    });
+  });
+  test("fragmented production SSE advances through real coalesced coverage", async () => {
+    const fixture = fixtureFetch("plain", "success", "legacy", (events) => {
+      const projection = coalesceSessionEventDeltasWithCoverage(events);
+      expect(projection.events.map((value) => value.sequence)).toEqual([1, 2, 3, 5]);
+      expect(projection.coveredThroughBySequence.get(3)).toBe(4);
+      const frames = projection.events.map((value) =>
+        formatSessionEventSse(value, projection.coveredThroughBySequence.get(value.sequence)!),
+      );
+      expect(frames[2]).toStartWith("id: 4\n");
+      // Split every byte, including the trusted id and JSON, across chunks.
+      return sseFrames(frames, 1);
+    });
+    const result = (await runBurst({ ...(await setup()), fetchImpl: fixture.fetchImpl })) as {
+      samples: Sample[];
+      summary: ReturnType<typeof summarize>;
+    };
+    expect(result.summary).toMatchObject({ denominator: 100, successes: 100, failures: 0 });
+    expect(result.summary.completionMsAllUsers.observed).toBe(100);
+    expect(result.samples.every((value) => value.cleanup === "requested")).toBe(true);
+    expect(fixture.calls.filter((call) => call.path.endsWith("/events/stream"))).toHaveLength(100);
+  });
+  test.each(["before_coverage", "after_coverage", "forged_producer_coverage"])(
+    "%s does not hide a real missing sequence or reconnect",
+    async (gap) => {
+      const fixture = fixtureFetch("plain", "success", "legacy", (events) => {
+        if (gap === "before_coverage")
+          return sse(
+            events.filter((value) => value.sequence !== 2),
+            true,
+          );
+        if (gap === "after_coverage")
+          return sse(
+            events.map((value) =>
+              value.type === "turn.completed" ? { ...value, sequence: 6 } : value,
+            ),
+            true,
+          );
+        return sse(
+          events
+            .filter((value) => value.sequence !== 4)
+            .map((value) =>
+              value.sequence === 3
+                ? {
+                    ...value,
+                    coveredThrough: 4,
+                    coalescedUntil: 4,
+                    payload: { ...value.payload, coalescedUntil: 4 },
+                  }
+                : value,
+            ),
+        );
+      });
+      const result = (await runBurst({ ...(await setup()), fetchImpl: fixture.fetchImpl })) as {
+        samples: Sample[];
+        summary: ReturnType<typeof summarize>;
+      };
+      expect(result.summary).toMatchObject({ denominator: 100, successes: 0, failures: 100 });
+      expect(result.summary.completionMsAllUsers.missing).toBe(100);
+      expect(
+        result.samples.every(
+          (value) => value.errorCode === "sse_sequence_gap" && value.cleanup === "held_unknown",
+        ),
+      ).toBe(true);
+      expect(fixture.calls.filter((call) => call.path.endsWith("/events/stream"))).toHaveLength(
+        100,
+      );
+      expect(fixture.calls.some((call) => call.method === "DELETE")).toBe(false);
+    },
+  );
+  test.each([
+    undefined,
+    "",
+    "not-a-sequence",
+    "4.0",
+    "4e0",
+    "+4",
+    "-4",
+    " 4",
+    "2",
+    "9007199254740992",
+  ])("invalid SSE id %s falls back to raw sequence and cannot claim coverage", async (id) => {
+    const fixture = fixtureFetch("plain", "success", "legacy", (events) =>
+      sseFrames(
+        events
+          .filter((value) => value.sequence !== 4)
+          .map((value) => {
+            const frame = formatSessionEventSse(value);
+            return value.sequence === 3
+              ? frame.replace(/^id: 3\n/, id === undefined ? "" : `id: ${id}\n`)
+              : frame;
+          }),
+      ),
+    );
+    const result = (await runBurst({ ...(await setup()), fetchImpl: fixture.fetchImpl })) as {
+      samples: Sample[];
+      summary: ReturnType<typeof summarize>;
+    };
+    expect(result.summary).toMatchObject({ denominator: 100, successes: 0, failures: 100 });
+    expect(result.samples.every((value) => value.errorCode === "sse_sequence_gap")).toBe(true);
+    expect(fixture.calls.filter((call) => call.path.endsWith("/events/stream"))).toHaveLength(100);
+    expect(fixture.calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
   test.each(["dual", "broker"])(
     "%s fresh auth uses isolated public transaction and selected actor",
     async (authMode) => {
@@ -550,13 +728,44 @@ describe("honest measurement fixtures", () => {
     expect(value.firstOutputMs).toBeNull();
     observer.observe(event(7, "agent.message.delta", { text: "éOK" }), 17, "wall");
     observer.observe(event(7, "agent.message.delta", { text: "duplicate" }), 99, "wall");
-    observer.observe(event(8, "turn.completed", {}), 25, "wall");
+    observer.observe(event(8, "turn.completed", { output: "éOK" }), 25, "wall");
     expect(value).toMatchObject({
       firstOutputMs: 17,
       workerStartMs: 2,
       completionMs: 25,
       status: "success",
     });
+  });
+  test.each([
+    { label: "missing", payload: {} },
+    { label: "null", payload: { output: null } },
+    { label: "number", payload: { output: 1 } },
+    { label: "object", payload: { output: { text: "OK" } } },
+    { label: "array", payload: { output: ["OK"] } },
+    { label: "empty", payload: { output: "" } },
+    { label: "whitespace", payload: { output: " \t\r\n" } },
+    { label: "empty final", payload: { output: "", emptyFinalReply: true } },
+    { label: "flagged nonempty", payload: { output: "OK", emptyFinalReply: true } },
+  ])("$label canonical output cannot borrow earlier commentary", ({ payload }) => {
+    const value = sample();
+    const observer = new TurnObserver(value, "plain");
+    observer.observe(event(1, "turn.started"), 1, "wall");
+    observer.observe(
+      event(2, "agent.message.completed", { text: "Working on it.", phase: "commentary" }),
+      10,
+      "wall",
+    );
+    expect(observer.observe(event(3, "turn.completed", payload), 20, "wall")).toBe(true);
+    expect(value).toMatchObject({ firstOutputMs: 10, completionMs: 20, status: "empty_output" });
+    expect(summarize([value]).completionMsAllUsers).toMatchObject({ observed: 0, missing: 1 });
+  });
+  test("canonical nonempty output still requires visible assistant text", () => {
+    const value = sample();
+    const observer = new TurnObserver(value, "plain");
+    observer.observe(event(1, "turn.started"), 1, "wall");
+    observer.observe(event(2, "turn.completed", { output: "OK" }), 20, "wall");
+    expect(value.firstOutputMs).toBeNull();
+    expect(value.status).toBe("empty_output");
   });
   test("command output cannot forge terminal metadata", () => {
     const value = sample();
@@ -580,7 +789,7 @@ describe("honest measurement fixtures", () => {
       "wall",
     );
     observer.observe(event(4, "agent.message.completed", { text: "OK" }), 30, "wall");
-    observer.observe(event(5, "turn.completed"), 40, "wall");
+    observer.observe(event(5, "turn.completed", { output: "OK" }), 40, "wall");
     expect(value.commandExitCode).toBeNull();
     expect(value.status).toBe("failed");
   });

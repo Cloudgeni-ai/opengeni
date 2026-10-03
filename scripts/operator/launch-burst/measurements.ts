@@ -146,7 +146,10 @@ export class TurnObserver {
       sample.status =
         event.type !== "turn.completed"
           ? "failed"
-          : sample.firstOutputMs === null
+          : sample.firstOutputMs === null ||
+              typeof event.payload.output !== "string" ||
+              event.payload.output.trim().length === 0 ||
+              event.payload.emptyFinalReply === true
             ? "empty_output"
             : sample.errorCode !== null ||
                 (this.mode !== "plain" &&

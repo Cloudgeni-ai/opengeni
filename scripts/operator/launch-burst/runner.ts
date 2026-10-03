@@ -305,7 +305,14 @@ export async function runBurst(input: RunInput): Promise<object> {
         const event = Event.parse(JSON.parse(message.data));
         if (event.sequence <= sequence) continue;
         if (event.sequence !== sequence + 1) throw new ProbeError("sse_sequence_gap");
-        sequence = event.sequence;
+        // Match the SDK's trustedSseSequence: only the transport id can cover
+        // coalesced raw events, never producer-controlled payload/body fields.
+        const covered =
+          message.id !== undefined && /^\d+$/.test(message.id)
+            ? Number(message.id)
+            : event.sequence;
+        sequence =
+          Number.isSafeInteger(covered) && covered >= event.sequence ? covered : event.sequence;
         terminal = observer.observe(event, clock.mono(), clock.wall());
         if (terminal) break;
       }
