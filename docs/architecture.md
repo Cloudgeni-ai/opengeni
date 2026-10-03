@@ -114,22 +114,20 @@ Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 ### 3.3 Logical turns and physical attempts are different
 
 A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
-attempts append atomic batches: ordered, exactly-once history.
+attempts append ordered, exactly-once atomic history batches.
 
-`wait_for_input` ends settled tool-batch execution, preserving trusted authority
-and immutable same-turn deadlines. Durable command results alone wake only
-explicit waits; notices never block inbox input. Batching preserves causal authority;
-messages/Steer inherit the sender’s human, independent of connections.
-See [`run-lifecycle.md`](run-lifecycle.md).
+`wait_for_input` settles tool-batch execution, preserving trusted authority and
+immutable same-turn deadlines. Command results wake only explicit waits; notices
+never block inbox input. Batching preserves causal authority; messages/Steer inherit
+the sender’s human independently of connections. [Details](run-lifecycle.md).
 
-Fresh agent-created sessions inherit omitted model/reasoning from the exact
-calling turn, but omitted latency defaults to `standard`. Explicit faster modes
-retain canonical model validation. Creation replay and later messages preserve
-the recipient's accepted settings; there is no follow-up latency reset.
+Agent-created sessions inherit omitted model/reasoning from the exact calling
+turn; omitted latency defaults to `standard`. Explicit faster modes require
+canonical validation. Replay/later messages preserve recipient settings.
 
-`runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
-effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
-fences; pre-dispatch proof alone permits recovery.
+`runAgentTurn` is non-retryable and attempt-fenced: retry settlement, not unknown
+effects. Unknown Modal Starts retain exact invocation/writer fences in tool results;
+only pre-dispatch proof permits recovery.
 Server-producer expiry receipts fence late turn/input materialization under the
 session lock; [validation/recovery fences](run-lifecycle.md).
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
@@ -144,16 +142,14 @@ Failed-session retry is not Pause/Resume or prompt admission:
 receipts, rejects unresolved execution/safety refusals, and re-enables the
 original turn, history, authority and selected model policy—never synthetic input.
 
-Active-run writes require the current exact attempt/generation; stale workers
-cannot write or settle replacements. Temporal cancellation is intent, not
-quiescence: unresolved writers fence capture, rotation and physical settlement.
-Inference can resume on the same machine after a lease-lost closed attempt's
-legacy Modal exec observation is unknown and has no retained locator. Exact
-actor/turn/generation and home-route checks bound this exception; the original
-admission and quiescence remain unresolved. Recovery tool results warn the model
-to inspect actual state before repeating a call. Pause/Steer fences stay strict.
-Finalization contains each stage with heartbeat/metric evidence
-(`agent-turn/finalization-monitor.ts`).
+Active-run writes require exact attempt/generation; stale workers cannot write
+or settle replacements. Temporal cancellation is intent, not quiescence;
+unresolved writers fence capture, rotation and physical settlement.
+Unknown, locator-less legacy Modal exec observation on a lease-lost closed
+attempt permits same-machine inference only under exact actor/turn/generation
+and home-route checks. Admission/quiescence remain unresolved; recovery results
+warn agents to inspect before replay. Pause/Steer remain strict. Finalization
+contains each stage with heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
 
 Recoverable shutdown transactionally creates a Postgres workflow wake,
 unacknowledged until exact closed-attempt quiescence. Retained-process
