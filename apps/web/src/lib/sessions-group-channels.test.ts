@@ -7,7 +7,13 @@ import {
   creatorLabel,
   railRowCreator,
 } from "./creator-initials";
-import { buildRailForest, channelRailSections, summarizeRailNodes } from "./sessions-group";
+import {
+  buildRailForest,
+  channelRailSections,
+  summarizeRailNodes,
+  summarizeRailStatusCounts,
+  sessionProjectTotals,
+} from "./sessions-group";
 import type { Session } from "../types";
 
 // channelRailSections only reads id / parentSessionId / status / channelId /
@@ -74,6 +80,47 @@ const CHANNELS = [
   { id: "channel-knowledge", name: "knowledge" },
   { id: "channel-security", name: "security" },
 ];
+
+test("complete project summaries replace loaded counts and clear empty groups", () => {
+  const groups = sessionProjectTotals(
+    {
+      needsYouCount: 9,
+      groups: [
+        {
+          channelId: "channel-security",
+          total: 80,
+          attention: 9,
+          attentionSince: "2026-08-01T00:00:00.000Z",
+          failed: 2,
+          active: 4,
+          queued: 3,
+          unread: 20,
+          activeWork: 1,
+        },
+      ],
+    },
+    CHANNELS.map((channel) => channel.id),
+  );
+  expect(
+    summarizeRailStatusCounts(groups.get("channel-security")!, new Date("2026-08-01T01:00:00Z")),
+  ).toMatchObject({ kind: "needs_attention", count: 9, total: 80 });
+  expect(summarizeRailStatusCounts(groups.get("channel-knowledge")!)).toMatchObject({
+    kind: "neutral",
+    total: 0,
+  });
+  expect(
+    summarizeRailStatusCounts({ ...groups.get("channel-security")!, sendFailed: 1 }),
+  ).toMatchObject({ kind: "send_failed", count: 1, total: 80 });
+  expect(
+    sessionProjectTotals(
+      {
+        needsYouCount: 0,
+        groups: [{ ...groups.get("channel-security")!, channelId: "removed-project" }],
+      },
+      [],
+    ).get(null)?.total,
+  ).toBe(80);
+});
 
 describe("channelRailSections", () => {
   test("puts projects in channel order before unfiled Default", () => {

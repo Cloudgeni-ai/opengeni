@@ -186,6 +186,166 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("complete totals and attention discovery survive small pages, pins and target grants", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:complete-attention";
+    await grantMember(workspace, subjectId);
+    const channel = await createChannel(db, { ...workspace, name: "Example project" });
+    const root = await session({ ...workspace, message: "older root", channelId: channel.id });
+    const child = await session({
+      ...workspace,
+      message: "pinned child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "attention grandchild",
+      parentSessionId: child.id,
+    });
+    const failedRoot = await session({ ...workspace, message: "failed root" });
+    const failedChild = await session({
+      ...workspace,
+      message: "failed child",
+      parentSessionId: failedRoot.id,
+    });
+    for (let i = 0; i < 6; i++) await session({ ...workspace, message: `new idle ${i}` });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      update sessions set status = case when id = ${grandchild.id} then 'requires_action' else 'failed' end
+      where id in (${grandchild.id}, ${failedRoot.id}, ${failedChild.id})`,
+    );
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: child.id,
+      pinned: true,
+    });
+    const options = {
+      subjectId,
+      parentSessionId: null,
+      includePinned: false,
+      includeTotals: true,
+      limit: 1,
+    };
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(page.sessions).toHaveLength(1);
+    expect(page.totals?.needsYouCount).toBe(2);
+    expect(page.totals?.groups.find((group) => group.channelId === channel.id)).toMatchObject({
+      total: 1,
+      attention: 0,
+    });
+    const attention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      needsYouOnly: true,
+    });
+    expect(attention.needsYouOnly).toBe(true);
+    const next = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      needsYouOnly: true,
+      cursor: decodeSessionListCursor(attention.nextCursor!)!,
+    });
+    expect(new Set([...attention.sessions, ...next.sessions].map((row) => row.id))).toEqual(
+      new Set([root.id, failedRoot.id]),
+    );
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        cursor: decodeSessionListCursor(attention.nextCursor!)!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(target.totals?.needsYouCount).toBe(0);
+    expect(target.totals?.groups[0]).toMatchObject({ total: 1, attention: 0 });
+    expect(
+      (
+        await listSessionEntriesForSubject(db, workspace.workspaceId, {
+          ...options,
+          needsYouOnly: true,
+          authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+        })
+      ).sessions,
+    ).toHaveLength(0);
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: failedRoot.id,
+      pinned: true,
+    });
+    const pinned = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(pinned.totals?.needsYouCount).toBe(2);
+    expect(pinned.totals?.groups.reduce((n, group) => n + group.total, 0)).toBe(7);
+    await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      archived: true,
+    });
+    expect(
+      (await listSessionEntriesForSubject(db, workspace.workspaceId, options)).totals
+        ?.needsYouCount,
+    ).toBe(1);
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        subjectId: "user:unrelated",
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  });
+
+  test("complete metadata exceeds painted-tree caps without hydrating configuration", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:large-metadata";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "large root" });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy, parent_session_id, root_session_id, status)
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'generated metadata fixture',
+        'test-model', 'medium', 'standard', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
+        case when generated.ordinal <= 1024 then ${root.id}::uuid else null end,
+        case when generated.ordinal <= 1024 then ${root.id}::uuid else generated.id end,
+        case when generated.ordinal = 1024 then 'requires_action' else 'idle' end
+      from (select gen_random_uuid() as id, ordinal from generate_series(1, 1536) ordinal) generated
+    `,
+    );
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+      limit: 1,
+      includePinned: false,
+    });
+    expect(page.sessions).toHaveLength(1);
+    expect(page.totals?.needsYouCount).toBe(1);
+    expect(page.totals?.groups[0]).toMatchObject({ total: 1537, attention: 1 });
+    expect(page.sessions[0]).not.toHaveProperty("initialMessage");
+    const attention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      needsYouOnly: true,
+      includeTotals: true,
+      includePinned: false,
+    });
+    expect(attention.sessions.map((row) => row.id)).toEqual([root.id]);
+    expect(attention.totals?.groups[0]).toMatchObject({ total: 1025, attention: 1 });
+    expect(attention.sessions[0]?.treeStats?.totalDescendants).toBe(1000);
+    const pins = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      pinsOnly: true,
+      includeTotals: true,
+    });
+    expect(pins.totals).toEqual(page.totals);
+  });
+
   test("compact pages retain authority and display state while excluding large configuration", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -542,7 +702,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const before = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: viewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(before.totals?.groups[0]).toMatchObject({ failed: 1, unread: 1 });
+    expect(before.totals?.needsYouCount).toBe(0);
     expect(before.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 1,
@@ -562,7 +725,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const after = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: viewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(after.totals?.groups[0]).toMatchObject({ failed: 0, unread: 0 });
     expect(after.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 0,
@@ -571,7 +736,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const other = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: otherViewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(other.totals?.groups[0]).toMatchObject({ failed: 1, unread: 1 });
     expect(other.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 1,
@@ -582,6 +749,16 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("counts effective pauses and excludes paused descendants from active totals", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const subjectId = "user:pause-metadata";
+    await grantMember(workspace, subjectId);
+    const readTotals = async () =>
+      (
+        await listSessionEntriesForSubject(db, workspace.workspaceId, {
+          subjectId,
+          parentSessionId: null,
+          includeTotals: true,
+        })
+      ).totals?.groups[0];
     const root = await session({ ...workspace, message: "effective pause root" });
     const pausedChild = await session({
       ...workspace,
@@ -646,6 +823,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pausedDescendants: 2,
     });
 
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 2 });
     await admin`
       update workspace_inference_controls
       set revision = 20, workspace_state = 'paused', workspace_pause_revision = 20
@@ -661,6 +839,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pausedDescendants: 3,
     });
 
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 0 });
     await executeSessionActivity(
       workspace.workspaceId,
       sql`
@@ -672,6 +851,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const resumedStats = await withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
       sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
     );
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 1 });
     expect(resumedStats.get(root.id)).toMatchObject({
       totalDescendants: 3,
       runningDescendants: 0,

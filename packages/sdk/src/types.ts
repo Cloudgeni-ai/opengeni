@@ -1704,8 +1704,25 @@ export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "ses
   sessions: SessionListEntry[];
 };
 
-/** Canonical session-list page; pinned rows are excluded from ordinary pages. */
+/** Complete metadata for authorized roots and ordinary project trees. */
+export type SessionListTotals = {
+  needsYouCount: number;
+  groups: Array<{
+    channelId: string | null;
+    total: number;
+    attention: number;
+    attentionSince: string | null;
+    failed: number;
+    active: number;
+    queued: number;
+    unread: number;
+    activeWork: number;
+  }>;
+};
+
 export type SessionListResponse = {
+  totals?: SessionListTotals;
+  needsYouOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;

@@ -801,6 +801,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.cursor ? { cursor: query.cursor } : {}),
           ...(query.search ? { search: query.search } : {}),
           ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includeTotals ? { includeTotals: true } : {}),
+          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -5224,6 +5226,8 @@ export function sessionListQuery(
   search: string | undefined;
   pinsOnly: boolean;
   includePinned: boolean;
+  includeTotals: boolean;
+  needsYouOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5273,6 +5277,16 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
+  for (const key of ["includeTotals", "needsYouOnly"]) {
+    if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
+      throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
+  }
+  const includeTotals = query.includeTotals === "true";
+  const needsYouOnly = query.needsYouOnly === "true";
+  if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
+    throw new HTTPException(400, { message: "includeTotals requires a root page" });
+  if (needsYouOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5366,6 +5380,7 @@ export function sessionListQuery(
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
+    needsYouOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5398,6 +5413,8 @@ export function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     includePinned,
+    includeTotals,
+    needsYouOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,

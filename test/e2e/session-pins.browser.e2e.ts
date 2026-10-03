@@ -2964,6 +2964,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         pause: "paused",
       });
       expect(evidence.direct).toEqual([child.id]);
+      // New idle roots push the attention tree outside the four-row project window.
+      for (let index = 0; index < 6; index++)
+        await createSessionThroughApi(page, apiBaseUrl, workspaceId, `New idle fixture ${index}`);
+      await navigateWithProjectPages(page, workspaceId, () => page.reload());
+      expect(await page.locator(`a[data-session-row="${parent.id}"]`).count()).toBe(0);
       // The rail's "Needs you" view keeps the failed workstream with its
       // spawned agents, so every waiting depth stays one click away.
       await page.getByRole("button", { name: /^Session view, 1 session needs you$/ }).click();

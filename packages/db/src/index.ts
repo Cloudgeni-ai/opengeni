@@ -297,6 +297,7 @@ import type {
   SessionScopeSubjectId,
   SessionMemoryScope,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -35628,6 +35629,8 @@ export type SessionListFilterOptions = {
   createdFrom?: Date;
   /** Exclusive creation upper bound. */
   createdBefore?: Date;
+  /** Restrict root pages to workstreams requiring human attention. */
+  needsYouOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -35635,6 +35638,8 @@ export type SessionListFilterOptions = {
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
   SessionListFilterOptions & {
     subjectId: string;
+    /** Complete metadata totals, independent of pagination. Root or global pin pages. */
+    includeTotals?: boolean;
     cursor?: SessionListCursor | undefined;
     search?: string | undefined;
     /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
@@ -36556,6 +36561,173 @@ function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requ
   };
 }
 
+function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefined): SQL {
+  if (!scope) return sql`true`;
+  return sessionAuthorizationScopeFilter(
+    scope.kind === "all"
+      ? scope
+      : {
+          ...scope,
+          sessionIds: [],
+        },
+  );
+}
+
+/** Exact target grants never imply visibility of relatives. */
+function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): SQL {
+  return sql`(
+    ${schema.sessions.status} in ('requires_action', 'failed')
+    or (
+      ${schema.sessions.parentSessionId} is null
+      and ${sessionRelatedListScope(scope)}
+      and exists (
+        with recursive attention_tree(id, status) as (
+          select child.id, child.status from ${schema.sessions} child
+          where child.workspace_id = ${schema.sessions.workspaceId}
+            and child.parent_session_id = ${schema.sessions.id}
+          union
+          select child.id, child.status from attention_tree parent
+          join ${schema.sessions} child on child.parent_session_id = parent.id
+          where child.workspace_id = ${schema.sessions.workspaceId}
+        )
+        select 1 from attention_tree where status = 'requires_action'
+      )
+    )
+  )`;
+}
+
+/**
+ * One content-free graph aggregation, before pagination. Each root owns a
+ * disjoint tree: a single-parent cycle cannot be reachable from a parentless
+ * root. UNION also deduplicates defensive legacy edges. Exact target scopes
+ * seed only their own row; pinned paths leave the ordinary project summaries.
+ */
+async function sessionListTotalsInScope(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+): Promise<SessionListTotals> {
+  const rootFilters = and(
+    eq(schema.sessions.workspaceId, workspaceId),
+    ...sessionFilters({ ...options, parentSessionId: null, needsYouOnly: false }),
+  );
+  const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
+    db,
+    sql`
+    with recursive roots as materialized (
+      select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
+        ${schema.sessions.status} as status,
+        ${schema.sessions.directControlState} as direct_control_state,
+        ${schema.sessions.directPauseRevision} as direct_pause_revision,
+        ${schema.sessions.subtreeRunOverrideRevision} as subtree_run_override_revision,
+        ${sessionRelatedListScope(options.authorizationScope)} as related,
+        exists (select 1 from ${schema.sessionPins} archived
+          where archived.workspace_id = ${workspaceId} and archived.subject_id = ${options.subjectId}
+            and archived.session_id = ${schema.sessions.id} and archived.archived) as archived
+      from ${schema.sessions} where ${rootFilters}
+    ), nodes(root_id, channel_id, id, status, pause_revision, pinned_path, related) as (
+      select root.id, root.channel_id, root.id, root.status,
+        greatest(
+          case when control.workspace_state = 'paused' and
+            (root.subtree_run_override_revision is null or
+             root.subtree_run_override_revision <= control.workspace_pause_revision)
+            then control.workspace_pause_revision end,
+          case when root.direct_control_state = 'paused' then root.direct_pause_revision end
+        ),
+        coalesce(personal.pinned, false), root.related
+      from roots root join ${schema.workspaceInferenceControls} control
+        on control.workspace_id = ${workspaceId}
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = root.id
+      union
+      select parent.root_id, parent.channel_id, child.id, child.status,
+        greatest(
+          case when child.subtree_run_override_revision is null or
+              child.subtree_run_override_revision <= parent.pause_revision
+            then parent.pause_revision end,
+          case when child.direct_control_state = 'paused' then child.direct_pause_revision end
+        ),
+        parent.pinned_path or coalesce(personal.pinned, false), parent.related
+      from nodes parent join ${schema.sessions} child on child.parent_session_id = parent.id
+        and child.workspace_id = ${workspaceId}
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = child.id
+      where parent.related
+    ), attention_roots as (
+      select root_id, bool_or(status = 'requires_action') as attention
+      from nodes group by root_id
+    ), root_attention as materialized (
+      select root.id, not root.archived and (
+        root.status in ('requires_action', 'failed') or coalesce(attention.attention, false)
+      ) as needs_you
+      from roots root left join attention_roots attention on attention.root_id = root.id
+    ), measured as (
+      select nodes.*,
+        cursor.last_meaningful_sequence > coalesce(
+          case when personal.manually_unread_through is not null then -1
+            else personal.acknowledged_sequence end, 0) as unread,
+        coalesce(personal.actively_working, false) as active_work,
+        case when nodes.status = 'requires_action' then (
+          select min(turn.updated_at) from ${schema.sessionTurns} turn
+          where turn.workspace_id = ${workspaceId} and turn.session_id = nodes.id
+            and turn.status = 'requires_action'
+        ) end as attention_since,
+        nodes.status = 'idle' and session.active_turn_id is null
+          and session.input_wait_until is not null
+          and session.input_wait_turn_id = (
+            select finished.id from ${schema.sessionTurns} finished
+            where finished.workspace_id = ${workspaceId} and finished.session_id = nodes.id
+              and finished.finished_at is not null
+              and ${sessionInputWaitDecidingTurnSql(
+                {
+                  id: sql`finished.id`,
+                  source: sql`finished.source`,
+                  workspaceId: sql`finished.workspace_id`,
+                  sessionId: sql`finished.session_id`,
+                  finishedAt: sql`finished.finished_at`,
+                  metadata: sql`finished.metadata`,
+                },
+                sql`session.input_wait_turn_id`,
+              )}
+            order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+          ) as input_wait
+      from nodes join ${schema.sessions} session on session.workspace_id = ${workspaceId}
+        and session.id = nodes.id
+      join ${schema.sessionEventCursors} cursor on cursor.workspace_id = ${workspaceId}
+        and cursor.session_id = nodes.id and cursor.account_id = session.account_id
+      left join ${schema.sessionPins} personal on personal.workspace_id = ${workspaceId}
+        and personal.subject_id = ${options.subjectId} and personal.session_id = nodes.id
+      join roots root on root.id = nodes.root_id
+      join root_attention attention on attention.id = nodes.root_id
+      where not root.archived and not nodes.pinned_path
+        and (not ${Boolean(options.needsYouOnly)} or attention.needs_you)
+    ), grouped as (
+      select channel_id as "channelId", count(*)::int as total,
+        count(*) filter (where status = 'requires_action')::int as attention,
+        min(attention_since) as "attentionSince",
+        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where pause_revision is null and
+          (status in ('running', 'recovering') or input_wait))::int as active,
+        count(*) filter (where pause_revision is null and
+          status in ('queued', 'waiting_capacity'))::int as queued,
+        count(*) filter (where unread)::int as unread,
+        count(*) filter (where active_work)::int as "activeWork"
+      from measured group by channel_id
+    )
+    select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
+      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups
+  `,
+  );
+  const result = rows[0];
+  return {
+    needsYouCount: Number(result?.needsYouCount ?? 0),
+    groups: (result?.groups ?? []).map((group) => ({
+      ...group,
+      attentionSince: group.attentionSince ? new Date(group.attentionSince).toISOString() : null,
+    })),
+  };
+}
+
 function sessionFilters(
   options: Pick<
     ListSessionsForSubjectOptions,
@@ -36573,6 +36745,7 @@ function sessionFilters(
     | "createdFrom"
     | "createdBefore"
     | "scopeSubjectId"
+    | "needsYouOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -36585,6 +36758,7 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.needsYouOnly) filters.push(sessionNeedsYouSql(options.authorizationScope));
   if (options.originSiteId) {
     filters.push(
       sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
@@ -36804,7 +36978,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
-    !options.scopeSubjectId
+    !options.scopeSubjectId &&
+    !options.needsYouOnly
   ) {
     return "all";
   }
@@ -36817,6 +36992,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
+    ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
   ]);
 }
 
@@ -37135,6 +37311,17 @@ async function readSessionListForSubject(
         if (options.archivedOnly && archiveMode !== "archived") {
           throw new SessionListCursorError("archivedOnly conflicts with archiveStatus");
         }
+        if (options.includeTotals && options.parentSessionId !== null && !options.pinsOnly)
+          throw new SessionListCursorError("Attention totals require root or global pin pages");
+        const totals = options.includeTotals
+          ? await sessionListTotalsInScope(
+              tx,
+              workspaceId,
+              options.pinsOnly
+                ? { ...options, archiveStatus: "active", parentSessionId: null }
+                : options,
+            )
+          : undefined;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
         const ordinaryPinFilter =
           archiveMode === "archived"
@@ -37586,6 +37773,8 @@ async function readSessionListForSubject(
         if (summary)
           return {
             projection: "summary",
+            ...(totals ? { totals } : {}),
+            ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -37594,6 +37783,8 @@ async function readSessionListForSubject(
             archiveStatus: archiveMode,
           };
         return {
+          ...(totals ? { totals } : {}),
+          ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
