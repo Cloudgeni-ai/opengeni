@@ -10,7 +10,10 @@ are unchanged. No historical total is repriced.
 workspaceId: string | null, query, now, detailsWorkspaceIds?: readonly string[],
 detailsSharedWorkspaces?: boolean })`. A null workspace selects organization
 scope. The result is the existing `@opengeni/contracts/insights-usage` response.
-All six UTC ranges and agreed grouping/filter/cursor fields are supported.
+All six preset UTC ranges and the original grouping/filter/cursor fields are
+supported. Source/plan/session dimensions and custom dates remain preserved
+follow-up work: these queries return HTTP 400 rather than silently using a
+different window or dimension. The interim response omits `facets.sources`.
 
 Core must supply authenticated detail authority, not wire fields: workspace
 routes pass their sessions:read-authorized workspace; organization routes pass

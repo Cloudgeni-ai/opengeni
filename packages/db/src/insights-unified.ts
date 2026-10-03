@@ -23,6 +23,9 @@ type Scope = {
 /** UTC calendar windows; rolling ranges include today and the preceding N-1 days. */
 export function insightsUsageWindow(range: InsightsUsageRange, now: Date) {
   if (!Number.isFinite(now.getTime())) throw new Error("Invalid Insights clock");
+  if (!["today", "week", "month", "30d", "90d", "ytd"].includes(range)) {
+    throw new Error("Raw Insights does not support this range");
+  }
   const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   if (range === "week") since.setUTCDate(since.getUTCDate() - 6);
   if (range === "30d") since.setUTCDate(since.getUTCDate() - 29);
@@ -92,7 +95,7 @@ function mini(): SQL {
 }
 
 function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
-  const key = {
+  const keys = {
     model: sql`payload->>'provider'||'/'||(payload->>'model')`,
     provider: sql`payload->>'provider'`,
     payer: sql`payload->>'payer'`,
@@ -101,8 +104,8 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootSessionId','deleted')`,
     person: sql`coalesce(payload->>'person','service')`,
     schedule: sql`coalesce(payload->>'scheduleId','service')`,
-  }[groupBy];
-  const label = {
+  };
+  const labels = {
     model: sql`payload->>'model'`,
     provider: sql`payload->>'provider'`,
     payer: sql`payload->>'payer'`,
@@ -111,7 +114,13 @@ function grouping(groupBy: InsightsUsageQuery["groupBy"]) {
     rootSession: sql`coalesce(payload->>'rootTitle','Untitled chat')`,
     person: sql`coalesce(payload->>'personName','Service')`,
     schedule: sql`coalesce(payload->>'scheduleName',case when payload->>'scheduleId' is null then 'Interactive' else 'Unavailable schedule' end)`,
-  }[groupBy];
+  };
+  if (!Object.hasOwn(keys, groupBy)) {
+    throw new Error("Raw Insights does not support this grouping");
+  }
+  const supportedGroup = groupBy as keyof typeof keys;
+  const key = keys[supportedGroup];
+  const label = labels[supportedGroup];
   const normalKind =
     groupBy === "project"
       ? sql`case when payload->>'projectId' is null then 'unfiled' else 'item' end`
