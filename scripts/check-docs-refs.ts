@@ -394,13 +394,13 @@ async function listFiles(roots: string[]): Promise<string[]> {
   }
   // Neither rg nor a git checkout (e.g. a fixture directory on a runner
   // without ripgrep): walk the roots directly, skipping dependencies.
-  const files: string[] = [];
+  const discoveredFiles: string[] = [];
   for (const root of existingRoots) {
     for await (const path of new Bun.Glob(`${root}/**/*`).scan({ onlyFiles: true, dot: true })) {
-      if (!/(^|\/)(node_modules|\.git|dist)\//.test(path)) files.push(path);
+      if (!/(^|\/)(node_modules|\.git|dist)\//.test(path)) discoveredFiles.push(path);
     }
   }
-  return normalizeFileList(files.join("\n"));
+  return normalizeFileList(discoveredFiles.join("\n"));
 }
 
 async function runFileListCommand(command: string[]): Promise<string | null> {
