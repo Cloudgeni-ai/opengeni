@@ -10,21 +10,24 @@ import {
   parseClaudeUsageHeaders,
   parseClaudeUsageResponse,
   parseModelProvidersJson,
+  emptyClaudeUsage,
+  ClaudeSubscriptionCredential,
 } from "@opengeni/config";
 import {
   createDb,
-  encryptEnvironmentValue,
-  readClaudeSubscriptionUsage,
-  loadClaudeSubscriptionUsageCredential,
-  recordClaudeSubscriptionUsage,
-  upsertWorkspaceProviderApiKeyConnection,
-  rotateWorkspaceProviderApiKeyConnection,
-  revokeWorkspaceProviderApiKeyConnections,
-  type ClaudeUsageScope,
+  createClaudeSubscriptionAccount,
+  upsertClaudeSubscriptionAccount,
+  upsertOrganizationClaudeSubscription,
+  setInitialActiveClaudeCredential,
+  disconnectClaudeSubscriptionAccount,
+  loadClaudeAccountCredential,
+  listClaudeAccountUsage,
+  recordClaudeAccountUsage,
+  type ClaudeAccountUsageAuthority,
   type DbClient,
 } from "../src";
 import { prepareClaudeSubscriptionCredential } from "../../../apps/api/src/claude-workspace-connection";
-import { refreshClaudeSubscriptionUsage } from "../../../apps/api/src/claude-subscription-usage";
+import { refreshClaudeAccountUsage } from "../../../apps/api/src/claude-subscription-account-usage";
 import {
   createClaudeUsageObserver,
   type CapturedClaudeUsage,
@@ -49,34 +52,100 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+type UsageAuthority = ClaudeAccountUsageAuthority & { credentialVersion: number };
+
+// Normalize an absent metadata map entry only after the real RLS-scoped read.
+async function readClaudeSubscriptionUsage(db: DbClient["db"], scope: UsageAuthority) {
+  const values = await listClaudeAccountUsage(db, scope, [
+    { id: scope.credentialId, version: scope.credentialVersion },
+  ]);
+  return values.get(scope.credentialId) ?? emptyClaudeUsage(null);
+}
+async function recordClaudeSubscriptionUsage(
+  db: DbClient["db"],
+  _settings: typeof settings,
+  scope: UsageAuthority,
+  input: {
+    token: string;
+    observation?: NonNullable<Parameters<typeof recordClaudeAccountUsage>[2]["observation"]>;
+    expectedConnectionId?: string;
+    expectedCredentialVersion?: number;
+    refresh?: NonNullable<Parameters<typeof recordClaudeAccountUsage>[2]["refresh"]>;
+  },
+) {
+  return recordClaudeAccountUsage(
+    db,
+    { ...scope, credentialId: input.expectedConnectionId ?? scope.credentialId },
+    {
+      ...input,
+      encryptionKey: key,
+      expectedCredentialVersion: input.expectedCredentialVersion ?? scope.credentialVersion,
+    },
+  );
+}
+
+async function fixture(fullScope = true) {
   const [account] = await shared.admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('Claude usage test') returning id`;
   const [workspace] = await shared.admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${account!.id}, 'Claude usage workspace') returning id`;
-  const scope: ClaudeUsageScope = {
-    accountId: account!.id,
-    workspaceId: workspace!.id,
-    scope: "workspace",
-  };
+  const subjectId = `user:${crypto.randomUUID()}`;
+  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    values (${account!.id}, ${workspace!.id}, ${subjectId}, 'admin')`;
+  const target = { accountId: account!.id, workspaceId: workspace!.id, subjectId };
   const bundle = prepareClaudeSubscriptionCredential(
     settings,
     "workspace:" + workspace!.id,
     setupToken,
   );
-  const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify({ apiKey: bundle }));
-  const row = await upsertWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
-    accountId: scope.accountId,
-    workspaceId: workspace!.id,
-    credentialEncrypted,
-    operationId: crypto.randomUUID(),
-    requestDigest: "fixture-create",
-    updatedBySubjectId: "test:claude-usage",
+  const secret = ClaudeSubscriptionCredential.parse(JSON.parse(bundle));
+  if (fullScope)
+    secret.oauth = {
+      refreshToken: "fixture-refresh-token",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      scopes: ["user:inference", "user:profile"],
+    };
+  const connected = await createClaudeSubscriptionAccount(client.db, {
+    ...target,
+    secret,
+    encryptionKey: key,
+    providerAccountId: "fixture:" + workspace!.id,
   });
-  expect(row).not.toBeNull();
-  return { scope, row: row!, credentialEncrypted };
+  await setInitialActiveClaudeCredential(client.db, {
+    ...target,
+    credentialId: connected.account.id,
+    authoritySnapshot: connected.authoritySnapshot,
+  });
+  const scope: UsageAuthority = {
+    ...target,
+    credentialId: connected.account.id,
+    credentialVersion: connected.account.version,
+    authoritySnapshot: connected.authoritySnapshot,
+  };
+  const [stored] = await shared.admin<
+    { updatedAt: Date }[]
+  >`select updated_at as "updatedAt" from claude_subscription_credentials where id = ${connected.account.id}`;
+  return {
+    scope,
+    row: { ...connected.account, updatedAt: stored!.updatedAt.toISOString() },
+    secret,
+  };
+}
+async function reconnect(
+  scope: UsageAuthority,
+  secret: Parameters<typeof upsertClaudeSubscriptionAccount>[1]["secret"],
+) {
+  if (!scope.workspaceId) throw new Error("Workspace fixture required");
+  return upsertClaudeSubscriptionAccount(client.db, {
+    ...scope,
+    workspaceId: scope.workspaceId,
+    expectedCredentialVersion: scope.credentialVersion,
+    secret,
+    encryptionKey: key,
+    providerAccountId: "fixture:" + scope.workspaceId,
+  });
 }
 const observation = (time = new Date(), value = ".5") =>
   parseClaudeUsageHeaders(
@@ -90,7 +159,7 @@ const observation = (time = new Date(), value = ".5") =>
   )!;
 
 test("worker responses received after same-token replacement cannot repopulate the new connection", async () => {
-  const { scope, row, credentialEncrypted } = await fixture();
+  const { scope, row, secret } = await fixture();
   const latest = new Map<string, CapturedClaudeUsage>();
   const observe = await createClaudeUsageObserver(
     parseModelProvidersJson(
@@ -111,18 +180,18 @@ test("worker responses received after same-token replacement cannot repopulate t
       ]),
     ),
     latest,
-    () => loadClaudeSubscriptionUsageCredential(client.db, settings, scope),
+    async () => {
+      const credential = await loadClaudeAccountCredential(client.db, scope, key);
+      return {
+        token: credential.secret.token,
+        connectionId: credential.id,
+        credentialVersion: credential.version,
+      };
+    },
   );
-  await rotateWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId!,
-    connectionId: row.id,
-    expectedVersion: row.version,
-    credentialEncrypted,
-    operationId: crypto.randomUUID(),
-    requestDigest: "worker-response-rotation",
-    updatedBySubjectId: "test:claude-usage",
-  });
+  const replaced = await reconnect(scope, secret);
+  expect(replaced.account.id).toBe(row.id);
+  expect(replaced.account.version).toBe(row.version + 1);
   observe(
     "workspace-claude-subscription",
     new Response(null, {
@@ -140,7 +209,7 @@ test("worker responses received after same-token replacement cannot repopulate t
 test("real app-role observations persist exact windows without changing credential or admission state", async () => {
   const { scope, row } = await fixture();
   const [before] =
-    await shared.admin`select version, updated_at, authority_generation, access_policy_version from connections where id = ${row.id}`;
+    await shared.admin`select version, updated_at, organization_user_resource_authority_generation, access_policy_version from claude_subscription_credentials where id = ${row.id}`;
   expect((await readClaudeSubscriptionUsage(client.db, scope)).observedAt).toBeNull();
   await recordClaudeSubscriptionUsage(client.db, settings, scope, {
     token: setupToken,
@@ -152,11 +221,11 @@ test("real app-role observations persist exact windows without changing credenti
   expect(JSON.stringify(value)).not.toContain(setupToken);
   expect(JSON.stringify(value)).not.toContain("deviceId");
   const [after] =
-    await shared.admin`select version, updated_at, authority_generation, access_policy_version from connections where id = ${row.id}`;
+    await shared.admin`select version, updated_at, organization_user_resource_authority_generation, access_policy_version from claude_subscription_credentials where id = ${row.id}`;
   expect(after).toEqual(before);
 });
 test("credential mismatch, replacement and revocation reject late observations", async () => {
-  const { scope, row, credentialEncrypted } = await fixture();
+  const { scope, row, secret } = await fixture();
   expect(
     await recordClaudeSubscriptionUsage(client.db, settings, scope, {
       token: "sk-ant-oat01-other",
@@ -167,17 +236,10 @@ test("credential mismatch, replacement and revocation reject late observations",
     token: setupToken,
     observation: observation(),
   });
-  const rotated = await rotateWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId!,
-    connectionId: row.id,
-    expectedVersion: row.version,
-    credentialEncrypted,
-    operationId: crypto.randomUUID(),
-    requestDigest: "fixture-replace",
-    updatedBySubjectId: "test:claude-usage",
-  });
-  expect(rotated?.id).not.toBe(row.id);
+  // Canonical reconnect retains account identity but fences the old generation.
+  const rotated = await reconnect(scope, secret);
+  expect(rotated.account.id).toBe(row.id);
+  expect(rotated.account.version).toBe(row.version + 1);
   expect((await readClaudeSubscriptionUsage(client.db, scope)).windows).toEqual([]);
   expect(
     await recordClaudeSubscriptionUsage(client.db, settings, scope, {
@@ -187,20 +249,17 @@ test("credential mismatch, replacement and revocation reject late observations",
       observation: observation(),
     }),
   ).toBeNull();
-  await revokeWorkspaceProviderApiKeyConnections(client.db, "claude_subscription", {
-    accountId: scope.accountId,
+  await disconnectClaudeSubscriptionAccount(client.db, {
+    ...scope,
     workspaceId: scope.workspaceId!,
-    connectionId: rotated!.id,
-    expectedVersion: rotated!.version,
-    updatedBySubjectId: "test:claude-usage",
   });
   expect((await readClaudeSubscriptionUsage(client.db, scope)).connected).toBe(false);
-  expect(
-    await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+  await expect(
+    recordClaudeSubscriptionUsage(client.db, settings, scope, {
       token: setupToken,
       observation: observation(),
     }),
-  ).toBeNull();
+  ).rejects.toThrow("authority is no longer active");
 });
 test("out-of-order responses cannot overwrite a newer provider reading", async () => {
   const { scope } = await fixture();
@@ -343,28 +402,32 @@ test("foreign account and foreign workspace reads do not reveal saved usage", as
     ),
   ).toBeNull();
 });
-test("inference-only scope errors retain header readings and suppress repeated unsupported lookups", async () => {
-  const { scope } = await fixture();
-  await recordClaudeSubscriptionUsage(client.db, settings, scope, {
-    token: setupToken,
-    observation: observation(),
-  });
-  let requests = 0;
-  const fetcher = (async (url: string, init: RequestInit) => {
-    requests++;
-    expect(url).toBe("https://api.anthropic.com/api/oauth/usage");
-    expect(init.method ?? "GET").toBe("GET");
-    expect(init.redirect).toBe("error");
-    return Response.json(
-      { error: { message: "OAuth token does not meet scope requirement user:profile" } },
-      { status: 403 },
-    );
-  }) as typeof fetch;
-  const result = await refreshClaudeSubscriptionUsage(client.db, settings, scope, fetcher);
-  expect(result.refreshStatus).toBe("scope_required");
-  expect(result.windows.map((window) => window.usedPercent)).toEqual([100, 50]);
-  expect(await refreshClaudeSubscriptionUsage(client.db, settings, scope, fetcher)).toEqual(result);
-  expect(requests).toBe(1);
+test("inference-only and provider scope errors retain headers and suppress unsupported lookups", async () => {
+  for (const fullScope of [false, true]) {
+    const { scope } = await fixture(fullScope);
+    await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+      token: setupToken,
+      observation: observation(),
+    });
+    let requests = 0;
+    const fetcher = (async (url: string, init: RequestInit) => {
+      requests++;
+      expect(url).toBe("https://api.anthropic.com/api/oauth/usage");
+      expect(init.method ?? "GET").toBe("GET");
+      expect(init.redirect).toBe("error");
+      return Response.json(
+        { error: { message: "OAuth token does not meet scope requirement user:profile" } },
+        { status: 403 },
+      );
+    }) as typeof fetch;
+    const result = await refreshClaudeAccountUsage(client.db, settings, scope, fetcher);
+    expect(result.refreshStatus).toBe("scope_required");
+    expect(result.windows.map((window) => window.usedPercent)).toEqual([100, 50]);
+    expect(await refreshClaudeAccountUsage(client.db, settings, scope, fetcher)).toEqual(result);
+    // Canonical setup tokens have no profile scope: reject locally with zero
+    // network requests. Full-scope tokens cache the provider's first 403.
+    expect(requests).toBe(fullScope ? 1 : 0);
+  }
 });
 test("full-scope refresh persists genuine provider percentages and bounds malformed/error bodies", async () => {
   for (const [response, expected] of [
@@ -379,7 +442,7 @@ test("full-scope refresh persists genuine provider percentages and bounds malfor
     [() => Response.json({ five_hour: { utilization: "bad" } }), "unavailable"],
   ] as const) {
     const { scope } = await fixture();
-    const result = await refreshClaudeSubscriptionUsage(client.db, settings, scope, (async () =>
+    const result = await refreshClaudeAccountUsage(client.db, settings, scope, (async () =>
       response()) as unknown as typeof fetch);
     expect(result.refreshStatus).toBe(expected);
     if (expected === "available") expect(result.windows[0]?.usedPercent).toBe(20);
@@ -398,34 +461,53 @@ test("organization observations reuse administrator and runtime RLS while exclud
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${workspaceScope.accountId}, 'Member personal') returning id`;
   await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id) values (${workspaceScope.accountId}, ${member}, 'member', 'active', ${memberWorkspace!.id})`;
-  const encrypted = encryptEnvironmentValue(
-    key,
-    prepareClaudeSubscriptionCredential(
-      settings,
-      "organization:" + workspaceScope.accountId,
-      setupToken,
+  const secret = ClaudeSubscriptionCredential.parse(
+    JSON.parse(
+      prepareClaudeSubscriptionCredential(
+        settings,
+        "organization:" + workspaceScope.accountId,
+        setupToken,
+      ),
     ),
   );
-  await shared.admin`insert into organization_model_provider_connections (account_id, provider_kind, credential_encrypted, operation_id, request_hash, updated_by_subject_id) values (${workspaceScope.accountId}, 'claude_subscription', ${encrypted}, ${crypto.randomUUID()}, ${"a".repeat(64)}, ${owner})`;
-  const runtime: ClaudeUsageScope = { ...workspaceScope, scope: "organization" };
+  const organization = await upsertOrganizationClaudeSubscription(client.db, {
+    organizationId: workspaceScope.accountId,
+    actorSubjectId: owner,
+    encryptionKey: key,
+    secret,
+    providerAccountId: "organization-fixture",
+    label: null,
+    accountEmail: null,
+    expiresAt: null,
+  });
+  const runtime: UsageAuthority = {
+    ...workspaceScope,
+    subjectId: owner,
+    credentialId: organization.account.id,
+    credentialVersion: organization.account.version,
+    authoritySnapshot: { version: 1, scope: "organization" },
+  };
   await recordClaudeSubscriptionUsage(client.db, settings, runtime, {
     token: setupToken,
     observation: observation(),
   });
-  const admin: ClaudeUsageScope = { ...runtime, workspaceId: null, actorSubjectId: owner };
+  const admin: UsageAuthority = {
+    ...runtime,
+    workspaceId: null,
+    authoritySnapshot: { version: 1, scope: "organization" },
+  };
   expect(
     (await readClaudeSubscriptionUsage(client.db, admin)).windows.map(
       (window) => window.usedPercent,
     ),
   ).toEqual([100, 50]);
   await expect(
-    readClaudeSubscriptionUsage(client.db, { ...admin, actorSubjectId: member }),
+    readClaudeSubscriptionUsage(client.db, { ...admin, subjectId: member }),
   ).rejects.toThrow();
   await expect(
     readClaudeSubscriptionUsage(client.db, {
-      accountId: admin.accountId,
-      workspaceId: null,
-      scope: "organization",
+      ...admin,
+      subjectId: "",
     }),
-  ).rejects.toThrow("administrator");
+  ).rejects.toThrow("setSubjectRlsContext: a non-empty subjectId is required");
 });

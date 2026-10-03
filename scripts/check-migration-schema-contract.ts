@@ -122,7 +122,11 @@ async function main(): Promise<void> {
     console.error(`  - ${violation.file}  (missing: ${violation.missing.join(", ")})`);
   }
   console.error("");
-  for (const line of registrationFixLines(violations, declaredIdentifiers(source))) {
+  for (const line of registrationFixLines(
+    violations,
+    declaredIdentifiers(source),
+    registration.semanticLedger,
+  )) {
     console.error(line);
   }
   process.exit(1);
