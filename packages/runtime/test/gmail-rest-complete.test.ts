@@ -412,9 +412,13 @@ describe("Gmail complete mailbox operations", () => {
   });
 
   test("imports never send and Calendar processing defaults off", async () => {
-    const calls: Array<{ url: URL; body: any }> = [];
+    const calls: Array<{ url: URL; body: any; method: string }> = [];
     const server = make(async (input, init) => {
-      calls.push({ url: new URL(input.toString()), body: JSON.parse(String(init?.body)) });
+      calls.push({
+        url: new URL(input.toString()),
+        body: JSON.parse(String(init?.body)),
+        method: init?.method ?? "GET",
+      });
       return Response.json({ id: "imported" });
     });
     await value(server, "import_message", {
@@ -423,10 +427,14 @@ describe("Gmail complete mailbox operations", () => {
       labelIds: ["INBOX"],
     });
     await value(server, "insert_message", { raw: b64(raw) });
-    expect(calls[0]!.url.pathname).toEndWith("/messages/import");
+    expect(calls[0]!.url.pathname).toBe("/gmail/v1/users/me/messages/import");
+    expect(calls[0]!.method).toBe("POST");
     expect(calls[0]!.url.searchParams.get("processForCalendar")).toBe("false");
-    expect(calls[1]!.url.pathname).toEndWith("/messages/insert");
+    expect(calls[1]!.url.pathname).toBe("/gmail/v1/users/me/messages");
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.url.searchParams.has("processForCalendar")).toBe(false);
     expect(Buffer.from(calls[0]!.body.raw, "base64url")).toEqual(raw);
+    expect(Buffer.from(calls[1]!.body.raw, "base64url")).toEqual(raw);
   });
 
   test("history preserves continuation and expired cursors require resync", async () => {
