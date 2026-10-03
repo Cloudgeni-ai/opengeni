@@ -51,6 +51,7 @@ import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedComputerInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { DesktopViewer } from "./desktop-viewer";
+import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
@@ -580,7 +581,7 @@ export function ComputerViewer({
   return (
     <div
       className={cn(
-        "@container/computer-viewer flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
+        "@container/computer-viewer relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
         className,
       )}
     >
@@ -798,17 +799,21 @@ function ComputerToolbar(props: {
   onCreate?: (() => void) | undefined;
   onRefresh: () => void;
 }) {
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
   const others = props.sessions.filter((session) => !props.relevantSessionIds.has(session.id));
-  const choose = (id: string) => {
-    props.onSelect(id);
+  const closeMenu = (restoreFocus: boolean) => {
     detailsRef.current?.removeAttribute("open");
+    if (restoreFocus) detailsRef.current?.querySelector("summary")?.focus();
+  };
+  const choose = (id: string, restoreFocus: boolean) => {
+    props.onSelect(id);
+    closeMenu(restoreFocus);
   };
   return (
     <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-1 px-2">
-      <details ref={detailsRef} className="relative min-w-0">
+      <details ref={detailsRef} className="min-w-0">
         <summary className="flex h-7 max-w-32 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 @sm/computer-viewer:max-w-52 [&::-webkit-details-marker]:hidden">
           <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
           <span className="truncate font-medium">
@@ -819,27 +824,42 @@ function ComputerToolbar(props: {
           ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-fg-subtle" />
         </summary>
-        <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-          <ComputerSessionGroup
-            label="Current agent"
-            sessions={current}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <ComputerSessionGroup
-            label="Other agents"
-            sessions={others}
-            selectedId={props.selectedSessionId}
-            interventionCounts={props.interventionCounts}
-            onSelect={choose}
-          />
-          <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
+        <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+          <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
+            <ComputerSessionGroup
+              label="Current agent"
+              sessions={current}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+            <ComputerSessionGroup
+              label="Other agents"
+              sessions={others}
+              selectedId={props.selectedSessionId}
+              interventionCounts={props.interventionCounts}
+              onSelect={choose}
+            />
+          </div>
+          <div className="mt-1 flex shrink-0 gap-1 border-t border-og-border pt-1">
             {current.length > 0 ? (
-              <MenuButton onClick={props.onFollow}>Follow agent</MenuButton>
+              <MenuButton
+                onClick={(event) => {
+                  props.onFollow();
+                  closeMenu(event.detail === 0);
+                }}
+              >
+                Follow agent
+              </MenuButton>
             ) : null}
             {props.onCreate ? (
-              <MenuButton onClick={props.onCreate} disabled={props.creating}>
+              <MenuButton
+                onClick={(event) => {
+                  props.onCreate?.();
+                  closeMenu(event.detail === 0);
+                }}
+                disabled={props.creating}
+              >
                 <PlusIcon className="size-3.5" /> New desktop
               </MenuButton>
             ) : null}
@@ -887,7 +907,7 @@ function ComputerSessionGroup(props: {
   sessions: ComputerSession[];
   selectedId: string | null;
   interventionCounts: Map<string, number>;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, restoreFocus: boolean) => void;
 }) {
   if (props.sessions.length === 0) return null;
   return (
@@ -901,7 +921,8 @@ function ComputerSessionGroup(props: {
           <button
             key={session.id}
             type="button"
-            onClick={() => props.onSelect(session.id)}
+            onClick={(event) => props.onSelect(session.id, event.detail === 0)}
+            aria-pressed={session.id === props.selectedId}
             className={cn(
               "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
               session.id === props.selectedId && "bg-og-surface-2",
@@ -931,7 +952,11 @@ function ComputerSessionGroup(props: {
   );
 }
 
-function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?: boolean }) {
+function MenuButton(props: {
+  children: ReactNode;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       type="button"
@@ -950,18 +975,18 @@ function ComputerTargetPicker(props: {
   loading: boolean;
   onSelect: (id: string) => void;
 }) {
-  const advancedRef = useRef<HTMLDetailsElement | null>(null);
   const screens = props.targets.filter((target) => target.kind === "screen");
   const advancedTargets = props.targets.filter(
     (target) =>
       target.kind === "app" || (target.kind === "window" && isRenderableComputerView(target)),
   );
+  const advancedRef = useViewerMenuDismiss(advancedTargets.length > 0);
   const selected = props.targets.find((target) => target.id === props.selectedTargetId);
-  const choose = (id: string) => {
+  const choose = (id: string, restoreFocus = false) => {
     props.onSelect(id);
     if (advancedRef.current?.open) {
       advancedRef.current.removeAttribute("open");
-      advancedRef.current.querySelector("summary")?.focus();
+      if (restoreFocus) advancedRef.current.querySelector("summary")?.focus();
     }
   };
   return (
@@ -992,7 +1017,7 @@ function ComputerTargetPicker(props: {
         </button>
       ) : null}
       {advancedTargets.length > 0 ? (
-        <details ref={advancedRef} className="relative shrink-0">
+        <details ref={advancedRef} className="shrink-0">
           <summary
             aria-label="Advanced desktop views"
             title="Advanced desktop views"
@@ -1002,35 +1027,37 @@ function ComputerTargetPicker(props: {
             <span className="hidden @sm/computer-viewer:inline">Advanced</span>
             <ChevronDownIcon className="size-3" />
           </summary>
-          <div className="absolute right-0 top-8 z-30 max-h-80 w-64 overflow-y-auto rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-            <p className="px-2 py-1 text-og-xs text-og-fg-subtle">Apps and windows</p>
-            {advancedTargets.map((target) => (
-              <button
-                key={target.id}
-                type="button"
-                onClick={() => choose(target.id)}
-                aria-pressed={target.id === props.selectedTargetId}
-                className={cn(
-                  "flex w-full min-w-0 items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
-                  target.id === props.selectedTargetId && "bg-og-surface-2",
-                )}
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-og-control text-og-fg">
-                    {target.title || target.applicationId || target.kind}
+          <div className="absolute right-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-64 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
+            <p className="shrink-0 px-2 py-1 text-og-xs text-og-fg-subtle">Apps and windows</p>
+            <div className="min-h-0 max-h-80 overflow-y-auto overscroll-contain">
+              {advancedTargets.map((target) => (
+                <button
+                  key={target.id}
+                  type="button"
+                  onClick={(event) => choose(target.id, event.detail === 0)}
+                  aria-pressed={target.id === props.selectedTargetId}
+                  className={cn(
+                    "flex w-full min-w-0 items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
+                    target.id === props.selectedTargetId && "bg-og-surface-2",
+                  )}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-og-control text-og-fg">
+                      {target.title || target.applicationId || target.kind}
+                    </span>
+                    <span className="block text-og-xs text-og-fg-subtle">
+                      {target.kind === "app" ? "App controls" : "Window view"}
+                    </span>
                   </span>
-                  <span className="block text-og-xs text-og-fg-subtle">
-                    {target.kind === "app" ? "App controls" : "Window view"}
-                  </span>
-                </span>
-                {target.focused ? (
-                  <span
-                    className="size-1.5 shrink-0 rounded-full bg-og-status-running"
-                    aria-label="Focused"
-                  />
-                ) : null}
-              </button>
-            ))}
+                  {target.focused ? (
+                    <span
+                      className="size-1.5 shrink-0 rounded-full bg-og-status-running"
+                      aria-label="Focused"
+                    />
+                  ) : null}
+                </button>
+              ))}
+            </div>
           </div>
         </details>
       ) : null}
