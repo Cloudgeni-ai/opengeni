@@ -150,8 +150,31 @@ describe("first agent answers", () => {
     expect(
       firstChatModel({ models: [luna({ availability: { selectable: false } })] } as never),
     ).toBeNull();
+    // A connected subscription that offers Luna (Codex) runs it when credits can't.
     expect(
-      firstChatModel({ models: [luna({ id: "codex/gpt-6-luna", cost: "subscription" })] } as never),
+      firstChatModel({
+        models: [
+          luna({ availability: { selectable: false } }),
+          luna({ id: "codex/gpt-6-luna", cost: "subscription" }),
+        ],
+      } as never),
+    ).toEqual({ id: "codex/gpt-6-luna", reasoningEffort: "xhigh" });
+    // Credits first when both can.
+    expect(
+      firstChatModel({
+        models: [luna({ id: "codex/gpt-6-luna", cost: "subscription" }), luna({})],
+      } as never)?.id,
+    ).toBe("openai/gpt-6-luna");
+    expect(
+      firstChatModel({
+        models: [
+          luna({
+            id: "codex/gpt-6-luna",
+            cost: "subscription",
+            availability: { selectable: false },
+          }),
+        ],
+      } as never),
     ).toBeNull();
   });
 

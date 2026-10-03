@@ -180,9 +180,17 @@ const SCREENS: readonly ScreenSpec[] = [
   },
 
   {
+    id: "chat-started",
+    section: "In the app",
+    title: "After Start building: the building chat, already working",
+    view: "chat-started",
+    paths: ["product-opengeni"],
+    query: () => ({ path: "build", ...answersQuery("product-opengeni") }),
+  },
+  {
     id: "new-chat",
     section: "In the app",
-    title: "New chat: composer on Luna and suggestions for the answer",
+    title: "After Start (or Skip): the new-chat page, Luna and suggestions for the answer",
     view: "new-chat",
     query: (path) => ({
       path: fixturePath(path),

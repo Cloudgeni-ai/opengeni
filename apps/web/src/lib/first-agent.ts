@@ -264,18 +264,19 @@ export function composeCodingAgentPrompt(answers: FirstAgentAnswers, target: Bui
 
 /**
  * The model first chats start on: GPT-6 Luna at extra high reasoning, billed
- * in Opengeni credits, when the workspace can run it (the organization holds
- * credits). Null otherwise: then the draft keeps the default it has.
+ * in Opengeni credits when the workspace can run it there (the organization
+ * holds credits), otherwise on a connected subscription that offers it (Codex).
+ * Null when neither can run it: then the draft keeps the default it has.
  */
 export function firstChatModel(
   catalog: Pick<WorkspaceModelCatalogResponse, "models">,
 ): { id: string; reasoningEffort: ReasoningEffort } | null {
-  const luna = catalog.models.find(
-    (model) =>
-      /(?:^|\/)gpt-6-luna$/u.test(model.id) &&
-      model.cost === "credits" &&
-      model.availability.selectable,
+  const lunas = catalog.models.filter(
+    (model) => /(?:^|\/)gpt-6-luna$/u.test(model.id) && model.availability.selectable,
   );
+  const luna =
+    lunas.find((model) => model.cost === "credits") ??
+    lunas.find((model) => model.cost === "subscription");
   return luna
     ? { id: luna.id, reasoningEffort: coerceReasoningEffortForModel(luna, "xhigh") }
     : null;

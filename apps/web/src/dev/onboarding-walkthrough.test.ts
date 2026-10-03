@@ -49,7 +49,7 @@ describe("onboarding walkthrough", () => {
       expect(ids(path)).toContain("new-chat");
     }
     expect(ids("product-opengeni")).toEqual(
-      expect.arrayContaining(["playground", "developer", "developer-worked"]),
+      expect.arrayContaining(["playground", "developer", "developer-worked", "chat-started"]),
     );
     expect(ids("invited")).not.toContain("use");
     for (const path of PATHS) {

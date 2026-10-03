@@ -31,7 +31,12 @@ import {
   writeOnboardingJourney,
   type OnboardingIntent,
 } from "@/lib/onboarding-journey";
-import { EMPTY_FIRST_AGENT, FIRST_AGENT_TASKS, type FirstAgentAnswers } from "@/lib/first-agent";
+import {
+  composeOpengeniPrompt,
+  EMPTY_FIRST_AGENT,
+  FIRST_AGENT_TASKS,
+  type FirstAgentAnswers,
+} from "@/lib/first-agent";
 import { gitHubRepositoryResource } from "@/lib/session-tools";
 import { FIRST_AGENT_STEPS, FirstAgentRoute, type FirstAgentStep } from "@/routes/first-agent";
 import { GetStartedRoute } from "@/routes/get-started";
@@ -751,8 +756,52 @@ function PreviewStarters({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/**
+ * What "Start building" opens: the building chat, its first message the
+ * composed prompt, the agent starting on GPT-6 Luna. A static picture.
+ */
+function ChatStartedPreview() {
+  const params = usePreviewParams();
+  const prompt = composeOpengeniPrompt(previewFirstAgent(params));
+  return (
+    <main className="flex min-h-dvh flex-col bg-canvas text-fg">
+      <header className="flex h-12 items-center gap-2 border-b border-border px-4">
+        <span className="text-sm font-medium text-fg">Add an AI agent to acme-robotics.com</span>
+        <span className="text-xs text-fg-subtle">Development</span>
+      </header>
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 py-8">
+        <div className="ml-auto max-w-[85%] rounded-[14px] bg-surface-2 px-4 py-3">
+          <p className="text-sm leading-6 whitespace-pre-wrap text-fg">{prompt}</p>
+        </div>
+        <div className="flex items-start gap-3">
+          <span
+            className="relative mt-1.5 flex size-2.5 items-center justify-center"
+            aria-hidden="true"
+          >
+            <span className="absolute size-2.5 animate-ping rounded-full bg-status-running/40 motion-reduce:hidden" />
+            <span className="size-1.5 rounded-full bg-status-running" />
+          </span>
+          <div className="grid gap-1">
+            <p className="text-sm text-fg">Looking at the website and the repository…</p>
+            <p className="text-xs text-fg-muted">acme/shop is attached to this chat.</p>
+          </div>
+        </div>
+      </div>
+      <div className="mx-auto w-full max-w-3xl px-4 pb-8">
+        <StaticComposer model="GPT-6 Luna" placeholder="Reply to the agent..." />
+      </div>
+    </main>
+  );
+}
+
 /** A picture of the new-chat composer for previews: nothing in it works. */
-function StaticComposer({ model }: { model: string | null }) {
+function StaticComposer({
+  model,
+  placeholder = "Describe a task for the agent...",
+}: {
+  model: string | null;
+  placeholder?: string;
+}) {
   return (
     <div
       aria-hidden="true"
@@ -764,7 +813,7 @@ function StaticComposer({ model }: { model: string | null }) {
           <ChevronDownIcon className="size-3 text-fg-subtle" />
         </span>
       </div>
-      <p className="px-4 pt-3 pb-6 text-base text-fg-subtle">Describe a task for the agent...</p>
+      <p className="px-4 pt-3 pb-6 text-base text-fg-subtle">{placeholder}</p>
       <div className="flex items-center gap-2 px-3 pb-3">
         <PlusIcon className="size-4 text-fg-muted" />
         <MicIcon className="ml-2 size-4 text-fg-muted" />
@@ -1026,6 +1075,7 @@ function PreviewView({ view }: { view: string }) {
     );
   }
   if (view === "new-chat") return <NewChatPreview />;
+  if (view === "chat-started") return <ChatStartedPreview />;
   if (view === "developer") return <DeveloperPreview />;
   if (view === "get-started")
     return (
