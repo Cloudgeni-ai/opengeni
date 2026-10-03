@@ -168,10 +168,19 @@ export function breakdownRows(
       parts: [group.measures],
     });
   }
-  const rows = [...merged.values()].map(({ row, parts }) => {
-    const measures = parts.length === 1 ? parts[0]! : sumMeasures(parts);
-    return { ...row, measures, cost: costMicros(measures) };
-  });
+  const rows = [...merged.values()]
+    .map(({ row, parts }) => {
+      const measures = parts.length === 1 ? parts[0]! : sumMeasures(parts);
+      return { ...row, measures, cost: costMicros(measures) };
+    })
+    // A workspace or schedule with nothing in the period is not a row of zeros.
+    .filter(
+      (row) =>
+        row.measures.calls > 0 ||
+        row.cost > 0 ||
+        row.measures.chargedMicros > 0 ||
+        (row.measures.tokensTotal ?? 0) > 0,
+    );
   // Folded and amount-only rows sit after the named ones.
   const rank = (row: BreakdownRow) => (row.kind === "item" ? 0 : row.kind === "other" ? 2 : 1);
   return rows.sort(

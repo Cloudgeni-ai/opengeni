@@ -270,15 +270,25 @@ export function UsageDashboard(props: UsageDashboardProps) {
           <>
             <KpiTiles usage={usage} />
             <div className="@container/insights-panels min-w-0">
-              <div className="grid min-w-0 gap-6 @5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-                <OverTimePanel
-                  usage={usage}
-                  rows={rows}
-                  metric={metric}
-                  split={props.search.split === "group"}
-                  onMetric={(next) => update({ metric: next })}
-                  onSplit={(next) => update({ split: next })}
-                />
+              {/* A source without a time series (older servers at organization
+                  scope) shows the type mix alone rather than an empty chart. */}
+              <div
+                className={cn(
+                  "grid min-w-0 gap-6",
+                  usage.series.length > 0 &&
+                    "@5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+                )}
+              >
+                {usage.series.length > 0 ? (
+                  <OverTimePanel
+                    usage={usage}
+                    rows={rows}
+                    metric={metric}
+                    split={props.search.split === "group"}
+                    onMetric={(next) => update({ metric: next })}
+                    onSplit={(next) => update({ split: next })}
+                  />
+                ) : null}
                 <CompositionPanel measures={usage.totals} />
               </div>
             </div>
