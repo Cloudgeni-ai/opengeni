@@ -52,7 +52,8 @@ export function QueueDock({
   );
   if (turns.length === 0) return null;
   const first = turns[0]!;
-  const small = { ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c["fg-muted"] };
+  // Web signal pill: control-size medium text in fg, 44pt tall on touch.
+  const small = { ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c.fg };
   const canEdit = composer !== undefined && composer.draftPersistence !== "disabled";
   const checkout = async (turnId: string, replaceDraft: boolean) => {
     if (!composer) return;
@@ -90,11 +91,11 @@ export function QueueDock({
             flexDirection: "row",
             alignItems: "center",
             gap: 6,
-            minHeight: 36,
-            paddingHorizontal: 10,
+            minHeight: 44,
+            paddingHorizontal: 12,
           }}
         >
-          <Icon name="list-ordered" size={14} color={c["fg-muted"]} />
+          <Icon name="list-ordered" size={14} color={c.fg} />
           <Text style={small}>{`${turns.length} queued`}</Text>
         </Pressable>
         <Pressable
@@ -106,11 +107,11 @@ export function QueueDock({
             flexDirection: "row",
             alignItems: "center",
             gap: 4,
-            minHeight: 36,
-            paddingHorizontal: 10,
+            minHeight: 44,
+            paddingHorizontal: 12,
           }}
         >
-          <Icon name="corner-down-right" size={14} color={c["fg-muted"]} />
+          <Icon name="corner-down-right" size={14} color={c.fg} />
           <Text style={small}>Steer</Text>
         </Pressable>
       </View>
@@ -120,8 +121,8 @@ export function QueueDock({
           style={{
             borderRadius: theme.radius.lg,
             backgroundColor: withAlpha(c["surface-2"], 0.6),
-            paddingHorizontal: 6,
-            paddingVertical: 4,
+            paddingHorizontal: 8,
+            paddingVertical: 2,
           }}
         >
           {turns.map((turn, index) => {
@@ -295,7 +296,7 @@ function RowAction(props: {
         justifyContent: "center",
         gap: 4,
         minWidth: 34,
-        height: 40,
+        height: 44,
         paddingHorizontal: props.text ? 6 : 0,
         borderRadius: theme.radius.sm,
         backgroundColor: pressed ? c.hover : "transparent",
