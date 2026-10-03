@@ -77,22 +77,34 @@ export function parseArgs(args: string[]): SweepOptions {
 
 // Canonical revision-aware inherited pause semantics: session-control.ts discovery projection.
 // Only candidate paths are visited. Cycles/depth overflow fail closed rather than report active.
-export function controlCte(includeRecentTurns: boolean, includeQueueWork = true): string {
+export function controlCte(
+  includeRecentTurns: boolean,
+  includeQueueWork = true,
+  targetSql?: string,
+): string {
   return `WITH RECURSIVE targets AS MATERIALIZED (
-  SELECT id,workspace_id FROM sessions WHERE status IN ('queued','recovering')
+  ${
+    targetSql ??
+    `SELECT id,workspace_id FROM sessions WHERE status IN ('queued','recovering')
   ${includeQueueWork ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE status='queued' AND source IN ('user','api') UNION SELECT session_id,workspace_id FROM session_system_updates WHERE state='pending'" : ""}
-  ${includeRecentTurns ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE finished_at >= $1::timestamptz - ($2::int * interval '1 minute')" : ""}
+  ${includeRecentTurns ? "UNION SELECT session_id,workspace_id FROM session_turns WHERE finished_at >= $1::timestamptz - ($2::int * interval '1 minute')" : ""}`
+  }
 ), candidates AS MATERIALIZED (
-  SELECT s.id,s.workspace_id,s.parent_session_id,s.direct_control_state,s.direct_pause_revision,
+  SELECT s.* FROM targets t CROSS JOIN LATERAL (
+    SELECT s.id,s.workspace_id,s.parent_session_id,s.direct_control_state,s.direct_pause_revision,
     s.subtree_run_override_revision,s.status,s.input_wait_until,s.created_at
-  FROM targets t JOIN sessions s ON s.id=t.id AND s.workspace_id=t.workspace_id
+    FROM sessions s WHERE s.id=t.id AND s.workspace_id=t.workspace_id OFFSET 0
+  ) s
 ), ancestry AS (
   SELECT s.id target_id,s.workspace_id,s.id,s.parent_session_id,s.direct_control_state,
     s.direct_pause_revision,s.subtree_run_override_revision,0 depth,ARRAY[s.id] visited,false cycle
   FROM candidates s UNION ALL
   SELECT a.target_id,a.workspace_id,p.id,p.parent_session_id,p.direct_control_state,
     p.direct_pause_revision,p.subtree_run_override_revision,a.depth+1,a.visited||p.id,p.id=ANY(a.visited)
-  FROM ancestry a JOIN sessions p ON p.id=a.parent_session_id AND p.workspace_id=a.workspace_id
+  FROM ancestry a CROSS JOIN LATERAL (
+    SELECT p.id,p.parent_session_id,p.direct_control_state,p.direct_pause_revision,p.subtree_run_override_revision
+    FROM sessions p WHERE p.id=a.parent_session_id AND p.workspace_id=a.workspace_id OFFSET 0
+  ) p
   WHERE NOT a.cycle AND a.depth<10000
 ), path AS (
   SELECT a.*,max(subtree_run_override_revision) OVER (PARTITION BY target_id ORDER BY depth
@@ -128,7 +140,14 @@ export function safeDatabaseErrorCode(error: unknown): string {
 
 export function databaseQueries(): Record<string, string> {
   return {
-    queued: `${controlCte(false)}, pending_work AS (
+    queued: `${controlCte(
+      false,
+      true,
+      `SELECT session_id id,workspace_id FROM session_turns
+      WHERE status='queued' AND source IN ('user','api') AND created_at<$1::timestamptz-interval '2 minutes'
+      UNION SELECT session_id,workspace_id FROM session_system_updates
+      WHERE state='pending' AND created_at<$1::timestamptz-interval '2 minutes'`,
+    )}, pending_work AS (
       SELECT s.id session_id,s.workspace_id,least(q.oldest,u.oldest) queued_at,
         CASE WHEN q.oldest IS NOT NULL AND (u.oldest IS NULL OR q.oldest<=u.oldest) THEN 'queued_human_api_turn'
           WHEN u.oldest IS NOT NULL THEN 'pending_system_update' ELSE 'unknown' END age_source,
@@ -142,14 +161,22 @@ export function databaseQueries(): Record<string, string> {
         WHERE t.session_id=s.id AND t.workspace_id=s.workspace_id AND t.status='queued' AND t.source IN ('user','api')) q ON true
       LEFT JOIN LATERAL (SELECT min(created_at) oldest FROM session_system_updates u
         WHERE u.session_id=s.id AND u.workspace_id=s.workspace_id AND u.state='pending') u ON true
-      WHERE s.status='queued' OR q.oldest IS NOT NULL OR u.oldest IS NOT NULL
     ), overdue AS (
-      SELECT * FROM pending_work WHERE queued_at<$1::timestamptz-interval '2 minutes' OR queued_at IS NULL
+      SELECT * FROM pending_work WHERE queued_at<$1::timestamptz-interval '2 minutes'
     ) SELECT jsonb_build_object('total',count(*) FILTER(WHERE queued_at IS NOT NULL),
       'unknownAgeCandidates',count(*) FILTER(WHERE queued_at IS NULL),'runnable',count(*) FILTER(WHERE reason='runnable'),
       'controlUnknown',count(*) FILTER(WHERE reason='control_unknown'),
       'excluded',coalesce((SELECT jsonb_object_agg(reason,n) FROM (SELECT reason,count(*) n FROM overdue WHERE reason!='runnable' GROUP BY reason) x),'{}'),
-      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,age_source,reason FROM overdue ORDER BY queued_at NULLS FIRST LIMIT 100) x),'[]')) facts FROM overdue`,
+      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,age_source,reason FROM overdue
+        ORDER BY CASE WHEN reason IN ('runnable','behind_active_turn') THEN 0 ELSE 1 END,queued_at LIMIT 100) x),'[]')) facts FROM overdue`,
+    queuedInventory: `WITH RECURSIVE unknown_age AS MATERIALIZED (
+      SELECT s.id session_id,s.workspace_id,NULL::timestamptz queued_at,'unknown' age_source,'unknown_age' reason
+      FROM sessions s WHERE s.status='queued'
+        AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.workspace_id=s.workspace_id AND t.session_id=s.id
+          AND t.status='queued' AND t.source IN ('user','api'))
+        AND NOT EXISTS (SELECT 1 FROM session_system_updates u WHERE u.workspace_id=s.workspace_id AND u.session_id=s.id AND u.state='pending')
+    ) SELECT jsonb_build_object('total',count(*),'checkedAt',$1::timestamptz,
+      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM unknown_age ORDER BY session_id LIMIT 100) x),'[]')) facts FROM unknown_age`,
     recovering: `${controlCte(false, false)}, recoveries AS (
       SELECT s.id session_id,s.workspace_id,r.since,c.paused,c.valid FROM candidates s
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
@@ -352,10 +379,16 @@ export function ownerClassification(observation: OwnerObservation | undefined): 
   return "unknown";
 }
 
-export function applyOwnership(facts: any, observations: OwnerObservation[], recovering = false) {
+export function applyOwnership(
+  facts: any,
+  observations: OwnerObservation[],
+  recovering = false,
+  unknownInventory = false,
+) {
   const rows = Array.isArray(facts.sessions) ? facts.sessions : [];
   const targets = rows.filter(
-    (row: any) => recovering || ["runnable", "behind_active_turn"].includes(row.reason),
+    (row: any) =>
+      recovering || unknownInventory || ["runnable", "behind_active_turn"].includes(row.reason),
   );
   let ownerUnknown = 0;
   let unknownQueueAge = 0;
@@ -386,18 +419,19 @@ export function applyOwnership(facts: any, observations: OwnerObservation[], rec
     };
   });
   // A capped SQL list cannot certify candidates outside its sample.
-  const omitted = recovering
-    ? Math.max(0, facts.total - rows.length)
-    : Math.max(0, facts.runnable - rows.filter((row: any) => row.reason === "runnable").length) +
-      Math.max(
-        0,
-        (facts.excluded?.behind_active_turn ?? 0) -
-          rows.filter((row: any) => row.reason === "behind_active_turn").length,
-      );
+  const omitted =
+    recovering || unknownInventory
+      ? Math.max(0, facts.total - rows.length)
+      : Math.max(0, facts.runnable - rows.filter((row: any) => row.reason === "runnable").length) +
+        Math.max(
+          0,
+          (facts.excluded?.behind_active_turn ?? 0) -
+            rows.filter((row: any) => row.reason === "behind_active_turn").length,
+        );
   const { runnable, ...otherFacts } = facts;
   return {
     ...otherFacts,
-    ...(recovering ? {} : { sqlRunnableCandidates: runnable }),
+    ...(recovering || unknownInventory ? {} : { sqlRunnableCandidates: runnable }),
     actionable,
     ownerUnknown: ownerUnknown + omitted,
     ...(recovering ? {} : { unknownQueueAge }),
@@ -593,7 +627,9 @@ export async function sweep(
   const database = async () => {
     const definitions: Record<string, string> = {
       queued:
-        "Accepted pending human/API turns and system updates across all session projections, plus durable queued sessions. Known age >120s uses earliest pending-work created_at, never session creation. Historical internal queued-turn rows alone are not pending-work authority. Unknown-age canonical runnable work is a gap. Canonical control.peekSessionWork and exact owner metadata classify candidates; first 100 listed, at most 20 observed.",
+        "Known accepted pending human/API turns and system updates aged >120s across all session projections, using earliest pending-work created_at, never session creation. Indexed target enumeration and per-ID revision-aware controls are isolated from global orphan inventory; queued-inventory must also be covered for complete queue health. First 100 triage-prioritized rows listed; shared cap of 20 canonical observations.",
+      "queued-inventory":
+        "Separate global inventory of durable queued sessions without an accepted pending human/API turn or system-update timestamp. Historical internal rows are not timestamp authority. Canonical control/owner observation classifies age-unknown work; runnable unknown age and omitted/failed observations are gaps. Independent read snapshot from known-aged source; source timeout never discards known-aged counts.",
       recovering:
         "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Missing transition or ownership evidence is a gap, not proof of physical quiescence.",
       empty: `All completed turns in ${options.windowMinutes}m retain denominator coverage; missing usable turn.completed evidence is a gap. At least two distinct suspect turns flag repeated empty replies; explicit emptyFinalReply or no reply/tools, excluding effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
@@ -619,28 +655,43 @@ export async function sweep(
         url = Buffer.from(s.data[options.databaseSecretKey], "base64").toString();
       }
       if (!url) throw new Error("no database source");
-      data = JSON.parse(
-        await run(
-          [
-            ...k,
-            "-n",
-            options.namespace,
-            "exec",
-            "-i",
-            options.dbPod,
-            "--",
-            "bun",
-            "-e",
-            DATABASE_RUNNER,
-          ],
-          JSON.stringify({
-            url,
-            now: now.toISOString(),
-            windowMinutes: options.windowMinutes,
-            queries: databaseQueries(),
-          }),
-        ),
-      );
+      const queries = databaseQueries();
+      const { queued, ...secondaryQueries } = queries;
+      const collect = async (querySet: Record<string, string>) => {
+        try {
+          const output = JSON.parse(
+            await run(
+              [
+                ...k,
+                "-n",
+                options.namespace,
+                "exec",
+                "-i",
+                options.dbPod,
+                "--",
+                "bun",
+                "-e",
+                DATABASE_RUNNER,
+              ],
+              JSON.stringify({
+                url,
+                now: now.toISOString(),
+                windowMinutes: options.windowMinutes,
+                queries: querySet,
+              }),
+            ),
+          );
+          return Object.fromEntries(Object.keys(querySet).map((name) => [name, output[name]]));
+        } catch {
+          return {};
+        }
+      };
+      // Separate execution budgets preserve aged counts even if the global inventory stalls.
+      const [known, secondary] = await Promise.all([
+        collect({ queued: queued! }),
+        collect(secondaryQueries),
+      ]);
+      data = { ...secondary, ...known };
     } catch {
       data = {};
     }
@@ -650,9 +701,12 @@ export async function sweep(
         )
       : [];
     const recoveryRows = Array.isArray(data.recovering?.sessions) ? data.recovering.sessions : [];
+    const inventoryRows = Array.isArray(data.queuedInventory?.sessions)
+      ? data.queuedInventory.sessions
+      : [];
     const targets = [
       ...new Map(
-        [...queueRows, ...recoveryRows].map((row: any) => [
+        [...queueRows, ...recoveryRows, ...inventoryRows].map((row: any) => [
           `${row.workspace_id}:${row.session_id}`,
           row,
         ]),
@@ -687,27 +741,31 @@ export async function sweep(
     if (data.queued && !data.queued.gap) data.queued = applyOwnership(data.queued, observations);
     if (data.recovering && !data.recovering.gap)
       data.recovering = applyOwnership(data.recovering, observations, true);
+    if (data.queuedInventory && !data.queuedInventory.gap)
+      data.queuedInventory = applyOwnership(data.queuedInventory, observations, false, true);
     for (const [name, definition] of Object.entries(definitions)) {
-      const facts = data[name];
+      const facts = data[name === "queued-inventory" ? "queuedInventory" : name];
       const required =
         name === "queued"
           ? ["total", "sqlRunnableCandidates", "controlUnknown", "unknownQueueAge"]
-          : name === "recovering"
-            ? ["total", "controlUnknown", "missingStatusTimestamp"]
-            : name === "empty"
-              ? [
-                  "sample",
-                  "suspectTurns",
-                  "repeatedSessions",
-                  "controlUnknown",
-                  "missingCompletionEvidence",
-                ]
-              : [
-                  "sample",
-                  "invalidNegativeSamples",
-                  "missingFirstStartEvents",
-                  "futureFirstStartEvents",
-                ];
+          : name === "queued-inventory"
+            ? ["total", "unknownQueueAge", "ownerUnknown"]
+            : name === "recovering"
+              ? ["total", "controlUnknown", "missingStatusTimestamp"]
+              : name === "empty"
+                ? [
+                    "sample",
+                    "suspectTurns",
+                    "repeatedSessions",
+                    "controlUnknown",
+                    "missingCompletionEvidence",
+                  ]
+                : [
+                    "sample",
+                    "invalidNegativeSamples",
+                    "missingFirstStartEvents",
+                    "futureFirstStartEvents",
+                  ];
       const invalid =
         !facts || required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0);
       const gap =

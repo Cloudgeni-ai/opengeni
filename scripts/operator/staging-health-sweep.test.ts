@@ -40,6 +40,7 @@ function healthyRun(
     if (args.includes("exec"))
       return JSON.stringify({
         queued: { total: 0, runnable: 0, controlUnknown: 0 },
+        queuedInventory: { total: 0, sessions: [] },
         recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
         empty: {
           sample: 3,
@@ -178,7 +179,7 @@ describe("staging health sweep", () => {
       throw new Error("postgres://user:secret@host");
     });
     expect(result.exitCode).toBe(2);
-    expect(result.checks).toHaveLength(7);
+    expect(result.checks).toHaveLength(8);
     expect(result.checks.every((c) => c.status === "gap")).toBe(true);
     expect(JSON.stringify(result)).not.toContain("secret");
     expect(textResult(result)).toContain("GAP queued");
@@ -209,6 +210,7 @@ describe("staging health sweep", () => {
         expect(JSON.parse(stdin!).url).toBe("postgres://credential");
         return JSON.stringify({
           queued: { total: 0, runnable: 0, controlUnknown: 0 },
+          queuedInventory: { total: 0, sessions: [] },
           recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
           empty: {
             sample: 3,
@@ -276,6 +278,7 @@ describe("staging health sweep", () => {
       "latency",
       "pod-restarts-oom",
       "queued",
+      "queued-inventory",
       "recovering",
     ]);
     expect(JSON.stringify(commands)).not.toContain("postgres://credential");
@@ -556,6 +559,91 @@ describe("staging health sweep", () => {
     expect(check.facts?.ownerUnknown).toBe(0);
     expect(result.exitCode).toBe(2);
   });
+  test("global inventory timeout cannot discard independently collected known-aged counts", async () => {
+    const queued = {
+      total: 1,
+      runnable: 1,
+      controlUnknown: 0,
+      excluded: {},
+      sessions: [
+        {
+          session_id: "s",
+          workspace_id: "w",
+          reason: "runnable",
+          queued_at: "2026-10-03T10:00:00Z",
+          age_source: "queued_human_api_turn",
+        },
+      ],
+    };
+    const owners: OwnerObservation[] = [
+      { session_id: "s", workspace_id: "w", state: "active", settlement: null, kind: "runnable" },
+    ];
+    const healthy = healthyRun({ database: { queued }, owners });
+    const batches: string[][] = [];
+    const run: Run = async (args, stdin) => {
+      if (args.includes("exec") && args.at(-1) === DATABASE_RUNNER) {
+        const names = Object.keys(JSON.parse(stdin!).queries);
+        batches.push(names);
+        if (names.includes("queued")) {
+          expect(names).toEqual(["queued"]);
+          return JSON.stringify({ queued });
+        }
+        expect(names).toContain("queuedInventory");
+        const other = JSON.parse(await healthy(args, stdin));
+        return JSON.stringify({
+          ...other,
+          queuedInventory: {
+            gap: "database_query_failed_or_global_read_role_unavailable",
+            code: "57014",
+          },
+        });
+      }
+      return healthy(args, stdin);
+    };
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      run,
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    expect(batches).toHaveLength(2);
+    const known = result.checks.find((check) => check.id === "queued")!;
+    const inventory = result.checks.find((check) => check.id === "queued-inventory")!;
+    expect(known.facts?.total).toBe(1);
+    expect(known.facts?.actionable).toBe(1);
+    expect(known.status).toBe("finding");
+    expect(inventory.status).toBe("gap");
+    expect(inventory.facts?.sourceErrorCode).toBe("57014");
+    expect(result.exitCode).toBe(2);
+  });
+  test("orphan inventory coverage and runnable unknown age remain fail closed", async () => {
+    const row = {
+      session_id: "unknown",
+      workspace_id: "w",
+      queued_at: null,
+      age_source: "unknown",
+      reason: "unknown_age",
+    };
+    const owners: OwnerObservation[] = [
+      {
+        session_id: "unknown",
+        workspace_id: "w",
+        state: "active",
+        settlement: null,
+        kind: "runnable",
+      },
+    ];
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { queuedInventory: { total: 3, sessions: [row] } }, owners }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const inventory = result.checks.find((check) => check.id === "queued-inventory")!;
+    expect(inventory.status).toBe("gap");
+    expect(inventory.facts?.unknownQueueAge).toBe(1);
+    expect(inventory.facts?.ownerUnknown).toBe(2);
+    expect(inventory.facts?.actionable).toBe(0);
+    expect(inventory.facts).not.toHaveProperty("sqlRunnableCandidates");
+  });
   test.skipIf(process.env.OPENGENI_HEALTH_SWEEP_LIVE_TESTS !== "1")(
     "read-only SQL fixtures retain missing completions and pending work across session projections",
     async () => {
@@ -583,7 +671,7 @@ describe("staging health sweep", () => {
         "workspace_id text,workspace_state text,workspace_pause_revision bigint",
         [{ workspace_id: "w", workspace_state: "active" }],
       );
-      const query = (name: "queued" | "empty", fixtures: string[]) => {
+      const query = (name: "queued" | "queuedInventory" | "empty", fixtures: string[]) => {
         const productionQuery = databaseQueries()[name]!;
         return (
           "WITH RECURSIVE " +
@@ -592,7 +680,7 @@ describe("staging health sweep", () => {
           productionQuery.replace(/^WITH RECURSIVE /, "")
         );
       };
-      const queued = query("queued", [
+      const queueTables = [
         sessions([
           { id: "fresh", status: "queued" },
           { id: "old-update", status: "queued" },
@@ -650,7 +738,9 @@ describe("staging health sweep", () => {
             },
           ],
         ),
-      ]);
+      ];
+      const queued = query("queued", queueTables);
+      const queuedInventory = query("queuedInventory", queueTables);
       const empty = query("empty", [
         sessions([{ id: "completed", status: "idle" }]),
         control,
@@ -711,18 +801,17 @@ describe("staging health sweep", () => {
             url,
             now: "2026-10-03T13:00:00Z",
             windowMinutes: 30,
-            queries: { queued, empty },
+            queries: { queued, queuedInventory, empty },
           }),
         ),
       );
       expect(result.queued).not.toHaveProperty("gap");
       expect(result.queued.total).toBe(3);
-      expect(result.queued.unknownAgeCandidates).toBe(1);
+      expect(result.queued.unknownAgeCandidates).toBe(0);
       expect(result.queued.sessions.map((row: any) => row.session_id).sort()).toEqual([
         "api-running",
         "human-idle",
         "old-update",
-        "unknown",
       ]);
       expect(
         result.queued.sessions.find((row: any) => row.session_id === "old-update").queued_at,
@@ -734,8 +823,23 @@ describe("staging health sweep", () => {
         settlement: null,
         kind: "runnable",
       }));
-      expect(applyOwnership(result.queued, observations).unknownQueueAge).toBe(1);
+      expect(applyOwnership(result.queued, observations).unknownQueueAge).toBe(0);
       expect(applyOwnership(result.queued, observations).actionable).toBe(3);
+      expect(result.queuedInventory).not.toHaveProperty("gap");
+      expect(result.queuedInventory.total).toBe(1);
+      expect(result.queuedInventory.sessions[0].session_id).toBe("unknown");
+      const unknownObservation: OwnerObservation[] = [
+        {
+          session_id: "unknown",
+          workspace_id: "w",
+          state: "active",
+          settlement: null,
+          kind: "runnable",
+        },
+      ];
+      expect(
+        applyOwnership(result.queuedInventory, unknownObservation, false, true).unknownQueueAge,
+      ).toBe(1);
       expect(result.empty).not.toHaveProperty("gap");
       expect(result.empty.sample).toBe(3);
       expect(result.empty.missingCompletionEvidence).toBe(2);
