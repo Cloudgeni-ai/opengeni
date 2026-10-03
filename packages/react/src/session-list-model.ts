@@ -3,7 +3,9 @@
 // (Today / Yesterday / Previous 7 days / Older), the running-first ordering
 // rule, status tones and the compact row metadata. No DOM, no React.
 import {
+  deriveAutomaticSessionTitlePreview,
   deriveSessionDisplayTitle,
+  sessionTitleIsPending,
   type ClientModel,
   type Session,
   type SessionListEntry,
@@ -22,6 +24,40 @@ export type SessionListRow = Session | SessionListEntry;
  */
 export function sessionDisplayTitle(session: SessionListRow): string {
   return "displayTitle" in session ? session.displayTitle : deriveSessionDisplayTitle(session);
+}
+
+/** The maximum length a session title may be renamed to. */
+export const SESSION_TITLE_MAX_LENGTH = 200;
+
+/**
+ * The value a rename editor seeds from. A safe provisional prompt preview is
+ * editable because it is also what the user sees; the UUID-derived reference
+ * remains an empty draft rather than becoming an accidental rename.
+ */
+export function sessionRenameSeed(session: SessionListRow): string {
+  if ("renameSeed" in session) return session.renameSeed;
+  if (!sessionTitleIsPending(session)) {
+    return session.title?.trim() || "";
+  }
+  return deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "";
+}
+
+/**
+ * Resolve a submitted draft against the current display title. Returns the
+ * trimmed title to persist, or `null` when the edit is a no-op (empty,
+ * unchanged from what is already shown, or still equal to the value that
+ * seeded this edit) and should simply cancel.
+ */
+export function resolveRenameSubmission(
+  draft: string,
+  display: string,
+  editSeed?: string,
+): string | null {
+  const next = draft.trim();
+  if (!next || next === display || (editSeed !== undefined && next === editSeed.trim())) {
+    return null;
+  }
+  return next;
 }
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";

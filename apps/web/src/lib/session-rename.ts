@@ -5,14 +5,15 @@
 // the Enter-save / Esc-cancel / blur-save / empty-or-unchanged-no-op behaviour
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { deriveAutomaticSessionTitlePreview, sessionTitleIsPending } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
 import type { RailSession } from "./session-list-entry";
-import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
-
-/** The maximum length a session title may be renamed to. */
-export const SESSION_TITLE_MAX_LENGTH = 200;
+import {
+  resolveRenameSubmission,
+  SESSION_TITLE_MAX_LENGTH,
+  sessionDisplayTitle,
+  sessionRenameSeed,
+} from "@opengeni/react/session-list-model";
 
 /**
  * The title shown for a session: durable agent/user metadata once available,
@@ -23,36 +24,14 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
 export { sessionDisplayTitle };
 
 /**
- * The value the editor seeds from when entering edit mode. A safe provisional
- * prompt preview is editable because it is also what the user sees; the
- * UUID-derived reference remains an empty draft rather than becoming an
- * accidental rename.
+ * The value the editor seeds from when entering edit mode; see the shared
+ * sessionRenameSeed. Rail entries carry a precomputed seed.
  */
 export function renameSeedValue(session: RailSession): string {
-  if ("renameSeed" in session) return session.renameSeed;
-  if (!sessionTitleIsPending(session)) {
-    return session.title?.trim() || "";
-  }
-  return deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "";
+  return sessionRenameSeed(session);
 }
 
-/**
- * Resolve a submitted draft against the current display title. Returns the
- * trimmed title to persist, or `null` when the edit is a no-op (empty,
- * unchanged from what is already shown, or still equal to the value that
- * seeded this edit) and should simply cancel.
- */
-export function resolveRenameSubmission(
-  draft: string,
-  display: string,
-  editSeed?: string,
-): string | null {
-  const next = draft.trim();
-  if (!next || next === display || (editSeed !== undefined && next === editSeed.trim())) {
-    return null;
-  }
-  return next;
-}
+export { resolveRenameSubmission, SESSION_TITLE_MAX_LENGTH };
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
 

@@ -1,10 +1,12 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
+import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
 import {
   ComposerPill,
   ModelMark,
   ModelPickerSheet,
   NativeSessionScreen,
+  SessionActionsButton,
   SessionStatusBadge,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
@@ -69,23 +71,35 @@ function LiveSession(props: {
   const status = controller.sessionStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
+  const refreshSession = controller.session.refresh;
   const headerRight = useCallback(
-    () =>
-      status ? (
-        <AppThemeProvider>
-          <SessionStatusBadge
-            status={paused ? "queued" : status}
-            label={paused ? "Paused" : undefined}
-          />
-        </AppThemeProvider>
-      ) : null,
-    [paused, status],
+    () => (
+      <AppThemeProvider>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+          {status ? (
+            <SessionStatusBadge
+              status={paused ? "queued" : status}
+              label={paused ? "Paused" : undefined}
+            />
+          ) : null}
+          {session ? (
+            <SessionActionsButton
+              session={session}
+              client={props.client}
+              onChanged={() => void refreshSession()}
+              onActionFeedback={() => void Haptics.selectionAsync()}
+            />
+          ) : null}
+        </View>
+      </AppThemeProvider>
+    ),
+    [paused, props.client, refreshSession, session, status],
   );
   return (
     <>
       <Stack.Screen
         options={{
-          title: session?.title ?? "",
+          title: session ? sessionDisplayTitle(session) : "",
           headerRight,
           headerStyle: { backgroundColor: theme.colors.bg },
           headerTintColor: theme.colors.fg,
