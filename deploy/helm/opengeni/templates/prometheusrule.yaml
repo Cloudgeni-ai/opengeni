@@ -1078,26 +1078,101 @@ spec:
           annotations:
             summary: A Google Drive sync reached an explicit resource limit
             description: Inspect the limit label and source size before approving any configuration increase.
-        # Eligible backlog and slot saturation are correlated on one exact
-        # scrape identity before fleet aggregation. Paused human prompts never
-        # enter these Temporal activity-queue signals.
+        # This is telemetry completeness, NOT an autoscaling demand record.
+        # `up` lacks environment/component: join only its actual scrape identity.
+        # A missing ready target, monitor value, timestamp or KSM deployment
+        # series makes the record absent (unknown), never a healthy zero.
+        - record: opengeni:turn_capacity_monitor:fresh
+          expr: |
+            min(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
+            and on()
+            time() - min(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 60
+            and on()
+            time() - max(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) >= -5
+            and on()
+            min(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"}) == 1
+            and on()
+            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
+              == count(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+            and on()
+            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
+              == count(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+            and on()
+            count(
+              up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1
+              and on(namespace, release, instance)
+              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
+            ) == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(
+              up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1
+              and on(namespace, release, instance)
+              opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}
+            ) == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(
+              up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1
+              and on(namespace, release, instance)
+              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}
+            ) == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(
+              up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1
+              and on(namespace, release, instance)
+              opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}
+            ) == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+              == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+              == count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"})
+            and on()
+            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
+              >= max(kube_deployment_status_replicas_available{namespace={{ .Release.Namespace | quote }},deployment="{{ $fullName }}-worker-turns"})
+        # Global queue inventory is MAX across fresh replicas, never SUM. This
+        # queue can still include legacy video/retry activities until the owning
+        # capacity-source change is deployed; it is not a customer-only count.
+        - record: opengeni:turn_eligible_backlog:fresh_max
+          expr: |
+            max(opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+            and on()
+            opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} == 1
+        - record: opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max
+          expr: |
+            max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+            and on()
+            opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} == 1
         - alert: OpenGeniTurnEligibleBacklogOld
           expr: |
-            max(
-              opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 30
-              and on(namespace, release, environment, component, instance)
-              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0
-              and on(namespace, release, environment, component, instance)
-              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
-              and on(namespace, release, environment, component, instance)
-              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
-            ) > 0
-          for: 5m
+            opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 30
+            and
+            opengeni:turn_eligible_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
+            unless
+            opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 120
+          for: 1m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
-            summary: Runnable OpenGeni turns have waited for worker admission for more than 30 seconds
-            description: Temporal's runAgentTurn activity queue contains eligible work. Paused human prompts are deliberately excluded from this capacity signal.
+            summary: Runnable OpenGeni turn-queue activities have waited over 30 seconds
+            description: A complete fresh turn-worker projection has positive queue depth and age between 30 and 120 seconds for one minute. Inspect queue activity classes, worker slots, admission memory and Pending Pods; exclude paused human prompts and do not treat legacy video/retry activities as customer-only demand. The critical age tier replaces this warning above 120 seconds. Rule hold excludes scrape, evaluation and notification grouping delay; inspect the loaded Alertmanager policy before claiming delivery latency.
+            action: Open Launch capacity drilldowns; compare fresh MAX queue depth/age against physical inflight, available slots, worker replicas and node capacity before changing scaling.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+        - alert: OpenGeniTurnEligibleBacklogCritical
+          expr: |
+            opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 120
+            and
+            opengeni:turn_eligible_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
+          for: 30s
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: Fresh runnable turn-queue activity age is over two minutes
+            description: Positive global queue depth and age over 120 seconds persist through a 30-second hold with complete fresh ready-worker telemetry. Inspect the exact queue classes and admission bottleneck; the shared queue may include legacy video/retry activities until its source isolation is deployed. This is not a pure external-customer backlog or proof of Temporal transport capacity. Notification arrival additionally depends on scrape, evaluation, grouping and a working receiver.
+            action: Investigate worker admission and node/DB budget immediately; verify available slots and Pending/HPA signals, then follow the reliability/capacity owner's recovery path rather than blindly raising concurrency.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
         - alert: OpenGeniTurnSlotsSaturated
           expr: |
             max(
@@ -1107,32 +1182,74 @@ spec:
               and on(namespace, release, environment, component, instance)
               opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
               and on(namespace, release, environment, component, instance)
-              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
+              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 60
             ) > 0
-          for: 5m
+            and on()
+            opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} == 1
+            unless on()
+            opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 30
+            unless on()
+            (
+              max(kube_horizontalpodautoscaler_status_current_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler="{{ $fullName }}-worker-turns"})
+                >= max(kube_horizontalpodautoscaler_spec_max_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler="{{ $fullName }}-worker-turns"})
+              and on()
+              deriv(opengeni:turn_eligible_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[2m]) > 0
+            )
+          for: 1m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
             summary: A turn worker is above 90% of memory-safe slots while eligible work waits
-            description: Scale the turn fleet or inspect an admission-memory contraction. The slot denominator already honors the hard per-turn memory budget.
+            description: Complete fresh queue telemetry shows over 90% slot use with positive queue depth for one minute. The age tier above 30 seconds or an observed HPA ceiling with a growing queue replaces this admission warning, avoiding duplicate capacity incidents. The memory-safe denominator is not the hard 32-turn ceiling and missing slot gauges are unknown.
+            action: Compare memory-safe slot contraction with worker/HPA replicas and node/DB budget; scale only through the capacity owner's approved path.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
-            absent(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
-            or
-            min(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 1
-            or
-            time() - min(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 45
-            or
-            min(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"}) < 1
-            or
-            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
-              > count(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+            absent(opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
+          for: 30s
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: OpenGeni turn-capacity telemetry is stale, incomplete or missing
+            description: No complete healthy ready-worker projection is available for 30 seconds; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
+            action: Check worker-turns ServiceMonitor targets, ready deployment replicas, monitor errors and Temporal DescribeTaskQueue connectivity; restore evidence before acting on queue values.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+        - alert: OpenGeniTurnWorkerPodPending
+          expr: |
+            max by (namespace, pod) (kube_pod_status_phase{namespace={{ .Release.Namespace | quote }},phase="Pending"} == 1)
+            * on(namespace, pod) group_left()
+            max by (namespace, pod) (kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"})
+            > 0
           for: 2m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
-            summary: OpenGeni eligible-turn backlog monitoring is stale
-            description: At least one expected turn-worker scrape is down, missing its monitor series, or has not produced a fresh Temporal DescribeTaskQueue sample for this exact namespace, release, and environment. Backlog values are diagnostic only until freshness recovers.
+            summary: A turn-worker Pod has remained Pending for two minutes
+            description: The exact release's turn-worker Pod is continuously Pending, not a transient rollout sample. If kube-state-metrics phase/label series are absent this signal is unknown; it is not evidence that scheduling succeeded.
+            action: Inspect the Pod scheduling condition/events, node pool headroom, requests, taints, affinity, image pull state and volume constraints; coordinate capacity recovery instead of increasing turn concurrency.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+        - alert: OpenGeniTurnWorkersAtScalingCeiling
+          expr: |
+            max(kube_horizontalpodautoscaler_status_current_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler="{{ $fullName }}-worker-turns"})
+              >= max(kube_horizontalpodautoscaler_spec_max_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler="{{ $fullName }}-worker-turns"})
+            and on()
+            deriv(opengeni:turn_eligible_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[2m]) > 0
+            and on()
+            opengeni:turn_eligible_backlog:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
+            unless on()
+            opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 30
+          for: 1m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: Turn-worker HPA is at its ceiling while the fresh queue grows
+            description: Current replicas have reached the observed HPA maximum and the fresh global queue has a positive two-minute trend and positive depth for one minute. An absent HPA or queue is unknown, not spare capacity. Older queue-age alerts replace this early warning; a flat or draining queue does not trigger it.
+            action: Check worker/HPA status and node/DB budget with the capacity owner; do not raise the replica cap without confirming the cluster and PostgreSQL connection budget.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
         # The remaining rules read cluster-infra series (cAdvisor and
         # kube-state-metrics); without those exporters they remain absent.
         # Additional environment-specific alerts may be appended with
