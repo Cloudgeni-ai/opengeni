@@ -1,4 +1,14 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import {
+  clusterIsSettled,
+  compactedLandmarkCount,
+  durationBetween,
+  flattenActivityItems,
+  isPreparingWork,
+  readableWorkDefaultOpen,
+  readableWorkShowsPreview,
+  readableWorkStatus,
+} from "../timeline/work-presentation";
 import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
@@ -3087,18 +3097,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
-        const phases = group.items.filter((item) => item.kind === "startup-phase");
-        const preparing =
-          !startupDetails &&
-          !startupDismissed &&
-          !group.work.endedAt &&
-          !group.work.waiting &&
-          phases.length > 0 &&
-          group.items.every(
-            (item) =>
-              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
-          ) &&
-          !phases.some((item) => item.status === "failed" || item.status === "cancelled");
+        const preparing = isPreparingWork(group, { startupDetails, startupDismissed });
         if (preparing) {
           // Preparation is primary, never hidden in an activity disclosure.
           // Keep work.startedAt unchanged for the handoff and settled duration.
@@ -3115,22 +3114,20 @@ const TimelineGroupView = memo(function TimelineGroupView({
             />
           );
         }
-        const end = group.work.endedAt;
-        const status: TurnSummaryStatus = end
-          ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
-          : group.work.waiting
-            ? { kind: "waiting", ...group.work.waiting }
-            : {
-                kind: "working",
-                since: group.work.startedAt,
-                preview: containsPresentedImage ? undefined : (
+        const workStatus = readableWorkStatus({ ...group, work: group.work });
+        const status: TurnSummaryStatus =
+          workStatus.kind === "working"
+            ? {
+                ...workStatus,
+                preview: readableWorkShowsPreview(group) ? (
                   <RollingActivity
                     items={group.items}
                     toolRegistry={toolRegistry}
                     showCount={false}
                   />
-                ),
-              };
+                ) : undefined,
+              }
+            : workStatus;
         return (
           <TurnSummary
             key="work"
@@ -3139,13 +3136,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
-            defaultOpen={
-              containsPresentedImage ||
-              group.outcome === "failed" ||
-              phases.some((item) => item.status === "failed" || item.status === "cancelled")
-                ? true
-                : undefined
-            }
+            defaultOpen={readableWorkDefaultOpen(group)}
             facets={turnSummary?.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
           >
@@ -3460,14 +3451,6 @@ function renderFoldedGroups(
   ));
 }
 
-function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
-  return groups.filter(
-    (group) =>
-      group.kind === "item" &&
-      group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
-  ).length;
-}
 
 /**
  * Body under a turn/activity chip. Remount flashes are gated by the timeline
@@ -3569,18 +3552,6 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
 /** No item still running or streaming — the only state safe to fold live.
     Position alone is a broken proxy: a pending queued message (or any trailing
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
-function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
-  return group.items.every((item) => {
-    if (item.kind === "reasoning" || item.kind === "agent-message") {
-      return !item.streaming;
-    }
-    // Memory writes and fleet observations are discrete, already-settled events.
-    if (item.kind === "memory" || item.kind === "fleet-decision") {
-      return true;
-    }
-    return item.status !== "running";
-  });
-}
 
 /** Settled activity clusters that could become nested chips under a turn. */
 function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number {
@@ -3593,17 +3564,6 @@ function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number 
   return count;
 }
 
-function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
-  const items: ActivityItem[] = [];
-  for (const group of groups) {
-    if (group.kind === "activity") {
-      items.push(...flattenActivityItems(group.work?.details ?? []), ...group.items);
-    } else if (group.kind === "turn") {
-      items.push(...flattenActivityItems(group.groups));
-    }
-  }
-  return items;
-}
 
 /** Assistant prose inside a turn fold (mid-turn narration), joined for copy. */
 function collectAgentMessageText(groups: readonly TimelineGroup[]): string {
@@ -3703,14 +3663,6 @@ function collectTurnCopyText(
   return parts.join("\n\n");
 }
 
-function durationBetween(startedAt: string, endedAt: string): number | undefined {
-  const started = Date.parse(startedAt);
-  const ended = Date.parse(endedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
-    return undefined;
-  }
-  return ended - started;
-}
 
 /* --- single rows ------------------------------------------------------------ */
 

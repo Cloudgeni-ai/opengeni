@@ -7,6 +7,7 @@ import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem } from "./types";
+import { rollingActivityItem } from "./work-presentation";
 
 /** One stable viewport; updates replace its content without moving the conversation. */
 export function RollingActivity({
@@ -25,21 +26,11 @@ export function RollingActivity({
   const reduced = useReducedMotion();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  // Progress notes have their own line in the status row; the reel shows steps.
-  const work = items.filter(
-    (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
-  );
-  const active = work.filter((item) =>
-    item.kind === "reasoning" ? item.streaming : "status" in item && item.status === "running",
-  );
-  // Advance with the event order; finishing a parallel tool must not replay an older one.
-  const item =
-    !mounted && previousItem && previousItem.kind !== "agent-message" ? previousItem : work.at(-1);
-  if (!item) return null;
-  const earlierCount = Math.max(
-    0,
-    work.findIndex((entry) => entry.id === item.id),
-  );
+  // Progress notes have their own line in the status row; the reel shows steps, advancing
+  // with the event order so finishing a parallel tool never replays an older one.
+  const selected = rollingActivityItem(items, previousItem, mounted);
+  if (!selected) return null;
+  const { item, earlierCount } = selected;
   const fallback = (
     <span className="og-rolling-label">
       <WrenchIcon className="size-3.5" />
@@ -51,7 +42,7 @@ export function RollingActivity({
   return (
     <span
       className="og-rolling-status"
-      data-running={active.some((entry) => entry.id === item.id) ? "true" : undefined}
+      data-running={selected.running ? "true" : undefined}
     >
       <span className="sr-only">
         {item.kind === "tool-call"

@@ -134,6 +134,10 @@
     "./testing": {
       "types": "./src/testing/session-scenarios.ts",
       "default": "./src/testing/session-scenarios.ts"
+    },
+    "./timeline-model": {
+      "types": "./src/timeline-model.ts",
+      "default": "./src/timeline-model.ts"
     }
   },
   "publishConfig": {
