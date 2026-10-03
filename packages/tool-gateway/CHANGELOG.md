@@ -1,5 +1,21 @@
 # @opengeni/tool-gateway
 
+## 0.1.20
+
+### Patch Changes
+
+- e6036b3: Publish native structured first-party tool input contracts without changing omission-sensitive arguments. Reject opaque input definitions during registration, and report applicable union validation requirements across tool adapters.
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3395acc]
+- Updated dependencies [746464c]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/observability@0.8.39
+
 ## 0.1.19
 
 ### Patch Changes
