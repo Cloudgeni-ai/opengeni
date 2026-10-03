@@ -63,16 +63,13 @@ export class ToolRequestError extends Error {
   }
   /** A ready 401 response with a `WWW-Authenticate: Bearer` challenge. */
   toResponse(): Response {
-    return new Response(
-      JSON.stringify({ error: { code: this.code, message: this.message } }),
-      {
-        status: 401,
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "WWW-Authenticate": 'Bearer error="invalid_token"',
-        },
+    return new Response(JSON.stringify({ error: { code: this.code, message: this.message } }), {
+      status: 401,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "WWW-Authenticate": 'Bearer error="invalid_token"',
       },
-    );
+    });
   }
 }
 
@@ -91,16 +88,11 @@ export async function verifyToolRequest(
 ): Promise<ToolRequestIdentity> {
   const key = await signingKey(resolveToolTokenSecret(options.secret));
   const { authorization, path } = requestParts(request);
-  const match =
-    /^Bearer[ ]+([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(
-      authorization?.trim() ?? "",
-    );
+  const match = /^Bearer[ ]+([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i.exec(
+    authorization?.trim() ?? "",
+  );
   if (!match) throw new ToolRequestError("token_missing");
-  const [header, payload, signature] = match[1]!.split(".") as [
-    string,
-    string,
-    string,
-  ];
+  const [header, payload, signature] = match[1]!.split(".") as [string, string, string];
   let protectedHeader: unknown;
   let claims: Record<string, unknown>;
   let signatureBytes: Uint8Array<ArrayBuffer>;
@@ -131,15 +123,11 @@ export async function verifyToolRequest(
   const now = Math.floor(Date.now() / 1000);
   const { iss, aud, sub, exp, iat, workspace_id, source, tenant } = claims;
   if (iss !== TOOL_TOKEN_ISSUER) throw new ToolRequestError("token_invalid");
-  if (typeof exp !== "number" || exp <= now)
-    throw new ToolRequestError("token_expired");
+  if (typeof exp !== "number" || exp <= now) throw new ToolRequestError("token_expired");
   if (typeof iat !== "number" || iat > now + CLOCK_SKEW_SECONDS) {
     throw new ToolRequestError("token_invalid");
   }
-  if (
-    typeof aud !== "string" ||
-    !audienceMatches(aud, options.audience, path)
-  ) {
+  if (typeof aud !== "string" || !audienceMatches(aud, options.audience, path)) {
     throw new ToolRequestError("token_audience");
   }
   if (
@@ -174,9 +162,7 @@ export async function mintToolToken(input: {
 }): Promise<string> {
   const ttl = input.ttlSeconds ?? TOOL_TOKEN_DEFAULT_TTL_SECONDS;
   if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > MAX_TTL_SECONDS) {
-    throw new TypeError(
-      `ttlSeconds must be an integer from 1 to ${MAX_TTL_SECONDS}.`,
-    );
+    throw new TypeError(`ttlSeconds must be an integer from 1 to ${MAX_TTL_SECONDS}.`);
   }
   const key = await signingKey(resolveToolTokenSecret(input.secret));
   const now = Math.floor(Date.now() / 1000);
@@ -203,8 +189,8 @@ export async function mintToolToken(input: {
 export function resolveToolTokenSecret(secret: string | undefined): string {
   const resolved =
     secret ??
-    (globalThis as { process?: { env?: Record<string, string | undefined> } })
-      .process?.env?.OPENGENI_API_KEY;
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+      ?.OPENGENI_API_KEY;
   if (!resolved) {
     throw new TypeError(
       "Tool tokens need a signing secret: set OPENGENI_API_KEY, or pass the same `secret` to the session proxy's toolServer and verifyToolRequest.",
@@ -262,16 +248,12 @@ function requestParts(request: ToolRequestLike): {
   const raw =
     headers && typeof (headers as Headers).get === "function"
       ? ((headers as Headers).get("authorization") ?? undefined)
-      : (headers as Record<string, string | string[] | undefined>)
-          ?.authorization;
+      : (headers as Record<string, string | string[] | undefined>)?.authorization;
   const authorization = Array.isArray(raw) ? undefined : raw;
   const target = node.originalUrl ?? node.url;
   return {
     authorization,
-    path:
-      target === undefined
-        ? undefined
-        : new URL(target, "http://localhost").pathname,
+    path: target === undefined ? undefined : new URL(target, "http://localhost").pathname,
   };
 }
 
@@ -299,18 +281,14 @@ function base64UrlJson(value: unknown): string {
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
   const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
   const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1)
-    bytes[index] = binary.charCodeAt(index);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
 }
 

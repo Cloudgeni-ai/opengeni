@@ -1,8 +1,80 @@
 # Data tools and credentials
 
+## Default for Node: the proxy toolServer
+
+When the product backend is Node (Next.js, Express, Hono, Bun) and mounts
+`createSessionProxyHandler`, give the agent the product's own data as the
+signed-in user with one proxy option plus one verification call. Do not
+hand-build token minting, per-session `mcpServers` wiring, credential refresh,
+or a second auth system.
+
+```ts
+createSessionProxyHandler(og, {
+  resolve, createSession, // unchanged; the token carries what resolve returns
+  toolServer: {
+    url: `${process.env.PUBLIC_BASE_URL}/api/mcp`, // public HTTPS; tunnel locally
+    approvals: { ask: ["rename_post"] }, // writes: the user approves each call
+  },
+});
+```
+
+```ts
+// The MCP endpoint, any library; official SDK shown. Next: export POST/GET = mcp.
+// Express: app.all("/api/mcp", toNodeMiddleware(mcp)); Hono: toHonoHandler(mcp).
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+import { z } from "zod";
+
+export async function mcp(request: Request): Promise<Response> {
+  let user: string;
+  try {
+    ({ user } = await verifyToolRequest(request)); // also tenant, workspaceId
+  } catch (error) {
+    if (error instanceof ToolRequestError) return error.toResponse(); // 401
+    throw error;
+  }
+  const server = new McpServer({ name: "acme", version: "1.0.0" });
+  server.registerTool("search_posts",
+    { description: "Search the user's posts", inputSchema: { query: z.string() } },
+    async ({ query }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.search(user, query)) }] }));
+  server.registerTool("rename_post",
+    { description: "Rename one of the user's posts", inputSchema: { id: z.string(), title: z.string() } },
+    async ({ id, title }) => ({ content: [{ type: "text", text: JSON.stringify(await db.posts.rename(user, id, title)) }] }));
+  const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+  await server.connect(transport);
+  return await transport.handleRequest(request);
+}
+```
+
+What the proxy does: on create it appends a per-session `mcpServers` entry
+(id `"app"` unless `toolServer.id`; model-facing names are `app__<tool>`) with
+`requireApproval` from `approvals.ask`, plus `{ kind: "mcp", id, eager: true }`
+when the hook returns an explicit `tools` list (omitted `tools` keeps workspace
+defaults and the attachment still selects the server). It rotates the token on
+send, steer, composer submit, approval decisions, and human-input answers, and
+only for sessions that carry this exact server and URL. Members need
+`mcp_servers:attach`.
+
+Token facts: HS256 JWT, key `HMAC-SHA256(key = OPENGENI_API_KEY, message =
+"opengeni-tool-token:v1")` (or the same explicit `secret` on both sides),
+`iss` `"opengeni-session-proxy"`, `aud` the exact tool URL, `sub` the external
+user id, optional `tenant`, `workspace_id`, `source`, `exp` one hour by default
+(`ttlSeconds`, at most 24 h). A non-Node tool server verifies it with any JWT
+library, for example PyJWT `jwt.decode(token, key, algorithms=["HS256"],
+issuer=..., audience=...)`. `verifyToolRequest` checks the audience path
+against the request path by default (tunnels rewrite the host); pass
+`audience` for an exact URL match. Missing secret is a startup `TypeError`.
+
+Still authorize per call: the token proves who the user is, not what they may
+touch now. Scope every query to the verified user and tenant, treat model-sent
+record ids as lookup keys only, and reload current host policy for writes (see
+below). A runnable reference with a tunnel and an end-to-end script is
+`examples/tool-server` in the OpenGeni repository.
+
 ## Existing customer APIs can become agent tools
 
-The customer does not need an MCP server when it already has a suitable HTTP or GraphQL API. Choose among these paths:
+For non-Node backends, background agents, or workspace-wide tools, the customer does not need an MCP server when it already has a suitable HTTP or GraphQL API. Choose among these paths:
 
 1. **OpenAPI Integration** — publish a focused OpenAPI 3.0 or 3.1 document for the operations the agent may use. OpenGeni deterministically compiles selected operations into agent tools.
 2. **GraphQL Integration** — expose a bounded GraphQL endpoint when that is the product's canonical API shape.

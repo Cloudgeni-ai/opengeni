@@ -54,7 +54,7 @@ Install both packages from the same release.
           "sessions:control",
           "files:upload",
           "files:read",
-          // add "mcp_servers:attach" when sessions carry per-session MCP servers
+          // add "mcp_servers:attach" for your own tools (toolServer) or per-session MCP servers
         ],
         operationId, // a UUID you persist first; reuse it only to retry this request
       });
@@ -90,9 +90,11 @@ Install both packages from the same release.
           identity: "You are Acme's assistant. Friendly and brief.",
           capabilities: "none", // your tools plus asking questions: see "Configure the agent"
         },
-        tools: [], // add your product's tools: see "Give the agent your data"
+        tools: [], // workspace integrations to select; toolServer adds itself
         sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
       }),
+      // Your product's own tools, as the signed-in user: see "Give the agent your data".
+      // toolServer: { url: "https://app.example.com/api/mcp", approvals: { ask: ["rename_post"] } },
     });
     ```
 

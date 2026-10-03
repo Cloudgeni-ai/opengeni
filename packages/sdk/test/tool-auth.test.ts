@@ -55,20 +55,13 @@ function b64url(value: unknown): string {
 }
 
 /** Independent HS256 signer, as a Python/Rails verifier would compute the key. */
-function signIndependently(
-  claims: Record<string, unknown>,
-  alg = "HS256",
-): string {
-  const key = createHmac("sha256", SECRET)
-    .update(TOOL_TOKEN_KEY_LABEL)
-    .digest();
-  const head = `${b64url({ alg, typ: "JWT" })}.${b64url(claims)}`;
+function signIndependently(payload: Record<string, unknown>, alg = "HS256"): string {
+  const key = createHmac("sha256", SECRET).update(TOOL_TOKEN_KEY_LABEL).digest();
+  const head = `${b64url({ alg, typ: "JWT" })}.${b64url(payload)}`;
   return `${head}.${createHmac("sha256", key).update(head).digest("base64url")}`;
 }
 
-function claims(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function claims(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const now = Math.floor(Date.now() / 1000);
   return {
     iss: TOOL_TOKEN_ISSUER,
@@ -108,17 +101,11 @@ describe("tool tokens", () => {
   test("the documented derivation verifies with any standard HS256 implementation", async () => {
     const token = await mintToolToken(identity);
     const [head, payload, signature] = token.split(".");
-    const key = createHmac("sha256", SECRET)
-      .update(TOOL_TOKEN_KEY_LABEL)
-      .digest();
-    expect(
-      createHmac("sha256", key)
-        .update(`${head}.${payload}`)
-        .digest("base64url"),
-    ).toBe(signature!);
-    expect(
-      JSON.parse(Buffer.from(payload!, "base64url").toString()),
-    ).toMatchObject({
+    const key = createHmac("sha256", SECRET).update(TOOL_TOKEN_KEY_LABEL).digest();
+    expect(createHmac("sha256", key).update(`${head}.${payload}`).digest("base64url")).toBe(
+      signature!,
+    );
+    expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toMatchObject({
       iss: "opengeni-session-proxy",
       aud: TOOL_URL,
       sub: "u_42",
@@ -126,12 +113,9 @@ describe("tool tokens", () => {
       workspace_id: WORKSPACE_ID,
     });
     // And the reverse: an independently signed token verifies.
-    const external = await verifyToolRequest(
-      bearer(signIndependently(claims())),
-      {
-        secret: SECRET,
-      },
-    );
+    const external = await verifyToolRequest(bearer(signIndependently(claims())), {
+      secret: SECRET,
+    });
     expect(external.user).toBe("u_42");
     expect(external.tenant).toBeUndefined();
   });
@@ -146,22 +130,18 @@ describe("tool tokens", () => {
       ),
     ).toBe("token_expired");
     const token = await mintToolToken(identity);
-    expect(
-      await rejectionCode(
-        verifyToolRequest(bearer(token), { secret: "other" }),
-      ),
-    ).toBe("token_invalid");
+    expect(await rejectionCode(verifyToolRequest(bearer(token), { secret: "other" }))).toBe(
+      "token_invalid",
+    );
     const [head, , signature] = token.split(".");
     const forged = `${head}.${b64url(claims({ sub: "admin" }))}.${signature}`;
-    expect(
-      await rejectionCode(
-        verifyToolRequest(bearer(forged), { secret: SECRET }),
-      ),
-    ).toBe("token_invalid");
+    expect(await rejectionCode(verifyToolRequest(bearer(forged), { secret: SECRET }))).toBe(
+      "token_invalid",
+    );
     const none = `${b64url({ alg: "none" })}.${b64url(claims())}.`;
-    expect(
-      await rejectionCode(verifyToolRequest(bearer(none), { secret: SECRET })),
-    ).toBe("token_missing");
+    expect(await rejectionCode(verifyToolRequest(bearer(none), { secret: SECRET }))).toBe(
+      "token_missing",
+    );
     expect(
       await rejectionCode(
         verifyToolRequest(bearer(signIndependently(claims(), "HS512")), {
@@ -171,12 +151,9 @@ describe("tool tokens", () => {
     ).toBe("token_malformed");
     expect(
       await rejectionCode(
-        verifyToolRequest(
-          bearer(signIndependently(claims({ iss: "someone-else" }))),
-          {
-            secret: SECRET,
-          },
-        ),
+        verifyToolRequest(bearer(signIndependently(claims({ iss: "someone-else" }))), {
+          secret: SECRET,
+        }),
       ),
     ).toBe("token_invalid");
     expect(
@@ -186,16 +163,12 @@ describe("tool tokens", () => {
         }),
       ),
     ).toBe("token_invalid");
-    expect(
-      await rejectionCode(
-        verifyToolRequest(new Request(TOOL_URL), { secret: SECRET }),
-      ),
-    ).toBe("token_missing");
-    expect(
-      await rejectionCode(
-        verifyToolRequest(bearer("a.b.c"), { secret: SECRET }),
-      ),
-    ).toBe("token_malformed");
+    expect(await rejectionCode(verifyToolRequest(new Request(TOOL_URL), { secret: SECRET }))).toBe(
+      "token_missing",
+    );
+    expect(await rejectionCode(verifyToolRequest(bearer("a.b.c"), { secret: SECRET }))).toBe(
+      "token_malformed",
+    );
     const response = new ToolRequestError("token_missing").toResponse();
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toContain("Bearer");
@@ -212,12 +185,8 @@ describe("tool tokens", () => {
     ).toBe("token_audience");
     // A tunnel or load balancer may rewrite the host; the path still matches.
     expect(
-      (
-        await verifyToolRequest(
-          bearer(token, "http://127.0.0.1:3000/api/mcp"),
-          { secret: SECRET },
-        )
-      ).user,
+      (await verifyToolRequest(bearer(token, "http://127.0.0.1:3000/api/mcp"), { secret: SECRET }))
+        .user,
     ).toBe("u_42");
     // An explicit audience is an exact URL match.
     expect(
@@ -238,10 +207,7 @@ describe("tool tokens", () => {
     ).toBe("u_42");
     expect(
       await rejectionCode(
-        verifyToolRequest(
-          { headers: { authorization: `Bearer ${token}` } },
-          { secret: SECRET },
-        ),
+        verifyToolRequest({ headers: { authorization: `Bearer ${token}` } }, { secret: SECRET }),
       ),
     ).toBe("token_audience");
   });
@@ -259,36 +225,27 @@ describe("tool tokens", () => {
     test("OPENGENI_API_KEY is the default secret on both sides", async () => {
       process.env.OPENGENI_API_KEY = SECRET;
       const token = await mintToolToken({ ...identity, secret: undefined });
-      expect(
-        (await verifyToolRequest(bearer(token), { secret: SECRET })).user,
-      ).toBe("u_42");
+      expect((await verifyToolRequest(bearer(token), { secret: SECRET })).user).toBe("u_42");
       expect((await verifyToolRequest(bearer(token))).user).toBe("u_42");
     });
 
     test("a missing secret is a setup error, not a 401", async () => {
       delete process.env.OPENGENI_API_KEY;
-      await expect(verifyToolRequest(bearer("x.y.z"))).rejects.toBeInstanceOf(
-        TypeError,
-      );
+      await expect(verifyToolRequest(bearer("x.y.z"))).rejects.toBeInstanceOf(TypeError);
       expect(() =>
-        createSessionProxyHandler(
-          new OpenGeniClient({ baseUrl: API, apiKey: "k" }),
-          {
-            resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u" }),
-            toolServer: { url: TOOL_URL },
-          },
-        ),
+        createSessionProxyHandler(new OpenGeniClient({ baseUrl: API, apiKey: "k" }), {
+          resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u" }),
+          toolServer: { url: TOOL_URL },
+        }),
       ).toThrow(TypeError);
     });
   });
 
   test("ttl is bounded", async () => {
-    await expect(
-      mintToolToken({ ...identity, ttlSeconds: 0 }),
-    ).rejects.toBeInstanceOf(TypeError);
-    await expect(
-      mintToolToken({ ...identity, ttlSeconds: 90_000 }),
-    ).rejects.toBeInstanceOf(TypeError);
+    await expect(mintToolToken({ ...identity, ttlSeconds: 0 })).rejects.toBeInstanceOf(TypeError);
+    await expect(mintToolToken({ ...identity, ttlSeconds: 90_000 })).rejects.toBeInstanceOf(
+      TypeError,
+    );
   });
 });
 
@@ -296,10 +253,7 @@ type Recorded = { method: string; path: string; body: any };
 
 function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
   const requests: Recorded[] = [];
-  const upstream = async (
-    input: string | URL | Request,
-    init?: RequestInit,
-  ) => {
+  const upstream = async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
     const path = new URL(request.url).pathname;
     const text = request.method === "GET" ? "" : await request.text();
@@ -327,10 +281,7 @@ function proxySetup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
             : [],
       });
     }
-    if (
-      path === `/v1/workspaces/${WORKSPACE_ID}/sessions` &&
-      request.method === "POST"
-    ) {
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
       return Response.json({ session: { id: SESSION_ID } });
     }
     return Response.json({
@@ -419,10 +370,7 @@ describe("session proxy toolServer", () => {
       { kind: "mcp", id: "crm" },
       { kind: "mcp", id: "posts", eager: true },
     ]);
-    expect(body.mcpServers.map((server: { id: string }) => server.id)).toEqual([
-      "crm",
-      "posts",
-    ]);
+    expect(body.mcpServers.map((server: { id: string }) => server.id)).toEqual(["crm", "posts"]);
     expect(body.mcpServers[1].requireApproval).toBe(true);
 
     const collision = proxySetup({
@@ -432,14 +380,11 @@ describe("session proxy toolServer", () => {
       }),
     });
     const response = await collision.handler(
-      new Request(
-        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ initialMessage: "hi" }),
-        },
-      ),
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initialMessage: "hi" }),
+      }),
     );
     expect(response.status).toBe(500);
     expect(collision.writes()).toHaveLength(0);
@@ -484,26 +429,19 @@ describe("session proxy toolServer", () => {
     for (const update of updates) {
       expect(update).toHaveLength(1);
       expect(update[0].id).toBe("app");
-      const verified = await verifyToolRequest(
-        bearer(tokenOf(update[0].headers)),
-        {
-          secret: SECRET,
-        },
-      );
+      const verified = await verifyToolRequest(bearer(tokenOf(update[0].headers)), {
+        secret: SECRET,
+      });
       expect(verified.user).toBe("u_42");
     }
     // The attachment lookup is cached per session.
-    expect(requests.filter((request) => request.method === "GET")).toHaveLength(
-      1,
-    );
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
   });
 
   test("sessions without this tool server are not rotated; host rotations win", async () => {
     const { writes, browser } = proxySetup({
       beforeForwardMessage: () => ({
-        mcpCredentialUpdates: [
-          { id: "crm", headers: { Authorization: "Bearer host" } },
-        ],
+        mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer host" } }],
       }),
     });
     await browser.sendMessage(WORKSPACE_ID, OTHER_SESSION, { text: "hi" });
@@ -512,16 +450,12 @@ describe("session proxy toolServer", () => {
     ]);
     await browser.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "hi" });
     expect(
-      writes()[1]!.body.payload.mcpCredentialUpdates.map(
-        (update: { id: string }) => update.id,
-      ),
+      writes()[1]!.body.payload.mcpCredentialUpdates.map((update: { id: string }) => update.id),
     ).toEqual(["crm", "app"]);
 
     const hostOwned = proxySetup({
       beforeForwardMessage: () => ({
-        mcpCredentialUpdates: [
-          { id: "app", headers: { Authorization: "Bearer host" } },
-        ],
+        mcpCredentialUpdates: [{ id: "app", headers: { Authorization: "Bearer host" } }],
       }),
     });
     await hostOwned.browser.sendMessage(WORKSPACE_ID, SESSION_ID, {
@@ -579,9 +513,7 @@ describe("a product MCP server built with the official MCP SDK", () => {
             type: "text",
             text: JSON.stringify(
               [...posts.values()].filter(
-                (post) =>
-                  post.owner === user &&
-                  post.title.toLowerCase().includes(query),
+                (post) => post.owner === user && post.title.toLowerCase().includes(query),
               ),
             ),
           },
@@ -615,15 +547,11 @@ describe("a product MCP server built with the official MCP SDK", () => {
     } as never);
     const token = tokenOf(writes()[0]!.body.mcpServers[0].headers);
 
-    const listed = await mcp(
-      rpc(token, { jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    );
+    const listed = await mcp(rpc(token, { jsonrpc: "2.0", id: 1, method: "tools/list" }));
     expect(listed.status).toBe(200);
-    expect(
-      (await listed.json()).result.tools.map(
-        (tool: { name: string }) => tool.name,
-      ),
-    ).toEqual(["searchPosts"]);
+    expect((await listed.json()).result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "searchPosts",
+    ]);
     const called = await mcp(
       rpc(token, {
         jsonrpc: "2.0",
@@ -637,9 +565,7 @@ describe("a product MCP server built with the official MCP SDK", () => {
       { id: "p1", owner: "u_42", title: "Launch plan" },
     ]);
 
-    const anonymous = await mcp(
-      rpc(null, { jsonrpc: "2.0", id: 3, method: "tools/list" }),
-    );
+    const anonymous = await mcp(rpc(null, { jsonrpc: "2.0", id: 3, method: "tools/list" }));
     expect(anonymous.status).toBe(401);
   });
 });

@@ -94,6 +94,11 @@ lease expiry runs independently of pending authorization. Older APIs omit only
 artifact capability, leaving conversation bootstrap available.
 Its Site HTML delivery streams with cancellation and a 25 MiB
 actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+The proxy's `toolServer` option attaches a product MCP endpoint to every session
+it creates with a short-lived per-user token and rotates it on every message,
+approval, and answer; the endpoint checks it with `verifyToolRequest` from
+`@opengeni/sdk/tool-auth`
+([your own tools](product-integration.md#your-own-tools-as-the-signed-in-user-node)).
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See

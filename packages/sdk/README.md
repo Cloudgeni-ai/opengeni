@@ -201,6 +201,35 @@ check on top of OpenGeni's own membership and visibility checks. Without
 `authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
 so cookie-authenticated hosts should pass their CSRF check.
 
+### Your own tools, as the signed-in user
+
+`toolServer` attaches your product's MCP endpoint to every session the
+`createSession` hook creates, with a short-lived token for the user `resolve`
+authenticated. The proxy refreshes it on every send, steer, submit, approval,
+and human-input answer. Your endpoint, built with any MCP library, verifies it:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  createSession,
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // public HTTPS (tunnel locally)
+    approvals: { ask: ["rename_post"] }, // the user approves each call first
+  },
+});
+
+// In the MCP route (Web Request, or an Express/Node request):
+import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+const { user, tenant, workspaceId } = await verifyToolRequest(request); // or ToolRequestError (401)
+```
+
+Scope every tool to the verified `user` and `tenant`; never trust ids the model
+sends. Members need `mcp_servers:attach`. Tokens are HS256 JWTs signed with a key
+derived from `OPENGENI_API_KEY` (or the same `secret` on both sides), bound to
+the tool URL by `aud`, and valid for `ttlSeconds` (default 3600); the format is
+documented in `src/tool-auth.ts` for non-Node verifiers. See
+`examples/tool-server` for a runnable Express version.
+
 `beforeForwardMessage(message, context)` runs before every forwarded user
 message (send, steer, composer submit, and a browser-started create) and may
 return server-owned additions, or a `Response` to refuse the message:

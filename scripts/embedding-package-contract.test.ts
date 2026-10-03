@@ -13,13 +13,8 @@ import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps
 test("Docker dependency stages and Codemode runtimes retain the Connect SDK dependency", () => {
   const root = join(import.meta.dir, "..");
   for (const file of ["opengeni", "sandbox", "desktop"]) {
-    const source = readFileSync(
-      join(root, "docker", `${file}.Dockerfile`),
-      "utf8",
-    );
-    expect(source).toContain(
-      "COPY packages/connect/package.json packages/connect/package.json",
-    );
+    const source = readFileSync(join(root, "docker", `${file}.Dockerfile`), "utf8");
+    expect(source).toContain("COPY packages/connect/package.json packages/connect/package.json");
     if (file !== "opengeni")
       expect(source).toContain(
         'cp -a packages/connect/src "$runtime/node_modules/@opengeni/connect/src"',
@@ -34,20 +29,12 @@ test("Connect is published before its SDK and React consumers without a React/se
   expect(connect).toBeDefined();
   expect(connect!.packageJson.dependencies ?? {}).toEqual({});
   expect(connect!.packageJson.peerDependencies ?? {}).toEqual({});
-  expect(existsSync(join(import.meta.dir, "..", connect!.dir, "LICENSE"))).toBe(
-    true,
-  );
+  expect(existsSync(join(import.meta.dir, "..", connect!.dir, "LICENSE"))).toBe(true);
   for (const name of ["@opengeni/sdk", "@opengeni/react"]) {
-    expect(names.indexOf(name)).toBeGreaterThan(
-      names.indexOf("@opengeni/connect"),
-    );
-    const manifest = structuredClone(
-      packages.find((pkg) => pkg.name === name)!.packageJson,
-    );
+    expect(names.indexOf(name)).toBeGreaterThan(names.indexOf("@opengeni/connect"));
+    const manifest = structuredClone(packages.find((pkg) => pkg.name === name)!.packageJson);
     rewriteWorkspaceDependenciesToConcrete(manifest, workspaceVersionMap());
-    expect(manifest.dependencies?.["@opengeni/connect"]).toBe(
-      `^${connect!.version}`,
-    );
+    expect(manifest.dependencies?.["@opengeni/connect"]).toBe(`^${connect!.version}`);
   }
 });
 
@@ -55,10 +42,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
   const root = join(import.meta.dir, "..");
   for (const [directory, subpaths] of [
     ["packages/connect", ["."]],
-    [
-      "packages/contracts",
-      ["./browser-storage", "./allowance-refusal", "./usage-allowances"],
-    ],
+    ["packages/contracts", ["./browser-storage", "./allowance-refusal", "./usage-allowances"]],
     [
       "packages/sdk",
       [
@@ -72,9 +56,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
     ],
     ["packages/react", ["./connect", "./sites", "./connect.css"]],
   ] as const) {
-    const manifest = JSON.parse(
-      readFileSync(join(root, directory, "package.json"), "utf8"),
-    );
+    const manifest = JSON.parse(readFileSync(join(root, directory, "package.json"), "utf8"));
     const sourceEntries = structuredClone(manifest.exports);
     rewriteEntryPointsToDist(manifest);
     for (const subpath of subpaths) {
@@ -83,9 +65,7 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
       expect(typeof entry.types).toBe("string");
       const source = sourceEntries[subpath];
       expect(existsSync(join(root, directory, source.types))).toBe(true);
-      expect(
-        existsSync(join(root, directory, source.import ?? source.default)),
-      ).toBe(true);
+      expect(existsSync(join(root, directory, source.import ?? source.default))).toBe(true);
       expect(entry.types).toBe(srcToDist(source.types, "types"));
       expect(entry.import ?? entry.default).toBe(
         srcToDist(source.import ?? source.default, "runtime"),
@@ -108,17 +88,12 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
 
 test("every public SDK source subpath has a matching runtime build entry", async () => {
   const directory = join(import.meta.dir, "../packages/sdk");
-  const manifest = JSON.parse(
-    readFileSync(join(directory, "package.json"), "utf8"),
-  );
-  const resolved =
-    typeof sdkConfig === "function" ? await sdkConfig({}) : sdkConfig;
+  const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+  const resolved = typeof sdkConfig === "function" ? await sdkConfig({}) : sdkConfig;
   const configs = Array.isArray(resolved) ? resolved : [resolved];
   const entries = new Set(
     configs.flatMap((config) =>
-      Array.isArray(config.entry)
-        ? config.entry
-        : Object.values(config.entry ?? {}),
+      Array.isArray(config.entry) ? config.entry : Object.values(config.entry ?? {}),
     ),
   );
   const published = structuredClone(manifest);
@@ -127,16 +102,10 @@ test("every public SDK source subpath has a matching runtime build entry", async
     const source = value as { import?: string; default?: string };
     const runtime = source.import ?? source.default;
     if (!runtime?.startsWith("./src/") || !runtime.endsWith(".ts")) continue;
-    expect(
-      entries.has(runtime.slice(2)),
-      `${subpath} runtime build entry`,
-    ).toBe(true);
+    expect(entries.has(runtime.slice(2)), `${subpath} runtime build entry`).toBe(true);
     if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1") {
       const emitted = published.exports[subpath];
-      expect(
-        existsSync(join(directory, emitted.types)),
-        `${subpath} declarations`,
-      ).toBe(true);
+      expect(existsSync(join(directory, emitted.types)), `${subpath} declarations`).toBe(true);
       expect(
         existsSync(join(directory, emitted.import ?? emitted.default)),
         `${subpath} runtime`,
@@ -150,11 +119,9 @@ type PublishedEntry = { field: string; condition: string; target: string };
 function publishedEntries(manifest: Record<string, unknown>): PublishedEntry[] {
   const entries: PublishedEntry[] = [];
   const visit = (field: string, condition: string, value: unknown): void => {
-    if (typeof value === "string")
-      entries.push({ field, condition, target: value });
+    if (typeof value === "string") entries.push({ field, condition, target: value });
     else if (value && typeof value === "object")
-      for (const [key, nested] of Object.entries(value))
-        visit(field, key, nested);
+      for (const [key, nested] of Object.entries(value)) visit(field, key, nested);
   };
   for (const field of ["main", "module", "types"] as const)
     visit(field, field === "types" ? "types" : "default", manifest[field]);
@@ -166,8 +133,7 @@ function publishedEntries(manifest: Record<string, unknown>): PublishedEntry[] {
   const bin = manifest.bin;
   if (typeof bin === "string") visit("bin", "default", bin);
   else if (bin && typeof bin === "object")
-    for (const [name, value] of Object.entries(bin))
-      visit(`bin["${name}"]`, "default", value);
+    for (const [name, value] of Object.entries(bin)) visit(`bin["${name}"]`, "default", value);
   return entries;
 }
 
@@ -185,11 +151,7 @@ test("every published package entry resolves to an emitted file or a shipped ass
       const label = `${pkg.name} ${field} (${condition}) -> ${target}`;
       if (target.startsWith("./dist/")) {
         const declaration = target.endsWith(".d.ts");
-        if (
-          condition === "types"
-            ? !declaration
-            : declaration || !emitted.test(target)
-        )
+        if (condition === "types" ? !declaration : declaration || !emitted.test(target))
           problems.push(
             `${label}: not an emitted ${condition === "types" ? "declaration" : "runtime"} file`,
           );

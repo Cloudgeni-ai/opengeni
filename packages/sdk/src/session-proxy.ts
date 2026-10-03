@@ -2,19 +2,10 @@ import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
-import type {
-  WorkspaceIdOptions,
-  WorkspaceIdTarget,
-} from "./tenant-workspaces";
+import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
 import { proxySessionEventStream } from "./proxy";
-import {
-  OPENGENI_API_CONTRACT_HEADER,
-  OPENGENI_API_CONTRACT_REVISION,
-} from "./types";
-import type {
-  CreateSessionRequest,
-  SessionMcpCredentialUpdateInput,
-} from "./types";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import {
   downloadSessionProxySiteHtml,
@@ -50,10 +41,7 @@ type ProxyFacade = {
   readonly client: ProxyClient;
   readonly source: string;
   workspaceId(target: { tenant: string }): Promise<string>;
-  workspaceIdFor?(
-    target: WorkspaceIdTarget,
-    options: WorkspaceIdOptions,
-  ): Promise<string>;
+  workspaceIdFor?(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string>;
 };
 
 /** Who the authenticated request acts as. Never derive any of it from the request body or path. */
@@ -71,10 +59,7 @@ export type SessionProxyResolution = (
 /** Host auth hook: return the resolution, or a `Response` (for example 401) to reject. */
 export type SessionProxyResolve = (
   request: Request,
-) =>
-  | Promise<SessionProxyResolution | Response>
-  | SessionProxyResolution
-  | Response;
+) => Promise<SessionProxyResolution | Response> | SessionProxyResolution | Response;
 
 export type SessionProxyContext = {
   request: Request;
@@ -152,18 +137,14 @@ export type SessionProxyHandlerOptions = {
    * rejects `Sec-Fetch-Site: cross-site` mutations and requires JSON bodies;
    * cookie-authenticated hosts should supply their existing CSRF check.
    */
-  authorizeMutation?:
-    ((request: Request) => boolean | Promise<boolean>) | undefined;
+  authorizeMutation?: ((request: Request) => boolean | Promise<boolean>) | undefined;
   /**
    * Optional product-level session check (for example "this ticket's session
    * belongs to this user"). OpenGeni still enforces membership and private
    * visibility on every call.
    */
   authorizeSession?:
-    | ((
-        sessionId: string,
-        context: SessionProxyContext,
-      ) => boolean | Promise<boolean>)
+    | ((sessionId: string, context: SessionProxyContext) => boolean | Promise<boolean>)
     | undefined;
   /**
    * Server-controlled session creation. The browser supplies only
@@ -175,10 +156,7 @@ export type SessionProxyHandlerOptions = {
     | ((
         input: SessionProxyCreateInput,
         context: SessionProxyContext,
-      ) =>
-        | CreateSessionRequest
-        | Response
-        | Promise<CreateSessionRequest | Response>)
+      ) => CreateSessionRequest | Response | Promise<CreateSessionRequest | Response>)
     | undefined;
   /**
    * Called before every forwarded user message (send, steer, composer submit,
@@ -267,16 +245,8 @@ export type SessionProxyHandlerOptions = {
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const QUEUE_OPERATIONS: ReadonlySet<string> = new Set([
-  "move",
-  "edit",
-  "steer",
-  "delete",
-]);
-const CREATE_FIELDS: ReadonlySet<string> = new Set([
-  "initialMessage",
-  "idempotencyKey",
-]);
+const QUEUE_OPERATIONS: ReadonlySet<string> = new Set(["move", "edit", "steer", "delete"]);
+const CREATE_FIELDS: ReadonlySet<string> = new Set(["initialMessage", "idempotencyKey"]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 
 class ProxyRejection extends Error {
@@ -293,11 +263,7 @@ function reject(status: number, code: string, message: string): never {
   throw new ProxyRejection(status, code, message);
 }
 
-function json(
-  body: unknown,
-  status = 200,
-  headers: Record<string, string> = {},
-): Response {
+function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -330,13 +296,11 @@ export function createSessionProxyHandler(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
-  const artifactsEnabled =
-    options.artifacts !== undefined && options.artifacts !== false;
+  const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
-        (typeof options.artifacts === "object"
-          ? options.artifacts.editableLiveUrl
-          : undefined) ?? service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
+        (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
+          service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
       )
     : null;
   const modelSelection = options.modelSelection ?? true;
@@ -345,9 +309,7 @@ export function createSessionProxyHandler(
   const archiveEnabled = options.archive ?? true;
   const chats = options.chats ?? "private";
   const defaults = chatDefaults(chats);
-  const toolServer = options.toolServer
-    ? normalizeToolServer(options.toolServer)
-    : undefined;
+  const toolServer = options.toolServer ? normalizeToolServer(options.toolServer) : undefined;
   // Whether a session carries this proxy's tool server (attachments are immutable).
   const toolSessions = new Map<string, Promise<boolean>>();
   // Canonical subject per external user, for the "mine" list filter.
@@ -357,8 +319,7 @@ export function createSessionProxyHandler(
     if (!subject) {
       subject = client.getAccessContext().then((access) => access.subjectId);
       subject.catch(() => subjects.delete(key));
-      if (subjects.size >= 1_000)
-        subjects.delete(subjects.keys().next().value!);
+      if (subjects.size >= 1_000) subjects.delete(subjects.keys().next().value!);
       subjects.set(key, subject);
     }
     return subject;
@@ -387,8 +348,7 @@ export function createSessionProxyHandler(
         const allowed = options.authorizeMutation
           ? await options.authorizeMutation(request)
           : request.headers.get("sec-fetch-site") !== "cross-site";
-        if (!allowed)
-          return errorJson(403, "mutation_denied", "Request denied.");
+        if (!allowed) return errorJson(403, "mutation_denied", "Request denied.");
       }
       const source = resolved.source ?? defaultSource;
       let workspaceId: string;
@@ -439,14 +399,11 @@ export function createSessionProxyHandler(
             .getSession(workspaceId, sessionId, call)
             .then((session) =>
               (session.mcpServers ?? []).some(
-                (server) =>
-                  server.id === toolServer!.id &&
-                  server.url === toolServer!.url,
+                (server) => server.id === toolServer!.id && server.url === toolServer!.url,
               ),
             );
           attached.catch(() => toolSessions.delete(key));
-          if (toolSessions.size >= 1_000)
-            toolSessions.delete(toolSessions.keys().next().value!);
+          if (toolSessions.size >= 1_000) toolSessions.delete(toolSessions.keys().next().value!);
           toolSessions.set(key, attached);
         }
         return attached;
@@ -457,13 +414,11 @@ export function createSessionProxyHandler(
         const extras = options.beforeForwardMessage
           ? await options.beforeForwardMessage(input, context)
           : undefined;
-        if (extras instanceof Response || !toolServer || !input.sessionId)
-          return extras;
+        if (extras instanceof Response || !toolServer || !input.sessionId) return extras;
         const updates = extras?.mcpCredentialUpdates ?? [];
         // A host-supplied rotation for the same id wins; sessions created
         // without this tool server (or for an older URL) are left alone.
-        if (updates.some((update) => update.id === toolServer.id))
-          return extras;
+        if (updates.some((update) => update.id === toolServer.id)) return extras;
         if (!(await hasToolServer(input.sessionId))) return extras;
         return {
           ...extras,
@@ -484,17 +439,12 @@ export function createSessionProxyHandler(
         // Submit repeats the saved policy as a mandatory integrity fence. Never
         // replace it with a newer draft's policy: outcome-unknown retries must
         // retain the original receipt hash. The API rejects any new selection.
-        const message = sanitizeMessage(
-          value,
-          modelSelection || input.delivery === "submit",
-        );
+        const message = sanitizeMessage(value, modelSelection || input.delivery === "submit");
         const extras = await messageExtras(input);
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(
           extras?.modelContext,
-          typeof message.modelContext === "string"
-            ? message.modelContext
-            : undefined,
+          typeof message.modelContext === "string" ? message.modelContext : undefined,
         );
         return {
           ...message,
@@ -537,9 +487,7 @@ export function createSessionProxyHandler(
             { ...query, workspaceId },
             call,
           );
-          let artifacts: Awaited<
-            ReturnType<typeof artifactViewerCapability>
-          > | null = null;
+          let artifacts: Awaited<ReturnType<typeof artifactViewerCapability>> | null = null;
           if (editableLiveUrl) {
             try {
               // Successful effective-grant resolution negotiates the viewer's
@@ -548,23 +496,17 @@ export function createSessionProxyHandler(
               artifacts = {
                 editableLiveUrl,
                 cachePartition: await cachePartition(
-                  await getSessionProxyWorkspaceGrant(
-                    client,
-                    workspaceId,
-                    call,
-                  ),
+                  await getSessionProxyWorkspaceGrant(client, workspaceId, call),
                   workspaceId,
                   source,
                 ),
               };
             } catch (error) {
-              if (!(error instanceof OpenGeniApiError) || error.status !== 404)
-                throw error;
+              if (!(error instanceof OpenGeniApiError) || error.status !== 404) throw error;
             }
           }
           // Upstream proxy capabilities never authorize this host's routes.
-          const { artifacts: _upstreamArtifacts, ...conversationConfig } =
-            config;
+          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
           return json({
             ...conversationConfig,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
@@ -583,34 +525,17 @@ export function createSessionProxyHandler(
       if (root !== "workspaces" || rest.length < 1) {
         return errorJson(404, "route_not_allowed", "Not found.");
       }
-      const [pathWorkspaceId, area, ...tail] = rest as [
-        string,
-        string | undefined,
-        ...string[],
-      ];
+      const [pathWorkspaceId, area, ...tail] = rest as [string, string | undefined, ...string[]];
       if (pathWorkspaceId !== workspaceId) {
-        return errorJson(
-          403,
-          "workspace_not_allowed",
-          "This workspace is not available.",
-        );
+        return errorJson(403, "workspace_not_allowed", "This workspace is not available.");
       }
       const base = `/v1/workspaces/${workspaceId}`;
 
       // Only the resolved user's own usage. No full roster, allowance config,
       // member selectors, or controls can pass through this browser boundary.
-      if (
-        area === "usage" &&
-        tail.length === 1 &&
-        tail[0] === "me" &&
-        method === "GET"
-      ) {
+      if (area === "usage" && tail.length === 1 && tail[0] === "me" && method === "GET") {
         if (Object.keys(query).some((key) => key !== "period")) {
-          return errorJson(
-            400,
-            "invalid_usage_query",
-            "Only period is accepted for own usage.",
-          );
+          return errorJson(400, "invalid_usage_query", "Only period is accepted for own usage.");
         }
         return await read(`${base}/usage/me`);
       }
@@ -620,62 +545,30 @@ export function createSessionProxyHandler(
       if (area === "model-catalog" && tail.length === 0 && method === "GET") {
         return await read(`${base}/model-catalog`);
       }
-      if (
-        area === "live-events" &&
-        tail.length === 1 &&
-        tail[0] === "stream" &&
-        method === "GET"
-      ) {
+      if (area === "live-events" && tail.length === 1 && tail[0] === "stream" && method === "GET") {
         // Surface authorization failures as HTTP status before streaming.
         await client.requestJson("GET", base, undefined, {}, call);
-        return workspaceLiveStream(
-          client,
-          workspaceId,
-          url.searchParams,
-          request,
-          heartbeatMs,
-        );
+        return workspaceLiveStream(client, workspaceId, url.searchParams, request, heartbeatMs);
       }
-      if (
-        area === "inference-control" &&
-        tail.length === 0 &&
-        method === "POST"
-      ) {
+      if (area === "inference-control" && tail.length === 0 && method === "POST") {
         // The conversation's paused-state UI only offers workspace Resume.
         const body = await readJsonBody(request, maxBodyBytes);
         if (body?.action !== "resume") {
-          reject(
-            403,
-            "control_not_allowed",
-            "Only workspace resume is available.",
-          );
+          reject(403, "control_not_allowed", "Only workspace resume is available.");
         }
-        return json(
-          await client.requestJson("POST", `${base}/inference-control`, body),
-        );
+        return json(await client.requestJson("POST", `${base}/inference-control`, body));
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
         if (tail.length === 1 && tail[0] === "uploads") {
           const body = await readJsonBody(request, maxBodyBytes);
           return json(
-            await client.requestJson(
-              "POST",
-              `${base}/files/uploads`,
-              pick(body, UPLOAD_FIELDS),
-            ),
+            await client.requestJson("POST", `${base}/files/uploads`, pick(body, UPLOAD_FIELDS)),
           );
         }
-        if (
-          tail.length === 3 &&
-          tail[0] === "uploads" &&
-          tail[2] === "complete"
-        ) {
+        if (tail.length === 3 && tail[0] === "uploads" && tail[2] === "complete") {
           return json(
-            await client.requestJson(
-              "POST",
-              `${base}/files/uploads/${tail[1]}/complete`,
-            ),
+            await client.requestJson("POST", `${base}/files/uploads/${tail[1]}/complete`),
           );
         }
         if (tail.length === 2 && tail[1] === "download-url") {
@@ -693,12 +586,8 @@ export function createSessionProxyHandler(
       }
 
       if (area === "editable-artifacts" || area === "published-artifacts") {
-        if (!artifactsEnabled)
-          return errorJson(404, "route_not_allowed", "Not found.");
-        const [artifactId, ...artifactOp] = tail as [
-          string | undefined,
-          ...string[],
-        ];
+        if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+        const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
         const editable = area === "editable-artifacts";
         const allowed = editable
@@ -707,19 +596,11 @@ export function createSessionProxyHandler(
         if (!artifactId || !SEGMENT.test(artifactId) || !allowed) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
-        const sessionId =
-          request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
+        const sessionId = request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
         if (!SEGMENT.test(sessionId)) {
-          reject(
-            400,
-            "session_scope_required",
-            "Artifact reads must name their session.",
-          );
+          reject(400, "session_scope_required", "Artifact reads must name their session.");
         }
-        if (
-          options.authorizeSession &&
-          !(await options.authorizeSession(sessionId, context))
-        ) {
+        if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
           return errorJson(404, "session_not_found", "Session not found.");
         }
         // No positive authorization cache: revocation must take effect even
@@ -759,41 +640,27 @@ export function createSessionProxyHandler(
         if (typeof versionId !== "string" || !SEGMENT.test(versionId)) {
           reject(400, "version_required", "versionId is required.");
         }
-        const html = await downloadSessionProxySiteHtml(
-          client,
-          workspaceId,
-          artifactId,
-          {
-            versionId,
-            signal: request.signal,
-          },
-        );
+        const html = await downloadSessionProxySiteHtml(client, workspaceId, artifactId, {
+          versionId,
+          signal: request.signal,
+        });
         return new Response(boundedSiteHtml(html.body, request.signal), {
           headers: SITE_HTML_HEADERS,
         });
       }
 
-      if (area !== "sessions")
-        return errorJson(404, "route_not_allowed", "Not found.");
+      if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
 
       if (tail.length === 0 && method === "GET") {
-        if (!sessionList)
-          return errorJson(404, "route_not_allowed", "Not found.");
+        if (!sessionList) return errorJson(404, "route_not_allowed", "Not found.");
         if (query.view !== "page") {
-          reject(
-            400,
-            "page_view_required",
-            "List sessions with listSessionPage.",
-          );
+          reject(400, "page_view_required", "List sessions with listSessionPage.");
         }
         const listQuery: Record<string, string> = { ...query };
         if (sessionList === "mine") {
           // Server-enforced creator filter; the browser cannot widen it.
           listQuery.createdByKind = "subject";
-          listQuery.createdBySubjectId = await subjectOf(
-            client,
-            `${source}\u0000${resolved.user}`,
-          );
+          listQuery.createdBySubjectId = await subjectOf(client, `${source}\u0000${resolved.user}`);
         }
         const page = await client.requestJson<Record<string, unknown>>(
           "GET",
@@ -812,15 +679,10 @@ export function createSessionProxyHandler(
         const input = createInput(await readJsonBody(request, maxBodyBytes));
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
-        const created = toolServer
-          ? withToolServer(hooked, toolServer, await toolToken())
-          : hooked;
+        const created = toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked;
         const extras = await messageExtras({ delivery: "create" });
         if (extras instanceof Response) return extras;
-        const modelContext = joinContext(
-          extras?.modelContext,
-          created.modelContext,
-        );
+        const modelContext = joinContext(extras?.modelContext, created.modelContext);
         return json(
           await client.createSession(workspaceId, {
             ...created,
@@ -833,29 +695,18 @@ export function createSessionProxyHandler(
       }
 
       const [sessionId, ...op] = tail as [string, ...string[]];
-      if (
-        options.authorizeSession &&
-        !(await options.authorizeSession(sessionId, context))
-      ) {
+      if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
         return errorJson(404, "session_not_found", "Session not found.");
       }
       const session = `${base}/sessions/${sessionId}`;
       const route = `${method} ${op.join("/")}`;
-      const body =
-        method === "GET"
-          ? undefined
-          : await readJsonBody(request, maxBodyBytes, true);
-      const sanitize = (value: unknown) =>
-        sanitizeMessage(value, modelSelection);
+      const body = method === "GET" ? undefined : await readJsonBody(request, maxBodyBytes, true);
+      const sanitize = (value: unknown) => sanitizeMessage(value, modelSelection);
       const saveDraftPolicy = async (message: Record<string, unknown>) => {
         if (modelSelection) return message;
         // Save requires explicit policy fields. Use this actor's durable draft,
         // not browser choices. The API's expectedRevision fence rejects races.
-        const draft = await client.getComposerDraft(
-          workspaceId,
-          sessionId,
-          call,
-        );
+        const draft = await client.getComposerDraft(workspaceId, sessionId, call);
         return {
           ...message,
           model: draft.model,
@@ -863,10 +714,7 @@ export function createSessionProxyHandler(
           latencyMode: draft.latencyMode,
         };
       };
-      const forward = async (
-        path: string,
-        payload: Record<string, unknown> | Response,
-      ) =>
+      const forward = async (path: string, payload: Record<string, unknown> | Response) =>
         payload instanceof Response
           ? payload
           : json(await client.requestJson("POST", path, payload));
@@ -875,27 +723,20 @@ export function createSessionProxyHandler(
         case "GET ":
           return await read(session);
         case "PUT archive": {
-          if (!archiveEnabled)
-            return errorJson(404, "route_not_allowed", "Not found.");
+          if (!archiveEnabled) return errorJson(404, "route_not_allowed", "Not found.");
           const archived = body?.archived;
           const expectedVersion = body?.expectedVersion;
-          if (typeof archived !== "boolean")
-            reject(400, "invalid_body", "archived is required.");
+          if (typeof archived !== "boolean") reject(400, "invalid_body", "archived is required.");
           return json(
             await client.requestJson("PUT", `${session}/archive`, {
               archived,
-              ...(typeof expectedVersion === "number"
-                ? { expectedVersion }
-                : {}),
+              ...(typeof expectedVersion === "number" ? { expectedVersion } : {}),
             }),
           );
         }
         case "PATCH ": {
           const title = body?.title;
-          if (
-            typeof title !== "string" ||
-            Object.keys(body ?? {}).length !== 1
-          ) {
+          if (typeof title !== "string" || Object.keys(body ?? {}).length !== 1) {
             reject(400, "invalid_body", "Only { title } may be updated.");
           }
           return json(await client.requestJson("PATCH", session, { title }));
@@ -953,38 +794,23 @@ export function createSessionProxyHandler(
         }
         case "POST control": {
           if (body?.action !== "pause" && body?.action !== "resume") {
-            reject(
-              403,
-              "control_not_allowed",
-              "Only pause and resume are available.",
-            );
+            reject(403, "control_not_allowed", "Only pause and resume are available.");
           }
-          return json(
-            await client.requestJson("POST", `${session}/control`, body),
-          );
+          return json(await client.requestJson("POST", `${session}/control`, body));
         }
         case "GET human-input-requests":
           return await read(`${session}/human-input-requests`);
         case "POST fs/read":
         case "POST fs/read-workspace": {
-          if (!sandboxFilesEnabled)
-            return errorJson(404, "route_not_allowed", "Not found.");
+          if (!sandboxFilesEnabled) return errorJson(404, "route_not_allowed", "Not found.");
           // A distinct route fails closed on older APIs that would strip the
           // additive workspaceOnly field and otherwise permit machine-wide reads.
           return json(
-            await client.requestJson(
-              "POST",
-              `${session}/fs/read-workspace`,
-              sandboxRead(body),
-            ),
+            await client.requestJson("POST", `${session}/fs/read-workspace`, sandboxRead(body)),
           );
         }
       }
-      if (
-        op.length === 2 &&
-        op[0] === "human-input-requests" &&
-        method === "GET"
-      ) {
+      if (op.length === 2 && op[0] === "human-input-requests" && method === "GET") {
         return await read(`${session}/human-input-requests/${op[1]}`);
       }
       if (
@@ -993,13 +819,7 @@ export function createSessionProxyHandler(
         QUEUE_OPERATIONS.has(op[2]!) &&
         method === "POST"
       ) {
-        return json(
-          await client.requestJson(
-            "POST",
-            `${session}/queue/${op[1]}/${op[2]}`,
-            body,
-          ),
-        );
+        return json(await client.requestJson("POST", `${session}/queue/${op[1]}/${op[2]}`, body));
       }
       return errorJson(404, "route_not_allowed", "Not found.");
     } catch (error) {
@@ -1008,22 +828,14 @@ export function createSessionProxyHandler(
   };
 }
 
-const UPLOAD_FIELDS = [
-  "scope",
-  "filename",
-  "contentType",
-  "sizeBytes",
-  "sha256",
-] as const;
+const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type NormalizedToolServer = SessionProxyToolServer & {
   id: string;
   secret: string;
 };
 
-function normalizeToolServer(
-  toolServer: SessionProxyToolServer,
-): NormalizedToolServer {
+function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedToolServer {
   let url: URL;
   try {
     url = new URL(toolServer.url);
@@ -1036,19 +848,11 @@ function normalizeToolServer(
   }
   const id = toolServer.id ?? "app";
   if (!/^[A-Za-z0-9_-]+$/.test(id)) {
-    throw new TypeError(
-      "toolServer.id may contain only letters, digits, _ and -.",
-    );
+    throw new TypeError("toolServer.id may contain only letters, digits, _ and -.");
   }
   const ask = toolServer.approvals?.ask;
-  if (
-    ask !== undefined &&
-    ask !== true &&
-    !(Array.isArray(ask) && ask.every(isToolName))
-  ) {
-    throw new TypeError(
-      "toolServer.approvals.ask must be true or a list of tool names.",
-    );
+  if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
+    throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
   }
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
@@ -1085,21 +889,14 @@ function withToolServer(
         ...(toolServer.name ? { name: toolServer.name } : {}),
         url: toolServer.url,
         headers: { Authorization: `Bearer ${token}` },
-        ...(ask === true
-          ? { requireApproval: true }
-          : ask?.length
-            ? { requireApproval: ask }
-            : {}),
+        ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
       },
     ],
     // Omitted tools keep workspace defaults; the attachment alone selects the
     // server. An explicit allow-list gets the server's tools on the first request.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
-          tools: [
-            ...tools,
-            { kind: "mcp" as const, id: toolServer.id, eager: true },
-          ],
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
         }
       : {}),
   };
@@ -1279,18 +1076,13 @@ async function legacyViewerGrant(
   workspaceId: string,
 ): Promise<import("./types").AccessGrant> {
   const access = await client.getAccessContext();
-  const grant = access.workspaceGrants.find(
-    (candidate) => candidate.workspaceId === workspaceId,
-  );
-  if (!grant)
-    reject(403, "workspace_not_allowed", "This workspace is not available.");
+  const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
   return grant;
 }
 
 /** Sandbox link download: one path, no route/target override. */
-function sandboxRead(
-  body: Record<string, unknown> | undefined,
-): Record<string, unknown> {
+function sandboxRead(body: Record<string, unknown> | undefined): Record<string, unknown> {
   const path = body?.path;
   const encoding = body?.encoding;
   const maxBytes = body?.maxBytes;
@@ -1307,11 +1099,7 @@ function sandboxRead(
       maxBytes < 1 ||
       maxBytes > 25 * 1024 * 1024)
   ) {
-    reject(
-      400,
-      "invalid_body",
-      "maxBytes must be an integer from 1 to 26214400.",
-    );
+    reject(400, "invalid_body", "maxBytes must be an integer from 1 to 26214400.");
   }
   return {
     path,
@@ -1322,10 +1110,7 @@ function sandboxRead(
 }
 
 /** Native path segments after the mount prefix, starting at `v1`'s child; null when not a proxied path. */
-function routeSegments(
-  pathname: string,
-  basePath: string | undefined,
-): string[] | null {
+function routeSegments(pathname: string, basePath: string | undefined): string[] | null {
   let rest: string;
   if (basePath !== undefined) {
     const prefix = basePath.replace(/\/+$/, "");
@@ -1359,8 +1144,7 @@ async function readJsonBody(
   optional = false,
 ): Promise<Record<string, unknown> | undefined> {
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > maxBytes)
-    reject(413, "body_too_large", "Request body is too large.");
+  if (declared > maxBytes) reject(413, "body_too_large", "Request body is too large.");
   const reader = request.body?.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -1413,9 +1197,7 @@ function pick(
   return picked;
 }
 
-function createInput(
-  body: Record<string, unknown> | undefined,
-): SessionProxyCreateInput {
+function createInput(body: Record<string, unknown> | undefined): SessionProxyCreateInput {
   for (const key of Object.keys(body ?? {})) {
     if (!CREATE_FIELDS.has(key)) {
       reject(
@@ -1430,15 +1212,8 @@ function createInput(
   if (typeof initialMessage !== "string" || !initialMessage.trim()) {
     reject(400, "initial_message_required", "initialMessage is required.");
   }
-  if (
-    idempotencyKey !== undefined &&
-    (typeof idempotencyKey !== "string" || !idempotencyKey)
-  ) {
-    reject(
-      400,
-      "invalid_idempotency_key",
-      "idempotencyKey must be a non-empty string.",
-    );
+  if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
+    reject(400, "invalid_idempotency_key", "idempotencyKey must be a non-empty string.");
   }
   return { initialMessage, ...(idempotencyKey ? { idempotencyKey } : {}) };
 }
@@ -1450,20 +1225,13 @@ function browserPayload(value: unknown): Record<string, unknown> {
   }
   const input = { ...(value as Record<string, unknown>) };
   if (Object.hasOwn(input, "mcpCredentialUpdates")) {
-    reject(
-      403,
-      "credential_update_not_allowed",
-      "MCP credentials are server-owned.",
-    );
+    reject(403, "credential_update_not_allowed", "MCP credentials are server-owned.");
   }
   return input;
 }
 
 /** Browser message/draft input: no credential rotation, file resources only, optional model lock. */
-function sanitizeMessage(
-  value: unknown,
-  modelSelection: boolean,
-): Record<string, unknown> {
+function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string, unknown> {
   const input = browserPayload(value);
   if (input.resources !== undefined) {
     if (
@@ -1475,11 +1243,7 @@ function sanitizeMessage(
           (resource as { kind?: unknown }).kind !== "file",
       )
     ) {
-      reject(
-        403,
-        "resource_not_allowed",
-        "Only file attachments may be added from the browser.",
-      );
+      reject(403, "resource_not_allowed", "Only file attachments may be added from the browser.");
     }
   }
   if (!modelSelection) {
@@ -1488,10 +1252,7 @@ function sanitizeMessage(
   return input;
 }
 
-function clientEvent(body: Record<string, unknown> | undefined): Record<
-  string,
-  unknown
-> & {
+function clientEvent(body: Record<string, unknown> | undefined): Record<string, unknown> & {
   type: string;
 } {
   switch (body?.type) {
@@ -1500,11 +1261,7 @@ function clientEvent(body: Record<string, unknown> | undefined): Record<
     case "user.humanInputResponse":
       return body as Record<string, unknown> & { type: string };
     default:
-      return reject(
-        403,
-        "event_not_allowed",
-        "This session event type is not available.",
-      );
+      return reject(403, "event_not_allowed", "This session event type is not available.");
   }
 }
 
@@ -1523,21 +1280,14 @@ async function listEvents(
   call: { signal: AbortSignal },
 ): Promise<Response> {
   if (query.mode === "forensic") {
-    reject(
-      403,
-      "forensic_events_not_allowed",
-      "Forensic event reads are not proxied.",
-    );
+    reject(403, "forensic_events_not_allowed", "Forensic event reads are not proxied.");
   }
   const upstream = await client.requestJsonResponse(path, query, call);
   const headers: Record<string, string> = {};
   upstream.headers.forEach((value, name) => {
     const lower = name.toLowerCase();
     // Paging metadata only; the upstream contract revision stays behind the proxy.
-    if (
-      lower.startsWith("x-opengeni-") &&
-      lower !== OPENGENI_API_CONTRACT_HEADER
-    ) {
+    if (lower.startsWith("x-opengeni-") && lower !== OPENGENI_API_CONTRACT_HEADER) {
       headers[name] = value;
     }
   });
@@ -1624,8 +1374,7 @@ function workspaceLiveStream(
 
 /** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
 function errorResponse(error: unknown): Response {
-  if (error instanceof ProxyRejection)
-    return errorJson(error.status, error.code, error.message);
+  if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
   if (error instanceof OpenGeniSetupError) {
     return json(
       {
@@ -1640,8 +1389,7 @@ function errorResponse(error: unknown): Response {
     );
   }
   if (error instanceof OpenGeniApiError) {
-    const status =
-      error.status >= 400 && error.status <= 599 ? error.status : 502;
+    const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
     // A decoded upstream envelope is forwarded verbatim; the SDK only retains decodable bodies.
     if (error.body) {
       return new Response(error.body, {
