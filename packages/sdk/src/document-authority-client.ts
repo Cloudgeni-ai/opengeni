@@ -1,5 +1,5 @@
 import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
-import { OpenGeniClient as OpenGeniCoreClient } from "./organization-usage-client";
+import { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
   Document,
   IssueUserResourceGrantRequest,

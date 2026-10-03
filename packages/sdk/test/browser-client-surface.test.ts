@@ -8,9 +8,9 @@ import { SITE_BROWSER_RUNTIME } from "../src/site-browser-runtime.gen";
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
 
-// These methods predate the browser-specific entry. Keep the list explicit so
-// removing legacy surface tightens the boundary, while adding a browser-unused
-// method to the eager client fails review until it moves to a focused subpath.
+// Existing public methods may predate the browser entry or outlive a reviewed
+// browser consumer removal. Keep each exception explicit: new SDK methods with
+// no browser consumer must still move to a focused subpath.
 const legacyBrowserUnusedMethods = [
   // Identity proposals are confirmed in the conversation that made them.
   "activateCompanyProfileRevision",
@@ -38,6 +38,10 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Added with the organization dashboard in #2497; the Insights redesign in
+  // #3264 removed its browser consumers. Preserve these existing public methods.
+  "getOrganizationUsageSummary",
+  "getOrganizationUsageWorkspacePage",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
@@ -103,8 +107,8 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
-  test("preserves retired organization usage reads on public compatibility clients only", async () => {
-    for (const Client of [OpenGeniClient, OpenGeniCoreClient]) {
+  test("preserves retired organization usage reads on every existing public client entry", async () => {
+    for (const Client of [OpenGeniClient, OpenGeniCoreClient, OpenGeniBrowserClient]) {
       const requests: URL[] = [];
       const client = new Client({
         baseUrl: "https://api.example.test",
@@ -113,6 +117,8 @@ describe("browser client runtime surface", () => {
           return Response.json({ accountId: "account" });
         },
       });
+      expect(client.getOrganizationUsageSummary).toBeFunction();
+      expect(client.getOrganizationUsageWorkspacePage).toBeFunction();
       expect(await client.getOrganizationUsageSummary({ accountId: "account" })).toMatchObject({
         accountId: "account",
       });
@@ -135,12 +141,10 @@ describe("browser client runtime surface", () => {
       });
     }
     const browser = new OpenGeniBrowserClient({ baseUrl: "https://api.example.test" });
-    expect("getOrganizationUsageSummary" in browser).toBe(false);
-    expect("getOrganizationUsageWorkspacePage" in browser).toBe(false);
     expect(browser.getOrganizationModelUsage).toBeFunction();
   });
 
-  test("excludes retired organization usage routes from browser and Site bundles", async () => {
+  test("preserves public organization usage routes in browser and Site bundles", async () => {
     const result = await Bun.build({
       entrypoints: [path.join(import.meta.dir, "fixtures/core-bundle-entry.ts")],
       target: "browser",
@@ -150,8 +154,8 @@ describe("browser client runtime surface", () => {
     if (!result.success) throw new AggregateError(result.logs, "Browser bundle failed");
     const browserBundle = await result.outputs[0]!.text();
     for (const route of ["/v1/billing/usage-summary", "/v1/billing/usage-workspaces"]) {
-      expect(browserBundle.includes(route)).toBe(false);
-      expect(SITE_BROWSER_RUNTIME.includes(route)).toBe(false);
+      expect(browserBundle.includes(route)).toBe(true);
+      expect(SITE_BROWSER_RUNTIME.includes(route)).toBe(true);
     }
     expect(browserBundle).toContain("/v1/billing/usage-models");
   });
