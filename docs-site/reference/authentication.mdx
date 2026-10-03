@@ -61,7 +61,7 @@ Choose an access tier when creating an organization key:
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `"full"` (default)  | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys                                                     |
 | `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                                                               |
-| `"developer_setup"` | What the `opengeni-setup` skill creates while you build: workspaces, members, sessions, and usage allowances, but no key management and only limited permissions for agents |
+| `"developer_setup"` | A restricted tier: workspaces, members, sessions, and usage allowances, but no key management. Setup flows use a full-access key instead |
 
 Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for product integrations, which create tenant workspaces and send messages.
 

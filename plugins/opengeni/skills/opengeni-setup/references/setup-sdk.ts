@@ -43,8 +43,9 @@ export function serverClient(env: Record<string, string | undefined>) {
 // setup key. Capture { token, apiKey.id } directly to the secure store/ledger.
 export async function createSetupKey(admin: OpenGeniClient, organizationId: string) {
   return await admin.createOrganizationApiKey(organizationId, {
-    name: "Product developer setup",
-    access: "developer_setup",
+    name: "Product setup",
+    access: "full",
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   });
 }
 
@@ -56,10 +57,9 @@ export async function ensureProductWorkspace(
   const access = await og.getAccessContext();
   if (
     access.credential?.kind !== "organization_api_key" ||
-    access.credential.accountId !== organizationId ||
-    access.credential.access !== "developer_setup"
+    access.credential.accountId !== organizationId
   ) {
-    throw new Error("Expected this organization's Developer setup key; do not widen access");
+    throw new Error("Expected this organization's setup key");
   }
   const result = await og.ensureWorkspace({ ...mapping, accountId: organizationId });
   const workspace = await og.getWorkspace(result.workspace.id);
