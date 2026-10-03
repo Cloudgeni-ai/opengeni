@@ -53,6 +53,67 @@ const hotTableNames = [
 
 const hotMutationPattern = String.raw`\m(INSERT[[:space:]]+INTO|UPDATE|DELETE[[:space:]]+FROM)[[:space:]]+(("[^"]+"|[a-z_][a-z0-9_]*|%[0-9]+\$I)\.)?(sessions|session_turns|session_turn_attempts|session_attempt_interruptions|session_system_updates|session_human_input_requests|session_pending_tool_calls|agent_run_states|session_goals|codex_capacity_waiters|xai_capacity_waiters|session_realtime_modes|session_realtime_connections|scheduled_tasks|sandbox_workspace_mutation_admissions|sandbox_retained_processes|sandbox_lease_holders)\M`;
 
+// 0345 installed the original set. 0598 copies the complete xAI waiter
+// contract, including this guard and FORCE RLS, to the Claude waiter table.
+const currentFencedTableNames = [...hotTableNames, "claude_capacity_waiters"].sort();
+
+type InstalledFenceTrigger = {
+  tableName: string;
+  guardSchema: string;
+  guardName: string;
+  enabled: string;
+  kind: number;
+  unconditional: boolean;
+  allColumns: boolean;
+  rls: boolean;
+  forcedRls: boolean;
+  source: string;
+};
+
+async function installedFenceTriggers(connection: postgres.Sql | postgres.TransactionSql) {
+  return await connection<InstalledFenceTrigger[]>`
+    select relation.relname as "tableName",
+      guard_namespace.nspname as "guardSchema",
+      procedure.proname as "guardName",
+      trigger_value.tgenabled::text as enabled,
+      trigger_value.tgtype::int as kind,
+      trigger_value.tgqual is null as unconditional,
+      cardinality(trigger_value.tgattr::smallint[]) = 0 as "allColumns",
+      relation.relrowsecurity as rls,
+      relation.relforcerowsecurity as "forcedRls",
+      procedure.prosrc as source
+    from pg_trigger trigger_value
+    join pg_proc procedure on procedure.oid = trigger_value.tgfoid
+    join pg_namespace guard_namespace on guard_namespace.oid = procedure.pronamespace
+    join pg_class relation on relation.oid = trigger_value.tgrelid
+    join pg_namespace namespace on namespace.oid = relation.relnamespace
+    where trigger_value.tgname = 'session_tenancy_workspace_fence'
+      and not trigger_value.tgisinternal
+      and namespace.nspname = current_schema()
+    order by relation.relname`;
+}
+
+function expectInstalledFenceCoverage(installed: InstalledFenceTrigger[]): void {
+  expect(installed.map((trigger) => trigger.tableName)).toEqual(currentFencedTableNames);
+  for (const trigger of installed) {
+    expect(trigger, trigger.tableName).toMatchObject({
+      guardSchema: "opengeni_private",
+      guardName: "require_session_tenancy_fence",
+      enabled: "O",
+      // PostgreSQL tgtype: ROW(1) | BEFORE(2) | INSERT(4) | DELETE(8) | UPDATE(16).
+      kind: 31,
+      unconditional: true,
+      allColumns: true,
+      rls: true,
+      forcedRls: true,
+    });
+    // A trigger definer must check the login and the caller backend's held
+    // locks, not its own privileged current_user or a newly acquired lock.
+    expect(trigger.source).toContain("rolname = session_user");
+    expect(trigger.source).toContain("FROM pg_locks held");
+  }
+}
+
 const directHotMutatorInventory = [
   "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
   "backfill_organization_session_ownership(uuid,integer,boolean,text)",
@@ -147,7 +208,9 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       migration.indexOf("hot_tables constant text[]"),
       migration.indexOf("];", migration.indexOf("hot_tables constant text[]")),
     );
-    expect(hotTableDeclaration.match(/'[^']+'/gu)).toHaveLength(17);
+    expect(hotTableDeclaration.match(/'[^']+'/gu)?.map((name) => name.slice(1, -1))).toEqual([
+      ...hotTableNames,
+    ]);
 
     const transition = migration.slice(
       migration.indexOf("CREATE OR REPLACE FUNCTION transition_session_visibility"),
@@ -160,31 +223,41 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       transition.indexOf("FROM workspaces"),
     );
     if (owned) {
-      const [installed] = await owned.admin<
-        Array<{ count: number; guardCount: number; source: string }>
-      >`
-        select count(*)::int as count,
-          count(*) filter (
-            where procedure.proname = 'require_session_tenancy_fence'
-          )::int as "guardCount",
-          min(procedure.prosrc) as source
-        from pg_trigger trigger_value
-        join pg_proc procedure on procedure.oid = trigger_value.tgfoid
-        join pg_class relation on relation.oid = trigger_value.tgrelid
-        join pg_namespace namespace on namespace.oid = relation.relnamespace
-        where trigger_value.tgname = 'session_tenancy_workspace_fence'
-          and not trigger_value.tgisinternal
-          and namespace.nspname = current_schema()`;
-      expect(installed?.count).toBe(hotTableNames.length);
-      expect(installed?.guardCount).toBe(hotTableNames.length);
-      // Trigger-return definers are excluded from the callable-routine
-      // inventory below. They cannot hide the login identity: SECURITY DEFINER
-      // changes current_user, while this row guard deliberately checks
-      // session_user and the caller backend's already-held advisory locks.
-      expect(installed?.source).toContain("rolname = session_user");
-      expect(installed?.source).toContain("FROM pg_locks held");
+      expectInstalledFenceCoverage(await installedFenceTriggers(owned.admin));
     }
   });
+
+  for (const [defect, ddl] of [
+    ["missing", "DROP TRIGGER session_tenancy_workspace_fence ON sessions"],
+    ["disabled", "ALTER TABLE sessions DISABLE TRIGGER session_tenancy_workspace_fence"],
+    [
+      "miswired",
+      `CREATE FUNCTION opengeni_private.unfenced_session_tenancy_fixture()
+       RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+       DROP TRIGGER session_tenancy_workspace_fence ON sessions;
+       CREATE TRIGGER session_tenancy_workspace_fence
+       BEFORE INSERT OR UPDATE OR DELETE ON sessions FOR EACH ROW
+       EXECUTE FUNCTION opengeni_private.unfenced_session_tenancy_fixture()`,
+    ],
+  ] as const) {
+    test(`rejects a ${defect} table guard in the installed fence inventory`, async () => {
+      if (!owned) return;
+      const rollbackMarker = new Error(`rollback ${defect} fence inventory fixture`);
+      await expect(
+        owned.admin.begin(async (transaction) => {
+          await transaction.unsafe(ddl);
+          const installed = await installedFenceTriggers(transaction);
+          if (defect !== "missing") {
+            // Disabled and miswired triggers still satisfy the old total count.
+            expect(installed).toHaveLength(currentFencedTableNames.length);
+          }
+          expect(() => expectInstalledFenceCoverage(installed)).toThrow();
+          throw rollbackMarker;
+        }),
+      ).rejects.toBe(rollbackMarker);
+      expectInstalledFenceCoverage(await installedFenceTriggers(owned.admin));
+    });
+  }
 
   test("the application activity boundary takes the matching shared prefix", async () => {
     const database = await readFile(new URL("../src/database.ts", import.meta.url), "utf8");
