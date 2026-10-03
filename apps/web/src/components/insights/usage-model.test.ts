@@ -125,6 +125,17 @@ describe("breakdown rows", () => {
     ]);
   });
 
+  test("groups with no usage in the period are left out", () => {
+    const rows = breakdownRows({
+      groupBy: "workspace",
+      groups: [
+        group({ key: "w1", label: "Busy" }),
+        group({ key: "w2", label: "Idle", measures: emptyMeasures() }),
+      ],
+    });
+    expect(rows.map((row) => row.label)).toEqual(["Busy"]);
+  });
+
   test("private, deleted and folded rows are amounts only, after the named rows", () => {
     const rows = breakdownRows({
       groupBy: "rootSession",

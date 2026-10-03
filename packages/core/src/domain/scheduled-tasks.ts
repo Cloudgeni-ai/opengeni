@@ -85,6 +85,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { isDeepStrictEqual } from "node:util";
 import {
   hasPermission,
+  requireExplicitPermissionDelegation,
   isDeveloperSetupAuthorization,
   isDeveloperSetupGrant,
   requirePermission,
@@ -553,6 +554,23 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
       isDeveloperSetupAuthorization(input.authorization)) ||
     isDeveloperSetupGrant(input.grant);
   if (!input.actor) {
+    if (input.grant.permissionMode === "explicit") {
+      const permissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+        hasPermission(input.grant.permissions, permission, "explicit"),
+      );
+      if (permissions.length === 0) {
+        throw new HTTPException(403, {
+          message:
+            "the organization key holds no first-party MCP permission it could delegate to scheduled runs",
+        });
+      }
+      return {
+        firstPartyMcpTools: null,
+        firstPartyMcpPermissions: permissions,
+        sessionPolicy: null,
+        ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
+      };
+    }
     // A restriction is not an agent tool/permission selection. Keep the exact
     // first-party and session defaults of ordinary API/service/asUser tasks.
     return restricted
@@ -595,7 +613,10 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   );
   const firstPartyMcpPermissions = (
     session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
-  ).filter((permission) => hasPermission(input.grant.permissions, permission));
+  ).filter((permission) =>
+    hasPermission(input.grant.permissions, permission, input.grant.permissionMode),
+  );
+  requireExplicitPermissionDelegation(input.grant, firstPartyMcpPermissions);
   if (firstPartyMcpPermissions.length === 0) {
     throw new HTTPException(403, {
       message:

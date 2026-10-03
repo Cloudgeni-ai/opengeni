@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationWorkspaceInScope,
   hasPermission,
   requireAccessContext,
   requireAccessGrantAuthorization,
@@ -161,9 +162,13 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     // Personal workspaces are excluded by the inventory itself; the stable id
     // order is what makes the `{ workspaceId, cursor }` continuation resumable
     // even when a workspace is created or deleted between pages.
-    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId)).sort(
-      compareWorkspaceIds,
-    );
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId))
+      .filter(
+        (workspace) =>
+          !authority || organizationWorkspaceInScope(authority.workspaceScope, workspace.id),
+      )
+      .sort(compareWorkspaceIds);
     let index = 0;
     let innerCursor: string | null = null;
     let pinnedOffset = 0;

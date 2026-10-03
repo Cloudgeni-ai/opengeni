@@ -206,11 +206,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const preparedTools = eventing.preparedTools!;
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
-  const sessionInstructions = await recoveryAwareSessionInstructions(
-    db,
-    input.workspaceId,
-    session,
-  );
+  // These scoped reads are independent. Keep the second live video-policy
+  // read here rather than reusing tool preparation's earlier policy snapshot.
+  const [sessionInstructions, videoGenerationPolicy] = await Promise.all([
+    recoveryAwareSessionInstructions(db, input.workspaceId, session),
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+  ]);
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -403,7 +404,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
   const videoGenerationEnabled =
     videoGenerationPolicy.defaultModelId !== null &&
     videoGenerationPolicy.enabledModelIds.length > 0;

@@ -43,7 +43,7 @@ import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
   buildSlackApiRateLimiter,
-  lockActiveExternalOrganizationKey,
+  lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
   withCodexAppsRequestAuthorization,
@@ -164,15 +164,18 @@ export async function prepareWorkspaceToolGateway(
           await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
             if (reauthorizeExternal) await reauthorizeExternal(tx);
             else {
-              const live = await lockActiveExternalOrganizationKey(
+              const live = await lockActiveExternalOrganizationKeyAuthority(
                 tx,
                 scope.accountId,
                 scope.subjectId.slice("api_key:".length),
+                scope.workspaceId,
               );
               const workspace = await requireWorkspace(tx, scope.workspaceId);
               if (
                 !live ||
-                permissions.some((permission) => !hasPermission(live, permission)) ||
+                permissions.some(
+                  (permission) => !hasPermission(live.permissions, permission, live.permissionMode),
+                ) ||
                 workspace.accountId !== scope.accountId ||
                 workspace.kind !== "shared"
               )

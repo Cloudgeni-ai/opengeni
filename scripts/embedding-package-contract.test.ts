@@ -87,18 +87,18 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
   }
 });
 
-test("every public SDK and contracts source subpath has a matching runtime build entry", async () => {
-  for (const [packageName, config] of [
-    ["sdk", sdkConfig],
+test("every public contracts and SDK source subpath has a matching runtime build entry", async () => {
+  for (const [name, buildConfig] of [
     ["contracts", contractsConfig],
+    ["sdk", sdkConfig],
   ] as const) {
-    const directory = join(import.meta.dir, "../packages", packageName);
+    const directory = join(import.meta.dir, "../packages", name);
     const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-    const resolved = typeof config === "function" ? await config({}) : config;
+    const resolved = typeof buildConfig === "function" ? await buildConfig({}) : buildConfig;
     const configs = Array.isArray(resolved) ? resolved : [resolved];
     const entries = new Set(
-      configs.flatMap((options) =>
-        Array.isArray(options.entry) ? options.entry : Object.values(options.entry ?? {}),
+      configs.flatMap((config) =>
+        Array.isArray(config.entry) ? config.entry : Object.values(config.entry ?? {}),
       ),
     );
     const published = structuredClone(manifest);
@@ -107,7 +107,7 @@ test("every public SDK and contracts source subpath has a matching runtime build
       const source = value as { import?: string; default?: string };
       const runtime = source.import ?? source.default;
       if (!runtime?.startsWith("./src/") || !runtime.endsWith(".ts")) continue;
-      const label = `@opengeni/${packageName}/${subpath}`;
+      const label = `@opengeni/${name} ${subpath}`;
       expect(entries.has(runtime.slice(2)), `${label} runtime build entry`).toBe(true);
       if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1") {
         const emitted = published.exports[subpath];

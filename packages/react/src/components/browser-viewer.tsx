@@ -23,6 +23,8 @@ import { interactionControlFailureFromError } from "@opengeni/sdk/interaction";
 import {
   BugIcon,
   ArchiveIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -913,6 +915,22 @@ export function BrowserViewer({
                 .act({ type: "navigate", url })
                 .catch((cause) => notifyError(cause, "Could not navigate."))
             }
+            onHistory={async (direction) => {
+              try {
+                const action = { type: "history", direction } as const;
+                if (receivedFrame) await browser.actFromFrame(action, receivedFrame);
+                else {
+                  if (!browser.observation)
+                    throw new Error("The browser page is not ready for input.");
+                  await browser.actFromObservation(action, browser.observation);
+                }
+              } catch (cause) {
+                notifyError(
+                  cause,
+                  direction === "back" ? "Could not go back." : "Could not go forward.",
+                );
+              }
+            }}
             onReload={() => {
               const url = browser.selectedTarget?.url;
               if (url)
@@ -1907,31 +1925,70 @@ function BrowserAddressBar(props: {
   target: BrowserTarget | null;
   loading: boolean;
   onNavigate: (url: string) => void;
+  onHistory: (direction: "back" | "forward") => Promise<void>;
   onReload: () => void;
 }) {
   const [draft, setDraft] = useState(props.target?.url ?? "");
   const focusedRef = useRef(false);
+  const historyPendingRef = useRef(false);
+  const [historyPending, setHistoryPending] = useState(false);
   useEffect(() => {
     if (!focusedRef.current) setDraft(props.target?.url ?? "");
   }, [props.target?.id, props.target?.url]);
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (historyPendingRef.current) return;
     const normalized = normalizeBrowserAddress(draft);
     if (normalized) props.onNavigate(normalized);
+  };
+  const navigateHistory = async (direction: "back" | "forward") => {
+    if (!props.target || props.loading || historyPendingRef.current) return;
+    historyPendingRef.current = true;
+    setHistoryPending(true);
+    try {
+      await props.onHistory(direction);
+    } finally {
+      historyPendingRef.current = false;
+      setHistoryPending(false);
+    }
   };
   return (
     <form
       onSubmit={submit}
+      aria-busy={historyPending || undefined}
       className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-bg px-2"
     >
+      {(["back", "forward"] as const).map((direction) => (
+        <button
+          key={direction}
+          type="button"
+          onClick={() => void navigateHistory(direction)}
+          disabled={!props.target || props.loading}
+          aria-disabled={historyPending || undefined}
+          className={cn(
+            "grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-35",
+            historyPending && "opacity-50",
+          )}
+          aria-label={direction === "back" ? "Back" : "Forward"}
+          title={direction === "back" ? "Back" : "Forward"}
+        >
+          {direction === "back" ? (
+            <ArrowLeftIcon className="size-3.5" />
+          ) : (
+            <ArrowRightIcon className="size-3.5" />
+          )}
+        </button>
+      ))}
       <button
         type="button"
         onClick={props.onReload}
-        disabled={!props.target || props.loading}
+        disabled={!props.target || props.loading || historyPending}
         className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-35"
         aria-label="Reload"
       >
-        <RefreshCwIcon className={cn("size-3.5", props.loading && "animate-spin")} />
+        <RefreshCwIcon
+          className={cn("size-3.5", (props.loading || historyPending) && "animate-spin")}
+        />
       </button>
       <div className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-og-sm border border-og-border bg-og-surface-1 px-2 focus-within:border-og-accent/60">
         <Globe2Icon className="size-3 shrink-0 text-og-fg-subtle" />
@@ -1947,6 +2004,7 @@ function BrowserAddressBar(props: {
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
             event.preventDefault();
+            if (historyPendingRef.current) return;
             const normalized = normalizeBrowserAddress(draft);
             if (normalized) props.onNavigate(normalized);
           }}

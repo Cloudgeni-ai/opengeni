@@ -115,7 +115,7 @@ describe("integrations.sh catalog import normalization", () => {
         },
       ],
     });
-    expect(normalized.rows.map((row) => row.domain)).toEqual(["example.com"]);
+    expect(normalized.rows.map((integration) => integration.domain)).toEqual(["example.com"]);
     expect(normalized.quarantined).toEqual([
       expect.objectContaining({
         row: expect.objectContaining({ domain: "figma.com" }),

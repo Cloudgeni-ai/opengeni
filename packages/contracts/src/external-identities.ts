@@ -278,6 +278,8 @@ export const ExternalLinkWorkSnapshot = z
     identity: ExternalIdentityReference,
     actor: ExternalActorAttribution.refine((value) => value.actingMode === "linked_native"),
     permissions: z.array(Permission).max(Permission.options.length),
+    /** Absent on historical snapshots, whose legacy semantics are preserved. */
+    permissionMode: z.enum(["legacy", "explicit"]).optional(),
   })
   .strict();
 export type ExternalLinkWorkSnapshot = z.infer<typeof ExternalLinkWorkSnapshot>;

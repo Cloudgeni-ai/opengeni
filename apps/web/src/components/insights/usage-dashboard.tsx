@@ -1,8 +1,6 @@
-import { CalendarIcon, LockIcon, Trash2Icon } from "lucide-react";
+import { CalendarIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ModelTile } from "@/components/model-identity";
-import { OpenGeniCreditsTile, ProviderTile } from "@/components/models/provider-mark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -14,7 +12,6 @@ import {
   type RowListColumn,
   type RowListSort,
 } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { ReasonTooltip } from "@/components/ui/disabled-reason";
 import { SECTION_TITLE_CLASS } from "@/components/ui/section";
@@ -35,7 +32,6 @@ import {
   catalogLabels,
   modelDisplayName,
   providerDisplayName,
-  type MarkId,
   type ModelLabelSource,
 } from "./model-display";
 import { StackedBarChart, type ChartBucket, type ChartSeries } from "./usage-chart";
@@ -274,15 +270,25 @@ export function UsageDashboard(props: UsageDashboardProps) {
           <>
             <KpiTiles usage={usage} />
             <div className="@container/insights-panels min-w-0">
-              <div className="grid min-w-0 gap-6 @5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-                <OverTimePanel
-                  usage={usage}
-                  rows={rows}
-                  metric={metric}
-                  split={props.search.split === "group"}
-                  onMetric={(next) => update({ metric: next })}
-                  onSplit={(next) => update({ split: next })}
-                />
+              {/* A source without a time series (older servers at organization
+                  scope) shows the type mix alone rather than an empty chart. */}
+              <div
+                className={cn(
+                  "grid min-w-0 gap-6",
+                  usage.series.length > 0 &&
+                    "@5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+                )}
+              >
+                {usage.series.length > 0 ? (
+                  <OverTimePanel
+                    usage={usage}
+                    rows={rows}
+                    metric={metric}
+                    split={props.search.split === "group"}
+                    onMetric={(next) => update({ metric: next })}
+                    onSplit={(next) => update({ split: next })}
+                  />
+                ) : null}
                 <CompositionPanel measures={usage.totals} />
               </div>
             </div>
@@ -985,19 +991,6 @@ function sortValue(row: BreakdownRow, column: SortColumn): number | string {
   return row.measures.tokensTotal !== undefined ? -1 : row.measures.tokens[column];
 }
 
-function RowMark(props: {
-  mark: MarkId;
-  modelId?: string | undefined;
-  kind: BreakdownRow["kind"];
-}) {
-  if (props.modelId) return <ModelTile model={props.modelId} />;
-  if (props.kind === "private") return <LogoTile icon={<LockIcon />} />;
-  if (props.kind === "deleted") return <LogoTile icon={<Trash2Icon />} />;
-  if (props.mark === "opengeni") return <OpenGeniCreditsTile />;
-  if (props.mark) return <ProviderTile provider={props.mark} />;
-  return null;
-}
-
 function BreakdownPanel(props: {
   usage: UsageResponse;
   rows: readonly BreakdownRow[];
@@ -1014,11 +1007,6 @@ function BreakdownPanel(props: {
   const { usage, rows } = props;
   const [sort, setSort] = useState<RowListSort>({ column: "cost", direction: "desc" });
   const groupBy = usage.groupBy;
-  const marks =
-    groupBy === "model" ||
-    groupBy === "provider" ||
-    groupBy === "payer" ||
-    rows.some((row) => row.kind === "private" || row.kind === "deleted");
   const sorted = useMemo(() => {
     const column = sort.column as SortColumn;
     const direction = sort.direction === "asc" ? 1 : -1;
@@ -1115,11 +1103,6 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
-                  leading={
-                    marks ? (
-                      <RowMark mark={row.mark} modelId={row.modelId} kind={row.kind} />
-                    ) : undefined
-                  }
                   title={row.label}
                   titleAddon={
                     row.you ? <span className="text-xs text-fg-subtle">You</span> : undefined
@@ -1330,11 +1313,8 @@ function RecentCalls(props: {
             ]}
             cells={{
               model: (
-                <span className="inline-flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-                  <ModelTile model={call.model} size="sm" />
-                  <span className="truncate">
-                    {modelDisplayName(call.provider, call.model, props.labels)}
-                  </span>
+                <span className="block min-w-0 truncate text-sm text-fg-muted">
+                  {modelDisplayName(call.provider, call.model, props.labels)}
                 </span>
               ),
               input: <Quiet>{call.tokens ? formatCount(inputTotal(call.tokens)) : "—"}</Quiet>,

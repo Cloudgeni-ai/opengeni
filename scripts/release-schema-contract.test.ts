@@ -145,7 +145,13 @@ describe("release schema contract", () => {
         sourceContract.migrations.some(
           (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
         )
-          ? "0598_claude_subscription_account_pools.sql"
+          ? (sourceContract.migrations.find(
+              (migration) => migration.path === "0600_organization_api_key_access_policy.sql",
+            )?.path ??
+              sourceContract.migrations.find(
+                (migration) => migration.path === "0599_paused_recovery_command_containment.sql",
+              )?.path ??
+              "0598_claude_subscription_account_pools.sql")
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0597_slack_api_rate_limits.sql",
               )
@@ -925,6 +931,12 @@ describe("release schema contract", () => {
     const claudeSubscriptionAccountPools = completeSourceContract.migrations.some(
       (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
     );
+    const pausedRecoveryCommandContainment = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0599_paused_recovery_command_containment.sql",
+    );
+    const organizationApiKeyAccessPolicy = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0600_organization_api_key_access_policy.sql",
+    );
     const slackApiRateLimits = completeSourceContract.migrations.some(
       (migration) => migration.path === "0597_slack_api_rate_limits.sql",
     );
@@ -1216,6 +1228,8 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationApiKeyAccessPolicy ? 1 : 0) +
+        (pausedRecoveryCommandContainment ? 1 : 0) +
         (claudeSubscriptionAccountPools ? 1 : 0) +
         (slackApiRateLimits ? 1 : 0) +
         (insightsScopedFactProjection ? 1 : 0) +
@@ -1834,6 +1848,12 @@ describe("release schema contract", () => {
       ...(claudeSubscriptionAccountPools
         ? { latestMigration: "0598_claude_subscription_account_pools.sql" }
         : {}),
+      ...(pausedRecoveryCommandContainment
+        ? { latestMigration: "0599_paused_recovery_command_containment.sql" }
+        : {}),
+      ...(organizationApiKeyAccessPolicy
+        ? { latestMigration: "0600_organization_api_key_access_policy.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1924,6 +1944,8 @@ describe("release schema contract", () => {
             "0596_managed_auth_new_signups_switch.sql",
             "0597_slack_api_rate_limits.sql",
             "0598_claude_subscription_account_pools.sql",
+            "0599_paused_recovery_command_containment.sql",
+            "0600_organization_api_key_access_policy.sql",
           ].includes(migration.path),
       ),
     };
@@ -3237,7 +3259,13 @@ describe("release schema contract", () => {
       unfilteredSourceContract.migrations.some(
         (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
       )
-        ? "0598_claude_subscription_account_pools.sql"
+        ? (unfilteredSourceContract.migrations.find(
+            (migration) => migration.path === "0600_organization_api_key_access_policy.sql",
+          )?.path ??
+            unfilteredSourceContract.migrations.find(
+              (migration) => migration.path === "0599_paused_recovery_command_containment.sql",
+            )?.path ??
+            "0598_claude_subscription_account_pools.sql")
         : unfilteredSourceContract.migrations.some(
               (migration) => migration.path === "0597_slack_api_rate_limits.sql",
             )
@@ -3748,6 +3776,8 @@ describe("release schema contract", () => {
       "0596_managed_auth_new_signups_switch.sql",
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
+      "0599_paused_recovery_command_containment.sql",
+      "0600_organization_api_key_access_policy.sql",
     ]);
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
       (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
@@ -4294,6 +4324,8 @@ describe("release schema contract", () => {
       "0596_managed_auth_new_signups_switch.sql",
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
+      "0599_paused_recovery_command_containment.sql",
+      "0600_organization_api_key_access_policy.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

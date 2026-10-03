@@ -22,7 +22,7 @@ Install both packages from the same release.
     OPENGENI_API_KEY=ogk_...                        # server only
     ```
 
-    This one key is all the integration needs: it creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` lists only its organization grants (`account:read`, `workspace:create`, `api_keys:manage`) under `accountGrants`; that is expected. Check `credential.access` (`"full"`) and `credential.effectiveWorkspacePermissions` instead. A read-only key can inspect sessions but cannot create them. See [Authentication](/reference/authentication).
+    Use full permissions with **all shared workspaces** scope for this provisioning flow. The key creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` may have empty `workspaceGrants`; check `credential.policy`, `credential.workspaceScope`, and `credential.effectiveWorkspacePermissions` instead of relying on the legacy `access` label. A read-only policy cannot create sessions; selected-workspace scope does not admit future tenant workspaces. Personal workspaces are always excluded. See [Authentication](/reference/authentication).
 
   </Step>
   <Step title="Onboard each user">
