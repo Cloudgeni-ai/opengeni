@@ -1019,7 +1019,9 @@ visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
 conserve totals. Unified GET usage/calls use `@opengeni/contracts/insights-usage`;
 the [checkpoint](insights-raw-usage-api.md) documents gates, residuals, privacy and
-interim performance.
+interim performance. Its bounded 60-second successful-response cache reauthorizes
+every hit and fences live permissions/visibility; normal statement cancellation
+returns an actionable range-too-large error rather than a hung request.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and

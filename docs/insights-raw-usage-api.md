@@ -37,7 +37,19 @@ Charged amounts come only from negative `model_usage_debit` / `model_response`
 credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are
 not actual debits. Unmatched workspace/account charges retain their money in
 restricted buckets with zero calls/tokens and no fabricated model attribution.
-Late ledger/fact updates are read immediately in this raw checkpoint.
+Successful JSON responses have a bounded, process-local 60-second cache, so
+amounts can be up to 60 seconds stale. Cache hits preserve `generatedAt` and
+`dataThrough`. Every request reauthenticates and reauthorizes; keys partition by
+account/workspace, normalized query, authenticated credential/principal and
+current selected-workspace/session-read ceilings. The existing committed
+session-activity revision plus current shared inventory/project/schedule metadata
+fences private/deleted/moved identities before a hit. Unavailable fence metadata
+disables caching. Credentials are HMAC-digested, not retained as cache keys.
+The cache holds at most 128 entries/8 MiB, with a 1 MiB per-response limit; hits
+do not extend TTL, failures are never cached, and browser cache control is
+`private, no-store`. `x-opengeni-insights-max-staleness-seconds: 60` discloses the
+upper bound. Existing transaction-local 10-second statement cancellation maps
+to HTTP 408 in the normal error envelope: `Range too large, try 7 days.`
 Usage totals follow each debit's ledger `occurredAt` in the selected period;
 call details follow the fact's `occurredAt` and show lifetime debits linked to
 that call, including a later clipped debit. These are different clocks: summing
@@ -83,4 +95,7 @@ rows, prices, allowances, permissions or policies are changed. The pre-index
 workspace seven-day p95 was 3.59s, workspace 30-day 9.80s, organization seven-day
 6.62s, and organization 30-day hit the existing 10s statement timeout. These are
 synthetic volume-sized local PostgreSQL 17.11 results, not PostgreSQL 16.15 staging
-clearance. The final-head rerun remains mandatory.
+clearance. The indexed 5239f006 run measured workspace seven-day warm p95 4.09s,
+organization seven-day 8.41s, and both 30-day cases encountered the 10s timeout
+(workspace's first request succeeded). Cache-hit smoke is separate from this
+uncached performance evidence; this is not a sub-two-second uncached claim.

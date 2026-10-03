@@ -8,7 +8,7 @@ import type {
   InsightsUsageResponse,
 } from "@opengeni/contracts/insights-usage";
 import { sql, type SQL } from "drizzle-orm";
-import { withRlsContext, type Database } from "./database";
+import { withDatabaseStatementTimeout, withRlsContext, type Database } from "./database";
 
 type Scope = {
   accountId: string;
@@ -19,6 +19,69 @@ type Scope = {
   /** Only the existing account-scoped API-key authority proof may establish this. */
   detailsSharedWorkspaces?: boolean;
 };
+
+/** Read-only cache invalidation through the existing committed activity clock.
+ * No cached authorization: callers must establish the normal scope on every read.
+ * Missing/denied clock metadata disables caching rather than reusing an old result.
+ */
+export async function readInsightsResponseCacheFence(
+  db: Database,
+  scope: Pick<Scope, "accountId" | "workspaceId">,
+): Promise<string | null> {
+  try {
+    const inventory = await withRlsContext(db, scope, async (scoped) => {
+      return await cacheMetadataRead(scoped, async (bounded) =>
+        rows<{ id: string; name: string }>(
+          await bounded.execute(sql`
+        select w.id::text,w.name from workspaces w where w.account_id=${scope.accountId}::uuid
+        and ${
+          scope.workspaceId === null
+            ? sql`w.id in(select workspace_id from list_organization_workspace_ids(${scope.accountId}::uuid))`
+            : sql`w.id=${scope.workspaceId}::uuid`
+        } order by w.id`),
+        ),
+      );
+    });
+    const metadata: unknown[] = [];
+    for (const workspace of inventory) {
+      const [state] = await withRlsContext(
+        db,
+        { accountId: scope.accountId, workspaceId: workspace.id },
+        async (scoped) => {
+          return await cacheMetadataRead(scoped, async (bounded) =>
+            rows<{ revision: string; projects: unknown; schedules: unknown }>(
+              await bounded.execute(sql`
+          select r.revision::text,
+            (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
+              from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
+            (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')
+              from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules
+          from workspace_session_activity_revisions r where r.account_id=${scope.accountId}::uuid and r.workspace_id=${workspace.id}::uuid`),
+            ),
+          );
+        },
+      );
+      if (!state) return null;
+      metadata.push([workspace.id, workspace.name, state]);
+    }
+    if (scope.workspaceId !== null && inventory.length !== 1) return null;
+    return createHash("sha256").update(JSON.stringify(metadata)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+async function cacheMetadataRead<T>(db: Database, read: (db: Database) => Promise<T>): Promise<T> {
+  const [prior] = rows<{ timeout: string }>(
+    await db.execute(sql`select current_setting('statement_timeout') as timeout`),
+  );
+  return await withDatabaseStatementTimeout(db, 1_000, async (bounded) => {
+    const result = await read(bounded);
+    // SET LOCAL survives nested savepoint release; do not shorten a parent request's timeout.
+    await bounded.execute(sql`select set_config('statement_timeout', ${prior!.timeout}, true)`);
+    return result;
+  });
+}
 
 /** UTC calendar windows; rolling ranges include today and the preceding N-1 days. */
 export function insightsUsageWindow(range: InsightsUsageRange, now: Date) {
