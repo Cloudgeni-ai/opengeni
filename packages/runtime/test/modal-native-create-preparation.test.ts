@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { types } from "node:util";
 import { canonicalModalCheckpointProviderBinding } from "@opengeni/contracts";
 import {
   compileNativeFreshCreate,
@@ -294,6 +295,146 @@ describe("pure native fresh-create compilation (no authority)", () => {
     });
     for (const spec of [hidden, symbol, classed, cycle, callback])
       expect(() => compileNativeFreshCreate(spec)).toThrow();
+  });
+
+  const proxyLocations = ["root", "origin", "create", "env", "entrypoint", "mounts"] as const;
+  type ProxyLocation = (typeof proxyLocations)[number];
+  function withProxy(
+    spec: NativeFreshCreateSpec,
+    location: ProxyLocation,
+    wrap: (value: object) => object,
+  ): NativeFreshCreateSpec {
+    switch (location) {
+      case "root":
+        return wrap(spec) as NativeFreshCreateSpec;
+      case "origin":
+        spec.origin = wrap(spec.origin) as NativeFreshCreateSpec["origin"];
+        break;
+      case "create":
+        spec.blueprint.create = wrap(
+          spec.blueprint.create,
+        ) as NativeFreshCreateSpec["blueprint"]["create"];
+        break;
+      case "env":
+        spec.blueprint.create.env = wrap(spec.blueprint.create.env);
+        break;
+      case "entrypoint":
+        spec.entrypoint = wrap(spec.entrypoint) as NativeFreshCreateSpec["entrypoint"];
+        break;
+      case "mounts":
+        spec.blueprint.create.mounts = wrap(
+          spec.blueprint.create.mounts,
+        ) as NativeFreshCreateSpec["blueprint"]["create"]["mounts"];
+        break;
+    }
+    return spec;
+  }
+  function trackedProxyHandler(callbacks: string[]): ProxyHandler<object> {
+    return {
+      getPrototypeOf(value) {
+        callbacks.push("getPrototypeOf");
+        return Reflect.getPrototypeOf(value);
+      },
+      ownKeys(value) {
+        callbacks.push("ownKeys");
+        return Reflect.ownKeys(value);
+      },
+      getOwnPropertyDescriptor(value, key) {
+        callbacks.push("getOwnPropertyDescriptor");
+        return Reflect.getOwnPropertyDescriptor(value, key);
+      },
+      get(value, key, receiver) {
+        callbacks.push("get");
+        return Reflect.get(value, key, receiver);
+      },
+    };
+  }
+
+  test.each(proxyLocations)(
+    "%s genuine Proxy is rejected before any trap or callback",
+    (location) => {
+      const callbacks: string[] = [];
+      const input = withProxy(fixture(), location, (value) => {
+        const proxy = new Proxy(value, trackedProxyHandler(callbacks));
+        expect(types.isProxy(proxy)).toBe(true);
+        return proxy;
+      });
+      expect(() => compileNativeFreshCreate(input)).toThrow(
+        "Unsupported native fresh-create specification",
+      );
+      expect(callbacks).toEqual([]);
+    },
+  );
+
+  test.each(proxyLocations)("%s revoked Proxy is rejected without callbacks", (location) => {
+    const callbacks: string[] = [];
+    const input = withProxy(fixture(), location, (value) => {
+      const { proxy, revoke } = Proxy.revocable(value, trackedProxyHandler(callbacks));
+      revoke();
+      expect(types.isProxy(proxy)).toBe(true);
+      return proxy;
+    });
+    expect(() => compileNativeFreshCreate(input)).toThrow(
+      "Unsupported native fresh-create specification",
+    );
+    expect(callbacks).toEqual([]);
+  });
+
+  test("Proxy handler accessors are never consulted", () => {
+    let callbacks = 0;
+    const handler: ProxyHandler<object> = {};
+    Object.defineProperty(handler, "getPrototypeOf", {
+      get() {
+        callbacks++;
+        return (value: object) => Reflect.getPrototypeOf(value);
+      },
+    });
+    const proxy = new Proxy(fixture(), handler);
+    expect(types.isProxy(proxy)).toBe(true);
+    expect(() => compileNativeFreshCreate(proxy)).toThrow(
+      "Unsupported native fresh-create specification",
+    );
+    expect(callbacks).toBe(0);
+  });
+
+  test("callable Proxies reject without invoking targets or traps", () => {
+    const callbacks: string[] = [];
+    const proxy = new Proxy(() => callbacks.push("target"), {
+      ...trackedProxyHandler(callbacks),
+      apply(value, receiver, args) {
+        callbacks.push("apply");
+        return Reflect.apply(value, receiver, args);
+      },
+    });
+    expect(types.isProxy(proxy)).toBe(true);
+    expect(() => compileNativeFreshCreate(proxy as never)).toThrow(
+      "Unsupported native fresh-create specification",
+    );
+    const spec = fixture();
+    Object.assign(spec.blueprint.create.env, { callback: proxy });
+    expect(() => compileNativeFreshCreate(spec)).toThrow(
+      "Unsupported native fresh-create specification",
+    );
+    expect(callbacks).toEqual([]);
+  });
+
+  test("normal and null-prototype own data with dense arrays compile identically", () => {
+    const ordinary = describeNativeFreshCreate(compileNativeFreshCreate(fixture()));
+    const spec = fixture();
+    function nullPrototypeObjects(value: unknown): void {
+      if (value !== null && typeof value === "object") {
+        for (const child of Object.values(value)) nullPrototypeObjects(child);
+        if (!Array.isArray(value)) Object.setPrototypeOf(value, null);
+      }
+    }
+    nullPrototypeObjects(spec);
+    expect(types.isProxy(spec)).toBe(false);
+    expect(Object.getPrototypeOf(spec)).toBeNull();
+    expect(Object.getPrototypeOf(spec.blueprint.create.env)).toBeNull();
+    expect(Object.getPrototypeOf(spec.entrypoint)).toBe(Array.prototype);
+    const compiled = describeNativeFreshCreate(compileNativeFreshCreate(spec));
+    expect(compiled).toEqual(ordinary);
+    expect(compiled.requestJson).toBe(ordinary.requestJson);
   });
 
   test("source has no SDK/config/DB/network or ID-generation integration", () => {

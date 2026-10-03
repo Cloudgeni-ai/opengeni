@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { types } from "node:util";
 import { z } from "zod";
 import { canonicalModalCheckpointProviderBinding } from "@opengeni/contracts";
 
@@ -155,7 +156,9 @@ function ownData(value: unknown, depth = 0): void {
     if (Number.isFinite(value) && !Object.is(value, -0)) return;
     throw new Error("Unsupported native fresh-create specification");
   }
-  if (typeof value !== "object") throw new Error("Unsupported native fresh-create specification");
+  // Native detection must precede reflection, including for revoked Proxies.
+  if (typeof value !== "object" || types.isProxy(value))
+    throw new Error("Unsupported native fresh-create specification");
   const array = Array.isArray(value);
   const prototype = Object.getPrototypeOf(value);
   if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null)
