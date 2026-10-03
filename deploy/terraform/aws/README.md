@@ -47,3 +47,7 @@ stacks, keep final snapshots and deletion protection enabled.
 
 Do not commit state, kubeconfigs, generated database passwords, AWS credentials, or filled secret values.
 The official Temporal chart still needs durable Postgres databases prepared outside the OpenGeni app chart before Helm install.
+
+### Upgrading PostgreSQL ingress
+
+Managed VPC deployments retain the existing `postgres_from_vpc[0]` resource address and VPC CIDR rule. Existing VPC deployments replace the legacy broad fallback with explicitly configured client CIDR and security group rules. Declare those sources before planning an upgrade and review the replacement rules before applying.

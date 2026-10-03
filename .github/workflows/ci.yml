@@ -1448,9 +1448,11 @@ jobs:
           terraform -chdir=deploy/terraform/aws fmt -check
           terraform -chdir=deploy/terraform/aws init -backend=false
           terraform -chdir=deploy/terraform/aws validate
+          terraform -chdir=deploy/terraform/aws test
           terraform -chdir=deploy/terraform/gcp fmt -check
           terraform -chdir=deploy/terraform/gcp init -backend=false
           terraform -chdir=deploy/terraform/gcp validate
+          terraform -chdir=deploy/terraform/gcp test
 
   artifact-runtime:
     name: Build exact artifact runtime inputs
