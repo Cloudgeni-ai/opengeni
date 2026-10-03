@@ -9,23 +9,17 @@ import {
   MENU_NOTE_CLASS,
   MENU_SURFACE_CLASS,
 } from "../lib/menu-styles";
+import { labelReasoningEffort, type PickerModelRow } from "../model-policy";
 import {
-  coerceReasoningEffortForModel,
-  effortOptionsForModel,
-  findPickerRow,
-  groupPickerRowsByBillingClass,
-  labelReasoningEffort,
-  payerSummaryForModel,
-  runnableLatencyModesForModel,
-  type PickerModelRow,
-} from "../model-policy";
+  compactEffortLabel,
+  groupPresentationFor,
+  modelPickerChoice,
+  modelPickerMenuView,
+} from "../model-picker-model";
 import {
   BillingClassMark,
   defaultModelPolicyPickerMessages,
-  effectiveRows,
-  groupPresentationFor,
   PickerNavRow,
-  SCOPED_BILLING_HINTS,
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
 import { ModelMark } from "./model-mark";
@@ -33,57 +27,18 @@ type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
 export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
   const [query, setQuery] = useState("");
-  const rows = effectiveRows(props);
-  const selected = findPickerRow(rows, props.model);
-  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const filtered = rows.filter((row) => {
-    const description = groupPresentationFor(props, row.billingClass)?.description;
-    const text =
-      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(row.catalog) : (description ?? "")}`.toLowerCase();
-    return words.every((word) => text.includes(word));
-  });
-  const matchingIds = new Set(filtered.map((row) => row.id));
-  const groups = groupPickerRowsByBillingClass(rows, {
-    codexOnly: props.codexOnly === true,
-    selectedId: props.model,
-    collapseScopes: props.collapseScopes !== false,
-  })
-    .map((group) => {
-      const presentation = groupPresentationFor(props, group.billingClass);
-      const override = presentation?.description;
-      const defaultHint =
-        props.collapseScopes === false &&
-        messages.billingHints[group.billingClass] ===
-          defaultModelPolicyPickerMessages.billingHints[group.billingClass]
-          ? (SCOPED_BILLING_HINTS[group.billingClass] ?? messages.billingHints[group.billingClass])
-          : messages.billingHints[group.billingClass];
-      return {
-        ...group,
-        label: presentation?.label ?? group.label,
-        rows: group.rows.filter((row) => matchingIds.has(row.id)),
-        description:
-          override === undefined
-            ? group.billingClass === "opengeni_credits"
-              ? null
-              : defaultHint
-            : override,
-      };
-    })
-    .filter((group) => group.rows.length > 0);
+  const view = modelPickerMenuView(props, query);
+  const { messages, rows, groups } = view;
+  const selected = view.selected;
   const choose = (row: ClientPickerModelRow) => {
-    if (!row.selectable || props.disabled) return;
-    if (row.id !== props.model) props.onModelChange(row.id);
-    const effort = coerceReasoningEffortForModel(row.catalog, props.effort);
+    if (props.disabled) return;
+    const choice = modelPickerChoice(props, row);
+    if (!choice) return;
+    if (choice.model !== null) props.onModelChange(choice.model);
     // Hosts may commit the combined model/effort draft through this callback.
-    props.onEffortChange(effort);
-    if (
-      props.latencyMode !== "standard" &&
-      !runnableLatencyModesForModel(row.catalog).includes(props.latencyMode)
-    ) {
-      props.onLatencyModeChange("standard");
-    }
+    props.onEffortChange(choice.effort);
+    if (choice.latencyMode !== null) props.onLatencyModeChange(choice.latencyMode);
   };
   const modelRow = (row: ClientPickerModelRow) => (
     <PickerNavRow
@@ -214,9 +169,9 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
                 {group.rows.map(modelRow)}
               </section>
             ))}
-            {filtered.length === 0 ? (
+            {view.matchCount === 0 ? (
               <p className={MENU_NOTE_CLASS}>
-                {words.length ? messages.noMatches : messages.noModels}
+                {view.searching ? messages.noMatches : messages.noModels}
               </p>
             ) : null}
           </>
@@ -226,17 +181,9 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
       </div>
-      {rows.some((row) => row.selectable) &&
-      selected &&
-      ((props.hasImageAttachments &&
-        selected.catalog.capabilities?.inputModalities.includes("image") === false) ||
-        (effortOptionsForModel(selected.catalog).length > 1 &&
-          selected.catalog.capabilities?.reasoning.runnable !== false) ||
-        (props.allowLatencyMode !== false &&
-          runnableLatencyModesForModel(selected.catalog).includes("fast"))) ? (
+      {view.anySelectable && selected && (view.unsupportedAttachments || view.thinking) ? (
         <div className="border-t border-og-border px-2.5 py-2.5">
-          {props.hasImageAttachments &&
-          selected.catalog.capabilities?.inputModalities.includes("image") === false ? (
+          {view.unsupportedAttachments ? (
             <p className="pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
               {messages.unsupportedAttachments}
             </p>
@@ -323,15 +270,13 @@ function ConnectModelsPanel(props: {
 }
 
 function ModelThinkingControls(props: ModelPolicyPickerProps) {
-  const selected = findPickerRow(effectiveRows(props), props.model);
-  if (!selected) return null;
-  const efforts = effortOptionsForModel(selected.catalog);
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
-  const supportsFast = runnableLatencyModesForModel(selected.catalog).includes("fast");
-  const showThinking =
-    efforts.length > 1 && selected.catalog.capabilities?.reasoning.runnable !== false;
-  const showFast = supportsFast && props.allowLatencyMode !== false;
-  if (!showThinking && !showFast) return null;
+  const view = modelPickerMenuView(props, "");
+  const thinking = view.thinking;
+  if (!view.selected || !thinking) return null;
+  const messages = view.messages;
+  const efforts = thinking.efforts;
+  const showThinking = thinking.showThinking;
+  const showFast = thinking.showFast;
   return (
     <div className="space-y-2 text-og-control" data-testid="model-picker-reasoning">
       <div className="flex min-h-7 items-center justify-between gap-3">
@@ -340,7 +285,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
           <button
             type="button"
             data-testid="model-picker-fast"
-            disabled={props.disabled || !selected.selectable}
+            disabled={props.disabled || thinking.disabled}
             aria-pressed={props.latencyMode === "fast"}
             title={messages.fast + " · " + messages.fastRateHint}
             onClick={() =>
@@ -357,8 +302,8 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
       {showThinking ? (
         <RadioGroup.Root
           aria-label={messages.thinkingEffort}
-          value={coerceReasoningEffortForModel(selected.catalog, props.effort)}
-          disabled={props.disabled || !selected.selectable}
+          value={thinking.value}
+          disabled={props.disabled || thinking.disabled}
           onValueChange={(value) => props.onEffortChange(value as ReasoningEffort)}
           orientation="horizontal"
           className="flex flex-wrap gap-0.5 rounded-og-md bg-og-surface-2 p-0.5"
@@ -371,7 +316,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
               title={labelReasoningEffort(effort)}
               className="min-h-8 min-w-10 flex-1 cursor-pointer whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {effort === "xhigh" ? "X-high" : labelReasoningEffort(effort)}
+              {compactEffortLabel(effort, labelReasoningEffort(effort))}
             </RadioGroup.Item>
           ))}
         </RadioGroup.Root>

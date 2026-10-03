@@ -78,6 +78,10 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./model-picker-model": {
+      "types": "./src/model-picker-model.ts",
+      "default": "./src/model-picker-model.ts"
+    },
     "./model-policy": {
       "types": "./src/model-policy.ts",
       "import": "./src/model-policy.ts",
