@@ -34,7 +34,7 @@ import {
 } from "../domain/resources";
 import {
   hasPermission,
-  externalAttributionForAuthorization,
+  hasVerifiedOwningUserAuthorization,
   type AccessGrantAuthorization,
 } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
@@ -364,10 +364,11 @@ async function saveActorNewSessionDraftInFileScope(
           // A managed human's own personal workspace has no membership row at
           // all, so the human-removal fence above must fall back to the
           // organization-membership pointer for them — and only for the
-          // canonical managed-cookie session that owns it.
+          // verified owning-user authorization for this exact grant.
           personalWorkspaceOwnerException:
             canonicalManagedHumanSession ||
-            externalAttributionForAuthorization(externalAuthorization, grant) !== null,
+            (externalAuthorization?.grant === grant &&
+              hasVerifiedOwningUserAuthorization(externalAuthorization)),
         }),
       ),
     );

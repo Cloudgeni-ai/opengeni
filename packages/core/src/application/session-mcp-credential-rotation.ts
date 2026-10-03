@@ -14,6 +14,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Settings } from "@opengeni/config";
 import {
   requirePermission,
+  hasVerifiedOwningUserAuthorization,
   requireResolvedAccessGrantAuthorization,
   type AccessGrantAuthorization,
 } from "../access";
@@ -172,7 +173,7 @@ export async function rotateSessionMcpCredentialsForRequest(
           const live = await getWorkspaceGrant(tx, fresh.subjectId, fresh.workspaceId);
           if (live) {
             requireRotationGrant(live);
-          } else if (!authorization.canonicalManagedHumanSession) {
+          } else if (!hasVerifiedOwningUserAuthorization(authorization)) {
             throw new HTTPException(403, { message: "credential rotation authority changed" });
           }
           if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, scope))) {
