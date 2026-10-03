@@ -43,7 +43,12 @@ projections are bounded to 256 Ki characters each and explicitly report
 `contentTruncated` and `decodingErrors`. Download the original message or a body
 part when exact or omitted data is needed.
 
-`download_attachment` resolves an exact leaf part in the selected message. Both
+`download_attachment` prefers a stable `partId`, resolving an exact leaf in the
+selected message and preserving MIME metadata. It takes precedence over an
+attachment token. An `attachmentId` alone is retrieved directly from the selected
+message's attachment endpoint: tokens can change between metadata reads. Pass
+`fileName` from the original metadata to preserve its name; otherwise this route
+uses a generated binary filename and `application/octet-stream`. Both
 external Gmail attachments and inline bytes are supported, including empty files.
 `download_message` returns a complete original RFC 5322 `.eml`. Downloads are
 bounded to 50 MiB per file. Worker-owned temporary byte staging feeds the existing
