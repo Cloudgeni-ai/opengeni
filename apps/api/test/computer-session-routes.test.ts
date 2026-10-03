@@ -1,32 +1,81 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { Hono } from "hono";
+
+import { registeredApiRoutes } from "../../../scripts/public-api/action-catalog";
+import surface from "../../../scripts/public-api/surface.gen.json";
+import { registerComputerSessionRoutes } from "../src/routes/computer-sessions";
 
 const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
-const appUrl = new URL("../src/app.ts", import.meta.url);
+const computerSessionRoot = "/v1/workspaces/:workspaceId/computer-sessions";
+type Route = { method: string; path: string };
+
+function isComputerSessionRoute(route: Route): boolean {
+  return route.path === computerSessionRoot || route.path.startsWith(`${computerSessionRoot}/`);
+}
+
+function routeKey(route: Route): string {
+  return `${route.method} ${route.path}`;
+}
+
+function assertComputerRouteSurface(actual: readonly Route[], expected: readonly Route[]): void {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const route of actual) {
+    const key = routeKey(route);
+    if (seen.has(key)) duplicates.add(key);
+    seen.add(key);
+  }
+  expect(duplicates).toEqual(new Set());
+  expect(seen).toEqual(new Set(expected.map(routeKey)));
+}
 
 describe("ComputerSession route discipline", () => {
-  test("registers the complete lifecycle, control, receipt, and frame routes", async () => {
-    const source = await readFile(routeUrl, "utf8");
-    for (const route of [
-      '"/v1/workspaces/:workspaceId/computer-sessions"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"',
-    ]) {
-      expect(source).toContain(route);
+  test("registers the entire public ComputerSession contract in the module and composed API", () => {
+    const app = new Hono();
+    // Registration must not perform resource access or start a controller.
+    registerComputerSessionRoutes(app, {} as ApiRouteDeps);
+    const expected = surface.routes.filter(isComputerSessionRoute);
+    expect(expected).not.toEqual([]);
+    assertComputerRouteSurface(app.routes, expected);
+    assertComputerRouteSurface(registeredApiRoutes().filter(isComputerSessionRoute), expected);
+  });
+
+  test("route coverage rejects missing, wrong-method, uncontracted and duplicate handlers", () => {
+    const expected = surface.routes.filter(isComputerSessionRoute);
+    expect(expected).not.toEqual([]);
+    // Every published operation, including input posture, must be registered;
+    // a path with the wrong verb or a shadowed handler is not equivalent.
+    for (const removed of expected) {
+      expect(() =>
+        assertComputerRouteSurface(
+          expected.filter((route) => routeKey(route) !== routeKey(removed)),
+          expected,
+        ),
+      ).toThrow();
     }
-    expect(source).not.toContain("/computer-sessions/:computerSessionId/suspend");
-    expect(source).not.toContain("/computer-sessions/:computerSessionId/resume");
-    expect(await readFile(appUrl, "utf8")).toContain(
-      "registerComputerSessionRoutes(app, routeDeps)",
-    );
+    const operation = expected[0]!;
+    for (const invalid of [
+      expected.map((route) => (route === operation ? { ...route, method: "UNSUPPORTED" } : route)),
+      [...expected, { method: "POST", path: `${computerSessionRoot}/uncontracted` }],
+      [...expected, operation],
+    ]) {
+      expect(() => assertComputerRouteSurface(invalid, expected)).toThrow();
+    }
+    // Route registration order is not a public lifecycle or control invariant.
+    assertComputerRouteSurface([...expected].reverse(), expected);
+  });
+
+  test("unsupported suspend and resume do not become public lifecycle operations", async () => {
+    const app = new Hono();
+    registerComputerSessionRoutes(app, {} as ApiRouteDeps);
+    const resource = computerSessionRoot.replace(":workspaceId", "workspace") + "/computer";
+    for (const operation of ["suspend", "resume"]) {
+      for (const method of ["GET", "POST"]) {
+        expect((await app.request(`${resource}/${operation}`, { method })).status).toBe(404);
+      }
+    }
   });
 
   test("authenticates before parsing and derives physical facts only from controller output", async () => {

@@ -13,6 +13,7 @@ import {
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
+  type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
 import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "../src/organization-mcp";
@@ -20,6 +21,38 @@ import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "../src/o
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const subjectId = "user:33333333-3333-4333-8333-333333333333";
+
+function routeKey(route: { method: string; path: string }): string {
+  return `${route.method} ${route.path}`;
+}
+
+function catalogByRoute(entries: readonly ActionCatalogEntry[]) {
+  const routes = new Map<string, ActionCatalogEntry>();
+  const ids = new Set<string>();
+  const duplicateRoutes = new Set<string>();
+  const duplicateIds = new Set<string>();
+  for (const entry of entries) {
+    const key = routeKey(entry);
+    if (routes.has(key)) duplicateRoutes.add(key);
+    if (ids.has(entry.id)) duplicateIds.add(entry.id);
+    ids.add(entry.id);
+    routes.set(key, {
+      ...entry,
+      request: [...entry.request].sort(),
+      response: [...entry.response].sort(),
+    });
+  }
+  expect(duplicateRoutes).toEqual(new Set());
+  expect(duplicateIds).toEqual(new Set());
+  return routes;
+}
+
+function assertCatalogMatches(
+  actual: readonly ActionCatalogEntry[],
+  expected: readonly ActionCatalogEntry[],
+): void {
+  expect(catalogByRoute(actual)).toEqual(catalogByRoute(expected));
+}
 
 const full: OrganizationAccessPolicy = {
   preset: "full",
@@ -71,15 +104,15 @@ describe("organization MCP action catalog", () => {
   test("covers every registered route except the listed exemptions, and is current", () => {
     const registered = registeredApiRoutes();
     // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.
-    expect(ACTION_CATALOG).toEqual(buildActionCatalog(registered));
-    const listed = new Set(ACTION_CATALOG.map((entry) => `${entry.method} ${entry.path}`));
-    const missing = [...registered, ...surface.routes]
-      .filter((route) => !isActionCatalogExempt(route.path))
-      .map((route) => `${route.method} ${route.path}`)
-      .filter((key) => !listed.has(key));
-    expect(missing).toEqual([]);
-    expect(new Set(ACTION_CATALOG.map((entry) => entry.id)).size).toBe(ACTION_CATALOG.length);
-    for (const entry of ACTION_CATALOG) expect(isActionCatalogExempt(entry.path)).toBe(false);
+    assertCatalogMatches(ACTION_CATALOG, buildActionCatalog(registered));
+    const listed = new Set(ACTION_CATALOG.map(routeKey));
+    // Independently require the complete route union, not only generator parity.
+    const callable = new Set(
+      [...registered, ...surface.routes]
+        .filter((route) => !isActionCatalogExempt(route.path))
+        .map(routeKey),
+    );
+    expect(listed).toEqual(callable);
     // UI actions that live outside the SDK are included too.
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
@@ -94,6 +127,44 @@ describe("organization MCP action catalog", () => {
       "POST /v1/identity/login-bindings/:bindingId/recovery",
     ])
       expect(listed.has(key)).toBe(false);
+  });
+
+  test("catalog parity is order-independent but rejects missing, extra and ambiguous actions", () => {
+    const expected: ActionCatalogEntry[] = [
+      {
+        id: "readFixture",
+        method: "GET",
+        path: "/v1/fixture",
+        request: [],
+        response: ["Fixture", "FixtureError"],
+      },
+      {
+        id: "createFixture",
+        method: "POST",
+        path: "/v1/fixture",
+        request: ["CreateFixture", "FixtureOptions"],
+        response: ["Fixture"],
+      },
+    ];
+    const reordered = [...expected].reverse().map((entry) => ({
+      ...entry,
+      request: [...entry.request].reverse(),
+      response: [...entry.response].reverse(),
+    }));
+    assertCatalogMatches(reordered, expected);
+    const [read, create] = expected as [ActionCatalogEntry, ActionCatalogEntry];
+    for (const invalid of [
+      [read],
+      [...expected, { ...read, id: "extraFixture", path: "/v1/fixture/extra" }],
+      [read, { ...create, method: "DELETE" }],
+      [read, { ...create, request: [] }],
+      [read, { ...create, response: [] }],
+      [read, { ...create, id: "wrongAction" }],
+      [read, { ...create, id: read.id }],
+      [...expected, { ...read, id: "shadowFixture" }],
+    ]) {
+      expect(() => assertCatalogMatches(invalid, expected)).toThrow();
+    }
   });
 });
 
