@@ -66,6 +66,8 @@ describe("public realtime ownership", () => {
   test("keeps the public React demo on published package imports", async () => {
     const violations: string[] = [];
     for (const file of await sourceFiles(reactDemoRoot)) {
+      // `*-test.tsx` pages are browser-test fixtures, not public demos.
+      if (file.endsWith("-test.tsx")) continue;
       const source = await readFile(file, "utf8");
       const path = relative(repositoryRoot, file);
       for (const [label, pattern] of [
