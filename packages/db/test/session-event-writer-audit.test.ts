@@ -234,8 +234,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
-    inserts: 2,
+    inserts: 1,
     contract: "canonical",
+  },
+  "packages/db/src/index.ts#projectPausedRecovery": {
+    inserts: 1,
+    contract: "owned_suffix",
   },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {
     inserts: 1,
@@ -281,7 +285,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 2,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#mutateAndAppendSessionEventsForTurnAttempt": {
+  "packages/db/src/index.ts#persist": {
     inserts: 1,
     contract: "turn_attempt_fence",
   },
@@ -379,6 +383,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
@@ -569,14 +574,16 @@ function productionTypeScriptFiles(): string[] {
   return files.sort();
 }
 
-function namedTopLevelFunction(
+function namedEnclosingFunction(
   node: t.Node,
+  outermost = false,
 ): { name: string; node: FunctionLikeDeclaration } | null {
   let current: t.Node | undefined = node;
   let result: { name: string; node: FunctionLikeDeclaration } | null = null;
   while (current) {
     if (isFunctionDeclaration(current) && current.id) {
       result = { name: current.id.name, node: current };
+      if (!outermost) return result;
     } else if (
       (isArrowFunctionExpression(current) || isFunctionExpression(current)) &&
       isVariableDeclarator(parentNodes.get(current))
@@ -584,11 +591,20 @@ function namedTopLevelFunction(
       const parent = parentNodes.get(current);
       if (isVariableDeclarator(parent) && isIdentifier(parent.id)) {
         result = { name: parent.id.name, node: current };
+        if (!outermost) return result;
       }
     }
     current = parentNodes.get(current);
   }
   return result;
+}
+
+function isNamedFunctionNode(node: t.Node): boolean {
+  return (
+    isFunctionDeclaration(node) ||
+    ((isArrowFunctionExpression(node) || isFunctionExpression(node)) &&
+      isVariableDeclarator(parentNodes.get(node)))
+  );
 }
 
 function callName(node: t.CallExpression): string | null {
@@ -639,6 +655,7 @@ const tenancyQuiescenceTables = {
   sessionGoals: "session_goals",
   codexCapacityWaiters: "codex_capacity_waiters",
   xaiCapacityWaiters: "xai_capacity_waiters",
+  claudeCapacityWaiters: "claude_capacity_waiters",
   sessionRealtimeModes: "session_realtime_modes",
   sessionRealtimeConnections: "session_realtime_connections",
   scheduledTasks: "scheduled_tasks",
@@ -679,6 +696,132 @@ function writesTenancyQuiescenceTable(node: t.CallExpression): boolean {
   );
 }
 
+function objectPropertyValue(object: t.ObjectExpression, name: string): t.Node | null {
+  for (const property of object.properties) {
+    if (
+      isObjectProperty(property) &&
+      ((isIdentifier(property.key) && property.key.name === name) ||
+        (isStringLiteral(property.key) && property.key.value === name))
+    ) {
+      return property.value;
+    }
+  }
+  return null;
+}
+
+/** Resolve the actual table object, not the provider label or a guessed table name. */
+function resolveTableObject(
+  path: string,
+  sourceFile: SourceFile,
+  node: t.Node,
+): t.ObjectExpression {
+  if (isObjectExpression(node)) return node;
+  if (!isIdentifier(node)) throw new Error(`Unresolved table binding in ${path}`);
+  let initializer: t.Node | null = null;
+  const visit = (candidate: t.Node): void => {
+    if (
+      isVariableDeclarator(candidate) &&
+      isIdentifier(candidate.id) &&
+      candidate.id.name === node.name
+    ) {
+      initializer = candidate.init ?? null;
+    }
+    forEachChild(candidate, visit);
+  };
+  visit(sourceFile.program);
+  if (initializer) return resolveTableObject(path, sourceFile, initializer);
+  for (const statement of sourceFile.program.body) {
+    if (statement.type !== "ImportDeclaration" || !statement.source.value.startsWith(".")) {
+      continue;
+    }
+    for (const specifier of statement.specifiers) {
+      if (
+        specifier.type !== "ImportSpecifier" ||
+        specifier.local.name !== node.name ||
+        !isIdentifier(specifier.imported)
+      ) {
+        continue;
+      }
+      const importedPath = resolve(path, "..", `${statement.source.value}.ts`);
+      const imported = parseSourceFile(importedPath, readFileSync(importedPath, "utf8"));
+      return resolveTableObject(importedPath, imported, specifier.imported);
+    }
+  }
+  throw new Error(`Unresolved table object ${node.name} in ${path}`);
+}
+
+function subscriptionWaiterBindings(): Map<string, string[]> {
+  const factories = new Map<string, string[]>([
+    ["createScopedSubscriptionCapacityWaiters", []],
+    ["createSubscriptionAccountRepository", []],
+  ]);
+  for (const path of productionTypeScriptFiles()) {
+    const source = readFileSync(path, "utf8");
+    if (![...factories.keys()].some((name) => source.includes(name))) continue;
+    const sourceFile = parseSourceFile(path, source);
+    const visit = (node: t.Node): void => {
+      if (isCallExpression(node)) {
+        const binding = factories.get(callName(node) ?? "");
+        if (binding) {
+          const options = node.arguments[0];
+          if (!options || !isObjectExpression(options)) {
+            throw new Error(`Unresolved subscription options in ${path}`);
+          }
+          const tables = objectPropertyValue(options, "tables");
+          if (!tables) throw new Error(`Missing subscription table binding in ${path}`);
+          const waiter = objectPropertyValue(
+            resolveTableObject(path, sourceFile, tables),
+            "capacityWaiters",
+          );
+          if (!waiter || !isMemberExpression(waiter) || !isIdentifier(waiter.property)) {
+            throw new Error(`Unresolved subscription waiter table in ${path}`);
+          }
+          const table =
+            tenancyQuiescenceTables[waiter.property.name as keyof typeof tenancyQuiescenceTables];
+          if (!table) throw new Error(`Uninventoried subscription waiter ${waiter.property.name}`);
+          binding.push(table);
+        }
+      }
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+  }
+  for (const [factory, tables] of factories) {
+    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+  }
+  return factories;
+}
+
+function parameterizedWaiterMutationTables(
+  node: t.CallExpression,
+  bindings: Map<string, string[]>,
+): string[] {
+  if (
+    !isMemberExpression(node.callee) ||
+    !["insert", "update", "delete"].includes(callName(node) ?? "")
+  ) {
+    return [];
+  }
+  const table = node.arguments[0];
+  if (
+    !table ||
+    !isMemberExpression(table) ||
+    !isIdentifier(table.object) ||
+    table.object.name !== "tables" ||
+    !isIdentifier(table.property) ||
+    table.property.name !== "capacityWaiters"
+  )
+    return [];
+  let ancestor: t.Node | undefined = node;
+  while (ancestor) {
+    if (isFunctionDeclaration(ancestor) && ancestor.id && bindings.has(ancestor.id.name)) {
+      return bindings.get(ancestor.id.name)!;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  throw new Error("Unresolved parameterized capacity-waiter writer");
+}
+
 function deletedTenancyCascadeRoot(node: t.CallExpression): string | null {
   if (!isMemberExpression(node.callee) || callName(node) !== "delete") return null;
   const table = node.arguments[0];
@@ -709,6 +852,7 @@ function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
 function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) found = true;
     if (!found) forEachChild(node, visit);
   };
@@ -723,6 +867,7 @@ function functionCallHasProperty(
 ): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -757,6 +902,7 @@ function callPositionsWithStringProperty(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -789,6 +935,7 @@ function callPositionsWithStringArgument(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       const argument = node.arguments[argumentIndex];
       if (argument !== undefined && isStringLiteral(argument) && argument.value === argumentValue) {
@@ -836,6 +983,7 @@ function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[]
 function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       positions.push(nodeStart(node));
     }
@@ -848,6 +996,7 @@ function callPositions(functionNode: FunctionLikeDeclaration, expectedName: stri
 function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && insertsSessionEvents(node)) {
       positions.push(nodeStart(node));
     }
@@ -858,9 +1007,51 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
-  test("pins all 17 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
+  test("nested factory writers cannot borrow sibling lock or gate evidence", () => {
+    const sourceFile = parseSourceFile(
+      "factory.ts",
+      `
+      function factory() {
+        function protectedWriter(tx: SessionActivityDatabase) {
+          lockSessionEventWriteRows(tx, { controlLock: "share" });
+          tx.insert(schema.sessionEvents);
+        }
+        const unprotectedWriter = (tx: Database) => {
+          tx.insert(schema.sessionEvents);
+          tx.update(schema.sessions);
+        };
+        return { protectedWriter, unprotectedWriter };
+      }
+    `,
+    );
+    const writers: Array<{ name: string; node: FunctionLikeDeclaration }> = [];
+    const visit = (node: t.Node): void => {
+      if (isCallExpression(node) && insertsSessionEvents(node)) {
+        writers.push(namedEnclosingFunction(node)!);
+      }
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
+    const factory = sourceFile.program.body[0]!;
+    expect(isFunctionDeclaration(factory)).toBe(true);
+    if (!isFunctionDeclaration(factory)) throw new Error("Expected a factory declaration");
+    expect(callPositions(factory, "lockSessionEventWriteRows")).toEqual([]);
+    expect(insertPositions(factory)).toEqual([]);
+    expect(controlAwarePrefixPositions(writers[0]!.node)).toHaveLength(1);
+    expect(insertPositions(writers[0]!.node)).toHaveLength(1);
+    expect(controlAwarePrefixPositions(writers[1]!.node)).toEqual([]);
+    expect(functionCalls(writers[1]!.node, "lockSessionEventWriteRows")).toBe(false);
+    expect(insertPositions(writers[1]!.node)).toHaveLength(1);
+    expect(
+      sourceFile.source.slice(writers[1]!.node.start, writers[1]!.node.body!.start),
+    ).not.toContain("SessionActivityDatabase");
+  });
+
+  test("pins all 18 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
     const discovered = new Set<string>();
     const writers = new Set<string>();
+    const bindings = subscriptionWaiterBindings();
     const sqlTables = Object.values(tenancyQuiescenceTables).join("|");
     const rawMutation = new RegExp(
       `\\b(?:insert\\s+into|update|delete\\s+from)\\s+(?:[a-z_]+\\.)?(?:${sqlTables})\\b`,
@@ -870,14 +1061,15 @@ describe("session_events writer inventory", () => {
       const source = readFileSync(path, "utf8");
       if (
         !Object.keys(tenancyQuiescenceTables).some((name) => source.includes(name)) &&
-        !Object.values(tenancyQuiescenceTables).some((name) => source.includes(name))
+        !Object.values(tenancyQuiescenceTables).some((name) => source.includes(name)) &&
+        !source.includes("tables.capacityWaiters")
       )
         continue;
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const recordWriter = (node: t.Node, table: string): void => {
         discovered.add(table);
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         writers.add(
           enclosing ? `${file}#${enclosing.name}` : `${file}:${lineNumber(source, node)}`,
         );
@@ -890,6 +1082,11 @@ describe("session_events writer inventory", () => {
               node,
               tenancyQuiescenceTables[table.property.name as keyof typeof tenancyQuiescenceTables],
             );
+          }
+        }
+        if (isCallExpression(node)) {
+          for (const table of parameterizedWaiterMutationTables(node, bindings)) {
+            recordWriter(node, table);
           }
         }
         if (isTaggedTemplateExpression(node)) {
@@ -919,7 +1116,22 @@ describe("session_events writer inventory", () => {
       migration.indexOf("];", migration.indexOf("hot_tables constant text[]")),
     );
     const guardedTables = [...declaration.matchAll(/'([^']+)'/gu)].map((match) => match[1]);
-    expect(guardedTables.sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
+    // 0345's original 17-table ledger is immutable. 0598 clones xAI's complete
+    // trigger contract onto Claude, adding the eighteenth current hot table.
+    expect(guardedTables.sort()).toEqual(
+      Object.entries(tenancyQuiescenceTables)
+        .filter(([name]) => name !== "claudeCapacityWaiters")
+        .map(([, table]) => table)
+        .sort(),
+    );
+    const claudeMigration = readFileSync(
+      join(repoRoot, "packages/db/drizzle/0598_claude_subscription_account_pools.sql"),
+      "utf8",
+    );
+    expect(claudeMigration).toContain("'xai_session_account_pins', 'xai_capacity_waiters'");
+    expect(claudeMigration).toMatch(
+      /SELECT pg_get_triggerdef\(oid\) AS definition FROM pg_trigger[\s\S]*?AND NOT tgisinternal[\s\S]*?EXECUTE replace\(item\.definition, 'xai_', 'claude_'\)/u,
+    );
     expect(migration).toMatch(
       /BEFORE INSERT OR UPDATE OR DELETE[\s\S]*?require_session_tenancy_fence/u,
     );
@@ -945,7 +1157,7 @@ describe("session_events writer inventory", () => {
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const recordDelete = (node: t.Node, root: string): void => {
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         if (!enclosing) throw new Error(`Unnamed ${root} delete in ${file}`);
         const key = `${file}#${enclosing.name}`;
         const writer = writers.get(key) ?? {
@@ -1025,7 +1237,7 @@ describe("session_events writer inventory", () => {
           }
           ancestor = parentNodes.get(ancestor);
         }
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         if (!enclosing) {
           violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
           return;
@@ -1061,7 +1273,12 @@ describe("session_events writer inventory", () => {
           expect(callers).toEqual(["packages/db/src/migrate.ts"]);
           return;
         }
-        if (key === DEV_SEED_CONVERSATION_WRITER || key === DEV_SEED_SCHEDULE_RUN_WRITER) {
+        const outer = namedEnclosingFunction(node, true);
+        const outerKey = `${file}#${outer?.name}`;
+        if (
+          outerKey === DEV_SEED_CONVERSATION_WRITER ||
+          outerKey === DEV_SEED_SCHEDULE_RUN_WRITER
+        ) {
           // The DEV-only design-preview seed writes fixture history into the
           // local dev stack through the migrations role, outside the runtime's
           // Drizzle handle. seedConversations replays the full open -> finalized
@@ -1172,13 +1389,16 @@ describe("session_events writer inventory", () => {
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const visit = (node: t.Node): void => {
-        if (isFunctionDeclaration(node) && node.id) {
-          const definitions = functionDefinitions.get(node.id.name) ?? [];
-          definitions.push({ sourceFile, functionNode: node });
-          functionDefinitions.set(node.id.name, definitions);
+        if (isNamedFunctionNode(node)) {
+          const enclosing = namedEnclosingFunction(node);
+          if (enclosing) {
+            const definitions = functionDefinitions.get(enclosing.name) ?? [];
+            definitions.push({ sourceFile, functionNode: enclosing.node });
+            functionDefinitions.set(enclosing.name, definitions);
+          }
         }
         if (isCallExpression(node)) {
-          const enclosing = namedTopLevelFunction(node);
+          const enclosing = namedEnclosingFunction(node);
           if (insertsSessionEvents(node)) {
             if (!enclosing) throw new Error(`Unnamed session_events writer in ${file}`);
             const key = `${file}#${enclosing.name}`;
@@ -1226,7 +1446,7 @@ describe("session_events writer inventory", () => {
           if (
             /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
             // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
-            `${file}#${namedTopLevelFunction(node)?.name}` !== DEV_SEED_CONVERSATION_WRITER
+            `${file}#${namedEnclosingFunction(node, true)?.name}` !== DEV_SEED_CONVERSATION_WRITER
           ) {
             rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
