@@ -85,8 +85,11 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
 `OpenGeniChat` (the user's chat list plus `SessionConversation`) from
-`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css`. For custom-branded
+embeds, theme with scoped `--og-*` tokens. For stock UI, use the shipped components
+and stylesheet without cosmetic host CSS or token overrides; see
+[Stock and host-branded appearance](references/product-shapes-and-ui.md#stock-and-host-branded-appearance).
+Import from `session-ui`, not the package root: the root also
 exports the workbench, whose editors, terminal and desktop viewer are optional
 peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped

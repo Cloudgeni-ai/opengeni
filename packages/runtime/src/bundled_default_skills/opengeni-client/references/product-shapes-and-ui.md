@@ -10,7 +10,7 @@
 | Product exposes files, changes, terminal, or desktop compute | Workbench surfaces beside the conversation | Product shell and selected tabs |
 | Existing Vercel `useChat` or OpenAI-shaped chat UI to keep | `@opengeni/sdk/chat` fallback (text-only) | Its existing chat UI |
 
-Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
+Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason to replace the component. For custom-branded embeds, theme with `--og-*` tokens and density props. For stock UI, keep the shipped components and stylesheet without cosmetic host CSS or token overrides; see [Stock and host-branded appearance](#stock-and-host-branded-appearance). Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
 ## Stock and host-branded appearance
 
