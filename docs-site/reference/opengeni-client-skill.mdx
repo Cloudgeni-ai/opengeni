@@ -294,6 +294,10 @@ only own usage. These are post-call ceilings, not prepaid reservations.
   acting user. MCP and OpenAPI spec URLs must be public HTTPS the deployment can
   reach; tunnel local servers (`cloudflared tunnel --url http://localhost:PORT`)
   and use the tunnel URL as `toolServer.url`.
+- The packaged proxy already rejects cross-site mutations and requires JSON.
+  Don't put your own Origin/CSRF check in front of it (browsers often omit
+  `Origin` on same-origin requests), and don't format-validate the product's
+  own IDs; authorize them with the product's normal lookup instead.
 - Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
   repository enforces a release-age policy (for example pnpm
   `minimumReleaseAge`), a just-published version may be refused: pin an older

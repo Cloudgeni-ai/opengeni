@@ -73,8 +73,9 @@ testing without the person opening the UI. Save the one-time `token`
 without logging the response. A lost creation response needs inventory and
 administrator revocation/replacement, not a blind repeated POST.
 
-The stored scopes are exactly `workspace:create`, `workspace:admin` and
-`usage_allowances:manage`, with a 24-hour default expiry. The setup tier does
+The full-access key uses the explicit 30-day expiry above. In contrast,
+the limited `developer_setup` tier stores exactly `workspace:create`, `workspace:admin` and
+`usage_allowances:manage`, with a 24-hour default expiry. The limited tier does
 not permit key inventory, minting, revocation or credential-management
 delegation despite its workspace-admin scope. Budget writes additionally
 require the canonical same-organization key; do not perform them with an
