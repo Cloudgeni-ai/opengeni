@@ -1,5 +1,6 @@
 import { ThinkingOrb } from "thinking-orbs";
 import { useThemeType } from "../lib/use-theme-type";
+import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./genie-copy";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 export type GenieLoadingRenderProps = {
@@ -39,24 +40,8 @@ export type GenieLoadingOptions = {
 };
 export const GenieLoadingOptionsContext = createContext<GenieLoadingOptions | undefined>(undefined);
 
-const PHRASES = [
-  "Polishing the lamp…",
-  "Consulting the carpet…",
-  "Untangling wishes…",
-  "Summoning a little cleverness…",
-  "Checking the fine print on infinity…",
-  "Warming up the abracadabra…",
-  "Rearranging the stars…",
-  "Negotiating with the lamp…",
-  "Dusting off a thousand years…",
-  "Wishful thinking…",
-  "Decanting a little magic…",
-  "Finding the good stardust…",
-  "Fluffing the magic carpet…",
-  "Putting a wish into motion…",
-  "A little hocus. A little pocus…",
-];
-const WAITING_PHRASES = ["Waiting for a response…"];
+const PHRASES = GENIE_PREPARING_PHRASES;
+const WAITING_PHRASES = GENIE_WAITING_PHRASES;
 
 /** Decorative copy never substitutes for a failure or claims measurable progress. */
 export function GenieLoading({

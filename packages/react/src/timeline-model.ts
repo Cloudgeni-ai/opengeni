@@ -81,3 +81,4 @@ export {
 } from "./timeline/platform-activity-presentation";
 export { formatBytes, stringifyPayload, tryParseJson } from "./lib/format";
 export { selectTurnSummaryFacets } from "./timeline/turn-summary-model";
+export { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./timeline/genie-copy";
