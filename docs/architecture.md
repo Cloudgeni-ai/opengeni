@@ -1154,6 +1154,10 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 - `deploy/helm/opengeni`: Helm services and integration resources.
 - `deploy/terraform/`: cloud infrastructure roots; `deploy/stacks/`: external
   dependency wrappers.
+- `deploy/terraform/azure-aks-capacity/`: additive AKS launch pools and adopted
+  staging system-pool bounds. Production system-pool ownership stays in
+  `deploy/terraform/azure/`; protected private-ops workflows own joint quota and
+  placement admission. Never place the same pool in both Terraform states.
 - `docs/`: topic docs and point-in-time records, indexed by [`README.md`](README.md).
 - `docs-site/`: public Mintlify docs at docs.opengeni.ai, published from
   `main:/docs-site`; product-facing pages link to engineering docs in `docs/`.
