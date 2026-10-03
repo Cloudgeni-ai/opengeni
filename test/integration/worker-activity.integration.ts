@@ -2012,10 +2012,15 @@ describe("worker activities integration", () => {
     });
     await Bun.sleep(0);
 
-    expect(exported).toHaveLength(1);
-    const span = exported[0]!.body.resourceSpans[0].scopeSpans[0].spans[0];
-    expect(span.name).toBe("worker.run_agent_segment");
-    expect(span.status.code).toBe(2);
+    // Startup phases export their own spans too; find the segment span by name.
+    const spans = exported.flatMap(({ body }) =>
+      body.resourceSpans.flatMap((resource: any) =>
+        resource.scopeSpans.flatMap((scope: any) => scope.spans),
+      ),
+    );
+    const span = spans.find((candidate: any) => candidate.name === "worker.run_agent_segment");
+    expect(span).toBeDefined();
+    expect(span!.status.code).toBe(2);
     expect(await observability.prometheusMetrics()).toContain('status="failed"');
   });
 
