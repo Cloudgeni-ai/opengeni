@@ -19,6 +19,7 @@ import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  settingsForAcceptedAzureTurn,
   settingsForAcceptedSubscriptionTurn,
   resolveTurnExecutionPolicyV1,
   type Settings,
@@ -318,6 +319,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
+  capabilitySettings = settingsForAcceptedAzureTurn(capabilitySettings, installedPolicy.policy, {
+    modelId: turn.model,
+    reasoningEffort: turn.reasoningEffort,
+    latencyMode: turn.latencyMode,
+  });
   capabilitySettings = settingsForAcceptedSubscriptionTurn(
     capabilitySettings,
     installedPolicy.policy,
