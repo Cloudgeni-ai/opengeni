@@ -386,11 +386,21 @@ async function listFiles(roots: string[]): Promise<string[]> {
   if (ripgrep !== null) {
     return normalizeFileList(ripgrep);
   }
-  const git = await runFileListCommand(["git", "ls-files", "--", ...existingRoots]);
+  const git = await runFileListCommand(["git", "ls-files", "--", ...existingRoots]).catch(
+    () => null,
+  );
   if (git !== null) {
     return normalizeFileList(git);
   }
-  throw new Error("Unable to list source files: neither rg nor git ls-files is available");
+  // Neither rg nor a git checkout (e.g. a fixture directory on a runner
+  // without ripgrep): walk the roots directly, skipping dependencies.
+  const files: string[] = [];
+  for (const root of existingRoots) {
+    for await (const path of new Bun.Glob(`${root}/**/*`).scan({ onlyFiles: true, dot: true })) {
+      if (!/(^|\/)(node_modules|\.git|dist)\//.test(path)) files.push(path);
+    }
+  }
+  return normalizeFileList(files.join("\n"));
 }
 
 async function runFileListCommand(command: string[]): Promise<string | null> {
