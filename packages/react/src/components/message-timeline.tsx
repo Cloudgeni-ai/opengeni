@@ -4653,6 +4653,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       </details>
     );
   }
+  const resolvedApproval = Boolean(item.resolvedAt && item.text.startsWith("Approval needed"));
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -4668,14 +4669,16 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       )}
       role="status"
     >
-      <TriangleAlertIcon
-        className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
-      />
+      {resolvedApproval ? (
+        <CheckIcon className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden="true" />
+      ) : (
+        <TriangleAlertIcon
+          className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+        />
+      )}
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">
-          {item.resolvedAt && item.text.startsWith("Approval needed")
-            ? "Approval was needed."
-            : item.text}
+          {resolvedApproval ? "You responded to this approval." : item.text}
         </span>
         {item.details ? (
           <details className="mt-2 text-og-control">
