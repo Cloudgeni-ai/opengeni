@@ -37,10 +37,12 @@ describe("onboarding use case text", () => {
     // attaches a repository with the card's Use button and the chat implements
     // there; a repository-attached worker is only the fallback.
     expect(withKey).toContain('"Use" button');
-    expect(withKey).toContain("Don't ask me again in a separate question");
+    expect(withKey).toContain("don't ask me again in a separate question");
     expect(withKey).toContain("call github_repositories_list");
     expect(withKey).toContain("session_create, passing that repository's returned resource");
     expect(withKey).toContain("give me the worker's pull request link");
+    expect(withKey).toContain("If GitHub was already connected and no card appeared");
+    expect(withKey).toContain("tell me in one short line what it is building");
     expect(withKey).not.toMatch(/ogk_/);
     const withoutKey = developerSetupModelContext({ ...facts, keyInSandbox: false });
     expect(withoutKey).toContain("No API key is attached to this chat.");
