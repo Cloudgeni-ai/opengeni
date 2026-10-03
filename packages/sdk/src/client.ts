@@ -291,6 +291,11 @@ import type {
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
   UpdateOrganizationApiKeyRequest,
+  OrganizationMcpConnection,
+  OrganizationMcpConnectionList,
+  UpdateOrganizationMcpConnectionRequest,
+  McpConnectionRequest,
+  McpConnectionDecision,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -8584,6 +8589,66 @@ export class OpenGeniClient {
     return await this.requestJson<ApiKey>(
       "DELETE",
       `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
+    );
+  }
+
+  // --- Connected agents (organization MCP server) ------------------------------------------------
+
+  /**
+   * Agents people connected to the organization MCP server (`/v1/mcp`).
+   * Everyone sees their own; owners and admins see everyone's. Browser only:
+   * keys and agents are refused, so an agent can't widen its own access.
+   */
+  async listOrganizationMcpConnections(
+    organizationId: string,
+  ): Promise<OrganizationMcpConnectionList> {
+    return await this.requestJson<OrganizationMcpConnectionList>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-connections`,
+    );
+  }
+
+  /** Change what a connected agent can do and where; its next request uses it. Only its person. */
+  async updateOrganizationMcpConnection(
+    organizationId: string,
+    connectionId: string,
+    request: UpdateOrganizationMcpConnectionRequest,
+  ): Promise<OrganizationMcpConnection> {
+    return await this.requestJson<OrganizationMcpConnection>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+      request,
+    );
+  }
+
+  /** Disconnect an agent: every token it holds is refused from now on. */
+  async deleteOrganizationMcpConnection(
+    organizationId: string,
+    connectionId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  /** The pending sign-in an agent started; read by the web app's sign-in page. */
+  async getMcpConnectionRequest(requestToken: string): Promise<McpConnectionRequest> {
+    return await this.requestJson<McpConnectionRequest>(
+      "GET",
+      `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
+    );
+  }
+
+  /** Allow or deny an agent's sign-in. Returns where to send the browser next. */
+  async answerMcpConnectionRequest(
+    requestToken: string,
+    decision: McpConnectionDecision,
+  ): Promise<{ redirectTo: string }> {
+    return await this.requestJson<{ redirectTo: string }>(
+      "POST",
+      `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
+      decision,
     );
   }
 

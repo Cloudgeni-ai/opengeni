@@ -5,6 +5,7 @@ import {
   meaningfulSessionEventSql,
 } from "./session-meaningful-events";
 import type {
+  OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
   AutomationAcceptedExecution,
@@ -4170,13 +4171,13 @@ const mcpOauthGrantColumns = () => ({
   accountId: uuid("account_id")
     .notNull()
     .references(() => managedAccounts.id, { onDelete: "cascade" }),
-  workspaceId: uuid("workspace_id")
-    .notNull()
-    .references(() => workspaces.id, { onDelete: "cascade" }),
+  // Null for an organization connection, which holds organizationAccess instead.
+  workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
   subjectId: text("subject_id").notNull(),
   resource: text("resource").notNull(),
   permissions: jsonb("permissions").$type<Permission[]>().notNull(),
   toolIdentities: jsonb("tool_identities").$type<ToolGatewayIdentity[]>().notNull(),
+  organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>(),
 });
 
 export const mcpOauthAuthorizationRequests = pgTable(
@@ -4237,6 +4238,7 @@ export const mcpOauthRefreshTokens = pgTable(
       .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
     ...mcpOauthGrantColumns(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -5201,6 +5201,54 @@ export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
 };
 
+// --- Connected agents (organization MCP server) ------------------------------------------------
+
+/** An outside agent a person connected to the organization MCP server. */
+export type OrganizationMcpConnection = {
+  id: string;
+  /** The name the client registered with ("Claude Code"). */
+  clientName: string;
+  /** Where its sign-in returned to ("127.0.0.1:4567", "cursor.com"). */
+  clientHost: string | null;
+  /** Signed-in agents act as the person who connected them. */
+  actor: "user";
+  connectedBy: { subjectId: string; name: string };
+  /** What it can do and where. The person's own live access still caps it. */
+  policy: OrganizationAccessPolicy;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string;
+  revokedAt: null;
+};
+
+export type OrganizationMcpConnectionList = {
+  connections: OrganizationMcpConnection[];
+  /** Owners and admins see and can disconnect everyone's agents. */
+  canManageAll: boolean;
+};
+
+export type UpdateOrganizationMcpConnectionRequest = {
+  access: OrganizationAccessPolicy;
+};
+
+/** A pending agent sign-in, as the web app's sign-in page shows it. */
+export type McpConnectionRequest = {
+  client: { name: string; host: string | null };
+  person: { name: string | null };
+  organizations: Array<{
+    id: string;
+    name: string;
+    workspaces: Array<{ id: string; name: string; personal: boolean }>;
+    /** Everything the person can do there; the most an agent can get. */
+    grantable: Permission[];
+  }>;
+  defaultOrganizationId: string | null;
+};
+
+export type McpConnectionDecision =
+  | { decision: "deny" }
+  | { decision: "approve"; organizationId: string; access: OrganizationAccessPolicy };
+
 // --- Organization-wide session list (org API key or organization owner) -----------------------
 
 export type ListOrganizationSessionsOptions = {

@@ -1,5 +1,6 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
+import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
@@ -37,6 +38,11 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
 
 function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "OPTIONS") {
+    return true;
+  }
+  // An organization MCP action dispatched in this process for a verified
+  // person. Only server code can stamp the exact Request object.
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
     return true;
   }
   const path = new URL(c.req.url).pathname;
