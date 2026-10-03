@@ -230,6 +230,18 @@ async function installApi(
       });
     if (path === "/v1/workspaces")
       return json([workspace(workspaceId, "Cloudgeni"), workspace(siblingId, "Analytics")]);
+    // Keep provider readiness independent of the connection lookup held during reload.
+    if (path.endsWith("/connect/catalog"))
+      return json([
+        {
+          id: "slack-bot",
+          label: "Opengeni Slack bot",
+          family: "slack",
+          readiness: "available",
+          ownership: ["workspace"],
+          setup: ["oauth"],
+        },
+      ]);
     if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
     if (path.endsWith("/connections")) {
       await state.connectionsReady;
