@@ -12,9 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { Sandbox } from "modal";
 import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
-import { isModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal";
+import {
+  isModalCommandStartOutcomeUnknownError,
+  isModalTaskExecStartPreDispatchUnavailableError,
+} from "../src/sandbox/providers/modal";
 import {
   MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
@@ -49,6 +53,7 @@ let endpoint: string;
 let certificate: Buffer;
 let startCalls = 0;
 let writeCalls = 0;
+let pollCalls = 0;
 const starts: object[] = [];
 let cancelledStartReceived: (() => void) | undefined;
 let cancelledReads = 0;
@@ -135,6 +140,7 @@ beforeAll(async () => {
         call.end();
       },
       poll(call: any, callback: any) {
+        pollCalls++;
         callback(
           null,
           call.request.execId === "running"
@@ -173,6 +179,246 @@ function wire() {
   return new ModalCommandRouterWire({ url: endpoint, jwt: "test-token" }, certificate);
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
+
+const readinessRequest = (): ModalRouterStart => ({
+  ...identity("prepared"),
+  commandArgs: ["/bin/true"],
+  workdir: "/tmp",
+  env: {},
+});
+
+function expectDescriptionRefusal(client: ModalCommandRouterWire, candidate: unknown): void {
+  let error: unknown;
+  try {
+    client.describePreparedStart(candidate as ModalRouterPreparedStart);
+  } catch (failure) {
+    error = failure;
+  }
+  expect(error).toBeInstanceOf(Error);
+  expect(error).toHaveProperty("name", "Error");
+  expect(error).toHaveProperty(
+    "message",
+    "Invalid, unsupported or unavailable Modal prepared Start descriptor",
+  );
+  expect(error).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+  expect(error).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+  expect(error).not.toBeInstanceOf(ModalCommandStartRejectedError);
+  expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(false);
+  expect(isModalCommandStartOutcomeUnknownError(error)).toBe(false);
+  expect(error).not.toHaveProperty("cause");
+  expect(error).not.toHaveProperty("taskId");
+  expect(error).not.toHaveProperty("execId");
+  expect(Object.getOwnPropertySymbols(error)).toEqual([]);
+}
+
+test("fixed readiness description retains the actual preflight fixture without getter work or consumption", async () => {
+  const client = wire();
+  const request = readinessRequest();
+  const codec = modalRouterWire.lookupType("Start").setup();
+  const encodeStart = codec.encode;
+  const fixture = Buffer.from(
+    "0a097461736b2d74657374120870726570617265641a092f62696e2f74727565200128013a042f746d70",
+    "hex",
+  );
+  let encoded: Buffer | undefined;
+  let encodes = 0;
+  const before = {
+    starts: startCalls,
+    writes: writeCalls,
+    polls: pollCalls,
+    reads: requests.length,
+  };
+  let callbacks = 0;
+  codec.encode = function (value, writer) {
+    encodes++;
+    const result = encodeStart.call(this, value, writer);
+    encoded = Buffer.from(result.finish());
+    return result;
+  };
+  try {
+    const pending = client.prepareStart(request);
+    expect(encodes).toBe(1);
+    expect(encoded).toEqual(fixture);
+    // Caller changes before readiness completes cannot change the descriptor.
+    request.taskId = "other-task";
+    request.execId = "other-exec";
+    request.commandArgs.push("not-readiness");
+    request.env.SECRET = "not-retained";
+    request.workdir = "/workspace";
+    const prepared = await pending;
+    const descriptor = client.describePreparedStart(prepared);
+    expect(descriptor).not.toBeInstanceOf(Promise);
+    expect(descriptor).toEqual({
+      ...identity("prepared"),
+      descriptorProtocol: "modal-prepared-start-descriptor",
+      descriptorVersion: 1,
+      readinessRecipe: "modal-exec-readiness-bin-true-v1",
+      readinessRecipeVersion: 1,
+      startMessage: "Start",
+      rpcMethod: `/${service}/TaskExecStart`,
+      encoderVersion: "protobufjs@7.6.5",
+      preflight: {
+        encoding: "modal-start-protobuf-preflight-v1",
+        sha256: "db127d48dc760c65e2e27acffc9c699e4a945ac894a997d52b31b1ace2d28519",
+        byteLength: 42,
+        encoderFingerprint:
+          "sha256:0af6a034d3159fd68e4ec650ef56db06babf81f08d8beb17c3b8c1861767f50e",
+      },
+    });
+    expect(descriptor.preflight.sha256).toBe(createHash("sha256").update(fixture).digest("hex"));
+    expect(descriptor.preflight.byteLength).toBe(encoded!.length);
+    expect(descriptor.encoderVersion).toBe(
+      `protobufjs@${createRequire(import.meta.url)("protobufjs/package.json").version}`,
+    );
+    expect(descriptor.preflight.encoderFingerprint).toBe(
+      `sha256:${createHash("sha256")
+        .update(
+          JSON.stringify({
+            encoderVersion: "protobufjs@7.6.5",
+            schema: modalRouterWire.toJSON(),
+            encoding: "Start.encode(Start.fromObject(value)).finish()",
+          }),
+        )
+        .digest("hex")}`,
+    );
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(descriptor.preflight)).toBe(true);
+    expect(Reflect.set(descriptor, "execId", "substituted")).toBe(false);
+    expect(Reflect.set(descriptor.preflight, "sha256", "substituted")).toBe(false);
+    // Description must not perform another encode or any transport operation.
+    codec.encode = () => {
+      throw new Error("No encoding during description");
+    };
+    Object.defineProperty((client as any).client, "waitForReady", {
+      value: () => {
+        throw new Error("No readiness during description/dispatch");
+      },
+    });
+    for (let index = 0; index < 3; index++)
+      expect(client.describePreparedStart(prepared)).toBe(descriptor);
+    expect(encodes).toBe(1);
+    expect({
+      starts: startCalls,
+      writes: writeCalls,
+      polls: pollCalls,
+      reads: requests.length,
+    }).toEqual(before);
+    expect(callbacks).toBe(0);
+    codec.encode = encodeStart;
+    // The real TLS Start still dispatches once, consuming synchronously.
+    callbacks++;
+    const dispatched = client.dispatchPreparedStart(prepared);
+    expectDescriptionRefusal(client, prepared);
+    await dispatched;
+    expectDescriptionRefusal(client, prepared);
+    expect(callbacks).toBe(1);
+    expect(startCalls - before.starts).toBe(1);
+    expect(starts.at(-1)).toEqual({
+      ...identity("prepared"),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      stdoutConfig: 1,
+      stderrConfig: 1,
+    });
+    expect(writeCalls).toBe(before.writes);
+    expect(pollCalls).toBe(before.polls);
+    expect(requests.length).toBe(before.reads);
+  } finally {
+    codec.encode = encodeStart;
+    client.close();
+  }
+});
+
+test("description rejects forged/copied/foreign/closed handles without proof or consumption", async () => {
+  const issuer = wire(),
+    foreign = wire();
+  const before = startCalls;
+  try {
+    const prepared = await issuer.prepareStart(readinessRequest());
+    const descriptor = issuer.describePreparedStart(prepared);
+    for (const candidate of [
+      {},
+      undefined,
+      null,
+      "prepared",
+      { ...prepared },
+      Object.create(prepared),
+      JSON.parse(JSON.stringify(prepared)),
+      structuredClone(prepared),
+      descriptor,
+      { ...descriptor },
+      new Proxy(prepared, {}),
+      { command: prepared, admission: "not-authority" },
+    ])
+      expectDescriptionRefusal(issuer, candidate);
+    expectDescriptionRefusal(foreign, prepared);
+    foreign.close();
+    expectDescriptionRefusal(foreign, prepared);
+    expect(issuer.describePreparedStart(prepared)).toBe(descriptor);
+    expect(startCalls).toBe(before);
+    issuer.close();
+    expectDescriptionRefusal(issuer, prepared);
+    // Getter refusal does not pre-spend the closed handle: dispatch alone
+    // retains its genuine local closure proof, then seals the handle.
+    await expect(issuer.dispatchPreparedStart(prepared)).rejects.toBeInstanceOf(
+      ModalCommandStartNotDispatchedError,
+    );
+    expectDescriptionRefusal(issuer, prepared);
+    expect(startCalls).toBe(before);
+  } finally {
+    issuer.close();
+    foreign.close();
+  }
+});
+
+test("only the exact readiness input is describable; unsupported generic Starts still dispatch", async () => {
+  const client = wire();
+  const before = startCalls;
+  const ptyInfo = {
+    enabled: false,
+    winszRows: 0,
+    winszCols: 0,
+    envTerm: "",
+    ptyType: 0,
+    noTerminateOnIdleStdin: false,
+  };
+  const variants = [
+    { ...readinessRequest(), commandArgs: ["true"] },
+    { ...readinessRequest(), commandArgs: ["/bin/true", "extra"] },
+    { ...readinessRequest(), workdir: "/workspace" },
+    { ...readinessRequest(), env: { EXTRA: "value" } },
+    { ...readinessRequest(), env: { [Symbol("extra")]: "value" } },
+    { ...readinessRequest(), ptyInfo },
+    { ...readinessRequest(), ptyInfo: undefined },
+    { ...readinessRequest(), timeoutSecs: 1 },
+    { ...readinessRequest(), stdoutConfig: 2 },
+    { ...readinessRequest(), stderrConfig: 2 },
+    { ...readinessRequest(), runtimeDebug: true },
+    { ...readinessRequest(), secretIds: ["not-used"] },
+    { ...readinessRequest(), containerId: "not-used" },
+    { ...readinessRequest(), extra: undefined },
+    { ...readinessRequest(), [Symbol("extra")]: true },
+    new Proxy(readinessRequest(), {
+      ownKeys() {
+        throw new Error("Unreadable shape");
+      },
+    }),
+  ];
+  try {
+    for (const request of variants) {
+      const prepared = await client.prepareStart(request);
+      expectDescriptionRefusal(client, prepared);
+      await client.dispatchPreparedStart(prepared);
+      await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
+    }
+    expect(startCalls - before).toBe(variants.length);
+    // The generic convenience Start is still available for these profiles.
+    await client.start(variants[0]!);
+    expect(startCalls - before).toBe(variants.length + 1);
+  } finally {
+    client.close();
+  }
+});
 
 test("TLS preparation sends no mutation and freezes exact parameters before single-use dispatch", async () => {
   const client = wire();
@@ -284,12 +530,16 @@ test("lost Start acknowledgement spends the original prepared handle permanently
       workdir: "/tmp",
       env: {},
     });
+    const descriptor = client.describePreparedStart(prepared);
     const outcome = await client.dispatchPreparedStart(prepared).catch((error) => error);
     expect(outcome).toMatchObject({
       name: "CommandStartOutcomeUnknownError",
       ...identity("prepared-unknown"),
       cause: { code: status.UNAVAILABLE },
     });
+    expect(descriptor).toMatchObject(identity("prepared-unknown"));
+    expectDescriptionRefusal(client, prepared);
+    expectDescriptionRefusal(client, descriptor);
     const duplicate = await client.dispatchPreparedStart(prepared).catch((error) => error);
     expect(duplicate).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
     expect(duplicate).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
@@ -319,6 +569,7 @@ test("post-dispatch cancellation is ambiguous and never permits a second Start",
       .dispatchPreparedStart(prepared, cancellation.signal)
       .catch((error) => error);
     await received;
+    expectDescriptionRefusal(client, prepared);
     cancellation.abort(reason);
     expect(await pending).toMatchObject({
       name: "CommandStartOutcomeUnknownError",
@@ -348,12 +599,14 @@ test("RPC-time serialization remains ambiguous and leaves the prepared handle sp
     codec.encode = () => {
       throw new Error("RPC serializer failed after preparation");
     };
+    expect(client.describePreparedStart(prepared)).toMatchObject(identity("serialization-failure"));
     const error = await client.dispatchPreparedStart(prepared).catch((failure) => failure);
     expect(error).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
     expect(error).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
     expect(error).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
     expect(error).toMatchObject(identity("serialization-failure"));
     expect(startCalls).toBe(before);
+    expectDescriptionRefusal(client, prepared);
     codec.encode = encodeStart;
     await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
     expect(startCalls).toBe(before);
@@ -377,9 +630,12 @@ test("abort or close after preparation sends zero Start but still spends the han
       });
       if (close) client.close();
       else cancellation.abort(new Error("caller stopped before dispatch"));
+      if (close) expectDescriptionRefusal(client, prepared);
+      else expect(client.describePreparedStart(prepared)).toMatchObject(identity("prepared"));
       await expect(
         client.dispatchPreparedStart(prepared, cancellation.signal),
       ).rejects.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+      expectDescriptionRefusal(client, prepared);
       await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
       expect(startCalls).toBe(before);
     } finally {
