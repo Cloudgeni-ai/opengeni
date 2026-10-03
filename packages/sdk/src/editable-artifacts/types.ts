@@ -479,6 +479,8 @@ export type EditableArtifactSyncView = {
   writable: boolean;
   pendingTransactions: number;
   blockedPending: readonly EditableArtifactBlockedPending[];
+  /** A command barrier independent of the artifact's edit permission. */
+  authoringBlockedReason?: "pending_conflict" | "prior_writer" | undefined;
   queuedMessages: number;
   reconnectAttempt: number;
   lastError: Error | null;
