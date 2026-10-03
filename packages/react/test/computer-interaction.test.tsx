@@ -982,6 +982,11 @@ describe("ComputerViewer", () => {
     const attachments: string[] = [];
     const requests: ComputerActionRequest[] = [];
     const client = fakeClient({
+      getComputerInputPosture: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        inputAllowed: true,
+      }),
       listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
       getComputerSession: async () => ({ ...computerSession(), platform: "macos" }),
       listComputerTargets: async () => ({
@@ -1083,6 +1088,11 @@ describe("ComputerViewer", () => {
     const requests: ComputerActionRequest[] = [];
     const attachments: string[] = [];
     const client = fakeClient({
+      getComputerInputPosture: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        inputAllowed: true,
+      }),
       listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
       getComputerSession: async () => computerSession(),
       listComputerTargets: async () => ({

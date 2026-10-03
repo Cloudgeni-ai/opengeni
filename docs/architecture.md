@@ -1380,14 +1380,29 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
-Managed Linux RFB input requires a server-enforced view grant bound to the exact
-screen target and generation, native keyboard/pointer support, and source-session
-control authority. Session view tokens remain pixel-only. The controller parses
-client packets and rechecks authority before forwarding; clipboard, power and
-display changes do not gain authority through RFB. Older controllers use the
-canonical server-only frame stream through an encrypted API proxy, with human
-input retaining the existing ComputerSession action path. This transport fence
-does not complete the legacy desktop-seat and producer migration.
+ComputerSession attachments use canonical frame streams, including relay kind 4,
+for screens and windows. The viewer paints those exact authenticated pixels and
+uses the painted frame ID, target generation and geometry for human `/actions`;
+it never labels a separate native capture as authority for RFB pixels. Attachment
+`inputAllowed` reflects the issuing source decision and human sandbox policy,
+while every action independently reauthorizes the live source and enforces that
+policy. Native pointer and keyboard availability remain independent; agent tools
+retain their separate session-control authority. Older frame responses may omit
+the viewer posture without changing canonical action authorization.
+
+App-only viewers read `/computer-sessions/:id/input-posture` without starting
+native actions, frame streams or view grants. Mutations require explicit permission
+for the current resource and controller generation. Pending, unavailable, denied
+or stale posture remains view-only; Refresh performs a fresh bounded read.
+The evaluator includes current source control, human sandbox policy and physical
+machine screen-control consent. Each action still rechecks its live authority.
+
+The API never mints an RFB input grant for this default path. Older strict-key
+controllers keep their upstream view bearer inside an encrypted frame proxy.
+Transitional direct RFB compatibility still requires an exact screen/generation
+scope; session view tokens remain pixel-only, and controller packet parsing denies
+ungranted input, clipboard, power and display changes. Default frame/action
+convergence does not complete the legacy desktop-seat and producer migration.
 
 Connected Machine canaries [embed matching helpers](../scripts/bake-agent.sh).
 The install API refuses partial baked targets. Embedded helpers precede adjacent

@@ -8,12 +8,12 @@ import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerSessionHeartbeatResponse,
+  ComputerSessionInputPosture,
   ComputerSessionLifecycleRequest,
   ComputerSessionListResponse,
   ComputerSessionMutationResponse,
@@ -125,6 +125,8 @@ type ComputerPlacement = {
   placementInstanceId: string;
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
+  /** Current placement consent, separate from passive viewing authority. */
+  screenControlAllowed?: boolean;
 };
 
 const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
@@ -445,6 +447,33 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   });
 
   app.get(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/input-posture",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.read",
+        "computer.read",
+        async ({ record, binding, placement }) =>
+          ComputerSessionInputPosture.parse({
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            inputAllowed: await authorizeHumanFrameInput(grant, record, placement),
+          }),
+        false,
+      );
+      context.header("cache-control", "no-store");
+      return context.json(result);
+    },
+  );
+
+  app.get(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(
@@ -560,8 +589,15 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         computerSessionId,
         "session.control",
         "computer.action",
-        async ({ sessionClient, binding }) =>
-          await sessionClient.action(
+        async ({ sessionClient, binding, record }) => {
+          if (
+            record.session.placement.kind === "sandbox_group" &&
+            deps.settings.sandboxDesktopInteractive === false &&
+            grant.principalKind !== "agent_attempt"
+          ) {
+            throw new HTTPException(403, { message: "Human desktop input is disabled" });
+          }
+          return await sessionClient.action(
             ComputerActionCommand.parse({
               protocolVersion: INTERACTION_PROTOCOL_VERSION,
               operationId: request.operationId,
@@ -574,7 +610,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               actor: interactionActorForGrant(grant),
               action: request.action,
             }),
-          ),
+          );
+        },
       );
       observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
@@ -653,33 +690,18 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          // Negotiate with the old strict-key request first. An older
-          // controller cannot enforce RFB input scopes; do not send it a
-          // scoped grant or expose its reusable upstream view bearer.
+          // Keep the old strict-key request. Human input uses canonical
+          // actions; this grant authorizes only the frame producer. An older
+          // controller's reusable RFB bearer must stay behind the proxy.
           const viewGrant = await client.createComputerViewGrant(reference, {
             grantId,
             token,
             expiresAt,
           });
-          const managedRfbPlacement =
+          const managedLinuxPlacement =
             record.session.placement.kind === "sandbox_group" &&
             record.session.platform === "linux";
-          const managedRfbTarget = managedRfbPlacement && target.kind === "screen";
-          const scopedRfb = managedRfbTarget && viewGrant.scopedRfbInput;
-          let inputAllowed = false;
-          if (scopedRfb) {
-            inputAllowed = await authorizeRfbInput(grant, record);
-            await client.createComputerViewGrant(reference, {
-              grantId,
-              token,
-              expiresAt,
-              rfbScope: {
-                targetId: target.id,
-                targetGeneration: target.targetGeneration,
-                inputAllowed,
-              },
-            });
-          }
+          const inputAllowed = await authorizeHumanFrameInput(grant, record, placement);
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -747,26 +769,17 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 };
               })()
             : await (async () => {
-                const rfb = scopedRfb;
-                const protocols = rfb
-                  ? [
-                      "binary",
-                      COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                    ]
-                  : [
-                      COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                    ];
-                const upstreamUrl = rfb
-                  ? await client.computerRfbStreamUrl(reference, request.targetId)
-                  : await client.computerFrameStreamUrl(
-                      reference,
-                      request.targetId,
-                      request.stream,
-                    );
+                const protocols = [
+                  COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                  `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                ];
+                const upstreamUrl = await client.computerFrameStreamUrl(
+                  reference,
+                  request.targetId,
+                  request.stream,
+                );
                 const attachment =
-                  (!viewGrant.scopedRfbInput && managedRfbPlacement) ||
+                  (!viewGrant.scopedRfbInput && managedLinuxPlacement) ||
                   placementUsesInteractionFrameProxy(placement.lease?.backend, {
                     openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
                     ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
@@ -790,14 +803,13 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                         expiresAt,
                       })
                     : { url: upstreamUrl, protocols };
-                return rfb
-                  ? { kind: "direct_rfb" as const, inputAllowed, ...attachment }
-                  : { kind: "direct_websocket" as const, ...attachment };
+                return { kind: "direct_websocket" as const, ...attachment };
               })();
           return ComputerSessionAttachment.parse({
             computerSessionId,
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
+            inputAllowed,
             stream,
             expiresAt,
           });
@@ -807,16 +819,19 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     },
   );
 
-  async function authorizeRfbInput(
+  async function authorizeHumanFrameInput(
     grant: AccessGrant,
     record: ComputerSessionControlRecord,
+    placement: ComputerPlacement,
   ): Promise<boolean> {
     if (
-      deps.settings.sandboxDesktopInteractive === false ||
+      ((record.session.placement.kind === "connected_machine" ||
+        record.session.placement.kind === "attached_device") &&
+        placement.screenControlAllowed !== true) ||
+      (record.session.placement.kind === "sandbox_group" &&
+        deps.settings.sandboxDesktopInteractive === false) ||
       grant.principalKind === "agent_attempt" ||
-      !hasPermission(grant.permissions, "sessions:control") ||
-      record.session.capabilities?.pointerInput !== true ||
-      record.session.capabilities?.keyboardInput !== true
+      !hasPermission(grant.permissions, "sessions:control")
     )
       return false;
     try {
@@ -827,13 +842,13 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       });
       return true;
     } catch (error) {
-      if (error instanceof SessionAuthorizationDeniedError) return false;
-      if (error instanceof SessionAuthorizationUnavailableError) {
-        throw new HTTPException(503, {
-          message: "session authorization is unavailable",
-          cause: error,
-        });
-      }
+      // Input availability cannot invalidate an independently authorized view.
+      // Every action reauthorizes the live source instead of trusting this hint.
+      if (
+        error instanceof SessionAuthorizationDeniedError ||
+        error instanceof SessionAuthorizationUnavailableError
+      )
+        return false;
       throw error;
     }
   }
@@ -1080,6 +1095,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         placementInstanceId,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
+        screenControlAllowed: enrollment.allowScreenControl === true,
       });
     }
     const runWithChannelA =
@@ -1121,6 +1137,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
 
         const resolved = await handle.routingSession.prime();
+        let screenControlAllowed = false;
         if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
           const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
           if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
@@ -1135,6 +1152,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             throw new ComputerSessionStateError("Connected Machine is unavailable");
           }
           assertConnectedMachineComputerAccess(enrollment, operation);
+          screenControlAllowed = enrollment.allowScreenControl === true;
         }
         if (expectedPlacement?.kind === "connected_machine") {
           if (
@@ -1160,6 +1178,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             placementInstanceId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
+            screenControlAllowed,
           });
         }
         if (resolved.sandboxId === null) {
@@ -1191,6 +1210,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
+            screenControlAllowed,
           });
         }
         throw new BrowserControlUnsupportedError(
