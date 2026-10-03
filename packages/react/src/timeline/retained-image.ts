@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import type { ToolRendererProps } from "./registry";
 type RetainedImageState =
@@ -7,23 +7,17 @@ type RetainedImageState =
   | { kind: "unavailable"; label: string }
   | { kind: "error"; message: string };
 
-/** Shared browser preview allowlist; other published files remain downloads. */
-export function isRetainedImageContentType(contentType: string): boolean {
-  return [
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-    "image/avif",
-    "image/svg+xml",
-  ].includes(contentType);
-}
+export { isRetainedImageContentType } from "./presented-image";
 
 export function useRetainedImageObjectUrl(
   artifact: RetainedArtifactReference,
   load: ToolRendererProps["loadRetainedArtifact"],
-): RetainedImageState {
+): RetainedImageState & { retry: () => void } {
   const [state, setState] = useState<RetainedImageState>({ kind: "loading" });
+  const [retrievalAttempt, setRetrievalAttempt] = useState(0);
+  // Retry only the immutable retained artifact; never issue a new capture or
+  // rewrite the tool receipt/model history to repair a human preview.
+  const retry = useCallback(() => setRetrievalAttempt((attempt) => attempt + 1), []);
   // Function outputs are commonly serialized JSON. Parsing them creates a new
   // object on every render, so depend on the immutable wire value rather than
   // object identity; otherwise the loader can refetch after its own setState.
@@ -79,8 +73,8 @@ export function useRetainedImageObjectUrl(
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [stableArtifact, load]);
-  return state;
+  }, [stableArtifact, load, retrievalAttempt]);
+  return { ...state, retry };
 }
 
 function retainedArtifactValue(artifact: RetainedArtifactReference): string {

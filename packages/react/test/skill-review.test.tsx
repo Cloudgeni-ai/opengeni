@@ -161,7 +161,8 @@ test("late preview from the previous account cannot authorize Save for a new loa
   );
   await act(async () => settle(skill));
   expect(mounted.container.querySelector("pre")).toBeNull();
-  expect(mounted.container.textContent).toContain("Access revoked");
+  expect(mounted.container.textContent).toContain("The request could not be completed.");
+  expect(mounted.container.textContent).not.toContain("Access revoked");
   await chooseAndSubmit("save");
   expect(responses).toEqual([]);
 });

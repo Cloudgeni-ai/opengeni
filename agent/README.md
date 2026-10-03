@@ -27,6 +27,7 @@ never `git clone`s a repo onto the machine.
 | `opengeni-agent-proto`    | Generated wire-protocol types (Rust side of the codegen).                                                                    |
 | `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | show | call` client; multi-deployment dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer.                                                            |
+| `opengeni-agent-files-ffi` | Safe descriptor-based macOS ACL inspection for transactional writes; no desktop dependencies. |
 | `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |
 | `opengeni-relay`          | The stateless stream-relay edge image.                                                                                       |
@@ -55,6 +56,14 @@ It does not inspect, edit, or authorize access to a document.
 
 The agent reaches a user's machine via one trusted line and keeps itself current.
 
+Managed Linux units use `KillMode=mixed`: SIGTERM reaches only the supervisor,
+which sends browserd its cooperative SIGINT. Scoped sidecars drain concurrently
+with a 60-second grace, covering browserd's 30-second close and exact owned-process
+cleanup; systemd retains a 90-second outer stop bound and final cgroup containment.
+Only byte-identical previously generated units migrate automatically; custom
+units and drop-ins remain operator-owned. These bounds do not preserve unsaved
+pages or guarantee graceful completion for a permanently stuck controller.
+
 - **Install scripts** — [`install/install.sh`](install/install.sh) (strict POSIX
   `sh`, Linux + macOS) and [`install/install.ps1`](install/install.ps1) (Windows).
   Each detects os/arch, resolves the matching GitHub-Release asset, downloads it,
@@ -66,6 +75,12 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
+  Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
+  authenticates its archive against a SHA-256 pinned in the script before execution,
+  then verifies the agent with the existing signing key. No verifier is installed
+  on the host. `OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL` may point to a mirror of those
+  exact archives; it cannot override their checksum pins.
   [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
@@ -80,6 +95,12 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   installation as a health gate, and automatically rolls back on failure. A
   tampered or non-booting artifact is always rejected. Capabilities that depend on
   service topology remain unadvertised until that reconciliation succeeds.
+- **Managed update drain** — routed work reserves its place before task spawning,
+  so an unpolled RPC cannot escape the idle check. An unfinished transactional
+  upload defers the update with retryable `update_busy_uploads`; its exact
+  connection, operation, and epoch may continue or cancel. Uploads retain their
+  existing reconnect behavior and have no invented expiry. Completion, failure,
+  cancellation, or removal of the owning link releases the upload reservation.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
@@ -201,3 +222,16 @@ wire equality. A green run proves the two generated stacks agree. The fixtures
 [`prost`]: https://docs.rs/prost
 [`protox`]: https://docs.rs/protox
 [`ts-proto`]: https://github.com/stephenh/ts-proto
+
+The optional slow-close acceptance fixture uses only synthetic profiles and a
+locally installed `chromium`. In an isolated Linux test environment, from `agent/`:
+
+```sh
+OPENGENI_TEST_SLOW_BROWSERD="$PWD/tests/fixtures/slow-browserd-chromium.sh" \
+  cargo test -p opengeni-agent shutdown_waits_for_slow_owned_cleanup_across_scopes_concurrently
+```
+
+It delays each of two sidecars' cleanup by 12 seconds, closes its own Chromium
+child, and reopens the same profile before confirming completion. This exercises
+native manager timing with real browsers; it is not a full browserd or live
+systemd integration test.

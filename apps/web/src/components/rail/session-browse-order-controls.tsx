@@ -2,6 +2,7 @@ import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "@/lib/sessions-g
 import type { SessionBrowseStatus } from "@/lib/session-browse-preferences";
 import {
   DropdownMenuCheckboxItem,
+  DropdownMenuMeta,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -24,6 +25,7 @@ const SORTS: Record<SessionBrowseSortBy, string> = {
 };
 const STATUSES: Record<SessionBrowseStatus, string> = {
   active: "Active",
+  "needs-you": "Needs you",
   archived: "Archived",
   all: "All",
 };
@@ -32,18 +34,21 @@ function ViewSubmenu<T extends string>({
   label,
   value,
   choices,
+  counts,
   onChange,
 }: {
   label: string;
   value: T;
   choices: Record<T, string>;
+  /** A quiet number beside a choice, shown only when positive. */
+  counts?: Partial<Record<T, number>>;
   onChange: (value: T) => void;
 }) {
   return (
     <DropdownMenuSub>
-      <DropdownMenuSubTrigger className="pointer-coarse:min-h-11 [&>svg]:ml-0">
+      <DropdownMenuSubTrigger className="[&>svg]:ml-0">
         {label}
-        <span className="ml-auto mr-1 text-xs text-fg-subtle">{choices[value]}</span>
+        <DropdownMenuMeta>{choices[value]}</DropdownMenuMeta>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent className="w-44">
         <DropdownMenuRadioGroup
@@ -52,8 +57,13 @@ function ViewSubmenu<T extends string>({
           onValueChange={(next) => onChange(next as T)}
         >
           {(Object.keys(choices) as T[]).map((choice) => (
-            <DropdownMenuRadioItem key={choice} value={choice} className="pointer-coarse:min-h-11">
+            <DropdownMenuRadioItem key={choice} value={choice}>
               {choices[choice]}
+              {counts?.[choice] ? (
+                <DropdownMenuMeta aria-label={`${counts[choice]} waiting`}>
+                  {counts[choice]}
+                </DropdownMenuMeta>
+              ) : null}
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
@@ -69,6 +79,7 @@ export function SessionBrowseOrderControls({
   onSortByChange,
   status,
   onStatusChange,
+  needsYouCount = 0,
   showEmptyGroups,
   onShowEmptyGroupsChange,
 }: {
@@ -78,12 +89,20 @@ export function SessionBrowseOrderControls({
   onSortByChange: (value: SessionBrowseSortBy) => void;
   status: SessionBrowseStatus;
   onStatusChange: (value: SessionBrowseStatus) => void;
+  /** Authorized active workstreams waiting on the person, counted beside "Needs you". */
+  needsYouCount?: number;
   showEmptyGroups: boolean;
   onShowEmptyGroupsChange: (value: boolean) => void;
 }) {
   return (
     <>
-      <ViewSubmenu label="Status" value={status} choices={STATUSES} onChange={onStatusChange} />
+      <ViewSubmenu
+        label="Status"
+        value={status}
+        choices={STATUSES}
+        counts={{ "needs-you": needsYouCount }}
+        onChange={onStatusChange}
+      />
       <DropdownMenuSeparator />
       <ViewSubmenu label="Group by" value={groupBy} choices={GROUPS} onChange={onGroupByChange} />
       <ViewSubmenu label="Sort by" value={sortBy} choices={SORTS} onChange={onSortByChange} />
@@ -91,7 +110,6 @@ export function SessionBrowseOrderControls({
       <DropdownMenuCheckboxItem
         checked={showEmptyGroups}
         disabled={groupBy === "none"}
-        className="pointer-coarse:min-h-11"
         onCheckedChange={(checked) => onShowEmptyGroupsChange(checked === true)}
       >
         Show empty groups

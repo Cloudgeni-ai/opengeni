@@ -41,6 +41,18 @@ externalSecret:
 
 networkPolicy:
   enabled: true
+  # When NetworkPolicy is enforced, only the bundled collector and these
+  # selectors reach the API's internal metrics port (api.metricsPort), and only
+  # these selectors reach the relay's (relay.metricsPort). Set them when a
+  # Prometheus outside the release scrapes the API or relay (ServiceMonitor or
+  # scrape annotations), or its target goes down.
+  # monitoring:
+  #   namespaceSelector:
+  #     matchLabels:
+  #       kubernetes.io/metadata.name: monitoring
+  #   podSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: prometheus
 
 postgres:
   enabled: false
@@ -96,9 +108,6 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
-          pathType: Exact
-          service: api
-        - path: /metrics
           pathType: Exact
           service: api
 

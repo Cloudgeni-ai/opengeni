@@ -40,6 +40,7 @@ import {
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
+  AnthropicProviderRejection,
   CompactionNeededError,
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
@@ -110,6 +111,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  PROVIDER_RATE_LIMIT_BACKOFF_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
   sessionTitleCodexRequestContext,
@@ -846,6 +848,10 @@ describe("turn exact-content boundaries", () => {
       "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
       streamCompletionAuthority,
     );
+    const drainedWaitReceipts = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -869,14 +875,19 @@ describe("turn exact-content boundaries", () => {
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
     expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
-    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(drainedWaitReceipts).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(drainedWaitReceipts);
     expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
     expect(source).toContain(
       "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
     );
-    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
+    // Receipt acceptance exempts a handoff but never asserts a yielded final.
+    expect(source).toContain(
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
+    );
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
+    expect(sealedWaitAdmission).toBeGreaterThan(interruptionPath);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
@@ -1525,7 +1536,11 @@ describe("model usage source key (re-dispatch charge stability)", () => {
       leaseLostMessage: "lease lost",
     });
 
-    expect(result).toEqual({ status: "duplicate", sourceKey: expectedSourceKey });
+    expect(result).toEqual({
+      status: "duplicate",
+      sourceKey: expectedSourceKey,
+      usageReported: true,
+    });
   });
 });
 
@@ -2326,7 +2341,7 @@ describe("production model-response usage callback authority", () => {
     }
   });
 
-  test("claims compaction usage before retry side effects and defers restart authority to durable usage", async () => {
+  test("claims compaction usage after billing and defers restart authority to durable usage", async () => {
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();
     const factRows: Array<Record<string, unknown>> = [];
@@ -2418,7 +2433,11 @@ describe("production model-response usage callback authority", () => {
         sourceKey: usage.responseId,
         authoritative: true,
       });
-      expect(await process()).toEqual({ status: "duplicate", sourceKey: usage.responseId });
+      expect(await process()).toEqual({
+        status: "duplicate",
+        sourceKey: usage.responseId,
+        usageReported: true,
+      });
       expect(state.usageCount).toBe(1);
       expect(leaseRenewals).toBe(1);
       expect(billingRows.size).toBe(1);
@@ -3216,6 +3235,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+    // A committed post-loss recovery decision rematerializes without waiting
+    // for the first tool call, still only for managed on-demand turns.
+    const recovering = { ...base, hasRepositoryResources: false, automaticRecoveryPending: true };
+    expect(shouldPrefetchManagedSandbox(recovering)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, groupBoxBackend: "selfhosted" })).toBe(
+      false,
+    );
   });
 
   test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
@@ -3564,7 +3592,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(1);
   });
 
-  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+  // resumeBoxForTurn owns the single proven fresh-box replacement internally
+  // (see sandbox-resume.test.ts). A readiness timeout that reaches the
+  // provisioner is terminal for the turn and must not start another establish.
+  test("a terminal command-readiness timeout is never re-provisioned by the turn", async () => {
     let establishes = 0;
     let failures = 0;
     const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {
@@ -5571,6 +5602,42 @@ describe("transient provider error classifier", () => {
     });
   });
 
+  test("Claude model suspension retains authored guidance and never retries or rotates credentials", () => {
+    const error = new AnthropicProviderRejection(
+      "anthropic_model_access_suspended",
+      403,
+      "req_synthetic_suspended",
+      "2031-04-05T06:07:08.000Z",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "anthropic_model_access_suspended",
+      retryable: false,
+      requestId: "req_synthetic_suspended",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(error.message).toContain("2031-04-05 06:07:08 UTC");
+  });
+
+  test("Claude HTTP-200 refusal uses the shared policy-refusal UI without automatic replay", () => {
+    const error = new AnthropicProviderRejection(
+      "content_policy_violation",
+      200,
+      "req_synthetic_refusal",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "provider_safety_refusal",
+      retryable: false,
+      requestId: "req_synthetic_refusal",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
+  });
+
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
     for (const status of [500, 502, 503, 504, 529]) {
       const err = Object.assign(new Error("Service failure"), { status });
@@ -6016,6 +6083,21 @@ describe("transient provider error classifier", () => {
         retryAfterMs: 12_000,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
+    // A one-second retry-after on a per-minute limit still waits out the window.
+    expect(
+      [1, 2, 3, 4, 5].map((attemptNumber) =>
+        providerRecoveryResult({
+          failureCode: "provider_rate_limited",
+          attemptNumber,
+          retryAfterMs: 1_000,
+        }),
+      ),
+    ).toEqual(
+      PROVIDER_RATE_LIMIT_BACKOFF_MS.map((continueDelayMs) => ({
+        status: "recovering",
+        continueDelayMs,
+      })),
+    );
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",
@@ -6649,6 +6731,21 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
+  });
+
+  test("passes stable session identity to native Claude without enabling unknown registry wires", () => {
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "claude-subscription-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "anthropic-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "anthropic-messages"))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 });
 

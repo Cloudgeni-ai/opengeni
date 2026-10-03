@@ -97,15 +97,15 @@ function picker(container: HTMLElement): HTMLSelectElement | null {
 }
 
 describe("ModelPicker", () => {
-  test("renders one optgroup per provider, in first-seen order, with model labels", async () => {
+  test("renders one optgroup per provider, in first-seen order, with clean model names", async () => {
     const container = await mount(<ModelPicker models={MODELS} onChange={() => {}} />);
     const select = picker(container)!;
     const groups = [...select.querySelectorAll("optgroup")];
     expect(groups.map((group) => group.label)).toEqual(["OpenAI", "Fireworks AI"]);
     // OpenAI group holds its two models; Fireworks group holds GLM 5.2.
     expect([...groups[0]!.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
-      "gpt-5.6-sol",
-      "gpt-5.4",
+      "GPT-5.6 Sol",
+      "GPT-5.4",
     ]);
     expect([...groups[1]!.querySelectorAll("option")].map((option) => option.value)).toEqual([
       "accounts/fireworks/models/glm-5p2",
@@ -166,7 +166,7 @@ describe("ModelPicker", () => {
         id: "gpt-5.6-sol",
         label: "Sol",
         billingClass: "opengeni_credits" as const,
-        billingClassLabel: "OpenGeni",
+        billingClassLabel: "Opengeni",
         selectable: true,
         unavailableReason: null,
         provider: "openai",
@@ -228,7 +228,7 @@ describe("ModelPicker", () => {
     );
     const select = picker(container)!;
     const groups = [...select.querySelectorAll("optgroup")];
-    expect(groups.map((group) => group.label)).toEqual(["OpenGeni", "Bring your own key"]);
+    expect(groups.map((group) => group.label)).toEqual(["Opengeni", "Bring your own key"]);
     const blocked = [...select.querySelectorAll("option")].find(
       (option) => option.value === "blocked",
     );

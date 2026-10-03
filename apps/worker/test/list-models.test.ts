@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { DEFAULT_OPENROUTER_MODEL_ID } from "@opengeni/config";
+import {
+  applyModelCatalogDocument,
+  configuredModels,
+  DEFAULT_OPENROUTER_MODEL_ID,
+  withCodexCatalogProvider,
+} from "@opengeni/config";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import {
@@ -10,6 +15,49 @@ import {
 } from "../src/activities/agent-turn/list-models";
 
 describe("list_models", () => {
+  test("live availability keeps unsupported configured models out of agent recommendations", () => {
+    const base = testSettings({ codexSubscriptionEnabled: true });
+    const capabilities = configuredModels(withCodexCatalogProvider(base))[0]!.capabilities;
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-sol"],
+      codexModels: [
+        {
+          id: "codex/gpt-6.1-sol",
+          upstreamModelId: "gpt-6.1-sol",
+          label: "GPT-6.1 Sol",
+          capabilities,
+        },
+        { id: "codex/gpt-6-sol", upstreamModelId: "gpt-6-sol", label: "GPT-6 Sol", capabilities },
+      ],
+    });
+    const observations = Object.fromEntries(
+      configuredModels(withCodexCatalogProvider(settings))
+        .filter((model) => model.id.startsWith("codex/"))
+        .map((model) => [
+          model.definitionVersion,
+          {
+            status:
+              model.id === "codex/gpt-6-sol" ? ("available" as const) : ("unavailable" as const),
+            reason: model.id === "codex/gpt-6-sol" ? null : ("not_entitled" as const),
+            checkedAt: new Date().toISOString(),
+          },
+        ]),
+    );
+    const rendered = renderListModels({
+      currentModelId: "codex/gpt-6-sol",
+      modelNotes: {},
+      selections: resolveWorkspaceModelSelection({
+        settings,
+        policy: null,
+        codexSubscriptionActive: true,
+        observations,
+      }),
+    });
+    expect(rendered).toContain("codex/gpt-6-sol | GPT-6 Sol");
+    expect(rendered).not.toContain("gpt-6.1-sol");
+  });
+
   test("renders the current model and selectable picker order with cost and optional notes", () => {
     const settings = testSettings({
       openrouterApiKey: "openrouter-test-key",

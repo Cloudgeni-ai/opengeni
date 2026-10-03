@@ -20,6 +20,8 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
+import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
@@ -33,10 +35,12 @@ import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   failSandboxRematerialization,
   failWarmingToCold,
+  beginModalProviderCreate,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolderStatus,
   markSandboxRestoreVerifying,
@@ -81,6 +85,7 @@ import {
   withoutSandboxProviderIdentity,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
+  type SandboxReadinessReplacementOutcome,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import {
@@ -150,6 +155,26 @@ export type SandboxResumeServices = {
   /** Test seam for the bounded command-readiness proof performed before an
    * attached provider box is handed to the agent. */
   verifyAttachedSandboxReadiness?: (established: EstablishedSandboxSession) => Promise<void>;
+  /** Test seam for the bounded command-readiness proof the elected spawner runs
+   * on its freshly created box before publishing the lease warm. Production
+   * uses {@link waitForSandboxExecReadiness} with the shared 60 s budget. */
+  verifySpawnedSandboxReadiness?: (
+    established: EstablishedSandboxSession,
+    identity: { sandboxGroupId: string },
+  ) => Promise<void>;
+  /** Test seam for the jittered pause before the single fresh-box readiness
+   * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
+   * It may be async so a test can observe the rolled-back lease in between. */
+  freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /**
+   * The turn attempt's fresh-box readiness replacement budget. The lazy
+   * provisioner may call resumeBoxForTurn again after a typed lease
+   * supersession, so the turn creates the budget once and shares it with every
+   * call. Absent, the call gets its own single replacement.
+   */
+  freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
+  /** Live fanout for background commands a provider loss settled. */
+  bus?: EventBus | null;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -189,6 +214,9 @@ export type ResumeBoxIds = {
    * never conflicts).
    */
   image?: string;
+  /** Deployment/workspace image pins apply only to new creates; an existing
+   * group keeps its image. Omission preserves explicit image matching (B3). */
+  imagePolicy?: "require_match" | "new_creates_only";
   /**
    * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
    * acquireLease, which stamps it on the cold-create and conflicts on a live box
@@ -318,6 +346,80 @@ export class SandboxSiblingWarmingTimeoutError extends SandboxWarmingTimeoutErro
   }
 }
 
+/**
+ * Out-of-band proof attached to one exact {@link SandboxExecReadinessTimeoutError}
+ * thrown by the elected spawner: the box that missed its readiness budget was
+ * freshly created by this caller (not an attached, resumed, or provider-continuity
+ * box), it was never published warm, the provider terminated it, and the holder
+ * was released. Only such an error may be replaced by re-entering admission.
+ */
+const disposedUnreadyFreshSandboxErrors = new WeakSet<object>();
+
+/** True only for a spawner readiness timeout whose unready fresh box is proven gone. */
+export function isReplaceableFreshSandboxReadinessTimeout(error: unknown): boolean {
+  return (
+    error instanceof SandboxExecReadinessTimeoutError &&
+    disposedUnreadyFreshSandboxErrors.has(error)
+  );
+}
+
+/**
+ * A burst of simultaneous turn starts can leave many freshly created provider
+ * boxes command-unready at once. The single replacement re-enters admission
+ * after a jittered pause so the replacement creates do not re-synchronize into
+ * the same burst. Bounded to [2 s, 10 s).
+ */
+export const FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS = 2_000;
+export const FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS = 8_000;
+
+export function freshSandboxReadinessReplacementDelayMs(
+  random: () => number = Math.random,
+): number {
+  const sample = random();
+  const unit = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1 - Number.EPSILON) : 0;
+  return (
+    FRESH_SANDBOX_READINESS_REPLACEMENT_BASE_DELAY_MS +
+    Math.floor(unit * FRESH_SANDBOX_READINESS_REPLACEMENT_JITTER_MS)
+  );
+}
+
+/** Replacements allowed per turn attempt, across every resumeBoxForTurn call. */
+export const FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT = 1;
+
+export type FreshSandboxReadinessReplacementBudget = { remaining: number };
+
+export function createFreshSandboxReadinessReplacementBudget(): FreshSandboxReadinessReplacementBudget {
+  return { remaining: FRESH_SANDBOX_READINESS_REPLACEMENTS_PER_TURN_ATTEMPT };
+}
+
+function recordFreshSandboxReadinessReplacement(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  outcome: SandboxReadinessReplacementOutcome,
+): void {
+  try {
+    metrics?.onSandboxReadinessReplacement?.({ backend, outcome });
+  } catch {
+    // Metrics emission must never affect sandbox recovery or error propagation.
+  }
+}
+
+async function sleepUnlessCancelled(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
+  if (signal?.aborted) return false;
+  if (ms <= 0) return true;
+  return await new Promise<boolean>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** The exact attached caller that won warm->cold after proving the provider
  * instance gone. It is a lease supersession (the same logical turn recovers),
  * plus the lost id needed for one durable observability event. */
@@ -350,9 +452,10 @@ export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
   identity: { sandboxGroupId?: string | null } = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await verifySandboxExecReadiness(established, timeoutMs);
+    await verifySandboxExecReadiness(established, timeoutMs, signal);
   } catch (error) {
     if (error instanceof SandboxExecReadinessError && error.code === "exec_probe_timeout") {
       throw new SandboxExecReadinessTimeoutError(established.backendId, timeoutMs, {
@@ -536,8 +639,9 @@ async function materializeSpawnEnvelopeArchive(
   }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_storage_unavailable",
       "workspace archive object storage is not configured",
+      { retryable: true },
     );
   }
   const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
@@ -1057,8 +1161,99 @@ async function persistWarmWorkspaceSnapshot(
  * holderId is the globally unique durable turn-attempt id. It must not be a
  * Temporal activity id, because activity ids are only workflow-local and
  * collide when sibling sessions share one sandbox group.
+ *
+ * A freshly created box that misses its bounded command-readiness budget is
+ * replaced at most once per turn attempt (the budget is shared by every call
+ * the turn's provisioner makes). The first establish has already terminated that exact
+ * unpublished box, rolled its exact warming epoch back to cold (advancing the
+ * epoch), and released its holder, so the replacement is an ordinary new
+ * admission: it re-runs the cold->warming CAS, persists its own provider
+ * instance before readiness, and may instead attach to a sibling that won the
+ * CAS first. Nothing model- or tool-visible ran on the discarded box, so no
+ * side effect is replayed. A second readiness timeout fails the turn exactly
+ * as before; attached/resumed boxes and unconfirmed terminations never
+ * replace.
  */
 export async function resumeBoxForTurn(
+  services: SandboxResumeServices,
+  ids: ResumeBoxIds,
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
+): Promise<ResumedTurnSandbox> {
+  try {
+    return await resumeBoxForTurnOnce(services, ids, kind, holderId);
+  } catch (error) {
+    if (!isReplaceableFreshSandboxReadinessTimeout(error)) throw error;
+    const readiness = error as SandboxExecReadinessTimeoutError;
+    const warn = (message: string, fields: Parameters<Observability["warn"]>[1]) => {
+      if (services.observability) services.observability.warn(message, fields);
+      else console.warn(message, fields);
+    };
+    const identity = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      backend: readiness.backend,
+      instanceId: readiness.instanceId,
+      readinessTimeoutMs: readiness.timeoutMs,
+    };
+    const budget =
+      services.freshSandboxReadinessReplacementBudget ??
+      createFreshSandboxReadinessReplacementBudget();
+    if (budget.remaining <= 0) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "budget_spent",
+      );
+      warn(
+        "sandbox command-readiness timed out on a fresh box; this turn attempt already used its replacement",
+        identity,
+      );
+      throw error;
+    }
+    budget.remaining -= 1;
+    const delayMs = await (
+      services.freshSandboxReadinessReplacementDelayMs ?? freshSandboxReadinessReplacementDelayMs
+    )();
+    warn("sandbox command-readiness timed out on a fresh box; replacing it once after jitter", {
+      ...identity,
+      replacementDelayMs: delayMs,
+    });
+    if (!(await sleepUnlessCancelled(delayMs, services.cancellationSignal))) {
+      // Cancellation owns the turn boundary; surface the original typed
+      // readiness failure rather than starting a replacement.
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "cancelled",
+      );
+      throw error;
+    }
+    try {
+      const replaced = await resumeBoxForTurnOnce(services, ids, kind, holderId);
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        "replaced",
+      );
+      return replaced;
+    } catch (replacementError) {
+      recordFreshSandboxReadinessReplacement(
+        services.sandboxMetrics,
+        readiness.backend,
+        services.cancellationSignal?.aborted
+          ? "cancelled"
+          : replacementError instanceof SandboxExecReadinessTimeoutError
+            ? "failed_again"
+            : "replacement_failed",
+      );
+      throw replacementError;
+    }
+  }
+}
+
+async function resumeBoxForTurnOnce(
   services: SandboxResumeServices,
   ids: ResumeBoxIds,
   kind: "turn",
@@ -1160,11 +1355,12 @@ export async function resumeBoxForTurn(
     },
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
-    // conflicts on a live box already running a different image. A
+    // conflicts on a live box already running a different required image. A
     // SandboxImageConflictError propagates while another holder is active; a
     // solo change requests a capture-and-drain rotation and this attempt retries
     // after the cold successor can safely stamp the new image.
     ...(ids.image ? { image: ids.image } : {}),
+    ...(ids.imagePolicy ? { imagePolicy: ids.imagePolicy } : {}),
     // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
     // + conflicts on a live box under a different rig. A SandboxRigConflictError
     // propagates while another holder is active; a solo change uses the same
@@ -1380,6 +1576,8 @@ export async function resumeBoxForTurn(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let providerCreateOperationId: string | undefined;
+    let providerCreateBindingKey: string | undefined;
     let rematerialization: {
       id: string;
       selectedRevision: string;
@@ -1391,30 +1589,53 @@ export async function resumeBoxForTurn(
       > | null;
     } | null = null;
     try {
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // An audited decision to continue a definitively lost workspace on a new
+      // EMPTY box: hydrate nothing (not even a per-session legacy archive) and
+      // resume no prior provider identity. Every group member was already told
+      // the workspace is empty; the DB accepts only this exact publication.
+      const freshWorkspaceRecoveryId = acquired.lease.freshWorkspaceRecoveryId ?? null;
+      const envelope = freshWorkspaceRecoveryId
+        ? null
+        : await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // The lease is authoritative. A legacy per-session fallback archive may
       // only be used after beginSandboxRematerialization imports its archive
       // fields under the warming-row lock and records one selected revision.
       // Select the fallback only when the lease has no archive truth at all. A
       // lease-carried unverified/invalid archive must fail closed rather than
       // silently substituting another revision.
+      // Backstop: a session already told its workspace is empty never gets a
+      // legacy per-session archive back, even if the lease marker was lost.
+      const legacyFallbackRefused =
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null &&
+        (await sessionHoldsFreshWorkspaceRecovery(db, ids.workspaceId, ids.sessionId));
       const fallbackArchiveEnvelope =
+        !freshWorkspaceRecoveryId &&
+        !legacyFallbackRefused &&
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutSandboxProviderIdentity(envelope)
           : null;
-      let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      let spawnEnvelope = freshWorkspaceRecoveryId
+        ? null
+        : legacyFallbackRefused
+          ? (acquired.lease.resumeState ?? null)
+          : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
           : acquired.lease.resumeState;
       const continuityRecovery = acquired.lease.recovery.continuity;
+      // A fresh-workspace spawn is deliberately archive-free; commitWarmingToWarm
+      // verifies the exact decision before publication.
       if (
-        (acquired.lease.recovery.archive.status === "available" &&
+        !freshWorkspaceRecoveryId &&
+        ((acquired.lease.recovery.archive.status === "available" &&
           (acquired.lease.archiveComplete ||
             acquired.lease.historicalRecoveryAuthorized === true)) ||
-        (acquired.lease.recovery.archive.status === "none" &&
-          workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
+          (acquired.lease.recovery.archive.status === "none" &&
+            workspaceArchiveFieldsFromEnvelope(archiveSource) !== null))
       ) {
         const rematerializationId = crypto.randomUUID();
         const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -1457,7 +1678,11 @@ export async function resumeBoxForTurn(
           legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
           legacyProviderBinding: null,
         };
-      } else if (acquired.lease.recovery.archive.status !== "none" && !continuityRecovery) {
+      } else if (
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status !== "none" &&
+        !continuityRecovery
+      ) {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
           expectedEpoch,
@@ -1516,6 +1741,34 @@ export async function resumeBoxForTurn(
         ...(services.logicalFallbackSettings
           ? { logicalFallbackSettings: services.logicalFallbackSettings }
           : {}),
+        onBeforeSandboxCreate: async (createSettings, intent, providerContext) => {
+          if (ids.backend !== "modal") return;
+          if (!intent || !providerContext)
+            throw new Error("Modal create requires the provider dispatch boundary");
+          throwIfReleasedOrCancelled();
+          const binding = await resolveModalCheckpointProviderBindingForSession(
+            createSettings,
+            providerContext,
+          );
+          const operationId = intent.operationId;
+          await beginModalProviderCreate(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            operationId,
+            providerBindingKey: binding.key,
+            rematerializationId: rematerialization?.id ?? null,
+            selectedRevision: rematerialization?.selectedRevision ?? null,
+            imageId: intent.imageId,
+            imageRef: createSettings.modalImageRef ?? null,
+            appId: intent.appId,
+            providerName: intent.name,
+            requestSha256: intent.requestSha256,
+          });
+          providerCreateOperationId = operationId;
+          providerCreateBindingKey = binding.key;
+        },
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           providerRenewalTarget = {
@@ -1523,7 +1776,16 @@ export async function resumeBoxForTurn(
             instanceId: created.instanceId,
           };
           providerRenewedAtMs = Date.now();
-          throwIfReleasedOrCancelled();
+          if (
+            providerCreateBindingKey &&
+            !(await modalSessionMatchesCheckpointProviderBinding(
+              settings,
+              created.session,
+              providerCreateBindingKey,
+            ))
+          ) {
+            throw new Error("Modal creation receipt crossed the fenced provider namespace");
+          }
           if (
             rematerialization &&
             (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
@@ -1574,6 +1836,7 @@ export async function resumeBoxForTurn(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             rematerializationId: rematerialization?.id ?? null,
+            ...(providerCreateOperationId ? { providerCreateOperationId } : {}),
             ...(created.providerContinuity
               ? { continuityRecovery: created.providerContinuity }
               : {}),
@@ -1656,11 +1919,22 @@ export async function resumeBoxForTurn(
       // A sandbox handle is not sufficient evidence that an asynchronous
       // provider's command router is live. Do not publish a warm lease until
       // one bounded no-op exec works.
-      // On timeout the catch below terminates the box and rolls warming -> cold,
-      // so the next turn cold-creates instead of hanging forever on first use.
-      await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-        sandboxGroupId: ids.sandboxGroupId,
-      });
+      // On timeout the catch below terminates the box and rolls warming -> cold;
+      // resumeBoxForTurn may then replace a proven-terminated fresh box once.
+      if (services.verifySpawnedSandboxReadiness) {
+        await services.verifySpawnedSandboxReadiness(established, {
+          sandboxGroupId: ids.sandboxGroupId,
+        });
+      } else {
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
+      }
       await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
@@ -1706,16 +1980,18 @@ export async function resumeBoxForTurn(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
-        ...(established.providerContinuity
-          ? { continuityRecovery: established.providerContinuity }
-          : rematerialization
-            ? {
-                rematerialization: {
-                  id: rematerialization.id,
-                  verifiedRevision: rematerialization.selectedRevision,
-                },
-              }
-            : {}),
+        ...(freshWorkspaceRecoveryId
+          ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+          : established.providerContinuity
+            ? { continuityRecovery: established.providerContinuity }
+            : rematerialization
+              ? {
+                  rematerialization: {
+                    id: rematerialization.id,
+                    verifiedRevision: rematerialization.selectedRevision,
+                  },
+                }
+              : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -1796,6 +2072,16 @@ export async function resumeBoxForTurn(
       }
       await release();
       recordSandboxWarmingTimeout(services.sandboxMetrics, error);
+      if (
+        terminated &&
+        createdEstablished &&
+        error instanceof SandboxExecReadinessTimeoutError &&
+        error.instanceId === createdEstablished.instanceId &&
+        (createdEstablished.origin === "created" || createdEstablished.origin === "restored") &&
+        !createdEstablished.providerContinuity
+      ) {
+        disposedUnreadyFreshSandboxErrors.add(error);
+      }
       throw sandboxProvisionStageError(rematerialization ? "archive_recovery" : "create", error);
     }
   }
@@ -1845,9 +2131,14 @@ export async function resumeBoxForTurn(
       if (services.verifyAttachedSandboxReadiness) {
         await services.verifyAttachedSandboxReadiness(established);
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       providerRenewalTarget = {
         backend: ids.backend,
@@ -1868,6 +2159,11 @@ export async function resumeBoxForTurn(
         expectedBackend: ids.backend,
       });
       if (marked.status === "marked") {
+        await publishDurableSessionEvents(
+          services.bus,
+          ids.workspaceId,
+          marked.backgroundCommandEvents,
+        );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,
           instanceId: live.instanceId,

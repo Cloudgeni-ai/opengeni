@@ -1,6 +1,8 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
+export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
@@ -34,6 +36,8 @@ export * from "./domain/knowledge-search";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./workflow-wake-contract";
+export * from "./user-presence";
+export * from "./product-usage-metrics";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in
@@ -47,6 +51,8 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  configureManagedUserAdmission,
+  assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,
@@ -56,6 +62,8 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./codex-model-availability";
+export * from "./default-session-model";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
@@ -96,7 +104,9 @@ export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
+export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
+export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/memory-slack-publication";
@@ -115,6 +125,7 @@ export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
+export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
@@ -126,6 +137,7 @@ export * from "./editable-artifact-live";
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
 export { withSiteSessionOrigin } from "./site-session-origin";
+export { resolveTurnSurface } from "./turn-surface";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
 

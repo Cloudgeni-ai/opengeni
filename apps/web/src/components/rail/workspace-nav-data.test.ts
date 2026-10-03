@@ -8,6 +8,7 @@ import {
 } from "./workspace-nav-data";
 
 const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
+const workspaceRouteSource = await Bun.file(`${import.meta.dir}/../../routes/workspace.tsx`).text();
 
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
@@ -46,5 +47,19 @@ describe("workspace rail destinations", () => {
         "/workspaces/$workspaceId/artifacts",
       ),
     ).toBe(true);
+  });
+
+  test("settings mode swaps the main rail for the settings rail", () => {
+    // The footer Settings entry is the way in; the management shell replaces RailShell.
+    // Workspace and organization settings share that one management shell.
+    const shell = workspaceRouteSource.slice(
+      workspaceRouteSource.indexOf("{managementLocation ? ("),
+    );
+    const management = shell.indexOf("<WorkspaceManagementShell");
+    expect(management).toBeGreaterThan(0);
+    expect(management).toBeLessThan(shell.indexOf("<RailShell>"));
+    expect(shell.slice(management, shell.indexOf("</WorkspaceManagementShell>"))).not.toContain(
+      "<RailShell>",
+    );
   });
 });

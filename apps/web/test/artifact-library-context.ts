@@ -15,6 +15,7 @@ export const fixtureActivity = {
   downloads: [] as string[],
   signedUrls: [] as string[],
   prompts: [] as string[],
+  siteHtml: [] as string[],
 };
 Object.assign(window, { artifactLibraryFixture: fixtureActivity });
 const retained: RetainedArtifactReference = {
@@ -71,7 +72,34 @@ const gallery: ArtifactCatalogItem[] = Array.from({ length: 60 }, (_, index) => 
   updatedAt: "2026-09-01T00:00:00Z",
   sourceSessionId: sessionId,
 }));
+const siteVersion = {
+  id: "88888888-8888-4888-8888-888888888888",
+  revision: 3,
+  requestedTools: [],
+};
 const client = {
+  tools: { forWorkspace: () => ({}) },
+  async getWorkspaceArtifact(_workspaceId: string, id: string) {
+    const item = items.find((candidate) => candidate.id === id && candidate.kind === "site");
+    if (!item) throw Object.assign(new Error("Site not found."), { status: 404 });
+    return {
+      artifact: {
+        id,
+        workspaceId,
+        title: item.title,
+        status: item.status,
+        currentVersion: siteVersion,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      },
+      versions: [siteVersion],
+    };
+  },
+  async getWorkspaceArtifactHtml(_workspaceId: string, id: string) {
+    fixtureActivity.siteHtml.push(id);
+    // A still must render the markup without running the script or loading the image.
+    return `<!doctype html><html><head><style>body{font:15px system-ui;margin:32px;color:#1f2328}h1{font-size:28px}.bar{height:14px;border-radius:7px;background:#2f6feb;margin:10px 0}</style></head><body><h1>Product analytics</h1><p>Weekly active teams by plan.</p><div class="bar" style="width:80%"></div><div class="bar" style="width:55%"></div><div class="bar" style="width:30%"></div><img src="https://example.com/pixel.png" alt=""><script>document.body.style.background="red";parent.postMessage("site-ran","*")</script></body></html>`;
+  },
   async listArtifactCatalog(_workspaceId: string, options: ArtifactCatalogListOptions = {}) {
     const state = new URLSearchParams(location.search).get("state");
     if (state === "loading") return new Promise<never>(() => {});
@@ -155,6 +183,17 @@ export function useAppContext() {
       fixtureActivity.prompts.push(input.text);
       return null;
     },
-    accessContext: { subjectId: "fixture" },
+    workspaces: [{ id: workspaceId, accountId: "99999999-9999-4999-8999-999999999999" }],
+    accessContext: {
+      subjectId: "fixture",
+      workspaceGrants: [
+        {
+          workspaceId,
+          accountId: "99999999-9999-4999-8999-999999999999",
+          subjectId: "fixture",
+          permissions: ["sessions:create"],
+        },
+      ],
+    },
   } as unknown as AppContextValue;
 }

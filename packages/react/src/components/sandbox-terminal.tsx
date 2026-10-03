@@ -1,5 +1,12 @@
 import type { TerminalCapability } from "@opengeni/sdk";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { cn } from "../lib/cn";
 import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
@@ -7,6 +14,7 @@ import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
+import { sandboxTerminalPeers } from "../lib/workbench-peers";
 
 /**
  * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
@@ -114,6 +122,19 @@ type XtermLike = {
   };
 };
 type FitAddonLike = { fit: () => void };
+type TerminalPeerBundle = {
+  Terminal: new (options: Record<string, unknown>) => XtermLike;
+  FitAddon: new () => FitAddonLike;
+  WebLinksAddon: new (handler: (event: MouseEvent, uri: string) => void) => unknown;
+  loadWebgl?:
+    | (() => Promise<{
+        WebglAddon: new () => {
+          dispose: () => void;
+          onContextLoss?: (callback: () => void) => void;
+        };
+      }>)
+    | undefined;
+};
 
 export type TerminalSurfaceState =
   | "loading"
@@ -237,6 +258,12 @@ export function SandboxTerminal({
   const wroteFirehoseRef = useRef(false);
   const bootActiveRef = useRef(false);
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState<Error | null>(null);
+  const peerRevision = useSyncExternalStore(
+    sandboxTerminalPeers.subscribe,
+    sandboxTerminalPeers.revision,
+    sandboxTerminalPeers.revision,
+  );
   const [inputReady, setInputReady] = useState(false);
   const [activated, setActivated] = useState(false);
 
@@ -353,12 +380,10 @@ export function SandboxTerminal({
 
     ensureXtermBaseCss();
 
+    setLoadError(null);
     void (async () => {
-      const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
-        import("@xterm/addon-web-links"),
-      ]);
+      const { Terminal, FitAddon, WebLinksAddon, loadWebgl } =
+        (await sandboxTerminalPeers.load()) as TerminalPeerBundle;
       if (disposed) return;
       await waitForSize(el);
       if (disposed) return;
@@ -397,13 +422,17 @@ export function SandboxTerminal({
       const failSet = forcedRendererFailures();
       const loaders: RendererLoaders = {
         webgl: async (onLoss) => {
+          if (disposed) throw new Error("Terminal was disposed");
           if (failSet.has("webgl")) throw new Error("forced webgl failure");
-          const { WebglAddon } = await import("@xterm/addon-webgl");
+          if (!loadWebgl) throw new Error("WebGL terminal renderer is not enabled");
+          const { WebglAddon } = await loadWebgl();
+          if (disposed) throw new Error("Terminal was disposed");
           const addon = new WebglAddon() as unknown as {
             dispose: () => void;
             onContextLoss?: (cb: () => void) => void;
           };
           addon.onContextLoss?.(() => {
+            if (disposed) return;
             try {
               addon.dispose();
             } catch {
@@ -416,6 +445,7 @@ export function SandboxTerminal({
         },
       };
       await attachRenderer("webgl", loaders, (tier) => {
+        if (disposed) return;
         rendererRef.current = tier;
         el.setAttribute("data-og-term-renderer", tier);
       });
@@ -448,7 +478,9 @@ export function SandboxTerminal({
         }
         setReady(true);
       });
-    })();
+    })().catch((cause: unknown) => {
+      if (!disposed) setLoadError(cause instanceof Error ? cause : new Error(String(cause)));
+    });
 
     return () => {
       disposed = true;
@@ -461,9 +493,9 @@ export function SandboxTerminal({
       bootActiveRef.current = false;
       setReady(false);
     };
-    // Mount ONCE — see the effects below for the runtime option syncs.
+    // Mount once per peer registration; runtime options sync without a remount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [peerRevision]);
 
   // Sync stdin/cursor at runtime (NOT a remount) when interactivity flips, so the
   // projection→PTY handoff keeps the single Terminal instance + its scrollback.
@@ -621,7 +653,12 @@ export function SandboxTerminal({
         onPointerDownCapture={handleActivate}
         onFocusCapture={handleActivate}
       >
-        {!ready && (placeholder ?? <TerminalPlaceholder />)}
+        {!ready &&
+          (loadError ? (
+            <p role="alert">{loadError.message}</p>
+          ) : (
+            (placeholder ?? <TerminalPlaceholder />)
+          ))}
         {/* Kept `visibility:hidden` until the first successful fit so the first
             VISIBLE frame is already correctly sized (no 80×24 flash — E4). */}
         <div

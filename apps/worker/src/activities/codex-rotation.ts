@@ -1,3 +1,4 @@
+import { subscriptionAccountShardIndex } from "@opengeni/config";
 // Multi-account P3 — the PURE rotation ranker. Zero I/O: no provider calls, no
 // decrypts, no db. It consumes the already-loaded, metadata-only account list
 // (cached usage columns + the exhausted_until cooldown column) and returns the
@@ -12,9 +13,25 @@ import type {
   CodexLeaseAccountStatus,
   CodexPinSource,
 } from "@opengeni/db";
-import { connectionModelAllowed } from "@opengeni/db";
+import { codexPlanExcludesModel, connectionModelAllowed } from "@opengeni/db";
 
 export type CodexRotationAccount = CodexAccountStatus | CodexLeaseAccountStatus;
+
+/**
+ * Model-scoped allocation filter: user connection policy plus proven plan
+ * entitlement. A plan exclusion applies only until it expires (one request
+ * then re-probes the account) or a different plan is observed.
+ */
+export function codexAccountServesModel(
+  account: Pick<CodexRotationAccount, "allowedModelIds" | "planType" | "planEntitlementExclusion">,
+  modelId: string,
+  now: Date,
+): boolean {
+  return (
+    connectionModelAllowed(account.allowedModelIds, modelId) &&
+    !codexPlanExcludesModel(account, modelId, now)
+  );
+}
 
 /** Capacity metadata worth an authoritative live read before/all through an idle. */
 export function codexAccountNeedsLiveCapacityRefresh(
@@ -207,17 +224,6 @@ export function isCodexAccountEligible(acct: CodexRotationAccount, now: Date): b
   return isCodexCredentialEligible(acct, now);
 }
 
-/** Deterministic 32-bit FNV-1a over a UTF-16 code-unit stream. Pure, allocation-free. */
-function fnv1a32(input: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    // 32-bit FNV prime multiply via Math.imul; `>>> 0` keeps it unsigned.
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
-
 /**
  * Session-sharded HOME account (AM-6): the deterministic account a session runs on
  * under the "sharded" strategy — `stableAccountList[ hash(sessionId) % N ]` over the
@@ -247,7 +253,7 @@ export function shardCredentialForSession(args: {
   if (eligibles.length === 0) {
     return null;
   }
-  const index = fnv1a32(sessionId) % eligibles.length;
+  const index = subscriptionAccountShardIndex(sessionId, eligibles.length);
   return eligibles[index]!.id;
 }
 
@@ -528,9 +534,12 @@ export function selectCodexCredentialLeaseForTurn<
   if (args.context.failoverExhausted) {
     return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
   }
+  // User model policy and proven plan entitlement both remove an account for
+  // this model only. A plan exclusion is provider truth, never user policy; it
+  // becomes inert when a different plan is observed or its TTL elapses.
   const accounts = args.context.modelId
     ? args.context.accounts.filter((account) =>
-        connectionModelAllowed(account.allowedModelIds, args.context.modelId!),
+        codexAccountServesModel(account, args.context.modelId!, args.now),
       )
     : args.context.accounts;
   const failedCredentialIds = new Set(args.context.failedCredentialIds ?? []);

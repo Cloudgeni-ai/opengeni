@@ -312,7 +312,7 @@ describe("QueueSurface", () => {
     expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
     expect(
       mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
-    ).toBe(failure.message);
+    ).toBe("The request could not be completed.");
     expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
     expect(loadCount()).toBe(0);
@@ -341,7 +341,7 @@ describe("QueueSurface", () => {
 
     const message = mounted.container.querySelector('[data-testid="queue-error-message"]');
     expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(message?.textContent).toBe(mutationFailure.message);
+    expect(message?.textContent).toBe("The request could not be completed.");
     expect(message?.textContent).not.toContain(queueFailure.message);
     expect(mounted.container.textContent).not.toContain("Loading inputs…");
     expect(mounted.container.querySelector('[data-testid="queue-surface-loading"]')).toBeNull();
@@ -367,6 +367,11 @@ describe("QueueSurface", () => {
     await click(mounted.container.querySelector('button[aria-expanded="false"]'));
     expect(mounted.container.querySelectorAll("[data-queue-turn-id]")).toHaveLength(2);
 
+    expect(
+      mounted.container
+        .querySelector('button[aria-label="Steer queued prompt 2"]')
+        ?.getAttribute("data-analytics-action"),
+    ).toBe("steer");
     await click(mounted.container.querySelector('button[aria-label="Steer queued prompt 2"]'));
     await click(mounted.container.querySelector('button[aria-label="Delete queued prompt 1"]'));
     expect(calls).toEqual([
@@ -568,6 +573,25 @@ describe("QueueSurface", () => {
     expect(
       mounted.container.querySelector('button[aria-label="Show full content for queued prompt 1"]'),
     ).toBeNull();
+  });
+
+  test("shows an explicit fallback for a queued turn with neither prompt nor annotations", async () => {
+    mounted = await renderLoadedQueueSurface(
+      <QueueSurface
+        queue={queue({
+          queue: [fakeTurn({ id: "11111111-1111-4111-8111-111111111120", prompt: "" })],
+        })}
+        readOnly
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-testid="queue-collapsed-preview"]')?.textContent,
+    ).toBe("Content unavailable");
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    expect(
+      mounted.container.querySelector('[data-testid="queue-prompt-unavailable-1"]')?.textContent,
+    ).toBe("Content unavailable");
   });
 
   test("withholds durable queue checkout from a local-only composer", () => {
@@ -1062,7 +1086,7 @@ describe("QueueSurface", () => {
     expect(visibleIdentities.size).toBe(100);
   });
 
-  test("keeps exact hostile queue errors in a bounded keyboard scroller beside retry", async () => {
+  test("keeps neutral queue errors in a bounded keyboard scroller beside retry", async () => {
     const queueFailure = new Error("queue failed");
     const mutationFailure = new Error(
       `Mutation failed\nhttps://queue.invalid/${"unbroken".repeat(10_000)}\nRetry safely`,
@@ -1090,7 +1114,8 @@ describe("QueueSurface", () => {
     expect(alert?.classList.contains("min-w-0")).toBe(true);
     expect(alert?.classList.contains("max-w-full")).toBe(true);
     expect(alert?.classList.contains("flex-wrap")).toBe(true);
-    expect(message?.textContent).toBe(mutationFailure.message);
+    expect(message?.textContent).toBe("The request could not be completed.");
+    expect(mutationFailure.message).toContain("https://queue.invalid/");
     expect(message?.textContent).not.toContain(queueFailure.message);
     expect(message?.getAttribute("role")).toBe("region");
     expect(message?.getAttribute("aria-label")).toBe("Queue error details");
@@ -1109,7 +1134,7 @@ describe("QueueSurface", () => {
     expect(calls).toEqual(["clear", "refresh"]);
   });
 
-  test("renders queue load errors losslessly when there is no mutation error", async () => {
+  test("keeps queue diagnostics unchanged while displaying neutral load errors", async () => {
     const failure = new Error(`Load failed: ${"Q".repeat(20_000)}`);
     mounted = await renderLoadedQueueSurface(
       <QueueSurface queue={queue({ error: failure })} composer={composer()} />,
@@ -1117,7 +1142,8 @@ describe("QueueSurface", () => {
 
     expect(
       mounted.container.querySelector('[data-testid="queue-error-message"]')?.textContent,
-    ).toBe(failure.message);
+    ).toBe("The request could not be completed.");
+    expect(failure.message).toContain("Q".repeat(20_000));
   });
 
   test("explains the durable Steer shutdown fence instead of looking stuck in an ordinary queue", async () => {

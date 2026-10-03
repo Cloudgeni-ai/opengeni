@@ -18,6 +18,7 @@ import {
 } from "@/lib/browser-account-popup";
 import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { readSignInCallbackError } from "@/lib/sign-in-feedback";
+import { signupAttribution } from "@/lib/signup-attribution";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -180,11 +181,15 @@ export function AccountAuthRoute({
               expectedGeneration: projection.generation,
             };
       socialStartAttempt.current = attempt;
+      // First-touch campaign tokens the opener carried into this window's URL;
+      // the server counts them only if the provider callback creates an account.
+      const attribution = signupAttribution();
       const result = await client.startSocialTransaction({
         operationId: attempt.operationId,
         expectedGeneration: attempt.expectedGeneration,
         transactionId: validTransactionId,
         provider,
+        ...(attribution ? { attribution } : {}),
       });
       socialStartAttempt.current = null;
       window.location.assign(result.url);
@@ -201,14 +206,14 @@ export function AccountAuthRoute({
 
   if (!validTransactionId) {
     return (
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div
           role="alert"
           className="w-full max-w-sm rounded-lg border border-status-failed/50 bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
         >
           <h1 className="text-base font-semibold">Invalid account request</h1>
           <p className="mt-2 text-sm text-fg-subtle">
-            Close this window and start the account action again from OpenGeni.
+            Close this window and start the account action again from Opengeni.
           </p>
         </div>
       </section>
@@ -217,7 +222,7 @@ export function AccountAuthRoute({
 
   if (socialOutcome === "complete") {
     return (
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div role="status" className="flex items-center gap-2 text-sm text-fg-subtle">
           <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
           Finishing sign in…
@@ -227,10 +232,10 @@ export function AccountAuthRoute({
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4 py-8">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4 py-8">
       <form
         noValidate
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6 forced-colors:border-[CanvasText]"
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
@@ -241,7 +246,7 @@ export function AccountAuthRoute({
           <p className="mt-1 text-sm text-fg-subtle">
             {invitation
               ? `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-              : "This window keeps the account you choose separate until OpenGeni verifies the sign-in."}
+              : "This window keeps the account you choose separate until Opengeni verifies the sign-in."}
           </p>
         </div>
         {!invitation ? (

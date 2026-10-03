@@ -76,6 +76,10 @@ pub enum UpdateError {
     /// The post-update health gate failed; the prior binary was rolled back.
     #[error("post-update health check failed: {0}")]
     HealthCheck(String),
+
+    /// A whole-app transaction failed and successfully restored the old bundle.
+    #[error("whole-app update rolled back: {0}")]
+    AppRolledBack(String),
 }
 
 impl UpdateError {

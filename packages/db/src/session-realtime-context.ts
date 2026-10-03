@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-import { ReasoningEffort } from "@opengeni/contracts";
+import { McpPersonalConnectionDelegations, ReasoningEffort } from "@opengeni/contracts";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -316,6 +317,11 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       },
     },
     source: "api",
+    surface: "voice",
+    personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+      mode.personalConnectionDelegations,
+    ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
   });
   const now = input.now ?? new Date();
   const [projection] = await db

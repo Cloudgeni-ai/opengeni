@@ -242,6 +242,22 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
 }
 
 describe("boundSessionDetailMcp", () => {
+  test("reports canonical model, reasoning and latency settings, not metadata guesses", () => {
+    const result = boundSessionDetailMcp(
+      sessionFixture({
+        model: "codex/gpt-6-sol",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+        metadata: { reasoningEffort: "low", latencyMode: "fast" },
+      }),
+    );
+    expect(result).toMatchObject({
+      model: "codex/gpt-6-sol",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+  });
+
   test("target-only full detail cannot restore hidden policy lineage during effective-policy assembly", () => {
     const ancestorId = "00000000-0000-4000-8000-000000000091";
     for (const mode of ["workspace_default", "explicit", "inherited"] as const) {

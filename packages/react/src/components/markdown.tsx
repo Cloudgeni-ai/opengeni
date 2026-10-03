@@ -32,6 +32,19 @@ import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
 import { searchMatchOffset, type TimelineSearchTarget } from "./timeline-search";
+import {
+  parseOpenGeniLink,
+  parseSandboxLink,
+  parseRetainedFileReference,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  type OpenGeniLinkTarget,
+} from "@opengeni/sdk";
+import {
+  chainLinkResolvers,
+  useOpenGeniLinkResolver,
+  type OpenGeniLinkResolver,
+} from "./open-geni-links";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -53,6 +66,7 @@ const InteractiveContext = createContext<{
   streaming?: boolean | undefined;
   render?: (block: MarkdownInteractiveBlock) => ReactNode;
   renderImage?: (image: { src: string; alt: string }) => ReactNode;
+  suppressImages?: boolean;
 }>({ source: "" });
 
 export type MarkdownProps = {
@@ -61,6 +75,8 @@ export type MarkdownProps = {
   /** Reveals a bounded source excerpt; closing Find retains it until explicit restore. */
   searchTarget?: TimelineSearchTarget | null | undefined;
   renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /** Show alt text without loading image URLs (e.g. in search previews). */
+  suppressImages?: boolean | undefined;
   /** Host opt-in for assistant-authored interactive fences. */
   renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
   children: string;
@@ -79,6 +95,13 @@ export type MarkdownProps = {
    * exact decoded `sandbox:` payload; `line`, when present, is 1-based.
    */
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
+  /**
+   * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable
+   * artifacts, Sites) to a host URL or action. Asked before any
+   * {@link OpenGeniLinkProvider} above this body; `artifactHref` and
+   * `onSandboxFile` still win for their own kinds.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
 };
 
 /** Exact target path plus optional 1-based line from a markdown href. */
@@ -113,7 +136,7 @@ const baseComponents: Components = {
   ),
   h4: ({ children, ...props }) => (
     <h4
-      className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0"
+      className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg first:mt-0"
       {...props}
     >
       {children}
@@ -186,7 +209,7 @@ const baseComponents: Components = {
   // the `pre` renderer), so a `code` reaching here is treated as inline.
   code: ({ children, className: _className, ...props }) => (
     <code
-      className="rounded-og-xs bg-og-surface-1 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
+      className="rounded-og-xs bg-og-surface-2 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
       {...props}
     >
       {children}
@@ -221,9 +244,28 @@ const MARKDOWN_LINK_CLASS =
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
-const MarkdownLinkContext = createContext<Pick<MarkdownProps, "onSandboxFile" | "artifactHref">>(
-  {},
-);
+const MarkdownLinkContext = createContext<
+  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink">
+>({});
+
+const UNAVAILABLE_LABEL: Record<Exclude<OpenGeniLinkTarget["kind"], "sandbox-file">, string> = {
+  file: "This file needs a workspace-aware host to open",
+  "editable-artifact": "This artifact needs a workspace-aware host to open",
+  site: "This Site needs a workspace-aware host to open",
+};
+
+function linkActionTitle(target: OpenGeniLinkTarget): string {
+  if (target.kind === "sandbox-file") {
+    return target.line !== null
+      ? `Open ${target.path} at line ${target.line}`
+      : `Open ${target.path}`;
+  }
+  return target.kind === "file"
+    ? "Open file"
+    : target.kind === "site"
+      ? "Open Site"
+      : "Open artifact";
+}
 
 const markdownComponents: Components = {
   ...baseComponents,
@@ -243,34 +285,69 @@ const markdownComponents: Components = {
     );
   },
   a: ({ children, href, ...props }) => {
-    const { onSandboxFile, artifactHref } = useContext(MarkdownLinkContext);
-    const artifactId = href ? retainedImageId(href) : null;
-    if (artifactId) {
-      const destination = artifactHref?.(artifactId);
-      return destination ? (
-        <a
-          className={MARKDOWN_LINK_CLASS}
-          href={defaultUrlTransform(destination)}
-          target="_blank"
-          rel="noreferrer noopener"
-        >
-          {children}
-        </a>
-      ) : (
-        <span title="This artifact requires a workspace-aware host">
+    const { onSandboxFile, artifactHref, resolveLink } = useContext(MarkdownLinkContext);
+    const inherited = useOpenGeniLinkResolver();
+    const target = parseOpenGeniLink(href);
+    if (target) {
+      // Explicit per-kind props keep their historical precedence.
+      if (target.kind === "file" && target.workspaceId === null && artifactHref) {
+        const destination = defaultUrlTransform(artifactHref(target.fileId));
+        if (destination) {
+          return (
+            <a
+              className={MARKDOWN_LINK_CLASS}
+              href={destination}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {children}
+            </a>
+          );
+        }
+      }
+      const resolution =
+        target.kind === "sandbox-file" && onSandboxFile
+          ? { open: () => onSandboxFile(target.path, target.line ?? undefined) }
+          : chainLinkResolvers(resolveLink, inherited)?.(target);
+      const destination = resolution?.href ? defaultUrlTransform(resolution.href) : "";
+      if (destination) {
+        return (
+          <a
+            className={MARKDOWN_LINK_CLASS}
+            href={destination}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {children}
+          </a>
+        );
+      }
+      if (resolution?.open) {
+        return (
+          <ActionMarkdownLink title={linkActionTitle(target)} onOpen={resolution.open}>
+            {children}
+          </ActionMarkdownLink>
+        );
+      }
+      if (target.kind === "sandbox-file") {
+        return (
+          <span
+            className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
+            aria-disabled="true"
+            title="This sandbox file requires a session-aware handler"
+          >
+            {children}
+          </span>
+        );
+      }
+      // Never navigate: a console path resolves against the host origin and 404s.
+      return (
+        <span title={UNAVAILABLE_LABEL[target.kind]} data-og-link-unavailable={target.kind}>
           {children} (artifact unavailable)
         </span>
       );
     }
-    const location = sandboxFileLocationFromHref(href);
-    if (location !== null) {
-      return (
-        <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
-          {children}
-        </SandboxMarkdownLink>
-      );
-    }
-    if (isSandboxHref(href) || !href) {
+    if (isReservedOpenGeniLink(href) || !href) {
       return (
         <span
           className="break-words text-og-fg-subtle"
@@ -299,45 +376,37 @@ const markdownComponents: Components = {
   },
 };
 
-function SandboxMarkdownLink({
-  location,
-  onSandboxFile,
+function ActionMarkdownLink({
+  title,
+  onOpen,
   children,
 }: {
-  location: SandboxFileLocation;
-  onSandboxFile: MarkdownProps["onSandboxFile"];
+  title: string;
+  onOpen: () => void | Promise<void>;
   children: ReactNode;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
-  const { path, line } = location;
-  if (!onSandboxFile) {
-    return (
-      <span
-        className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
-        aria-disabled="true"
-        title="This sandbox file requires a session-aware handler"
-      >
-        {children}
-      </span>
-    );
-  }
-  const idleTitle = line !== null ? `Open ${path} at line ${line}` : `Open ${path}`;
   return (
     <button
       type="button"
       className={cn(
         MARKDOWN_LINK_CLASS,
-        "inline-flex min-h-7 cursor-pointer items-center disabled:cursor-wait disabled:opacity-70 pointer-coarse:min-h-11",
+        "inline-flex min-h-7 cursor-pointer items-center aria-disabled:cursor-wait aria-disabled:opacity-70 pointer-coarse:min-h-11",
       )}
-      disabled={state === "loading"}
+      // Not `disabled`: disabling the focused control drops focus to the page,
+      // so a host viewer could not return focus to the link that opened it.
+      aria-disabled={state === "loading" || undefined}
       aria-busy={state === "loading"}
-      title={state === "error" ? "Couldn't open this file. Select to retry." : idleTitle}
+      title={state === "error" ? "Couldn't open this file. Select to retry." : title}
       onClick={() => {
+        if (state === "loading") return;
         setState("loading");
-        void Promise.resolve(onSandboxFile(path, line ?? undefined)).then(
-          () => setState("idle"),
-          () => setState("error"),
-        );
+        void Promise.resolve()
+          .then(onOpen)
+          .then(
+            () => setState("idle"),
+            () => setState("error"),
+          );
       }}
     >
       {children}
@@ -346,14 +415,8 @@ function SandboxMarkdownLink({
   );
 }
 
-const SANDBOX_SCHEME = "sandbox:";
-const LEGACY_WORKSPACE_PREFIX = "/workspace/";
-const TRAILING_LINE = /:([0-9]+)$/u;
-const TRAILING_INVALID_LINE = /:-(?:[0-9]+)$|:[0-9]+-[0-9]+$/u;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
-
 function isSandboxHref(href: string | undefined): boolean {
-  return href?.startsWith(SANDBOX_SCHEME) ?? false;
+  return openGeniLinkScheme(href) === "sandbox";
 }
 
 /**
@@ -363,27 +426,7 @@ function isSandboxHref(href: string | undefined): boolean {
  * session-aware host and its FileSystem boundary.
  */
 export function sandboxFileLocationFromHref(href: string | undefined): SandboxFileLocation | null {
-  if (!href) return null;
-  const encodedLocation = isSandboxHref(href)
-    ? href.slice(SANDBOX_SCHEME.length)
-    : href.startsWith(LEGACY_WORKSPACE_PREFIX)
-      ? href
-      : null;
-  if (!encodedLocation || encodedLocation.includes("?") || encodedLocation.includes("#")) {
-    return null;
-  }
-  if (TRAILING_INVALID_LINE.test(encodedLocation)) return null;
-  const lineMatch = TRAILING_LINE.exec(encodedLocation);
-  const encodedPath = lineMatch ? encodedLocation.slice(0, -lineMatch[0].length) : encodedLocation;
-  const line = lineMatch?.[1] ? Number(lineMatch[1]) : null;
-  if (line !== null && (!Number.isSafeInteger(line) || line < 1)) return null;
-  if (!encodedPath) return null;
-  try {
-    const path = decodeURIComponent(encodedPath);
-    return path && !CONTROL_CHARACTER.test(path) ? { path, line } : null;
-  } catch {
-    return null;
-  }
+  return parseSandboxLink(href);
 }
 
 /** Return the exact decoded path for a supported sandbox-link href. */
@@ -392,14 +435,12 @@ export function sandboxFilePathFromHref(href: string | undefined): string | null
 }
 
 export function retainedImageId(src: string): string | null {
-  return (
-    /^artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
-      .exec(src)?.[1]
-      ?.toLowerCase() ?? null
-  );
+  return parseRetainedFileReference(src);
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
-  const { renderImage } = useContext(InteractiveContext);
+  const { renderImage, suppressImages } = useContext(InteractiveContext);
+  if (suppressImages)
+    return <span data-og-image-placeholder="">{alt || "Image"} (preview unavailable)</span>;
   if (!src) return <span>{alt ?? "Image unavailable"}</span>;
   if (retainedImageId(src))
     return renderImage ? (
@@ -411,7 +452,7 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
 }
 
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  (key === "href" && node.tagName === "a" && (isSandboxHref(url) || retainedImageId(url))) ||
+  (key === "href" && node.tagName === "a" && isReservedOpenGeniLink(url)) ||
   (key === "src" && node.tagName === "img" && retainedImageId(url))
     ? url
     : defaultUrlTransform(url);
@@ -592,6 +633,8 @@ function MarkdownImpl({
   onSandboxFile,
   renderInteractiveBlock,
   renderImage,
+  resolveLink,
+  suppressImages,
 }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
@@ -682,8 +725,8 @@ function MarkdownImpl({
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
   const linkContext = useMemo(
-    () => ({ onSandboxFile, artifactHref }),
-    [onSandboxFile, artifactHref],
+    () => ({ onSandboxFile, artifactHref, resolveLink }),
+    [onSandboxFile, artifactHref, resolveLink],
   );
 
   const interactiveContext = useMemo(
@@ -692,8 +735,9 @@ function MarkdownImpl({
       streaming,
       ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
       ...(renderImage ? { renderImage } : {}),
+      ...(suppressImages ? { suppressImages } : {}),
     }),
-    [children, streaming, renderInteractiveBlock, renderImage],
+    [children, streaming, renderInteractiveBlock, renderImage, suppressImages],
   );
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so

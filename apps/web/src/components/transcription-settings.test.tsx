@@ -1,14 +1,14 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ComponentProps } from "react";
-import { createRoot } from "react-dom/client";
-import { VoiceInputPreferences } from "./transcription-settings";
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
+import type { ComponentProps } from "react";
+
+// Register the DOM before React DOM and Radix load, so the select's menu mounts.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
+const { VoiceInputPreferences } = await import("./transcription-settings");
 afterAll(() => GlobalRegistrator.unregister());
 test("provider selection and toggles preserve the other workspace preferences", async () => {
   const writes: unknown[] = [];
@@ -42,13 +42,17 @@ test("provider selection and toggles preserve the other workspace preferences", 
     await act(async () =>
       root.render(<VoiceInputPreferences workspaceId="workspace" canManage context={context} />),
     );
-    const select = container.querySelector("select")!;
-    expect(select.value).toBe("codex-subscription");
-    expect(select.textContent).toContain("SuperGrok subscription");
-    await act(async () => {
-      select.value = "supergrok-subscription";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const trigger = container.querySelector<HTMLButtonElement>('[role="combobox"]')!;
+    expect(trigger.textContent).toContain("Codex subscription");
+    await act(async () => trigger.click());
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 20)));
+    // "Automatic" names the first provider as its payer, so pick the provider's own option.
+    const supergrok = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (option) =>
+        option.textContent?.includes("SuperGrok subscription") &&
+        !option.textContent.includes("Automatic"),
+    )!;
+    await act(async () => supergrok.click());
     expect(writes[0]).toEqual({
       voiceInput: {
         enabled: true,
@@ -56,9 +60,8 @@ test("provider selection and toggles preserve the other workspace preferences", 
         fallbackEnabled: false,
       },
     });
-    await act(async () => {
-      (container.querySelector('[aria-label="Voice input"]') as HTMLButtonElement).click();
-    });
+    const voiceSwitch = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')][0]!;
+    await act(async () => voiceSwitch.click());
     expect(writes[1]).toEqual({
       voiceInput: {
         enabled: false,
@@ -71,7 +74,10 @@ test("provider selection and toggles preserve the other workspace preferences", 
         <VoiceInputPreferences workspaceId="workspace" canManage={false} context={context} />,
       ),
     );
-    expect(select.disabled).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>('[role="combobox"]')!.disabled ||
+        container.querySelector('[role="combobox"]')!.getAttribute("aria-disabled") === "true",
+    ).toBe(true);
   } finally {
     await act(async () => root.unmount());
     container.remove();

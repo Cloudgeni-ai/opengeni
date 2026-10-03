@@ -36,6 +36,7 @@ import { z } from "zod";
 
 import { createCompanyBrainOkfPackage, serializeCompanyBrainOkf } from "../company-brain-okf";
 import { projectWorkspaceState } from "../workspace-state-projection";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 const inspectorQuery = z
   .object({
@@ -235,6 +236,9 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
       "content-disposition",
       `attachment; filename="company-brain-${workspaceId}.okf.md"`,
     );
+    for (const [name, value] of Object.entries(USER_CONTENT_SECURITY_HEADERS)) {
+      context.header(name, value);
+    }
     return context.body(serializeCompanyBrainOkf(result));
   });
 

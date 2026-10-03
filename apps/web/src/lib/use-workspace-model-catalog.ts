@@ -1,13 +1,18 @@
-import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import type { DefaultModelSelection, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "@/lib/model-policy";
 
 export type WorkspaceModelCatalogState = {
   models: WorkspaceModelCatalogModel[];
   /** Real catalog projection only — never invents rows for a missing selection. */
   rows: PickerModelRow[];
+  /** Server-resolved default for new chats and scheduled tasks; null until known. */
+  defaultSelection: DefaultModelSelection | null;
+  /** What the default becomes once the organization holds OpenGeni credits. */
+  creditsSelection: DefaultModelSelection | null;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -16,6 +21,10 @@ export type WorkspaceModelCatalogState = {
 export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceModelCatalogState {
   const client = useAppContext().client;
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
+  const [defaults, setDefaults] = useState<{
+    defaultSelection: DefaultModelSelection | null;
+    creditsSelection: DefaultModelSelection | null;
+  }>({ defaultSelection: null, creditsSelection: null });
   const [loading, setLoading] = useState(Boolean(workspaceId));
   const [error, setError] = useState<string | null>(null);
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -24,6 +33,7 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
     async (requestAbort: AbortController): Promise<void> => {
       if (!workspaceId) {
         setModels([]);
+        setDefaults({ defaultSelection: null, creditsSelection: null });
         setLoading(false);
         setError(null);
         if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
@@ -36,11 +46,17 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
         });
         if (requestAbort.signal.aborted) return;
         setModels(response.models);
+        setDefaults({
+          defaultSelection: response.defaultSelection ?? null,
+          creditsSelection: response.creditsSelection ?? null,
+        });
         setError(null);
       } catch (caught) {
         if (requestAbort.signal.aborted) return;
         setModels([]);
-        setError(caught instanceof Error ? caught.message : String(caught));
+        setDefaults({ defaultSelection: null, creditsSelection: null });
+        // Shown in the model picker: what to do, never the raw API message.
+        setError(userErrorText(caught));
       } finally {
         if (!requestAbort.signal.aborted) setLoading(false);
         if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
@@ -83,6 +99,8 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
   return {
     models,
     rows,
+    defaultSelection: defaults.defaultSelection,
+    creditsSelection: defaults.creditsSelection,
     loading,
     error,
     refresh,

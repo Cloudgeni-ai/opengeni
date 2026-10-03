@@ -9,6 +9,10 @@ import {
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse,
   BrowserDomReadResponse,
   BrowserDomReadLocator,
   BrowserDomReadSelector,
@@ -20,6 +24,8 @@ import {
   InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
+  BrowserStorageMode,
+  browserSessionStorageMode,
   BrowserSessionMutationResponse,
   BrowserTarget,
   BrowserTargetListResponse,
@@ -277,6 +283,8 @@ const TOOL_PERMISSION = {
   browser_act: "sessions:control",
   browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
+  browser_downloads: "sessions:read",
+  browser_download_save: ["sessions:control", "files:upload"],
   browser_auth: "sessions:control",
   interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
@@ -288,11 +296,11 @@ const TOOL_PERMISSION = {
   computer_clipboard: "sessions:read",
   computer_act: "sessions:control",
   computer_lifecycle: "sessions:control",
-} as const satisfies Record<InteractionAttemptToolName, Permission>;
+} as const satisfies Record<InteractionAttemptToolName, Permission | readonly Permission[]>;
 
 const DiscoveryInput = z
   .object({
-    scope: z.enum(["current_session", "workspace"]).optional(),
+    scope: z.enum(["current_session", "workspace", "attached_browsers"]).optional(),
     includeTerminal: z.boolean().optional(),
     includeArchivedIdentities: z.boolean().optional(),
     includeDisconnectedDevices: z.boolean().optional(),
@@ -319,6 +327,7 @@ const BrowserOpenInput = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: z.string().url().max(16_384).optional(),
     headless: z.boolean().optional(),
+    storageMode: BrowserStorageMode.optional(),
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
@@ -327,6 +336,23 @@ const BrowserOpenInput = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (
+      !value.browserSessionId &&
+      value.storageMode === "ephemeral_context" &&
+      (value.headless !== true ||
+        value.identityId ||
+        value.baseRevisionId ||
+        value.networkRouteId ||
+        value.linkedComputerSessionId ||
+        (value.placement && value.placement.kind !== "sandbox_group"))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["storageMode"],
+        message:
+          "ephemeral_context requires headless sandbox Chromium without identity, revision, route or Computer",
+      });
+    }
     if (value.browserSessionId && value.mode === "new") {
       context.addIssue({
         code: "custom",
@@ -598,6 +624,26 @@ const ComputerLifecycleInput = z
 
 const TERMINAL_LIFECYCLES = new Set(["ended", "failed"]);
 
+const BrowserDownloadsInput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    operation: z.enum(["list", "get"]).default("list"),
+    downloadId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.operation === "get") !== (value.downloadId !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["downloadId"],
+        message: "downloadId is required only for operation=get",
+      });
+    }
+  });
+const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: true })
+  .extend({ browserSessionId: z.string().uuid(), downloadId: z.string().uuid() })
+  .strict();
+
 export type CreateInteractionAttemptToolsInput = {
   transport: InteractionTransport;
   workspaceId: string;
@@ -661,6 +707,7 @@ export function createInteractionAttemptToolDefinitions(
           raw,
           context,
           options.execute,
+          options.readOnly,
         ),
     });
   };
@@ -670,13 +717,31 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List BrowserSessions and ComputerSessions associated with this agent session. The default current_session scope is deliberately small and omits workspace-wide identities, attached-browser bridges, and Chrome profiles. For requests about the user's existing/current/personal Chrome, reusable identities, or peer/child resources, call this with scope=workspace before browser_open and select an actual attachedBrowsers device; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
+      "Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
       const scope = value.scope ?? "current_session";
+      if (scope === "attached_browsers") {
+        const attached = await input.transport.listAttachedBrowsers(input.workspaceId, {
+          includeDisconnected: value.includeDisconnectedDevices ?? false,
+        });
+        // Each inventory uses the same workspace interaction revision. Empty arrays
+        // here are outside this scope, not evidence that the workspace has no sessions.
+        return {
+          browserRevision: attached.revision,
+          computerRevision: attached.revision,
+          identityRevision: attached.revision,
+          attachedBrowserRevision: attached.revision,
+          browsers: [],
+          computers: [],
+          identities: [],
+          attachedBrowserBridges: attached.bridges,
+          attachedBrowsers: attached.devices,
+        };
+      }
       const [browsers, computers, identities, attached] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId),
         input.transport.listComputerSessions(input.workspaceId),
@@ -716,7 +781,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -730,7 +795,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
     input: BrowserTabsInput,
     output: BrowserTargetListResponse,
     readOnly: false,
@@ -1001,6 +1066,82 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   add({
+    name: "browser_downloads",
+    codemodePath: ["interaction", "browser", "downloads"],
+    title: "Inspect browser downloads",
+    description:
+      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. Attached browsers and Lightpanda do not expose managed downloads.",
+    input: BrowserDownloadsInput,
+    output: z.union([BrowserDownloadListResponse, BrowserDownload]),
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) => {
+      if (value.operation === "get") {
+        const download = await input.transport.getBrowserDownload(
+          input.workspaceId,
+          value.browserSessionId,
+          value.downloadId!,
+        );
+        if (
+          download.browserSessionId !== value.browserSessionId ||
+          download.id !== value.downloadId
+        ) {
+          throw new Error("Browser download belongs to another resource");
+        }
+        return download;
+      }
+      const response = await input.transport.listBrowserDownloads(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      if (
+        response.browserSessionId !== value.browserSessionId ||
+        response.downloads.some(
+          (download) =>
+            download.browserSessionId !== value.browserSessionId ||
+            download.controllerGeneration !== response.controllerGeneration,
+        )
+      ) {
+        throw new Error("Browser downloads belong to another session binding");
+      }
+      return response;
+    },
+  });
+
+  add({
+    name: "browser_download_save",
+    codemodePath: ["interaction", "browser", "downloadSave"],
+    title: "Save browser download to workspace",
+    description:
+      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+    input: BrowserDownloadSaveInput,
+    output: BrowserDownloadSaveResponse,
+    readOnly: false,
+    idempotent: true,
+    execute: async (value, context) => {
+      const response = await input.transport.saveBrowserDownload(
+        input.workspaceId,
+        value.browserSessionId,
+        value.downloadId,
+        {
+          operationId: context.operationId,
+          destinationPath: value.destinationPath,
+          overwrite: value.overwrite,
+        },
+      );
+      if (
+        response.download.browserSessionId !== value.browserSessionId ||
+        response.download.id !== value.downloadId ||
+        response.operationId !== context.operationId ||
+        response.destinationPath !== value.destinationPath
+      ) {
+        throw new Error("Browser download save returned another operation binding");
+      }
+      return response;
+    },
+  });
+
+  add({
     name: "browser_auth",
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
@@ -1232,7 +1373,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "lifecycle"],
     title: "Change browser lifecycle",
     description:
-      "Suspend, resume, or end one BrowserSession through its durable exactly-once lifecycle journal. Suspending preserves a private working checkpoint; it does not publish a reusable identity version.",
+      "Suspend, resume, or end one BrowserSession through its durable exactly-once lifecycle journal. End a disposable managed session you created when its task is finished and no continuation or human handoff needs it; this releases the browser process and removes its private profile. Suspend instead when supported if later work needs the private working checkpoint; suspension does not publish a reusable identity version. Do not end another actor's, shared, or attached user browser merely because your turn is finished or it appears idle.",
     input: BrowserLifecycleInput,
     output: BrowserSessionMutationResponse,
     readOnly: false,
@@ -1439,6 +1580,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
   scope: AttemptToolScope;
   subjectId?: string;
   subjectLabel?: string;
+  credentialRestriction?: "developer_setup";
   fetch?: typeof globalThis.fetch;
 };
 
@@ -1479,6 +1621,9 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
         turnId: input.scope.turnId,
         attemptId: input.scope.attemptId,
         executionGeneration: input.scope.executionGeneration,
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);
@@ -1507,6 +1652,8 @@ async function openBrowser(
   let created = false;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
+    if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
+      throw new Error("existing BrowserSession storage mode does not match request");
   } else {
     const listed =
       value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
@@ -1522,6 +1669,7 @@ async function openBrowser(
             listed.sessions.filter(
               (candidate) =>
                 candidate.headless === requestedHeadless &&
+                browserSessionStorageMode(candidate) === (value.storageMode ?? "private_profile") &&
                 compatibleInteractionPlacement(candidate.placement, value.placement) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
@@ -1544,6 +1692,7 @@ async function openBrowser(
           ...(value.name ? { name: value.name } : {}),
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
           headless: requestedHeadless,
+          ...(value.storageMode ? { storageMode: value.storageMode } : {}),
           ...(value.placement ? { placement: value.placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
@@ -1873,6 +2022,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     value: z.output<TInput>,
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
+  readOnly: boolean,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -1894,11 +2044,18 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
     }
-    if (error instanceof OpenGeniApiError && !error.outcomeUnknown && error.status < 500) {
+    // A failed read is still a useful tool result. Preserve the API's public
+    // explanation; mutations and uncertain outcomes retain their failure path.
+    if (
+      error instanceof OpenGeniApiError &&
+      !error.outcomeUnknown &&
+      (error.status < 500 || readOnly)
+    ) {
       return interactionErrorResult(
         error.code ?? `http_${error.status}`,
         boundedErrorMessage(error.message),
         error.retryable,
+        error.correlationId,
       );
     }
     throw error;
@@ -1923,8 +2080,9 @@ function interactionErrorResult(
   code: string,
   message: string,
   retryable = false,
+  requestId?: string,
 ): AttemptToolResultValue {
-  const error = { code, message, retryable };
+  const error = { code, message, retryable, ...(requestId ? { requestId } : {}) };
   return {
     isError: true,
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
@@ -1936,8 +2094,16 @@ function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
 }
 
-function hasToolPermission(permissions: readonly Permission[], required: Permission): boolean {
-  return permissions.includes(required) || permissions.includes("workspace:admin");
+function hasToolPermission(
+  permissions: readonly Permission[],
+  required: Permission | readonly Permission[],
+): boolean {
+  return (
+    permissions.includes("workspace:admin") ||
+    (typeof required === "string" ? [required] : required).every((permission) =>
+      permissions.includes(permission),
+    )
+  );
 }
 
 function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {

@@ -13,21 +13,28 @@ export function RollingActivity({
   items,
   toolRegistry = defaultToolRegistry,
   previousItem,
+  showCount = true,
 }: {
   items: ActivityItem[];
   /** The standalone item visible immediately before this reel mounted. */
   previousItem?: ActivityItem | undefined;
   toolRegistry?: ToolRegistry;
+  /** Show "+N earlier"; off when an enclosing status line already counts steps. */
+  showCount?: boolean;
 }) {
   const reduced = useReducedMotion();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  const work = items.filter((item) => item.kind !== "startup-phase");
+  // Progress notes have their own line in the status row; the reel shows steps.
+  const work = items.filter(
+    (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
+  );
   const active = work.filter((item) =>
     item.kind === "reasoning" ? item.streaming : "status" in item && item.status === "running",
   );
   // Advance with the event order; finishing a parallel tool must not replay an older one.
-  const item = !mounted && previousItem ? previousItem : work.at(-1);
+  const item =
+    !mounted && previousItem && previousItem.kind !== "agent-message" ? previousItem : work.at(-1);
   if (!item) return null;
   const earlierCount = Math.max(
     0,
@@ -77,7 +84,7 @@ export function RollingActivity({
           </motion.span>
         </AnimatePresence>
       </span>
-      {earlierCount > 0 ? (
+      {showCount && earlierCount > 0 ? (
         <span className="og-rolling-count">{`+${earlierCount} earlier`}</span>
       ) : null}
     </span>

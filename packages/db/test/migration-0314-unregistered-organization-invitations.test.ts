@@ -317,6 +317,8 @@ describe("migration 0314 unregistered organization invitations", () => {
         (grant) =>
           grant.workspaceId === initialWorkspaceId &&
           grant.permissions.includes("sessions:create") &&
+          grant.permissions.includes("connections:read") &&
+          !grant.permissions.includes("connections:write") &&
           !grant.permissions.includes("workspace:admin"),
       ),
     ).toBe(true);

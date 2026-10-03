@@ -1,14 +1,15 @@
-//! Relay metrics — the operator-visible aggregates.
+//! Relay metrics: the operator-visible aggregates.
 //!
 //! Per-channel byte counters, buffer high-water marks, rate-limit drops, and
 //! reconnect counts, aggregated process-wide. These are operator Prometheus-style
-//! aggregates (the per-MACHINE metrics are a DIFFERENT plane — the agent samples
+//! aggregates (the per-MACHINE metrics are a DIFFERENT plane; the agent samples
 //! those onto the control-plane heartbeat). The relay never holds
 //! per-channel history; counters are monotonic process totals plus a small live
 //! gauge.
 //!
-//! Exposed at `GET /metrics` as a tiny line-oriented text body the
-//! `deployment-preflight` probe + a Prometheus scrape can read.
+//! Exposed at `GET /metrics` in the Prometheus text exposition format for a
+//! Prometheus scrape: on the dedicated `OPENGENI_RELAY_METRICS_BIND` listener
+//! when that is set, otherwise on the wss listener.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;

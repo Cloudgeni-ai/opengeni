@@ -193,23 +193,26 @@ async function listOwnConnectionMetadata(
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<ConnectionMetadata[]> {
   const accounts = await listOwnedConnectionAccounts(db, input);
-  const connections = await Promise.all(
-    accounts.map(async (account) => {
-      const connection = await getConnectionMetadata(
-        db,
-        account.originWorkspaceId,
-        account.connectionId,
-        input.subjectId,
-      );
-      return connection?.accountId === input.accountId &&
-        connection.subjectId === input.subjectId &&
-        connection.authorityId != null &&
-        connection.status === "active"
-        ? connection
-        : null;
-    }),
-  );
-  return connections.filter((connection) => connection !== null);
+  const connections: ConnectionMetadata[] = [];
+  // The caller may supply a transaction handle (for example, credential
+  // rotation). Each metadata read opens a nested RLS savepoint on that same
+  // connection, so these reads must not overlap.
+  for (const account of accounts) {
+    const connection = await getConnectionMetadata(
+      db,
+      account.originWorkspaceId,
+      account.connectionId,
+      input.subjectId,
+    );
+    if (
+      connection?.accountId === input.accountId &&
+      connection.subjectId === input.subjectId &&
+      connection.authorityId != null &&
+      connection.status === "active"
+    )
+      connections.push(connection);
+  }
+  return connections;
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
@@ -404,6 +407,11 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
     if (!selection && eligible.length > 1) {
       throw new ConnectionAccountSelectionError(
         `Choose an account for ${server.id}: multiple connected accounts match.`,
+        {
+          version: 1,
+          reason: "ambiguous_account",
+          accounts: [{ serverId: server.id, connectionId: null, reason: "selection_unavailable" }],
+        },
       );
     }
     const connection = selection
@@ -423,6 +431,14 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
   if (selections.size > 0) {
     throw new ConnectionAccountSelectionError(
       `Selected account is unavailable for: ${[...selections.keys()].join(", ")}`,
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [...selections.values()].map((selection) => ({
+          ...selection,
+          reason: "selection_unavailable",
+        })),
+      },
     );
   }
   return delegations;
@@ -812,6 +828,7 @@ export async function freezeConnectionAccounts(
     if (input.authoritySelections?.length) {
       throw new ConnectionAccountSelectionError(
         "Agent-created work inherits the exact parent accounts",
+        { version: 1, reason: "parent_accounts_required", accounts: [] },
       );
     }
     const inherited = await getSessionTurnMcpAccountBindings(
@@ -828,30 +845,17 @@ export async function freezeConnectionAccounts(
     }
     mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
   } else {
-    const personal =
-      input.source.kind === "subject" &&
-      (await ownerStillBelongsToWorkspace(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.source.subjectId,
-      }))
-        ? await listOwnConnectionMetadata(input.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.source.subjectId,
-          })
-        : [];
-    const workspace = await listConnectionsMetadata(input.db, input.workspaceId, null);
     mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
       servers,
       selectionsFrozen: input.authoritySelectionsFrozen === true,
-      connections: [
-        ...workspace.filter((connection) => connection.subjectId === null),
-        ...personal,
-      ],
+      connections: await visibleMcpAccountConnections(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        source: input.source,
+      }),
       ...(input.authoritySelections
         ? {
             selections: input.authoritySelections.filter((selection) =>
@@ -884,6 +888,66 @@ export async function freezeConnectionAccounts(
       ...special,
     ],
   };
+}
+
+/** Shared workspace accounts plus the entitled owner's own active accounts. */
+export async function visibleMcpAccountConnections(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+  },
+): Promise<ConnectionMetadata[]> {
+  const personal =
+    input.source.kind === "subject" &&
+    (await ownerStillBelongsToWorkspace(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.source.subjectId,
+    }))
+      ? await listOwnConnectionMetadata(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.source.subjectId,
+        })
+      : [];
+  const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
+  return [...workspace.filter((connection) => connection.subjectId === null), ...personal];
+}
+
+/**
+ * Every account a fresh, selection-free freeze would bind for the generic MCP
+ * routes among `tools`: exactly what `freezeConnectionAccounts` binds when no
+ * account is chosen. The same entitlement contract applies: `source` is a
+ * grant-derived or frozen-owner subject, never a looked-up one. Read-only; it
+ * never persists a delegation.
+ */
+export async function availableMcpAccountBindings(input: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  settings: Pick<Settings, "mcpServers">;
+  tools: ToolRef[];
+  source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+  /** Result of `visibleMcpAccountConnections` for the same source, when already read. */
+  connections?: ConnectionMetadata[];
+}): Promise<McpConnectionAccountBinding[]> {
+  const selectedIds = new Set(input.tools.map((tool) => tool.id));
+  const servers = input.settings.mcpServers.filter(
+    (server) =>
+      selectedIds.has(server.id) &&
+      server.connectionRef &&
+      server.connectionRef.authoritySource !== "host",
+  );
+  if (servers.length === 0) return [];
+  return mcpAccountBindingsFromVisibleConnections({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
+    servers,
+    connections: input.connections ?? (await visibleMcpAccountConnections(input.db, input)),
+  });
 }
 
 export async function freezePersonalConnectionDelegations(input: {
@@ -962,6 +1026,7 @@ export async function freezePersonalConnectionDelegations(input: {
     if ((input.authoritySelections?.length ?? 0) > 0) {
       throw new ConnectionAccountSelectionError(
         "Selected connection account requires live owner workspace access",
+        { version: 1, reason: "owner_access_unavailable", accounts: [] },
       );
     }
     if (personalGitHubResources.length > 0) {
@@ -990,6 +1055,14 @@ export async function freezePersonalConnectionDelegations(input: {
       `connection authority selection did not match a selected MCP server: ${unsupportedSelections
         .map((selection) => selection.serverId)
         .join(", ")}`,
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: unsupportedSelections.map((selection) => ({
+          ...selection,
+          reason: "connector_unavailable",
+        })),
+      },
     );
   }
   const mcp = personalConnectionDelegationsFromVisibleConnections({

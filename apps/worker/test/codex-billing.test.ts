@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -11,9 +11,22 @@ import {
   usageReservationReleaseEvents,
 } from "../src/activities/agent-turn";
 
+import {
+  reserveModelCallBudget,
+  BudgetExhaustedError,
+  ensureRunAllowedBetweenModelCalls,
+} from "../src/activities/agent-turn/admission";
+
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 const db = {} as Database;
+let allowanceSpy: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+beforeEach(() => {
+  allowanceSpy = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+});
+afterEach(() => {
+  allowanceSpy.mockRestore();
+});
 
 // Live config that reproduces the bug: stripe + managed, 0 OpenGeni credits.
 function billedSettings() {
@@ -188,6 +201,7 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
         undefined,
         true,
         true,
+        null,
         {
           sessionId: "sess-1",
           turnId: "turn-1",
@@ -228,13 +242,24 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
     });
     try {
       await expect(
-        ensureRunAllowed(costCapSettings(), db, ACCOUNT, WORKSPACE, false, undefined, true, true, {
-          sessionId: "sess-1",
-          turnId: "turn-1",
-          turnAttemptId: "attempt-1",
-          ordinal: 1,
-          costMicros: 250,
-        }),
+        ensureRunAllowed(
+          costCapSettings(),
+          db,
+          ACCOUNT,
+          WORKSPACE,
+          false,
+          undefined,
+          true,
+          true,
+          null,
+          {
+            sessionId: "sess-1",
+            turnId: "turn-1",
+            turnAttemptId: "attempt-1",
+            ordinal: 1,
+            costMicros: 250,
+          },
+        ),
       ).rejects.toThrow("monthly cost limit reached (1000)");
     } finally {
       balanceSpy.mockRestore();
@@ -257,6 +282,7 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
         undefined,
         /* chargesOpenGeniCredits */ false,
         /* countsTowardTokenCap */ false,
+        null,
         {
           sessionId: "sess-1",
           turnId: "turn-1",
@@ -279,7 +305,7 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
 });
 
 describe("pre-inference reservation estimates (BILL-02)", () => {
-  test("bound = actual provider-bound prompt + reserved output headroom, clamped to the window", () => {
+  test("reserves the full selected input window plus separately bounded output", () => {
     const settings = testSettings({
       contextWindowTokens: 1_000,
       contextReservedOutputTokens: 200,
@@ -296,21 +322,20 @@ describe("pre-inference reservation estimates (BILL-02)", () => {
       promptTokens: 500,
       contextWindowTokens: settings.contextWindowTokens,
     });
-    expect(bound.tokens).toBe(700);
-    // 500 input micros + 400 output micros.
-    expect(bound.costMicros).toBe(900);
-    // A call that would overflow the window is clamped to it — the provider's
-    // own context ceiling enforces the tail of the output cap.
+    expect(bound.tokens).toBe(1_200);
+    // The input bound covers1000 tokens, plus200 output tokens.
+    expect(bound.costMicros).toBe(1_400);
+    // Changing a heuristic estimate cannot shrink the financial bound.
     const clamped = modelCallReservationQuantities({
       settings,
       model: "scripted-model",
       promptTokens: 950,
       contextWindowTokens: settings.contextWindowTokens,
     });
-    expect(clamped.tokens).toBe(1_000);
+    expect(clamped.tokens).toBe(1_200);
   });
 
-  test("unpriceable models skip the cost hold and stay check-only", () => {
+  test("unpriceable models return no cost bound for the caller to reject under a cost cap", () => {
     const settings = testSettings({
       contextWindowTokens: 1_000,
       contextReservedOutputTokens: 200,
@@ -321,7 +346,7 @@ describe("pre-inference reservation estimates (BILL-02)", () => {
       promptTokens: 500,
       contextWindowTokens: settings.contextWindowTokens,
     });
-    expect(bound.tokens).toBe(700);
+    expect(bound.tokens).toBe(1_200);
     expect(bound.costMicros).toBeNull();
   });
 
@@ -810,5 +835,95 @@ describe("worker recordModelUsageAndDebitCredits — atomic batch (BILL-03)", ()
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("durable provider admission regressions", () => {
+  const admission = () => ({
+    settings: testSettings({
+      billingMode: "none",
+      usageLimitsMode: "static",
+      contextWindowTokens: 1000,
+      contextReservedOutputTokens: 200,
+      staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 10000 }),
+    }),
+    db,
+    accountId: ACCOUNT,
+    workspaceId: WORKSPACE,
+    sessionId: "session",
+    turnId: "turn",
+    turnAttemptId: "attempt",
+    model: "scripted-model",
+    isExternallyBilledTurn: false,
+    chargesOpenGeniCredits: false,
+    countsTowardTokenCap: true,
+    initiatingHumanSubjectId: "accepted-human",
+  });
+  test("activity retries get fresh durable identities even for the same attempt", async () => {
+    const reserve = spyOn(opengeniDb, "tryReserveUsageBudget").mockImplementation(
+      async (_db, input) => ({
+        allowed: true as const,
+        holds: input.reservations.map((r) => ({
+          idempotencyKey: r.idempotencyKey,
+          quantity: r.quantity,
+        })),
+      }),
+    );
+    try {
+      const first = await reserveModelCallBudget(admission());
+      const retry = await reserveModelCallBudget(admission());
+      expect(first.callId).not.toBe(retry.callId);
+      expect(reserve.mock.calls[0]![1].reservations[0]!.idempotencyKey).not.toBe(
+        reserve.mock.calls[1]![1].reservations[0]!.idempotencyKey,
+      );
+      expect(first.maxOutputTokens).toBe(200);
+    } finally {
+      reserve.mockRestore();
+    }
+  });
+  test("database failures remain retryable failures instead of budget completion", async () => {
+    const fault = new Error("database connection reset");
+    const reserve = spyOn(opengeniDb, "tryReserveUsageBudget").mockRejectedValue(fault);
+    const usage = spyOn(opengeniDb, "sumUsageQuantity").mockRejectedValue(fault);
+    try {
+      await expect(reserveModelCallBudget(admission())).rejects.toBe(fault);
+      const input = admission();
+      await expect(ensureRunAllowedBetweenModelCalls(input)).rejects.toBe(fault);
+      expect(fault).not.toBeInstanceOf(BudgetExhaustedError);
+    } finally {
+      reserve.mockRestore();
+      usage.mockRestore();
+    }
+  });
+  test("a granted call does not reject itself at a repeated transport authority check", async () => {
+    const usage = spyOn(opengeniDb, "sumUsageQuantity").mockImplementation(async () => {
+      throw new Error("own reservation must not be admitted a second time");
+    });
+    try {
+      await ensureRunAllowedBetweenModelCalls({ ...admission(), monthlyBudgetReserved: true });
+    } finally {
+      usage.mockRestore();
+    }
+  });
+  test("cache-write rates are included in the conservative cost bound", () => {
+    const settings = testSettings({
+      contextWindowTokens: 1000,
+      contextReservedOutputTokens: 200,
+      modelPricingJson: JSON.stringify({
+        "scripted-model": {
+          inputMicrosPerMillionTokens: 1000000,
+          cacheWriteMicrosPerMillionTokens: 2000000,
+          outputMicrosPerMillionTokens: 3000000,
+          marginBps: 1000,
+        },
+      }),
+    });
+    const bound = modelCallReservationQuantities({
+      settings,
+      model: "scripted-model",
+      promptTokens: 1,
+      contextWindowTokens: 1000,
+    });
+    expect(bound.costMicros).toBe(2860);
   });
 });

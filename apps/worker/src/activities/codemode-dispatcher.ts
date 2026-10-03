@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { bindMcpTelemetry, measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogStaleError,
@@ -17,6 +18,7 @@ import {
   type CodemodeOperation,
   type SessionEvent,
   type ToolDisplayMetadata,
+  type ToolFamily,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
@@ -72,6 +74,8 @@ export class CodemodeAttemptDispatcher {
     private readonly maxConcurrentCalls = CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
     timings: CodemodeDispatcherTimings = {},
     private readonly toolDisplayMetadata?: (modelName: string) => ToolDisplayMetadata | undefined,
+    /** Content-free analytics family for a catalog entry; event enrichment only. */
+    private readonly toolFamily?: (entry: AttemptToolCatalogEntry) => ToolFamily | null,
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -109,7 +113,7 @@ export class CodemodeAttemptDispatcher {
       throw new Error("Codemode dispatcher cannot be restarted");
     this.unsubscribe = this.bus.subscribeRequests(
       codemodeDispatchSubject(this.scope.workspaceId, this.scope.attemptId),
-      async (payload) => {
+      bindMcpTelemetry(async (payload) => {
         const request = decodeCodemodeDispatchRequest(payload);
         if (request.catalogDigest !== this.environment.catalog.digest || this.closing) {
           return encodeCodemodeDispatchAck({
@@ -138,11 +142,11 @@ export class CodemodeAttemptDispatcher {
             claimLeaseMs: this.claimLeaseMs,
           });
           if (claim.status === "claimed") {
-            const execution = this.execute(claim.operation, claim.claimId, claim.reclaimed).finally(
-              () => {
-                this.inFlight.delete(request.operationId);
-              },
-            );
+            const execution = withMcpCallIdentity(claim.operation.operationId, () =>
+              this.execute(claim.operation, claim.claimId, claim.reclaimed),
+            ).finally(() => {
+              this.inFlight.delete(request.operationId);
+            });
             this.inFlight.set(request.operationId, execution);
             return encodeCodemodeDispatchAck({
               version: 1,
@@ -171,7 +175,7 @@ export class CodemodeAttemptDispatcher {
         } finally {
           this.pendingClaims -= 1;
         }
-      },
+      }),
     );
   }
 
@@ -250,7 +254,11 @@ export class CodemodeAttemptDispatcher {
       );
       return;
     }
-    if (!(await this.ensureToolCallCreated(operation, entry, reclaimed))) {
+    if (
+      !(await measureMcpPhase("event_persistence", () =>
+        this.ensureToolCallCreated(operation, entry, reclaimed),
+      ))
+    ) {
       await this.failBeforeExecution(
         operation.operationId,
         claimId,
@@ -353,6 +361,7 @@ export class CodemodeAttemptDispatcher {
         return true;
       }
     }
+    const toolFamily = this.toolFamily?.(entry) ?? null;
     try {
       const created = await appendAndPublishTurnEventsFenced(
         this.db,
@@ -380,6 +389,7 @@ export class CodemodeAttemptDispatcher {
               arguments: operation.arguments,
               origin: "codemode",
               subjectId: operation.caller.subjectId,
+              ...(toolFamily ? { toolFamily } : {}),
               raw: {
                 type: "codemode_call",
                 serverId: operation.identity.serverId,
@@ -417,6 +427,18 @@ export class CodemodeAttemptDispatcher {
           errorCode: string;
           errorMessage: string;
         },
+  ): Promise<void> {
+    return withMcpCallIdentity(operation.operationId, () =>
+      measureMcpPhase("event_persistence", () =>
+        this.persistSettlement(operation, claimId, settlement),
+      ),
+    );
+  }
+
+  private async persistSettlement(
+    operation: CodemodeOperation,
+    claimId: string,
+    settlement: Parameters<CodemodeAttemptDispatcher["settleWithOutput"]>[2],
   ): Promise<void> {
     const result = await settleCodemodeOperationWithOutput(this.db, {
       ...this.scope,

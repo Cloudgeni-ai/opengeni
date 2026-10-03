@@ -61,7 +61,7 @@ import {
   initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
-  observabilityEventLogger,
+  observabilityEventBusOptions,
   startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
@@ -85,6 +85,7 @@ import {
   combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
   type WorkerServiceLifecycle,
   type WorkerRunTarget,
 } from "./worker-service-lifecycle";
@@ -99,6 +100,10 @@ import {
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
 } from "./sandbox-reaper-contract";
+import {
+  BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+  browserDeadlineCheckpointTaskQueue,
+} from "./browser-deadline-checkpoint-contract";
 
 export {
   createHostExportPump,
@@ -108,6 +113,9 @@ export {
   type HostEventExport,
   type HostEventExportBatch,
   type HostEventSink,
+  type HostLifecycleFactExport,
+  type HostLifecycleFactExportBatch,
+  type HostLifecycleFactSink,
   type HostUsageExport,
   type HostUsageExportBatch,
   type HostUsageSink,
@@ -264,10 +272,20 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         },
       ),
     async (connection) => {
+      let turnWorker: Worker | undefined;
+      let cleanupDrainRequested = false;
       const activityDependencies = {
         ...options.activityDependencies,
         settings,
         observability,
+        requestWorkerDrain:
+          options.activityDependencies?.requestWorkerDrain ??
+          (() => {
+            if (cleanupDrainRequested) return;
+            if (!turnWorker) throw new Error("turn worker lifecycle is not initialized");
+            turnWorker.shutdown();
+            cleanupDrainRequested = true;
+          }),
       };
       const activities =
         options.activities ??
@@ -316,32 +334,44 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           : turnConcurrency!.options),
       });
       if (options.role !== "control") {
+        turnWorker = worker;
         turnConcurrency?.admission?.finalizeStartupBaseline();
         return { worker, connection };
       }
 
+      const ownedWorkers = [worker];
       try {
-        const sandboxLifecycleWorker = await Worker.create({
-          ...sharedWorkerOptions,
-          ...workflowDefinition,
-          taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
-          reuseV8Context: true,
-          workflowThreadPoolSize: 1,
-          maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
-          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-          maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-        });
+        // The new activity type has its own queue. Retain the V1 poller so old
+        // drain histories finish; old binaries never receive checkpoint work.
+        for (const taskQueue of [
+          sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
+        ]) {
+          const lifecycleWorker = await Worker.create({
+            ...sharedWorkerOptions,
+            ...workflowDefinition,
+            taskQueue,
+            reuseV8Context: true,
+            workflowThreadPoolSize: 1,
+            maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
+            maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+            maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+          });
+          ownedWorkers.push(lifecycleWorker);
+        }
         return {
-          worker: combineWorkerRunTargets([worker, sandboxLifecycleWorker]),
+          worker: combineWorkerRunTargets(ownedWorkers),
           connection,
         };
       } catch (error) {
-        try {
-          worker.shutdown();
-        } catch {
-          // Preserve the lifecycle worker construction failure. The base poller
-          // still received its shutdown request; a secondary synchronous
-          // shutdown error must not replace the startup root cause.
+        for (const ownedWorker of ownedWorkers) {
+          try {
+            ownedWorker.shutdown();
+          } catch {
+            // Preserve the lifecycle worker construction failure. The base poller
+            // still received its shutdown request; a secondary synchronous
+            // shutdown error must not replace the startup root cause.
+          }
         }
         throw error;
       }
@@ -475,20 +505,33 @@ export async function createWorkerWorkflowSignaler(
       return normalizeTurnTaskQueueStats(response.stats);
     },
     startSandboxReaperWorkflow: async () => {
-      try {
-        await temporal.workflow.start("sandboxReaperWorkflowV2", {
+      // Same backend tick, no additional schedule. A bounded independent
+      // inventory cannot prevent the existing per-box drain from starting.
+      const starts = await Promise.allSettled([
+        temporal.workflow.start("sandboxReaperWorkflowV2", {
           taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
           workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
-        });
-        return "started";
-      } catch (error) {
-        if (error instanceof WorkflowExecutionAlreadyStartedError) {
-          return "already_running";
+        }),
+        temporal.workflow.start("browserDeadlineCheckpointSweepWorkflow", {
+          taskQueue: browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
+          workflowId: BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [],
+        }),
+      ]);
+      for (const start of starts) {
+        if (
+          start.status === "rejected" &&
+          !(start.reason instanceof WorkflowExecutionAlreadyStartedError)
+        ) {
+          // The other start already settled. Retry the router without losing
+          // ordinary draining or silently omitting the checkpoint sweep.
+          throw start.reason;
         }
-        throw error;
       }
+      return starts[0].status === "fulfilled" ? "started" : "already_running";
     },
     startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
       try {
@@ -791,6 +834,9 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
 
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
+  /** Host-owned final containment after a stalled cleanup has drained peers.
+   * The standalone process exits; embedded hosts own their termination policy. */
+  terminateWorker?: () => void;
   /**
    * Exact catalog posture required by the standalone runtime. Embedded hosts
    * may omit this when they own an equivalent database isolation contract.
@@ -847,6 +893,7 @@ export async function createOpenGeniWorkerService(
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   let lifecycle: WorkerServiceLifecycle | undefined;
+  let cleanupContainment: ReturnType<typeof createWorkerCleanupContainment> | undefined;
   let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
@@ -926,6 +973,10 @@ export async function createOpenGeniWorkerService(
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
+        requestWorkerDrain: () => {
+          if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
+          cleanupContainment.request();
+        },
       },
     });
 
@@ -987,18 +1038,15 @@ export async function createOpenGeniWorkerService(
     }
 
     if (options.http !== false) {
-      const databaseReady = dbReadyCheck(
-        options.http?.readinessDb ?? options.activityDependencies.db,
-        options.databasePosture,
-      );
+      const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
+      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
+        await resolveCatalogSettings(readinessDb, settings);
+      });
       httpServer = startWorkerHttpServer({
         settings,
         observability,
         checks: {
-          db: async () => {
-            await databaseReady();
-            await resolveCatalogSettings(options.activityDependencies.db, settings);
-          },
+          db: databaseReady,
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
@@ -1025,9 +1073,21 @@ export async function createOpenGeniWorkerService(
     throw new Error("OpenGeni worker service initialization did not complete");
   }
 
+  cleanupContainment = createWorkerCleanupContainment({
+    drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
+    ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
+    observability,
+  });
+  const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
     role: options.role,
-    worker: activeWorkerBundle.worker,
+    worker: {
+      shutdown: () => activeWorkerBundle.worker.shutdown(),
+      run: async () => {
+        await activeWorkerBundle.worker.run();
+        activeCleanupContainment.finished();
+      },
+    },
     observability,
     closeOwnedResources: async () => {
       memoryPressureGuard?.close();
@@ -1173,12 +1233,13 @@ export async function startWorker() {
           controlPlaneAuth
             ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
             : undefined,
-          { logger: observabilityEventLogger(observability) },
+          observabilityEventBusOptions(observability),
         ),
       { ...retryOptions, onRetry },
     );
     await runOpenGeniWorker({
       role,
+      terminateWorker: () => process.exit(1),
       settings,
       databasePosture,
       http: { readinessDb: readinessDbClient.db },

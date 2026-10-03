@@ -1,6 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
+import {
+  CLIENT_ERROR_REVISION_PATTERN,
+  CLIENT_ERROR_ROUTE_PATTERN,
+} from "@opengeni/contracts/client-error-report";
 import {
   currentTraceContext,
   validTraceContext,
@@ -10,6 +14,15 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export { createLogThrottle, type LogThrottle } from "./log-throttle";
+export {
+  withMcpTelemetry,
+  withMcpCallIdentity,
+  bindMcpTelemetry,
+  beginMcpPhase,
+  measureMcpPhase,
+  MCP_EXECUTION_PHASES,
+} from "./mcp-timing";
 export {
   currentTraceContext,
   withTraceContext,
@@ -22,6 +35,9 @@ export {
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
+
+// Opaque runtime identity shared by observers in this process, never a metric label.
+const serviceInstanceId = randomUUID();
 
 export type ObservabilitySettings = {
   serviceName: string;
@@ -48,6 +64,7 @@ export type ObservabilityOptions = {
 export type Span = {
   traceId: string;
   spanId: string;
+  traceFlags?: string;
   addLink?: (context: TraceContext) => void;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
@@ -320,14 +337,21 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "estimatedDeliveredTokens",
   "fullEvidenceAvailable",
   "retainedOutputKind",
+  "suppressedCount",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
+  ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  // Web error beacon: a route PATTERN of lowercase literal and `$param`
+  // segments (never a concrete path or id) and the bundle revision token, in
+  // the exact wire grammar the API route admits.
+  ["clientRoute", CLIENT_ERROR_ROUTE_PATTERN],
+  ["clientRevision", CLIENT_ERROR_REVISION_PATTERN],
 ]);
 
 const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
@@ -394,12 +418,15 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "GitCredentialRenewalOperationError",
   "HostExportOperationError",
   "HttpOperationError",
+  "KnowledgeIndexOperationError",
   "McpLifecycleError",
   "McpOperationError",
   "MemoryEmbeddingOperationError",
   "MemorySearchOperationError",
   "NatsAuthCalloutOperationError",
   "OAuthOperationError",
+  "ParallelSessionTitleGenerationError",
+  "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
   "RunStateCompatibilityError",
   "SandboxChannelAOperationError",
@@ -443,6 +470,11 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "idempotency_conflict",
   "incompatible_exposed_ports",
   "internal_error",
+  "knowledge_index_defer_failed",
+  "knowledge_index_embedding_failed",
+  "knowledge_index_failed",
+  "knowledge_index_persistence_failed",
+  "knowledge_index_usage_limit_reached",
   "limit_exceeded",
   "mcp_close_failed",
   "mcp_connect_failed",
@@ -458,6 +490,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "not_found",
   "oauth_operation_failed",
   "otlp_export_failed",
+  "parallel_session_title_generation_failed",
+  "parallel_session_title_persistence_failed",
   "payment_required",
   "provider_verification_failed",
   "sandbox_channel_a_cancelled",
@@ -481,6 +515,12 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "worker_shutdown_request_failed",
   "workspace_control_live_publish_failed",
 ]);
+
+// Human-readable descriptions come only from the reviewed protocol vocabulary,
+// never an exception message or a caller-supplied errorMessage attribute.
+const PUBLIC_TELEMETRY_ERROR_MESSAGES = new Map(
+  [...PUBLIC_TELEMETRY_ERROR_CODES].map((code) => [code, code.replaceAll("_", " ")]),
+);
 
 const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
   "api",
@@ -573,8 +613,10 @@ export class Observability {
     this.exporter = options.exporter ?? defaultExporter;
     this.resourceAttributes = {
       "service.name": settings.serviceName,
+      "service.instance.id": serviceInstanceId,
       "deployment.environment": settings.environment,
       "opengeni.component": options.component,
+      "opengeni.deployment_revision": settings.deploymentRevision || undefined,
     };
     this.registry.setDefaultLabels({
       service: settings.serviceName,
@@ -737,6 +779,7 @@ export class Observability {
     return {
       traceId,
       spanId,
+      ...(parent?.traceFlags === undefined ? {} : { traceFlags: parent.traceFlags }),
       addLink: (context) => {
         const valid = validTraceContext(context);
         if (
@@ -1060,7 +1103,7 @@ export class Observability {
                   traceId: span.traceId,
                   spanId: span.spanId,
                   ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
-                  links: span.links,
+                  links: span.links.map(({ traceId, spanId }) => ({ traceId, spanId })),
                   name: span.name,
                   kind: 1,
                   startTimeUnixNano: millisToNanos(span.startMs),
@@ -1508,6 +1551,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
+      ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1630,6 +1674,13 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   return projected;
 }
 
+function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "KnowledgeIndexOperationError") return {};
+  const sqlState = attributes.sqlState;
+  // A SQLSTATE is a five-character protocol code, never message or SQL text.
+  return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};
+}
+
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
   const errorClass = attributes.errorClass;
   const errorCode = attributes.errorCode;
@@ -1642,7 +1693,7 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
         ? errorClass
         : "OperationError",
     ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
-      ? { errorCode }
+      ? { errorCode, errorMessage: PUBLIC_TELEMETRY_ERROR_MESSAGES.get(errorCode)! }
       : {}),
     ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
       ? { status }
@@ -1768,6 +1819,8 @@ async function defaultExporter(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1_000),
   });
+  // Export decisions use only the status; release the ignored response body.
+  await response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);
   }

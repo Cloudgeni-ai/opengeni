@@ -2,7 +2,7 @@
 // runtime-only jobs skip this test; native verification must run it explicitly.
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
@@ -17,14 +17,23 @@ if (process.env.OPENGENI_REQUIRE_NATIVE_FS_TEST === "1" && !existsSync(binary)) 
   throw new Error("Required native transactional filesystem fixture was not built");
 }
 
-for (const interrupt of [false, true]) {
-  test.skipIf(process.platform !== "linux" || !existsSync(binary))(
-    `TypeScript editor drives native transactional files: ${interrupt ? "abandoned staging cleanup" : "verified large replacement"}`,
+for (const [lines, interrupt, raw = false] of [
+  [1, false],
+  [1, true],
+  [1000, false],
+  [1000, true],
+  [80000, false],
+  [80000, true],
+  [80000, false, true],
+  [80000, true, true],
+] as const) {
+  test.skipIf(!["linux", "darwin"].includes(process.platform) || !existsSync(binary))(
+    `TypeScript ${raw ? "raw writer" : "editor"} drives native transactional files (${lines} lines): ${interrupt ? "abandoned staging cleanup" : "verified replacement"}`,
     async () => {
       setSelfhostedApplyDiff(applyDiff);
-      const root = await mkdtemp(join(tmpdir(), "opengeni-native-write-"));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "opengeni-native-write-")));
       const path = join(root, "synthetic.md");
-      const original = "# Before\n" + "Synthetic cross-language fixture.\n".repeat(80000);
+      const original = "# Before\n" + "Synthetic cross-language fixture.\n".repeat(lines);
       await writeFile(path, original, { mode: 0o640 });
       const child = Bun.spawn([binary, root, "1"], {
         stdin: "pipe",
@@ -58,7 +67,7 @@ for (const interrupt of [false, true]) {
           const request = ControlRequest.decode(payload);
           if (request.op?.$case === "writeChunk") {
             chunks += 1;
-            if (interrupt && chunks === 2)
+            if (interrupt && chunks === (lines === 80000 ? 2 : 1))
               throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
           }
           if (request.op?.$case === "opCancel") cancels += 1;
@@ -87,10 +96,16 @@ for (const interrupt of [false, true]) {
           controlRpc: rpc,
           transactionalFsWriteSupported: true,
         });
-        const update = session.createEditor().updateFile({
-          path,
-          diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
-        });
+        const update = raw
+          ? session.writeFile({
+              path,
+              content: original.replace("# Before", "# After"),
+              createParents: false,
+            })
+          : session.createEditor().updateFile({
+              path,
+              diff: "@@\n-# Before\n+# After\n Synthetic cross-language fixture.",
+            });
         if (interrupt) await expect(update).rejects.toThrow("Cancellation");
         else await update;
         expect(await readFile(path, "utf8")).toBe(
@@ -101,7 +116,7 @@ for (const interrupt of [false, true]) {
         // conceal a caller-side failure to cancel an abandoned live transfer.
         expect(await readdir(root)).toEqual(["synthetic.md"]);
         expect(cancels).toBe(interrupt ? 1 : 0);
-        expect(chunks).toBeGreaterThan(1);
+        expect(chunks).toBeGreaterThanOrEqual(lines === 80000 ? 2 : 1);
         child.stdin.end();
         expect(await child.exited).toBe(0);
         expect(await stderr).toBe("");

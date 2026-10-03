@@ -4,7 +4,7 @@
 
 Fetch https://docs.opengeni.ai/llms.txt for the official documentation index.
 Read the relevant Markdown page, especially
-https://docs.opengeni.ai/guides/integrate-your-product.md,
+https://docs.opengeni.ai/embed-manually.md,
 https://docs.opengeni.ai/reference/authentication.md, and
 https://docs.opengeni.ai/reference/sdk.md. An ordinary customer integration
 does not require a clone of OpenGeni. If a fetch fails, report that source as
@@ -13,6 +13,125 @@ unavailable and inspect the installed package and authorized service instead.
 Documentation availability and deployed feature availability are separate.
 Inspect the installed package exports/types and `/v1/config/client`; verify the
 chosen contract against the intended deployment before implementing against it.
+
+To check the full Skill's HTTP Markdown export from a repository checkout:
+
+```bash
+bun scripts/check-client-skill-markdown-export.ts
+```
+
+This opt-in network check compares the published `.md` sections with the local
+generated mirror, including nested code fences. A mismatch may mean the docs
+deployment has not caught up with the checkout; it is not evidence of a runtime
+API failure. Use `--url` and `--expected` to check another deployment or a known
+matching mirror. The local HTTP regression tests run without external services.
+
+## CommonJS hosts
+
+The SDK is ESM-only. In an existing `.cjs` host, use dynamic `import()` inside
+an async initializer; `require("@opengeni/sdk")` is not the supported loading
+path. Do not change the entire project's module type just to load the SDK.
+
+```js
+// opengeni.cjs — callers await createOpenGeniClient().
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep this initialization on the server: never send the API key to a browser.
+
+## Host errors and uncertain actions
+
+Keep SDK/provider details server-only and return friendly host-branded notices,
+not `error.message`, `error.body`, raw stack traces or a provider's product name.
+Put configuration, dynamic SDK import/initialization, identity resolution,
+upstream calls and local persistence inside the route's error boundary, not only
+the final call. Log a redacted diagnostic with a non-secret correlation ID on
+the server; never copy an SDK exception into the browser response or DOM.
+
+Branding applies to UI-owned labels/notices, not legitimate source quotations,
+code, or user/assistant transcript content; do not rewrite those to hide names.
+Check the installed SDK/React error-copy API separately: changing conversation
+labels does not itself prove that upstream error messages are remapped. Host
+safe-copy guidance alone does not change a package's default error behavior.
+
+When the installed SDK exports `formatErrorMessage(error, fallback?)` (root,
+`@opengeni/sdk/core` or `@opengeni/sdk/browser`), use it for custom-renderer error
+copy. Typed errors produce neutral, state-aware messages and retain a bounded
+support reference; an unrecognized error uses the supplied safe fallback, never
+its raw message. The original error's `message`, `body`, `details`, `status`,
+`code`, `retryable` and `outcomeUnknown` remain diagnostic/policy facts.
+
+The matching React package provides `OpenGeniProvider.formatError`, with the
+exported type `ErrorMessageFormatter`:
+`(error: unknown, defaultMessage: string) => string | undefined`. It receives
+the original error and neutral default before presentation. Return a host
+message; `undefined` or an empty string keeps the default. A minimal branding
+callback preserves its state guidance and support reference. A throwing callback
+or invalid runtime return also keeps the neutral default; presentation must not
+interrupt delivery-state settlement:
+
+```js
+function formatAssistantError(_error, defaultMessage) {
+  return `ACME Assistant: ${defaultMessage}`;
+}
+```
+
+Pass this as `formatError={formatAssistantError}` on the existing provider.
+Keep heading/placeholder/label overrides separately. Explicit host-authored
+error props and custom command messages still need safe host copy; this callback
+does not rewrite user, assistant, tool, worker or Skill content. Do not regex
+scrub those strings or stringify diagnostic errors. Check the installed exports
+and provider prop before using these additive APIs; source guidance is not
+proof that an older installed/published package contains them.
+
+Formatting is presentation only: it does not authorize calls, change retry
+policy or reconcile an uncertain mutation. Preserve the default's sign-in,
+permission, setup/allowance, HTTPS-upload and unknown-outcome instructions when
+customizing it. Keep diagnostics server-only/redacted and retain only the
+bounded support reference needed by the UI, not a raw diagnostic body.
+
+For an approval route, distinguish an accepted decision from completed tool
+execution. If the call returns a decision event and local mapping/receipt save
+then fails, the decision may already be durable. `outcomeUnknown: true` also
+means acceptance may have occurred. Neither case justifies "the article is
+unchanged", a fresh approval ID or a blind replay. Keep the original session,
+approval ID and persisted `clientEventId`; reread ordered events and the
+authorized provider record to reconcile. Only retry the exact original request
+under the installed endpoint's supported idempotency contract after reconciliation.
+For stale/no-pending approval conflicts, refresh current state instead of
+recreating a pending card or exposing the raw upstream error.
+
+```js
+function assistantFailureNotice(error, { decisionAccepted = false } = {}) {
+  if (decisionAccepted || error?.outcomeUnknown === true) {
+    return {
+      state: "reconciling",
+      message: "The action may have been accepted. Check its status before trying again.",
+    };
+  }
+  if (error?.status === 409) {
+    return { state: "refresh", message: "This request has changed. Refresh before deciding." };
+  }
+  return { state: "failed", message: "The assistant is unavailable. Please try again later." };
+}
+```
+
+This helper is for the host's approval-action error boundary, not a replacement
+for authentication/authorization responses. Set `decisionAccepted = true`
+immediately after `await sendApprovalDecision(...)`, before any local save.
+Disable repeat actions while `state === "reconciling"`; render only this safe
+notice and use the existing host status/error conventions. Apply the same
+safe-copy boundary to polling, configuration and generic SDK failures. Test
+stale approval, an unknown mutation outcome, accepted-decision/local-save failure,
+SDK initialization failure and late errors after an identity switch.
 
 ## Decide what is being replaced
 

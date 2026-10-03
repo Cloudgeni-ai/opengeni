@@ -1,4 +1,4 @@
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 export const DEFAULT_VISIBLE_TREE_LEVELS = 3;
 export const MAX_VISUAL_TREE_DEPTH = 3;

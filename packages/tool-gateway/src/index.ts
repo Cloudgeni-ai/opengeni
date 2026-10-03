@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
+import { bindMcpTelemetry, withMcpCallIdentity, measureMcpPhase } from "@opengeni/observability";
+import Ajv, {
+  _,
+  str,
+  type CodeKeywordDefinition,
+  type KeywordCxt,
+  type ValidateFunction,
+} from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import {
@@ -29,6 +36,7 @@ import {
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
+import { summarizeToolGatewayInputErrors } from "./input-issues";
 
 export type ToolGatewayExecutionContext = {
   operationId: string;
@@ -117,6 +125,8 @@ type CompiledDefinition = {
   preflightCall: ToolGatewayDefinition["preflightCall"];
   lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
+  /** Lazily compiled all-errors validator, used only to describe a rejected call. */
+  diagnoseInput: () => ValidateFunction<unknown>;
   validateOutput: ValidateFunction<unknown> | null;
 };
 
@@ -206,6 +216,19 @@ export class ToolGateway {
     context: ToolGatewayCallContext,
     modelApprovalConfirmed: boolean,
   ): Promise<PreparedToolGatewayCall> {
+    return withMcpCallIdentity(context.sourceCallId ?? input.operationId, async () => {
+      const prepared = await measureMcpPhase("gateway_policy", () =>
+        this.prepareCallCore(input, context, modelApprovalConfirmed),
+      );
+      return { ...prepared, execute: bindMcpTelemetry(prepared.execute) };
+    });
+  }
+
+  private async prepareCallCore(
+    input: ToolGatewayCall,
+    context: ToolGatewayCallContext,
+    modelApprovalConfirmed: boolean,
+  ): Promise<PreparedToolGatewayCall> {
     const request = ToolGatewayCallRequest.parse({
       operationId: input.operationId,
       catalogDigest: input.catalogDigest,
@@ -225,7 +248,7 @@ export class ToolGateway {
       throw new ToolGatewayApprovalRequiredError();
     }
     if (!definition.validateInput(request.arguments)) {
-      throw new ToolGatewayInputValidationError();
+      throw inputValidationError(definition, request.arguments);
     }
     if (
       caller.kind === "model" &&
@@ -241,19 +264,25 @@ export class ToolGateway {
       arguments: request.arguments,
       caller,
     } satisfies ToolGatewayCall;
-    await this.authorize?.({ call, entry: definition.entry });
+    await measureMcpPhase("provider_authorization", () =>
+      this.authorize?.({ call, entry: definition.entry }),
+    );
     if (definition.entry.approval === "human") {
-      await definition.preflightCall?.({
+      await measureMcpPhase("preflight", () =>
+        definition.preflightCall?.({
+          call,
+          entry: definition.entry,
+          context,
+        }),
+      );
+    }
+    const lifecycle = await measureMcpPhase("lifecycle_prepare", () =>
+      definition.lifecycle?.prepare({
         call,
         entry: definition.entry,
         context,
-      });
-    }
-    const lifecycle = await definition.lifecycle?.prepare({
-      call,
-      entry: definition.entry,
-      context,
-    });
+      }),
+    );
     return {
       call,
       entry: definition.entry,
@@ -264,36 +293,47 @@ export class ToolGateway {
           catalogDigest: this.catalogDigest,
           identity: definition.entry.identity,
         }),
-      execute: async () => {
-        await lifecycle?.begin?.();
-        let result: ToolGatewayResultValue;
-        try {
-          result = ToolGatewayResult.parse(
-            await definition.execute(request.arguments, {
-              operationId,
-              caller,
-              ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
-              ...(context.transportMeta === undefined
-                ? {}
-                : { transportMeta: context.transportMeta }),
-              ...(context.signal === undefined ? {} : { signal: context.signal }),
-            }),
-          );
-          if (!result.isError && definition.validateOutput) {
-            const outputMatchesSchema =
-              result.structuredContent !== undefined &&
-              definition.validateOutput(result.structuredContent);
-            if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-              throw new ToolGatewayOutputValidationError();
+      execute: async () =>
+        measureMcpPhase(
+          "execution",
+          async () => {
+            await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
+            let result: ToolGatewayResultValue;
+            try {
+              result = ToolGatewayResult.parse(
+                await definition.execute(request.arguments, {
+                  operationId,
+                  caller,
+                  ...(context.sourceCallId === undefined
+                    ? {}
+                    : { sourceCallId: context.sourceCallId }),
+                  ...(context.transportMeta === undefined
+                    ? {}
+                    : { transportMeta: context.transportMeta }),
+                  ...(context.signal === undefined ? {} : { signal: context.signal }),
+                }),
+              );
+              if (!result.isError && definition.validateOutput) {
+                const outputMatchesSchema =
+                  result.structuredContent !== undefined &&
+                  definition.validateOutput(result.structuredContent);
+                if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
+                  throw new ToolGatewayOutputValidationError();
+                }
+              }
+            } catch (error) {
+              await measureMcpPhase("lifecycle_complete", () =>
+                lifecycle?.complete?.({ outcome: "failed", error }),
+              );
+              throw error;
             }
-          }
-        } catch (error) {
-          await lifecycle?.complete?.({ outcome: "failed", error });
-          throw error;
-        }
-        await lifecycle?.complete?.({ outcome: "completed", result });
-        return result;
-      },
+            await measureMcpPhase("lifecycle_complete", () =>
+              lifecycle?.complete?.({ outcome: "completed", result }),
+            );
+            return result;
+          },
+          (result) => (result.isError ? "rejected" : "completed"),
+        ),
     };
   }
 
@@ -331,7 +371,8 @@ export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
 ): PreparedToolGatewayDefinitions {
   const paths = allocateToolPaths(definitions);
-  const schemaValidators = createSchemaValidators();
+  const schemaValidators = createSchemaValidators("first_error");
+  let diagnosticValidators: SchemaValidators | undefined;
   const compiled = definitions.map((definition, index): CompiledDefinition => {
     const {
       execute,
@@ -349,6 +390,7 @@ export function prepareToolGatewayDefinitions(
       ...entryInput,
       codemodePath: paths[index],
     });
+    let diagnoseInput: ValidateFunction<unknown> | undefined;
     return {
       entry,
       execute,
@@ -356,6 +398,11 @@ export function prepareToolGatewayDefinitions(
       preflightCall,
       lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
+      diagnoseInput: () =>
+        (diagnoseInput ??= compileCatalogSchema(
+          (diagnosticValidators ??= createSchemaValidators("all_errors")),
+          entry.inputSchema,
+        )),
       validateOutput: entry.outputSchema
         ? compileCatalogSchema(schemaValidators, entry.outputSchema)
         : null,
@@ -403,30 +450,123 @@ export function createWorkspaceToolGateway(input: {
 
 type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
 
-const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
-const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
+type SchemaValidatorMode = "first_error" | "all_errors";
 
-function createSchemaValidators(): {
+type SchemaValidators = {
+  mode: SchemaValidatorMode;
   draft7: SchemaCompiler;
   draft2019: SchemaCompiler;
   draft2020: SchemaCompiler;
-} {
+};
+
+const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
+const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
+
+/**
+ * Serialized-size ceiling for the all-errors diagnostic pass. The accept/reject
+ * decision always uses the first-error validator, which stops at the first
+ * failure so a schema's own bounds (for example `maxLength` ahead of `pattern`)
+ * keep limiting validation cost. The diagnostic pass runs only after a
+ * rejection and only on arguments this small; larger ones report the first
+ * problem alone. Its `pattern` keeps the `maxLength` guard (see
+ * `maxLengthGuardedPattern`).
+ */
+export const TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS = 64 * 1024;
+
+function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
   const options = {
-    allErrors: false,
+    allErrors: mode === "all_errors",
     coerceTypes: false,
     strict: false,
     useDefaults: false,
     validateFormats: false,
   } as const;
-  return {
+  const validators = {
     draft7: new Ajv(options),
     draft2019: new Ajv2019(options),
     draft2020: new Ajv2020(options),
   };
+  if (mode === "all_errors") {
+    for (const ajv of Object.values(validators)) {
+      ajv.removeKeyword("pattern").addKeyword(maxLengthGuardedPattern);
+    }
+  }
+  return { mode, ...validators };
+}
+
+function codePointLength(value: string): number {
+  let length = 0;
+  for (const _codePoint of value) length += 1;
+  return length;
+}
+
+/**
+ * `pattern` for the all-errors diagnostic validators. The first-error validator
+ * checks `maxLength` before `pattern` and stops there, so a schema's
+ * `maxLength` bounds how long a string its (possibly backtracking-heavy)
+ * pattern ever sees. With `allErrors` the built-in keyword would still run the
+ * pattern on the over-long string. This version skips the pattern exactly when
+ * the sibling `maxLength` already fails, so every subschema's validity is
+ * unchanged and the diagnostic pass never runs a pattern on a string the
+ * accept/reject validator would not have. Error shape matches the built-in.
+ */
+const maxLengthGuardedPattern: CodeKeywordDefinition = {
+  keyword: "pattern",
+  type: "string",
+  schemaType: "string",
+  error: {
+    message: ({ schemaCode }) => str`must match pattern "${schemaCode}"`,
+    params: ({ schemaCode }) => _`{pattern: ${schemaCode}}`,
+  },
+  code(cxt: KeywordCxt) {
+    const { gen, data, schema, parentSchema, it } = cxt;
+    const flags = it.opts.unicodeRegExp ? "u" : "";
+    const regExp = gen.scopeValue("pattern", {
+      key: `${schema}/${flags}`,
+      ref: it.opts.code.regExp(schema as string, flags),
+    });
+    const maxLength: unknown = parentSchema.maxLength;
+    if (typeof maxLength !== "number") {
+      cxt.fail(_`!${regExp}.test(${data})`);
+      return;
+    }
+    const length =
+      it.opts.unicode === false
+        ? _`${data}.length`
+        : _`${gen.scopeValue("func", { ref: codePointLength })}(${data})`;
+    cxt.fail(_`${length} <= ${maxLength} && !${regExp}.test(${data})`);
+  },
+};
+
+/**
+ * Describe why the first-error validator rejected `args`: every problem (capped)
+ * when the arguments are small enough for the diagnostic pass, else the first.
+ * Never includes argument values.
+ */
+function inputValidationError(
+  definition: CompiledDefinition,
+  args: Record<string, unknown>,
+): ToolGatewayInputValidationError {
+  let errors = definition.validateInput.errors;
+  let diagnosticInput:
+    | { schema: Record<string, unknown>; arguments: Record<string, unknown> }
+    | undefined;
+  try {
+    const serialized = JSON.stringify(args);
+    if (serialized !== undefined && serialized.length <= TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS) {
+      diagnosticInput = { schema: definition.entry.inputSchema, arguments: args };
+      const diagnose = definition.diagnoseInput();
+      if (!diagnose(args) && diagnose.errors?.length) errors = diagnose.errors;
+    }
+  } catch {
+    // Diagnostics are best effort; the rejection itself is already decided.
+  }
+  const { issues, omittedIssueCount } = summarizeToolGatewayInputErrors(errors, diagnosticInput);
+  return new ToolGatewayInputValidationError(issues, omittedIssueCount);
 }
 
 function compileCatalogSchema(
-  validators: ReturnType<typeof createSchemaValidators>,
+  validators: SchemaValidators,
   schema: ToolGatewayCatalogEntryValue["inputSchema"],
 ): ValidateFunction<unknown> {
   const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
@@ -435,7 +575,7 @@ function compileCatalogSchema(
     : dialect.includes("2019-09")
       ? "2019-09"
       : "draft7";
-  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
+  const cacheKey = `${validators.mode}:${family}:${digestCanonicalJson(schema)}`;
   const cached = compiledCatalogSchemaCache.get(cacheKey);
   if (cached) {
     compiledCatalogSchemaCache.delete(cacheKey);
@@ -532,3 +672,4 @@ function identityKey(identity: ToolGatewayIdentity): string {
 export * from "./catalog";
 export * from "./declarations";
 export * from "./errors";
+export * from "./input-issues";

@@ -10,6 +10,9 @@ import {
   type AccountGrant,
   type AccessContext,
   type AccessGrant,
+  type OrganizationApiKeyAccess,
+  OPENGENI_USER_ACTIVITY_ACTIVE,
+  OPENGENI_USER_ACTIVITY_HEADER,
   Permission,
   type Workspace,
 } from "@opengeni/contracts";
@@ -17,6 +20,7 @@ import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   ensureExternalIdentity,
+  lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -34,9 +38,69 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
+import type { UserPresenceRecorder } from "../user-presence";
+import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
+const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
+const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
+const developerSetupGrants = new WeakSet<AccessGrant>();
+
+/** Only canonical authentication can prove setup-key provenance. */
+export function isDeveloperSetupApiKeyContext(context: AccessContext): boolean {
+  return (
+    developerSetupApiKeyContexts.has(context) &&
+    accountScopedApiKeyWorkspaceAuthority(context) !== null
+  );
+}
+
+/** Provenance from canonical raw-key or verified restricted-token authentication. */
+export function isDeveloperSetupAuthorization(
+  authorization: AccessGrantAuthorization | undefined,
+): boolean {
+  return (
+    authorization !== undefined &&
+    developerSetupAuthorizations.get(authorization) === authorization.grant
+  );
+}
+
+/** Exact grant objects resolved under authenticated setup-only provenance. */
+export function isDeveloperSetupGrant(grant: AccessGrant): boolean {
+  return developerSetupGrants.has(grant);
+}
+
+/** Setup-derived credentials cannot carry literal organization or key authority. */
+export function isDeveloperSetupDelegatedPermissionAllowed(permission: Permission): boolean {
+  return (
+    permission !== "secrets:read" &&
+    permission !== "api_keys:manage" &&
+    !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission)
+  );
+}
+
+/** Canonical authentication provenance, including the backing key of asUser. */
+export function requireApiKeyManagementContext(context: AccessContext): void {
+  if (developerSetupApiKeyContexts.has(context)) {
+    throw new HTTPException(403, { message: "Developer setup keys cannot manage API keys" });
+  }
+}
+
+/** Membership is not an escape hatch for minting durable credentials. */
+export function requireApiKeyDelegationContext(
+  context: AccessContext,
+  permissions: Permission[],
+): void {
+  if (
+    (hasPermission(permissions, "api_keys:manage") ||
+      hasPermission(permissions, "members:manage")) &&
+    developerSetupApiKeyContexts.has(context)
+  ) {
+    throw new HTTPException(403, {
+      message: "Setup credentials cannot delegate API key management",
+    });
+  }
+}
 
 /**
  * Contexts that were authenticated by a verified canonical managed cookie
@@ -141,6 +205,10 @@ const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
   Readonly<{ accountId: string; permissions: readonly Permission[] }>
 >();
+const apiKeyServiceContexts = new WeakMap<
+  AccessContext,
+  Pick<AccessGrant, "serviceInitiator" | "serviceInitiatorContext">
+>();
 const verifiedOrganizationServiceAuthorizations = new WeakMap<
   AccessGrantAuthorization,
   AccessGrant
@@ -163,6 +231,7 @@ const accountScopedApiKeyAccountPermissions = new Set<Permission>([
   "billing:read",
   "billing:manage",
   "api_keys:manage",
+  "usage_allowances:manage",
 ]);
 const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
   "account:read",
@@ -170,6 +239,7 @@ const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
   "workspace:create",
   "billing:read",
   "billing:manage",
+  "usage_allowances:manage",
 ]);
 
 export type AccountScopedApiKeyWorkspaceAuthority = Readonly<{
@@ -204,6 +274,17 @@ export function accountScopedApiKeyWorkspaceAuthority(
   };
 }
 
+/** Classify stored scopes without changing the legacy full/read permission sets. */
+export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
+  if (
+    permissions.includes("workspace:admin") &&
+    permissions.includes("usage_allowances:manage") &&
+    !permissions.includes("api_keys:manage")
+  )
+    return "developer_setup";
+  return permissions.includes("workspace:admin") ? "full" : "read";
+}
+
 /**
  * Opaque, request-local proof that the canonical access resolver authorized the
  * exact account administrator named by the stamp. The random id is audit and
@@ -222,6 +303,8 @@ export type AccessDeps = {
   settings: Settings;
   managedAuth?: ManagedAuth | null;
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
+  /** Analytics only: notes canonical managed-cookie activity, never authority. */
+  userPresence?: UserPresenceRecorder | null;
 };
 
 /** null means this is not an authenticated external lane; [] means that lane
@@ -348,6 +431,10 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
+    developerSetupAuthorizations.set(authorization, grant);
+    developerSetupGrants.add(grant);
+  }
   if (
     contextIntegrity &&
     accountScopedApiKeyWorkspaceAuthority(context)?.accountId === grant.accountId &&
@@ -547,6 +634,28 @@ async function accessGrantAuthorization(
       workspaceId,
       principalKind ? { principalKind } : undefined,
     ));
+  if (grant && isDeveloperSetupApiKeyContext(context)) {
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const workspace = await requireWorkspace(deps.db, workspaceId);
+    if (!authority || workspace.accountId !== authority.accountId || workspace.kind !== "shared") {
+      throw new HTTPException(403, {
+        message: "Developer setup requires a shared organization workspace",
+      });
+    }
+    // A persisted creator/membership grant cannot widen the authenticated key
+    // ceiling, including literal secret reads and inherited session authority.
+    const storedPermissions = grant.permissions;
+    grant = {
+      ...grant,
+      permissions: Permission.options.filter(
+        (value) =>
+          value !== "api_keys:manage" &&
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(value) &&
+          hasPermission(storedPermissions, value) &&
+          hasPermission(authority.permissions, value),
+      ),
+    };
+  }
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -567,6 +676,7 @@ async function accessGrantAuthorization(
         ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
         permissions: authority.permissions,
         principalKind: "api_key",
+        ...apiKeyServiceContexts.get(context),
       };
     } else {
       throw new HTTPException(403, { message: "workspace access denied" });
@@ -690,6 +800,21 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (service) {
+    if (deps.settings.productAccessMode === "local") {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    const context = await apiKeyAccessContext(c, deps, deps.settings.productAccessMode);
+    if (!context) {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    return context;
+  }
   if (c.req.header("x-opengeni-external-actor") !== undefined) {
     if (deps.settings.productAccessMode === "local") {
       throw new HTTPException(401, {
@@ -773,11 +898,27 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      recordUserPresence(c, deps, context.subjectId);
       return context;
     }
   }
 
   return null;
+}
+
+/**
+ * Presence counts people, so only the verified managed browser-session branch
+ * reports it, and only for a request the console marked as human activity (a
+ * visible tab with recent interaction). Each request counts once: an SSE
+ * stream's periodic reauthorization reuses its original request.
+ */
+const presenceRecordedRequests = new WeakSet<Request>();
+function recordUserPresence(c: Context, deps: AccessDeps, subjectId: string): void {
+  if (!deps.userPresence) return;
+  if (c.req.header(OPENGENI_USER_ACTIVITY_HEADER) !== OPENGENI_USER_ACTIVITY_ACTIVE) return;
+  if (presenceRecordedRequests.has(c.req.raw)) return;
+  presenceRecordedRequests.add(c.req.raw);
+  deps.userPresence.touch(subjectId);
 }
 
 async function apiKeyAccessContext(
@@ -794,6 +935,16 @@ async function apiKeyAccessContext(
     return null;
   }
   const externalHeader = c.req.header("x-opengeni-external-actor");
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (
+    service &&
+    apiKey.credentialKind !== "organization" &&
+    apiKey.credentialKind !== "workspace"
+  ) {
+    throw new HTTPException(422, {
+      message: "service initiator headers require an organization or workspace API key",
+    });
+  }
   if (externalHeader !== undefined) {
     if (apiKey.workspaceId !== null || apiKey.credentialKind !== "organization") {
       throw new HTTPException(403, { message: "external actors require an organization key" });
@@ -807,9 +958,15 @@ async function apiKeyAccessContext(
     }
     let identity: ExternalIdentity;
     try {
-      identity = await ensureExternalIdentity(deps.db, {
-        accountId: apiKey.accountId,
-        ...selection.identity,
+      identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
+        // Provisioning locks the live membership after its identity lock.
+        // Claim the lifecycle prefix first so a membership-fenced session
+        // writer can recheck that identity without a lock inversion.
+        await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
+        return await ensureExternalIdentity(tx, {
+          accountId: apiKey.accountId,
+          ...selection.identity,
+        });
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {
@@ -844,6 +1001,9 @@ async function apiKeyAccessContext(
       permissions: [...apiKey.permissions],
       ...(linked ? { linked } : {}),
     });
+    if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
+      developerSetupApiKeyContexts.add(context);
+    }
     return context;
   }
   const subjectId = `api_key:${apiKey.id}`;
@@ -854,7 +1014,7 @@ async function apiKeyAccessContext(
     : apiKey.permissions.filter((permission) =>
         accountScopedApiKeyAccountPermissions.has(permission),
       );
-  const context = {
+  const context: AccessContext = {
     mode,
     subjectId,
     subjectLabel: apiKey.name,
@@ -875,12 +1035,20 @@ async function apiKeyAccessContext(
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
             principalKind: "api_key",
+            ...service,
           },
         ]
       : [],
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
-  } satisfies AccessContext;
+  };
+  if (service) apiKeyServiceContexts.set(context, service);
+  if (
+    apiKey.credentialKind === "organization" &&
+    organizationApiKeyAccess(apiKey.permissions) === "developer_setup"
+  ) {
+    developerSetupApiKeyContexts.add(context);
+  }
   if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
       context,
@@ -893,6 +1061,31 @@ async function apiKeyAccessContext(
         ),
       }),
     );
+  }
+  // Report the exact stamped authority consumed by accessGrantAuthorization,
+  // rather than re-deriving organization-key permissions from a separate rule.
+  // This projection is never an authorization input, and the asUser branch
+  // above deliberately omits it instead of advertising the service's authority.
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  const workspaceGrant =
+    apiKey.credentialKind === "workspace" ? context.workspaceGrants[0] : undefined;
+  const workspacePermissions = authority?.permissions ?? workspaceGrant?.permissions;
+  if (workspacePermissions) {
+    context.credential = {
+      kind: authority ? "organization_api_key" : "workspace_api_key",
+      ...(authority ? { access: organizationApiKeyAccess(apiKey.permissions) } : {}),
+      accountId: apiKey.accountId,
+      workspaceId: apiKey.workspaceId,
+      effectiveWorkspacePermissions: Permission.options.filter(
+        (permission) =>
+          !(developerSetupApiKeyContexts.has(context) && permission === "api_keys:manage") &&
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
+          hasPermission(workspacePermissions, permission),
+      ),
+      note: authority
+        ? "These permissions apply to every shared workspace in this organization, not Personal workspaces. workspaceGrants need not enumerate them; accountGrants report organization-level permissions. asUser requests also require user authority."
+        : "These permissions apply only to the workspace identified by workspaceId; they grant no organization-wide workspace authority.",
+    };
   }
   return context;
 }
@@ -911,7 +1104,11 @@ async function delegatedAccessContext(
   if (!payload) {
     return null;
   }
-  return {
+  const restricted = payload.credentialRestriction === "developer_setup";
+  const workspacePermissions = restricted
+    ? payload.permissions.filter(isDeveloperSetupDelegatedPermissionAllowed)
+    : payload.permissions;
+  const context: AccessContext = {
     mode,
     subjectId: payload.subjectId,
     ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
@@ -920,7 +1117,7 @@ async function delegatedAccessContext(
         accountId: payload.accountId,
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-        permissions: payload.permissions,
+        permissions: restricted ? [] : payload.permissions,
       },
     ],
     workspaceGrants: [
@@ -929,7 +1126,7 @@ async function delegatedAccessContext(
         accountId: payload.accountId,
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-        permissions: payload.permissions,
+        permissions: workspacePermissions,
         principalKind: payload.principalKind,
         // sessionId is worker-asserted (HMAC-signed token claim), not agent
         // controlled; it scopes session-bound MCP tools such as goal management.
@@ -962,6 +1159,8 @@ async function delegatedAccessContext(
     defaultAccountId: payload.accountId,
     defaultWorkspaceId: payload.workspaceId,
   };
+  if (restricted) developerSetupApiKeyContexts.add(context);
+  return context;
 }
 
 function configuredSubject(c: Context): string {

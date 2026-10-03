@@ -1,8 +1,24 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
-import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
-import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
-import type { EventLogger } from "@opengeni/events";
+import {
+  BundledSkillId,
+  CREDIT_GRANT_CLASSES,
+  SandboxBackend,
+  type SessionEventType,
+  type SkillReadKind,
+  type SkillUseSource,
+} from "@opengeni/contracts";
+import {
+  ACTIVE_USER_WINDOWS,
+  type ActiveUserWindow,
+  type CreditGrantTotals,
+  type SessionEventAppendPhaseObservation,
+} from "@opengeni/db";
+import {
+  natsSubscriptionTerminationCounter,
+  type EventBusOptions,
+  type EventLogger,
+} from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
@@ -80,6 +96,16 @@ const CONTEXT_COMPACTIONS_METRIC = {
   help: "Total completed context compactions, by trigger.",
 } as const;
 
+/** Logger plus the closed-label subscription-termination counter for NATS connections. */
+export function observabilityEventBusOptions(
+  observability: Observability,
+): Pick<EventBusOptions, "logger" | "onSubscriptionTerminated"> {
+  return {
+    logger: observabilityEventLogger(observability),
+    onSubscriptionTerminated: natsSubscriptionTerminationCounter(observability),
+  };
+}
+
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
     debug: (message, attributes) => observability.debug(message, eventAttributes(attributes)),
@@ -154,6 +180,13 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
         labels: { backend, stage },
+      });
+    },
+    onSandboxReadinessReplacement: ({ backend, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_readiness_replacements_total",
+        help: "Fresh sandbox command-readiness replacement decisions by backend and outcome.",
+        labels: { backend, outcome },
       });
     },
     onSandboxProviderApiThrottle: ({ backend, operation }) => {
@@ -1033,6 +1066,7 @@ export function recordOpenSandboxKubernetesInventoryGauges(
 export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "leases",
   "checkpoint_artifacts",
+  "recovery_observations",
   "rotation_backlog",
   "retained_processes",
   "expired_drains",
@@ -1092,6 +1126,106 @@ export function recordCreditBalanceGauges(
     }
   }
   creditBalanceGaugeAccounts.set(observability, current);
+}
+
+/**
+ * Distinct managed people with authenticated browser activity in each fixed
+ * window (migration 0565 presence). Every control worker publishes the same
+ * global value, so dashboards must aggregate with `max()` across pods, never
+ * `sum()`. API keys, services and embedded hosts are never counted.
+ */
+export function recordActiveUserGauges(
+  observability: Observability,
+  counts: Record<ActiveUserWindow, number>,
+): void {
+  for (const window of ACTIVE_USER_WINDOWS) {
+    observability.setGauge({
+      name: "opengeni_active_users",
+      help: "Distinct managed users with authenticated activity within the window (global; use max across pods).",
+      labels: { window },
+      value: counts[window],
+    });
+  }
+}
+
+/**
+ * Positive credit grants observed by the ledger trigger since migration 0565,
+ * by closed class. These are cumulative database totals published as gauges by
+ * every control worker: aggregate with `max()` across pods, then `increase()`.
+ * Counting in the database covers the grants no application process writes:
+ * the verified-signup trial grant (a setup trigger) and operator grants.
+ */
+export function recordCreditGrantGauges(
+  observability: Observability,
+  totals: CreditGrantTotals,
+): void {
+  for (const grantClass of CREDIT_GRANT_CLASSES) {
+    const total = totals[grantClass];
+    observability.setGauge({
+      name: "opengeni_credit_grants_total",
+      help: "Positive credit grants observed in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
+      labels: { grant_class: grantClass },
+      value: total.count,
+    });
+    observability.setGauge({
+      name: "opengeni_credit_granted_micros_total",
+      help: "Credit micros granted in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
+      labels: { grant_class: grantClass },
+      value: total.micros,
+    });
+  }
+}
+
+/**
+ * The deployment-level runtime switch for the one-time verified signup trial
+ * credit (migration 0521): 1 while it allows grants, 0 when an operator has
+ * disabled it or no revision exists. A grant also needs the API's
+ * OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in, which
+ * {@link recordVerifiedSignupTrialDeploymentFlagGauge} reports separately.
+ */
+export function recordVerifiedSignupTrialSwitchGauge(
+  observability: Observability,
+  grantsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_runtime_enabled",
+    help: "Whether the runtime switch allows new verified signup trial credit grants (1) or blocks them (0).",
+    value: grantsEnabled ? 1 : 0,
+  });
+}
+
+/**
+ * The deployment-level runtime switch for new managed account sign-ups
+ * (migration 0585): 1 while it allows new accounts (also when no revision
+ * exists), 0 when an operator has paused them. The API additionally honours
+ * its OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED ceiling, which this gauge does
+ * not see; `GET /v1/config/client` reports the combined decision.
+ */
+export function recordManagedAuthNewSignupsSwitchGauge(
+  observability: Observability,
+  signupsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_managed_auth_new_signups_runtime_enabled",
+    help: "Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    value: signupsEnabled ? 1 : 0,
+  });
+}
+
+/**
+ * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
+ * worker's configuration sees it. The API reads the same shared setting; new
+ * grants happen only while this gauge and the runtime switch gauge are both 1.
+ */
+export function recordVerifiedSignupTrialDeploymentFlagGauge(
+  observability: Observability,
+  enabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_verified_signup_trial_credits_deployment_enabled",
+    help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
+    value: enabled ? 1 : 0,
+  });
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
@@ -1166,6 +1300,101 @@ export function recordSandboxDeadlineRotationsRequested(
     name: "opengeni_sandbox_deadline_rotations_requested_total",
     help: "Total finite-lifetime sandbox rotations requested before provider deadline.",
     amount: count,
+  });
+}
+
+/** Fixed outcomes of legacy retained-command containment: per-candidate
+ * enrollment inspection, then the enrolled drain's exact cold commit. */
+export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
+  "idle_enrolled",
+  "deadline_enrolled",
+  "resumed_enrolled",
+  "not_eligible",
+  "inspection_failed",
+  "contained",
+  "provider_missing",
+] as const;
+
+export type SandboxCommandContainmentOutcome =
+  (typeof SANDBOX_COMMAND_CONTAINMENT_OUTCOMES)[number];
+
+export function recordSandboxCommandContainment(
+  observability: Observability,
+  outcome: SandboxCommandContainmentOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_command_containment_total",
+    help: "Legacy retained-command containment inspections and enrolled drain commits by fixed outcome.",
+    labels: { outcome },
+  });
+}
+
+/** Only call after the exact draining->cold commit reports wentCold. The
+ * backend is validated against the closed contract so provider IDs and other
+ * per-sandbox values can never become metric labels. */
+export function recordSandboxProviderMissingBeforeCapture(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_missing_before_capture_total",
+    help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
+export function recordSandboxRecoveryObservationGauges(
+  observability: Observability,
+  observations: {
+    providerLosses: number;
+    fallbackSelections: number;
+    freshWorkspaceSelections?: number;
+  },
+): void {
+  for (const [kind, value] of [
+    ["provider_missing_before_capture", observations.providerLosses],
+    ["checkpoint_fallback_selected", observations.fallbackSelections],
+    ["fresh_workspace_selected", observations.freshWorkspaceSelections ?? 0],
+  ] as const) {
+    observability.setGauge({
+      name: "opengeni_sandbox_recovery_observations_recent",
+      help: "Committed sandbox recovery observations in the last 30 minutes by fixed kind.",
+      labels: { kind },
+      value,
+    });
+  }
+}
+
+/** Fixed outcomes for a committed automatic continuity decision after
+ * definitive managed-provider loss: a singleton checkpoint (`selected`), a
+ * shared-group checkpoint (`selected_shared`), or a new empty workspace
+ * (`fresh_workspace`). Call only after the durable authorization committed. */
+export const SANDBOX_AUTOMATIC_RECOVERY_OUTCOMES = [
+  "selected",
+  "selected_shared",
+  "fresh_workspace",
+] as const;
+export type SandboxAutomaticRecoveryOutcome = (typeof SANDBOX_AUTOMATIC_RECOVERY_OUTCOMES)[number];
+
+export function sandboxAutomaticRecoveryOutcome(input: {
+  lane: "checkpoint" | "fresh_workspace";
+  groupSessionCount: number;
+}): SandboxAutomaticRecoveryOutcome {
+  if (input.lane === "fresh_workspace") return "fresh_workspace";
+  return input.groupSessionCount > 1 ? "selected_shared" : "selected";
+}
+
+export function recordSandboxAutomaticRecoverySelected(
+  observability: Observability,
+  backend: string,
+  outcome: SandboxAutomaticRecoveryOutcome,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_checkpoint_fallback_total",
+    help: "System-selected continuity after managed provider loss: verified checkpoint or empty workspace.",
+    labels: { backend: safeBackend, outcome },
   });
 }
 
@@ -1286,6 +1515,7 @@ export function recordExpiredDrainingSandboxLeaseGauges(
 
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "claim_failed",
+  "background_recovered",
   "proof_exited",
   "proof_lost",
   "proof_checkpoint_failed",
@@ -2264,4 +2494,142 @@ export function modelCallAccountContext(input: {
     servingAccountHash: stableAccountHash(input.servingCredentialId),
     accountChangedFromPrevCall,
   };
+}
+
+export type CodeSearchCallOutcome =
+  | "completed"
+  | "jev_unavailable"
+  | "jev_rejected"
+  | "workspace_unavailable"
+  | "invalid_arguments"
+  | "breaker_open"
+  | "cancelled"
+  | "failed";
+
+/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+export function recordCodeSearchCall(
+  observability: Observability,
+  input: {
+    outcome: CodeSearchCallOutcome;
+    durationSeconds: number;
+    jevRequests: number;
+    jevCostUsd: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_code_search_calls_total",
+    help: "Jev-backed code_search tool calls by outcome.",
+    labels: { outcome: input.outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_code_search_duration_seconds",
+    help: "Wall time of one code_search tool call.",
+    buckets: [0.5, 1, 2, 4, 8, 15, 30, 60],
+    labels: { outcome: input.outcome },
+    value: Math.max(0, input.durationSeconds),
+  });
+  if (input.jevRequests > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_requests_total",
+      help: "Jev requests made by code_search.",
+      amount: input.jevRequests,
+    });
+  }
+  if (input.jevCostUsd > 0) {
+    observability.incrementCounter({
+      name: "opengeni_code_search_jev_cost_micro_usd_total",
+      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
+      amount: Math.round(input.jevCostUsd * 1_000_000),
+    });
+  }
+}
+
+/**
+ * One skill_read call. Labels are closed sets: `skill` is a built-in id or
+ * `custom` for every other Skill, so tenant Skill ids, names, and requested
+ * identifiers never become labels. `source` is `unknown` when the read was
+ * refused before a Skill resolved.
+ */
+export function recordSkillRead(
+  observability: Observability,
+  read: {
+    caller: "model" | "codemode";
+    kind: SkillReadKind;
+    source: SkillUseSource | null;
+    /** The resolved Skill id, or the requested identifier when none resolved. */
+    skill: string;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_skill_reads_total",
+    help: "skill_read calls by Skill source, built-in Skill id (custom for any other Skill), result kind, and caller.",
+    labels: {
+      source: read.source ?? "unknown",
+      skill: skillReadMetricLabel(read.source, read.skill),
+      kind: read.kind,
+      caller: read.caller,
+    },
+  });
+}
+
+/**
+ * One skill_checkout call. Labels are closed sets and never carry Skill ids,
+ * names, or paths. Phases that did not run are not observed.
+ */
+export function recordSkillCheckout(
+  observability: Observability,
+  checkout: {
+    outcome: "written" | "unchanged" | "refused" | "failed";
+    selection: "all" | "paths";
+    written: number;
+    unchanged: number;
+    resolveSeconds: number | null;
+    sandboxSeconds: number | null;
+    writeSeconds: number | null;
+    totalSeconds: number;
+  },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_skill_checkouts_total",
+    help: "skill_checkout calls by outcome and whether they selected specific paths.",
+    labels: { outcome: checkout.outcome, selection: checkout.selection },
+  });
+  const phases = [
+    ["resolve", checkout.resolveSeconds],
+    ["sandbox", checkout.sandboxSeconds],
+    ["write", checkout.writeSeconds],
+    ["total", checkout.totalSeconds],
+  ] as const;
+  for (const [phase, seconds] of phases) {
+    if (seconds === null) continue;
+    observability.observeHistogram({
+      name: "opengeni_skill_checkout_duration_seconds",
+      help: "Wall time of skill_checkout phases: resolve (authority and Skill read), sandbox (filesystem handle, including lazy box start), write (batched file write), and total.",
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60],
+      labels: { phase, outcome: checkout.outcome },
+      value: Math.max(0, seconds),
+    });
+  }
+  for (const [result, amount] of [
+    ["written", checkout.written],
+    ["unchanged", checkout.unchanged],
+  ] as const) {
+    if (amount <= 0) continue;
+    observability.incrementCounter({
+      name: "opengeni_skill_checkout_files_total",
+      help: "Files skill_checkout wrote or found already present with the same content.",
+      labels: { result },
+      amount,
+    });
+  }
+}
+
+function skillReadMetricLabel(source: SkillUseSource | null, skill: string): string {
+  if (source !== null && source !== "builtin") return "custom";
+  // A refused read may name a built-in by its plain name.
+  for (const candidate of source === null ? [skill, `builtin:${skill}`] : [skill]) {
+    const parsed = BundledSkillId.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+  }
+  return "custom";
 }

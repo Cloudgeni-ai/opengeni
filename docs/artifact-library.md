@@ -24,6 +24,13 @@ the viewer and query and expires after one hour. A bounded scan through denied
 candidates can return an empty page with `nextCursor`; that is not the end of the
 listing.
 
+The web console keeps loaded catalog views in memory per client, credential
+generation, workspace, and filters, so switching tabs or returning to the page
+renders at once. A view older than 30 seconds, or one a session's tool output has
+marked stale, refetches on revisit or window focus, restarting the listing and
+reloading as many pages as were shown. Site archive, restore, and rollback drop
+the workspace's cached views; an access denial drops them without keeping rows.
+
 The catalog reuses Site records and versions, editable-artifact records and
 authority, generated-image correlation, and explicit sandbox-file publication
 metadata. File bytes remain in the existing workspace file domain. It does not
@@ -37,12 +44,36 @@ authoritative. Source-session links are exposed only when that session is
 readable. Content is loaded through the existing authenticated artifact APIs;
 catalog results contain no storage credentials or temporary download URLs.
 
+Images and other files need `files:read`; Sites, documents, spreadsheets, and
+presentations need `artifacts:read`. A viewer holding only one of the two gets
+the other kinds silently omitted from the catalog, so the console names the
+gap ("Sites and documents are hidden", or "You can't see sites here." on a
+hidden kind's tab) instead of reporting "none yet". A Site or editable-artifact
+page that the viewer cannot read says the viewer needs artifact access rather
+than suggesting the item was removed. The API's 403/404 semantics are
+unchanged; the console decides from a 403 or from the viewer's loaded grant.
+
+Creating, publishing, rolling back, archiving, and restoring need
+`artifacts:publish`, which the named Member and Admin roles hold (migration
+0555). These actions apply to any artifact in the workspace, not only the
+caller's own, and are reversible: archive keeps the source and full version
+history, restore republishes an archived Site, and rollback restores an earlier
+version without discarding the current one.
+
 ## Presentation and version semantics
 
-The workspace library offers a preview grid and compact list, type filtering,
-title search, sorting, and an archived filter. The session panel uses the same
-catalog with a source-session filter. Both open the existing type-specific
-viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
+The workspace library opens as a preview gallery: cards with a thumbnail, the
+title and one meta line ("Site · updated 3 days ago"), the ⋯ menu on hover or
+focus. Images show their own pixels; a Site shows a still of its published
+HTML (`getWorkspaceArtifactHtml`) in a `srcdoc` frame with an empty `sandbox`
+and a `default-src 'none'` policy, so a card never runs Site code or makes a
+network request. Other types show their type glyph (and a file's extension).
+Previews load only near the viewport. A Gallery | List toggle in the toolbar
+switches to flat rows and is remembered in the browser
+(`opengeni:artifact-library:view:v1`). Both views keep the type tabs, title
+search, and a Filter menu for archived items and sorting. The session panel
+uses the same catalog with a source-session filter. Both open the existing
+type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
 
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.
@@ -111,7 +142,49 @@ action remains available, and browsers without intersection observation load
 normally. Site and inline-HTML chat viewports have bounded fixed heights; larger
 content scrolls inside the preview or opens with the full-screen control. Late
 content resize messages do not resize the conversation. Loading, failure, and
-retry states retain the same chat slot.
+retry states retain the same chat slot. The Artifacts image detail viewer uses
+the available page width and a viewport-height limit instead of the fixed chat
+image slot, while preserving the image aspect ratio and expand action.
+
+## Serving user content from the API origin
+
+Every API response that streams user- or agent-controlled bytes (retained
+file/image/video and screenshot `/content` ranges, browser and computer frames,
+editable-artifact export downloads, and the Company Brain and workspace-state
+exports) uses the shared headers in `apps/api/src/http/user-content.ts`:
+
+- `Content-Security-Policy: default-src 'none'; ...; sandbox`, so a directly
+  opened file is a sandboxed document with no script, form, popup, or network
+  capability. Audio and video use `sandbox allow-same-origin` (never
+  `allow-scripts`) so the browser's media player can re-fetch its own URL.
+- `Cross-Origin-Resource-Policy: same-origin` and `X-Content-Type-Options: nosniff`.
+- `Content-Disposition: attachment` only for active markup types (HTML, XML
+  dialects including SVG, multipart), so opening one downloads it instead of
+  rendering attacker-authored markup on the app origin. Images, media, PDF and
+  text stay inline (a directly opened PDF still renders in Chrome's viewer
+  under the bare `sandbox` policy). The filename carries an ASCII fallback plus
+  an RFC 6266 `filename*` for names the fallback would change.
+
+The console never navigates to these routes; its previews read bytes through
+the SDK and render them in app-owned elements, so the headers do not change
+in-app viewing. Site `/html` responses keep their own `sandbox allow-scripts`
+policy (an opaque origin), add the same CORP and `nosniff` headers, and are
+attachments: clients fetch the HTML and render it in their own frame, so a raw
+`/html` URL never runs a publisher page at an app-origin URL. A new route that
+returns stored bytes must use the same helper;
+`apps/api/test/user-content-headers.test.ts` fails until a new raw route body is
+classified.
+
+Signed object-storage GET URLs follow the same rule through
+`userContentSignedGetUrlOptions`: for active markup (file and document
+downloads, Knowledge originals, the files MCP, and Site HTML downloads) the URL
+carries a signed `Content-Disposition: attachment` response override
+(`response-content-disposition` on S3-compatible and GCS, `rscd` on Azure).
+The storage endpoint is not always a separate site: local development serves
+Garage from loopback, and a preview may route the bucket path on the app
+origin. URLs that only a machine fetches (browser-controller file authorities,
+workspace capture manifests and files stored as JSON or octet-stream) are
+unchanged.
 
 ## Boundaries and compatibility
 

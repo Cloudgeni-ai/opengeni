@@ -1,3 +1,13 @@
+import { SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+
+const VERIFICATION_LINK_CALLBACK_ERROR =
+  "This email verification link has expired or is no longer valid. Request a new verification email to finish setting up your account.";
+
+/** The expired/invalid email-verification link message, which the signed-out auth panel can own. */
+export function isVerificationLinkCallbackError(message: string | null): boolean {
+  return message === VERIFICATION_LINK_CALLBACK_ERROR;
+}
+
 /** Callback query strings are untrusted hints, never evidence of a linked account. */
 export function signInCallbackError(code: string | null | undefined): string | null {
   if (!code) return null;
@@ -8,17 +18,22 @@ export function signInCallbackError(code: string | null | undefined): string | n
     case "email_not_verified":
     case "email_verification_required":
       return "Verify your email before using this sign-in method. Use your existing sign-in method to access your account.";
+    case "signup_disabled":
+      return `${SIGNUPS_PAUSED_MESSAGE} If you already have an account, sign in with the method you used before.`;
     case "account_not_linked":
     case "account_linking_disabled":
       return "This sign-in method isn't connected. Sign in with an existing method, then connect it in Personal settings → Security.";
     case "account_already_linked":
     case "identity_conflict":
-      return "This provider account is already connected to another OpenGeni account. Use a different provider account; accounts are not merged.";
+      return "This provider account is already connected to another Opengeni account. Use a different provider account; accounts are not merged.";
+    case "token_expired":
+    case "invalid_token":
+      return VERIFICATION_LINK_CALLBACK_ERROR;
     case "state_mismatch":
     case "state_not_found":
     case "invalid_state":
     case "session_expired":
-      return "This sign-in request expired or no longer matches this browser. Start sign-in again from OpenGeni.";
+      return "This sign-in request expired or no longer matches this browser. Start sign-in again from Opengeni.";
     default:
       return "Sign-in couldn't be completed. Try again, or use an existing sign-in method. No account connection has been confirmed.";
   }

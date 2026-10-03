@@ -110,6 +110,11 @@ jobs:
         shell: bash
         run: bun install --frozen-lockfile
 
+      - name: Install both pinned macOS native dependency architectures
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: bun install --frozen-lockfile --os=darwin --cpu='*'
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -246,6 +251,8 @@ jobs:
             packages/browserd/dist/opengeni-agent-browser-x64 \
             packages/browserd/dist/opengeni-agent-browser-arm64 \
             -output "opengeni-agent-browser-${{ matrix.target }}"
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
+          bun packages/browserd/scripts/stage-cua-runtime.ts arm64
           chmod 0755 \
             "opengeni-browserd-${{ matrix.target }}" \
             "opengeni-agent-browser-${{ matrix.target }}" \
@@ -256,11 +263,13 @@ jobs:
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-x64" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-x64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/x86_64-apple-darwin/release/opengeni-computer-native" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/x64/embedded.rs" \
               cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-arm64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/opengeni-computer-native" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/arm64/embedded.rs" \
               cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
           )
           lipo -create \
@@ -643,6 +652,7 @@ jobs:
             'x86_64-unknown-linux-musl:opengeni-agent-x86_64-unknown-linux-musl' \
             'aarch64-unknown-linux-musl:opengeni-agent-aarch64-unknown-linux-musl' \
             'universal-apple-darwin:opengeni-agent-universal-apple-darwin' \
+            'universal-apple-darwin-app:OpenGeni-Agent.app.zip' \
             'x86_64-pc-windows-msvc:opengeni-agent-x86_64-pc-windows-msvc.exe' \
             'aarch64-pc-windows-msvc:opengeni-agent-aarch64-pc-windows-msvc.exe'
           do

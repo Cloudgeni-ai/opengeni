@@ -58,10 +58,38 @@ import { useWorkspaceCapture } from "../hooks/use-workspace-capture";
 import { useMachineChip, type MachineChip } from "../hooks/use-machine-chip";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "../hooks/use-machines";
 import type { MachineView } from "../types/machines";
-import { SandboxFiles } from "./sandbox-files";
+import type { SandboxFilesProps } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
+
+const LazySandboxFiles = lazy(() =>
+  import("./sandbox-files")
+    .then(({ SandboxFiles }) => ({ default: SandboxFiles }))
+    // A host may already have attempted stale-deployment recovery. Keep an
+    // optional chunk failure inside Files rather than unmounting the chat.
+    .catch(() => ({ default: FilesLoadFailed })),
+);
+
+function FilesLoadFailed() {
+  return (
+    <CenteredState tone="danger" icon={<TriangleAlertIcon className="size-5" aria-hidden />}>
+      <p className="text-og-sm font-medium text-og-fg">Files could not be loaded.</p>
+      <DockActionButton onClick={() => window.location.reload()}>
+        <RefreshCwIcon className="size-3" aria-hidden />
+        Reload
+      </DockActionButton>
+    </CenteredState>
+  );
+}
+
+function FilesTabBody(props: SandboxFilesProps) {
+  return (
+    <Suspense fallback={<WorkbenchSurfaceLoading name="Files" />}>
+      <LazySandboxFiles {...props} />
+    </Suspense>
+  );
+}
 
 const LazyBrowserViewer = lazy(async () => {
   const { BrowserViewer } = await import("./browser-viewer");
@@ -119,7 +147,7 @@ function sourceDrivenDefaultTab(
   return null;
 }
 
-function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
+function WorkbenchSurfaceLoading({ name }: { name: "Files" | "Browser" | "Desktop" }) {
   return (
     <CenteredState
       icon={
@@ -741,7 +769,7 @@ export function useSandboxWorkspaceTabs(
         label: "Files",
         icon: <FileCode2Icon />,
         content: (
-          <SandboxFiles
+          <FilesTabBody
             key={sessionId}
             files={files}
             git={git}
@@ -1207,7 +1235,12 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
       tabs={tabs}
       {...(activeTab !== undefined ? { activeTab } : {})}
       onActiveTabChange={selectTab}
-      {...(machine.enabled
+      // Browser and Desktop select independent workspace resources, potentially
+      // on another placement. Their own viewers report runtime status; the
+      // agent-session machine chip must not describe those resources.
+      {...(machine.enabled &&
+      activeTab !== WORKBENCH_TAB_BROWSER &&
+      activeTab !== WORKBENCH_TAB_DESKTOP
         ? {
             headerAccessory: <MachineStateChip chip={machine.chip} />,
           }

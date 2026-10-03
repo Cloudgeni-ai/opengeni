@@ -39,7 +39,7 @@ const COMMON_SCOPE_LABELS: Readonly<Record<string, { label: string; description:
   },
   offline_access: {
     label: "Keep the connection working",
-    description: "Refresh access when you are not actively using OpenGeni.",
+    description: "Refresh access when you are not actively using Opengeni.",
   },
   "User.Read": {
     label: "Confirm your Microsoft account",

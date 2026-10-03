@@ -10,7 +10,9 @@ import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
+import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
+import type { LatestQuestionOptions } from "./latest-question";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -26,7 +28,7 @@ export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
 export type UseSessionEventsResult = {
   /** Replayed + live events, ordered by sequence, no gaps, no duplicates. */
   events: SessionEvent[];
-  /** Projected, renderable timeline (memoized over `events`). */
+  /** Renderable timeline, including the bounded navigation witness for a distant queued prompt. */
   timeline: TimelineItem[];
   /** Latest session status observed in the event log, if any. */
   sessionStatus: SessionStatus | null;
@@ -41,6 +43,10 @@ export type UseSessionEventsResult = {
   windowTruncated: boolean;
   /** True until the initial tail window has been applied (windowed mode). */
   initialLoading: boolean;
+  /** A history window (including an empty tail) succeeded for this session/replay
+   * identity. Stays true through later stream errors and navigation/reloads.
+   * Full replay has no snapshot-completion watermark and does not set this by itself. */
+  initialHistoryReady: boolean;
   /** Whether older durable events are available before the current window. */
   hasOlder: boolean;
   /** True while an older window is being fetched. */
@@ -73,6 +79,10 @@ export type UseSessionEventsResult = {
    * "Jump to latest" when the tip is not in memory (history view).
    */
   jumpToLatest: () => Promise<void>;
+  /** Resolve the newest eligible durable human question. Pending prompts use the
+   * optional queue destination and return null; started prompts load their actual
+   * turn context (pass `timeline` to MessageTimeline as `items`). */
+  jumpToLatestQuestion: (options?: LatestQuestionOptions) => Promise<number | null>;
   /** Replace history with a bounded window containing this exact durable event. */
   jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
@@ -105,8 +115,11 @@ const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
 const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
-export const SESSION_EVENT_BROWSER_MAX_BYTES = 160 * 1024 * 1024;
-export const SESSION_EVENT_BROWSER_MAX_COUNT = 200_000;
+// Durable history remains on the server and is available through bounded
+// navigation. Keep the live browser working set small across multiple tabs;
+// serialized payloads also expand into objects and timeline projections.
+export const SESSION_EVENT_BROWSER_MAX_BYTES = 16 * 1024 * 1024;
+export const SESSION_EVENT_BROWSER_MAX_COUNT = 20_000;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_BYTES = 1024 * 1024;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_COUNT = 256;
 
@@ -139,10 +152,31 @@ export function useSessionEvents(
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
   const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
+  // Bind callbacks to this read lifetime, including a return to a previous
+  // identity. Publish during render so old callbacks are fenced before passive
+  // cleanup can advance the navigation generation.
   const navigationIdentityRef = useRef({ client, streamKey, enabled });
-  navigationIdentityRef.current = { client, streamKey, enabled };
+  if (
+    navigationIdentityRef.current.client !== client ||
+    navigationIdentityRef.current.streamKey !== streamKey ||
+    navigationIdentityRef.current.enabled !== enabled
+  ) {
+    navigationIdentityRef.current = { client, streamKey, enabled };
+  }
+  const navigationIdentity = navigationIdentityRef.current;
+  const ownsNavigation = useCallback(
+    () => navigationIdentityRef.current === navigationIdentity,
+    [navigationIdentity],
+  );
 
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
+  // One navigation witness, not a second history cache. Raw events stay contiguous.
+  const [questionEvidence, setQuestionEvidence] = useState<{
+    client: EmbeddedSessionClientLike;
+    streamKey: string;
+    anchor: number;
+    events: SessionEvent[];
+  } | null>(null);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [newerError, setNewerError] = useState<Error | null>(null);
@@ -152,6 +186,7 @@ export function useSessionEvents(
     null,
   );
   const [initialLoading, setInitialLoading] = useState(true);
+  const [initialHistoryReady, setInitialHistoryReady] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingOldest, setLoadingOldest] = useState(false);
@@ -199,6 +234,7 @@ export function useSessionEvents(
     loadingNewerRef.current = false;
     loadingOldestRef.current = false;
     loadingTargetRef.current = false;
+    setQuestionEvidence(null);
     setLoadingTarget(false);
     setLoadingOlder(false);
     setLoadingNewer(false);
@@ -226,6 +262,7 @@ export function useSessionEvents(
       setLoadingOldest(false);
       setLoadingLatest(false);
       setInitialLoading(true);
+      setInitialHistoryReady(false);
       lastSequenceRef.current = after;
       streamResumeSequenceRef.current = after;
       oldestSequenceRef.current = null;
@@ -277,7 +314,12 @@ export function useSessionEvents(
     const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
     reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
-    const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
+    const isCurrent = () =>
+      generationRef.current === generation &&
+      !controller.signal.aborted &&
+      navigationIdentityRef.current.client === client &&
+      navigationIdentityRef.current.streamKey === streamKey &&
+      navigationIdentityRef.current.enabled === enabled;
     streamAbortRef.current = controller;
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event. Project every
@@ -433,6 +475,8 @@ export function useSessionEvents(
           lastSequenceRef.current = window.newestSequence;
           streamResumeSequenceRef.current = window.newestSequence;
           initialWindowLoadedRef.current = true;
+          setInitialHistoryReady(true);
+          setError(null);
           if (status !== undefined) {
             setSessionStatusProjection(status);
           }
@@ -455,7 +499,7 @@ export function useSessionEvents(
               .then(() => reconcileSession(sessionId))
               .catch((cause) => {
                 if (isCurrent()) {
-                  setError(cause instanceof Error ? cause : new Error(String(cause)));
+                  setError(normalizeError(cause));
                 }
               });
           },
@@ -496,7 +540,7 @@ export function useSessionEvents(
       } catch (cause) {
         if (isCurrent()) {
           flush();
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
           setConnectionState("error");
           // A failed first compact-tail request has no later success path in
           // this effect instance. End the loading gate so hosts can render the
@@ -543,7 +587,7 @@ export function useSessionEvents(
   const loadOlder = useCallback(
     (): OlderHistoryLoadReceipt =>
       createOlderHistoryLoadReceipt(async (markCommitted, preserveTail, markTailPreserved) => {
-        if (!sessionId || navigationBusy() || !hasOlderRef.current) {
+        if (!ownsNavigation() || !sessionId || navigationBusy() || !hasOlderRef.current) {
           return false;
         }
         const before = oldestSequenceRef.current;
@@ -554,6 +598,7 @@ export function useSessionEvents(
           return false;
         }
         const generation = navigationGenerationRef.current;
+        const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
         loadingOlderRef.current = true;
         setLoadingOlder(true);
         let published = false;
@@ -563,8 +608,9 @@ export function useSessionEvents(
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
+            isCurrent,
           });
-          if (navigationGenerationRef.current !== generation) {
+          if (!isCurrent()) {
             return false;
           }
           if (window.events.length === 0) {
@@ -650,21 +696,27 @@ export function useSessionEvents(
           });
           published = true;
           return olderStillAvailable;
+        } catch (reason) {
+          if (!isCurrent()) return false;
+          throw reason;
         } finally {
-          if (!published && navigationGenerationRef.current === generation) {
+          if (!published && isCurrent()) {
             loadingOlderRef.current = false;
             setLoadingOlder(false);
           }
         }
       }),
-    [client, workspaceId, sessionId],
+    [client, workspaceId, sessionId, ownsNavigation],
   );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || navigationBusy() || !hasOlderRef.current) {
+    if (!ownsNavigation() || !sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
-    const generation = navigationGenerationRef.current;
+    // Explicit window replacement supersedes unresolved question destinations.
+    const generation = ++navigationGenerationRef.current;
+    const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
+    setQuestionEvidence(null);
     loadingOldestRef.current = true;
     setLoadingOldest(true);
     let published = false;
@@ -674,8 +726,9 @@ export function useSessionEvents(
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
+        isCurrent,
       });
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
       if (window.events.length === 0) {
@@ -701,6 +754,8 @@ export function useSessionEvents(
         (retainedNewest !== null && retainedNewest < highWater);
       hasNewerRef.current = newer;
       initialWindowLoadedRef.current = true;
+      setInitialHistoryReady(true);
+      setError(null);
       viewModeRef.current = "history";
       loadingOldestRef.current = false;
       setNewerError(null);
@@ -716,16 +771,19 @@ export function useSessionEvents(
       });
       published = true;
       return newer;
+    } catch (reason) {
+      if (!isCurrent()) return false;
+      throw reason;
     } finally {
-      if (!published && navigationGenerationRef.current === generation) {
+      if (!published && isCurrent()) {
         loadingOldestRef.current = false;
         setLoadingOldest(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, ownsNavigation]);
 
   const loadNewer = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || navigationBusy() || !hasNewerRef.current) {
+    if (!ownsNavigation() || !sessionId || navigationBusy() || !hasNewerRef.current) {
       return false;
     }
     const afterSequence = newestSequenceRef.current;
@@ -735,6 +793,7 @@ export function useSessionEvents(
       return false;
     }
     const generation = navigationGenerationRef.current;
+    const isCurrent = () => ownsNavigation() && navigationGenerationRef.current === generation;
     loadingNewerRef.current = true;
     setLoadingNewer(true);
     let published = false;
@@ -744,8 +803,9 @@ export function useSessionEvents(
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
+        isCurrent,
       });
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
       if (window.events.length === 0) {
@@ -819,35 +879,33 @@ export function useSessionEvents(
     } catch (reason) {
       // A settled request from an old navigation lifetime is not a failure of
       // the current session. Preserve current loading/error state as well.
-      if (navigationGenerationRef.current !== generation) {
+      if (!isCurrent()) {
         return false;
       }
-      setNewerError(reason instanceof Error ? reason : new Error(String(reason)));
+      setNewerError(normalizeError(reason));
       // Keep authorization and integrity failures actionable for callers;
       // timeline-owned invocations attach their own explicit recovery UI.
       throw reason;
     } finally {
-      if (!published && navigationGenerationRef.current === generation) {
+      if (!published && isCurrent()) {
         loadingNewerRef.current = false;
         setLoadingNewer(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, ownsNavigation]);
 
   const jumpToSequence = useCallback(
     async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
       const signal = navigationOptions?.signal;
-      if (!sessionId || !Number.isSafeInteger(sequence) || sequence < 1) return false;
+      if (!ownsNavigation() || !sessionId || !Number.isSafeInteger(sequence) || sequence < 1)
+        return false;
       // A navigation that was already cancelled (for example Find closed before
       // the caller could react) must not disturb any current view state.
       if (signal?.aborted) return false;
       // Explicit targets supersede both other targets and adjacent-page requests.
       const generation = ++navigationGenerationRef.current;
-      const current = () =>
-        generation === navigationGenerationRef.current &&
-        navigationIdentityRef.current.client === client &&
-        navigationIdentityRef.current.streamKey === streamKey &&
-        navigationIdentityRef.current.enabled === enabled;
+      setQuestionEvidence(null);
+      const current = () => generation === navigationGenerationRef.current && ownsNavigation();
       const previousMode = viewModeRef.current;
       streamAbortRef.current?.abort();
       generationRef.current += 1;
@@ -896,6 +954,8 @@ export function useSessionEvents(
           retained.truncated ||
           (newestSequenceRef.current ?? 0) < lastSequenceRef.current;
         initialWindowLoadedRef.current = true;
+        setInitialHistoryReady(true);
+        setError(null);
         viewModeRef.current = "history";
         setEventWindow(retained);
         setHasOlder(hasOlderRef.current);
@@ -921,10 +981,52 @@ export function useSessionEvents(
         }
       }
     },
-    [client, workspaceId, sessionId, streamKey, enabled],
+    [client, workspaceId, sessionId, ownsNavigation],
+  );
+
+  const jumpToLatestQuestion = useCallback(
+    async (questionOptions?: LatestQuestionOptions): Promise<number | null> => {
+      if (!sessionId || !ownsNavigation()) return null;
+      let generation = navigationGenerationRef.current;
+      const current = () => ownsNavigation() && generation === navigationGenerationRef.current;
+      try {
+        // Optional action code stays off the session-open path. Capture identity
+        // before the import and fence its completion just like network reads.
+        const { resolveLatestQuestion } = await import("./latest-question");
+        if (!current()) return null;
+        const destination = await resolveLatestQuestion({
+          client,
+          workspaceId,
+          sessionId,
+          isCurrent: current,
+          resumeSequence: maxResumeSequence,
+          options: questionOptions,
+        });
+        if (!destination || !current()) return null;
+        if (!eventWindowRef.current.events.some((event) => event.sequence === destination.anchor)) {
+          const navigation = jumpToSequence(destination.anchor);
+          generation = navigationGenerationRef.current;
+          if (!(await navigation) || !current()) return null;
+        }
+        setQuestionEvidence({
+          client,
+          streamKey,
+          anchor: destination.anchor,
+          events: destination.events,
+        });
+        return destination.questionSequence;
+      } catch (reason) {
+        if (!current()) return null;
+        throw reason;
+      }
+    },
+    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence],
   );
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
+    // An old host retry closure must not clear a replacement session's error
+    // or abort its live feed before the passive effect cleanup has run.
+    if (!ownsNavigation()) return;
     if (loadingTargetRef.current) {
       navigationGenerationRef.current += 1;
       loadingTargetRef.current = false;
@@ -933,9 +1035,12 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy()) {
       return;
     }
+    navigationGenerationRef.current += 1;
+    setQuestionEvidence(null);
     loadingLatestRef.current = true;
     setLoadingLatest(true);
     setNewerError(null);
+    setError(null);
     let published = false;
     try {
       streamAbortRef.current?.abort();
@@ -966,17 +1071,25 @@ export function useSessionEvents(
         setLoadingLatest(false);
       }
     }
-  }, [after, sessionId]);
+  }, [after, sessionId, ownsNavigation]);
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
-  const timeline = useMemo(
-    () =>
-      buildTimeline(visibleEvents, {
-        partialStart: hasOlder || eventWindow.truncated || after > 0,
-      }),
-    [visibleEvents, hasOlder, eventWindow.truncated, after],
-  );
+  const timeline = useMemo(() => {
+    const witness =
+      questionEvidence?.client === client &&
+      questionEvidence.streamKey === streamKey &&
+      visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
+        ? questionEvidence.events
+        : EMPTY_EVENTS;
+    const timelineOptions = { partialStart: hasOlder || eventWindow.truncated || after > 0 };
+    if (witness.length === 0) return buildTimeline(visibleEvents, timelineOptions);
+    const ids = new Set(visibleEvents.map((event) => event.id));
+    return buildTimeline(
+      [...visibleEvents, ...witness.filter((event) => !ids.has(event.id))],
+      timelineOptions,
+    );
+  }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
 
   return {
     events: visibleEvents,
@@ -988,6 +1101,7 @@ export function useSessionEvents(
     windowBytes: identityMatches ? eventWindow.bytes : 2,
     windowTruncated: identityMatches ? eventWindow.truncated : false,
     initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    initialHistoryReady: identityMatches && initialHistoryReady,
     hasOlder: !identityMatches ? false : hasOlder,
     loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,
@@ -998,6 +1112,7 @@ export function useSessionEvents(
     loadOldest,
     loadingLatest: !identityMatches ? false : loadingLatest,
     jumpToLatest,
+    jumpToLatestQuestion,
     jumpToSequence,
     loadingTarget: identityMatches && loadingTarget,
     error: identityMatches ? (newerError ?? error) : null,
@@ -1181,6 +1296,7 @@ async function loadEventWindow(
     maxFetches: number;
     boundaryPageCap?: number;
     signal?: AbortSignal;
+    isCurrent?: () => boolean;
   },
 ): Promise<LoadedEventWindow> {
   let cursor = options.before;
@@ -1196,6 +1312,7 @@ async function loadEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     if (page.length === 0) {
       reachedStart = true;
@@ -1226,6 +1343,7 @@ async function loadEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     snapPages += 1;
     if (page.length === 0) {
@@ -1289,6 +1407,7 @@ async function loadForwardEventWindow(
     targetGroups: number;
     maxFetches: number;
     signal?: AbortSignal;
+    isCurrent?: () => boolean;
   },
 ): Promise<LoadedForwardEventWindow> {
   let cursor = options.after;
@@ -1304,6 +1423,7 @@ async function loadForwardEventWindow(
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (options.isCurrent?.() === false) throw abortError();
     fetches += 1;
     if (page.length === 0) {
       reachedEnd = true;

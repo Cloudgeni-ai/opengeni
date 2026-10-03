@@ -5,6 +5,38 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
+  test("all three account-inventory callsites pass the live tri-state read grant", async () => {
+    for (const [path, workspace] of [
+      ["routes/session.tsx", "props.session.workspaceId"],
+      ["routes/sessions-index.tsx", "workspaceId"],
+      ["components/schedules/schedule-form-page.tsx", "workspaceId"],
+    ] as const) {
+      const route = await source(path);
+      const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
+      expect(start).toBeGreaterThan(-1);
+      const call = route.slice(start, route.indexOf("\n  );", start));
+      expect(call).toContain("context.accessContext === null");
+      expect(call).toContain("hasWorkspacePermission(");
+      expect(call).toContain("context.accessContext,");
+      expect(call).toContain(workspace);
+      expect(call).toContain('"connections:read"');
+    }
+  });
+
+  test("new-session Send stays available when background draft saving conflicts", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("draftConflict: null,");
+    expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
+    expect(route).toContain("<NewSessionDraftSyncNotice />");
+    expect(route).toContain("newSessionDraft.isCurrentSignature(visibleSignature)");
+    expect(route).toContain("suspendAutosave: submitting");
+    expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
+    expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
+    expect(route).not.toContain("newSessionDraft.conflict ||");
+    expect(route).not.toContain("!newSessionDraft.conflict &&");
+    expect(route).not.toContain("newSessionDraft.conflict !== null ||");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
@@ -17,7 +49,11 @@ describe("session control surface architecture", () => {
     expect(newSession).not.toContain("voiceModel={{");
     expect(newSession).toContain('modelMenu="split"');
     const plus = await source("components/composer-mobile-plus.tsx");
-    expect(plus).toContain('setPanel("settings")');
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(plus).toContain('import("./composer-mobile-plus-panel")');
+    expect(plus).toContain("{open ? (");
+    expect(panel).toContain('setPanel("settings")');
+    expect(panel).not.toContain("setSettingsOpen");
     expect(plus).not.toContain("setSettingsOpen");
   });
 
@@ -200,8 +236,10 @@ describe("session control surface architecture", () => {
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
-    expect(route).toContain("onChange={props.onComputeChange}");
-    expect(route).toContain("props.onComputeChange({");
+    // Machine and folder choices live under "+" > Runs on and go through the
+    // explicit compute path, never the launch-selection draft setter.
+    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
@@ -391,10 +429,47 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("loads the first page and older sessions independently in each project", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
+    expect(list).toContain(
+      'const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;',
+    );
+    expect(list).toContain("includePinned: false");
+    expect(list).toContain('if (!channelMode || search || browseStatus === "archived") return;');
+    expect(list).toContain("void loadMoreInGroup(group);");
+    expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
+    expect(list).toMatch(/\(!channelMode \|\| search\)\s*&&\s*workspacePagination/);
+  });
+
+  test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain(
+      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    );
+    expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
+    expect(list).toContain("visibleNodes={visibleNodesForGroup(");
+    expect(list).toContain("Show ${revealCount} more");
+  });
+
+  test("separates archive browsing and hydrates sparse creator groups", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("browseSessions.filter((session) => !session.archived)");
+    expect(list).toContain('browseStatus === "archived" || session.archived');
+    expect(list).toContain('label="Archived"');
+    expect(list).toContain('sectionId="archived"');
+    expect(list).toContain("allowNewSession={false}");
+    expect(list).toContain(
+      'if (browseGroupBy !== "creator" || search || browseStatus === "archived") return;',
+    );
+    expect(list).toContain('group.kind === "archived" ? {} : { sortBy: browseSortBy }');
+  });
+
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
-    expect(list).toContain('void onMoveToChannel(session, null, "actions")');
+    // Default (channel id null) is the first row of the same project list.
+    expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
     expect(list).toContain("pendingSessionFocus.current = {");
     expect(list).toContain("if (!remountSelection.current) return;");
     expect(list).toContain("event.preventDefault();");
@@ -505,6 +580,21 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
     expect(rail).toContain("onOpenChange={setSearchOpen}");
+  });
+
+  test("the established-session Variable Set editor stays behind its lazy panel", async () => {
+    // A direct session load must not carry the editor: the "+" menu mounts it
+    // on demand (see test/e2e/session-lazy-panels.browser.e2e.ts).
+    const route = await source("routes/session.tsx");
+    expect(route).toContain('from "@/components/session/session-variable-set-picker-panel"');
+    expect(route).not.toContain('from "@/components/session/session-variable-set-picker"');
+    const panel = await source("components/session/session-variable-set-picker-panel.tsx");
+    expect(panel).toContain('import("@/components/session/session-variable-set-picker")');
+    // Only a type-only import of the implementation module is allowed.
+    expect(panel).not.toMatch(
+      /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
+    );
+    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
   });
 
   test("the retired client-side queue model is gone", async () => {

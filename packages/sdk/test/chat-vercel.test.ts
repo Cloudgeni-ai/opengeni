@@ -3,6 +3,8 @@ import {
   chatSessionId,
   handleVercelChatRequest,
   UI_MESSAGE_STREAM_HEADER,
+  uiMessageStreamParts,
+  type ChatChunk,
   type ChatResolve,
 } from "../src/chat";
 import { fakeServer, readBody, sseDataLines } from "./chat-helpers";
@@ -223,6 +225,8 @@ describe("handleVercelChatRequest", () => {
       type: "tool-input-available",
       toolCallId: "call_9",
       toolName: "delete_file",
+      dynamic: true,
+      providerExecuted: true,
       input: { path: "x" },
     });
     expect(streamed[6]).toEqual({
@@ -232,7 +236,7 @@ describe("handleVercelChatRequest", () => {
     });
   });
 
-  test("tool calls map to tool-input and tool-output parts", async () => {
+  test("OpenGeni tool activity is omitted by default and dynamic when opted in", async () => {
     const server = fakeServer({
       reply: () => [
         {
@@ -244,21 +248,25 @@ describe("handleVercelChatRequest", () => {
         { type: "turn.completed", payload: {} },
       ],
     });
-    const body = await readBody(
-      await handleVercelChatRequest(
-        server.og,
-        useChatRequest({
-          id: "c_9",
-          messages: [{ role: "user", parts: [{ type: "text", text: "go" }] }],
-        }),
-        resolveTenant,
+    const request = () =>
+      useChatRequest({
+        id: "c_9",
+        messages: [{ role: "user", parts: [{ type: "text", text: "go" }] }],
+      });
+    const plain = parts(
+      await readBody(await handleVercelChatRequest(server.og, request(), resolveTenant)),
+    );
+    expect(plain.some((part) => String(part.type).startsWith("tool-"))).toBe(false);
+    const streamed = parts(
+      await readBody(
+        await handleVercelChatRequest(server.og, request(), resolveTenant, { toolParts: true }),
       ),
     );
-    const streamed = parts(body);
+    const tool = { toolCallId: "call_1", dynamic: true, providerExecuted: true };
     expect(streamed.slice(2, 5)).toEqual([
-      { type: "tool-input-start", toolCallId: "call_1", toolName: "search" },
-      { type: "tool-input-available", toolCallId: "call_1", toolName: "search", input: { q: 1 } },
-      { type: "tool-output-available", toolCallId: "call_1", output: { status: "completed" } },
+      { type: "tool-input-start", ...tool, toolName: "search" },
+      { type: "tool-input-available", ...tool, toolName: "search", input: { q: 1 } },
+      { type: "tool-output-available", ...tool, output: { status: "completed" } },
     ]);
     expect(streamed.find((part) => part.type === "text-delta")?.delta).toBe("Found it.");
   });
@@ -314,5 +322,18 @@ describe("handleVercelChatRequest", () => {
     );
     expect(noConversation.status).toBe(400);
     expect(await noConversation.json()).toMatchObject({ error: { code: "conversation_required" } });
+  });
+});
+
+describe("uiMessageStreamParts inside an existing AI SDK stream", () => {
+  test("framing: false omits start/finish so a host writer owns them", async () => {
+    async function* chunks(): AsyncGenerator<ChatChunk, void, void> {
+      yield { type: "text", text: "Hi" };
+    }
+    const types: unknown[] = [];
+    for await (const part of uiMessageStreamParts(chunks(), { framing: false })) {
+      types.push(part.type);
+    }
+    expect(types).toEqual(["text-start", "text-delta", "text-end"]);
   });
 });

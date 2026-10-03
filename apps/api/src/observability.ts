@@ -1,5 +1,19 @@
-import type { EventLogger } from "@opengeni/events";
+import {
+  natsSubscriptionTerminationCounter,
+  type EventBusOptions,
+  type EventLogger,
+} from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+
+/** Logger plus the closed-label subscription-termination counter for NATS connections. */
+export function observabilityEventBusOptions(
+  observability: Observability,
+): Pick<EventBusOptions, "logger" | "onSubscriptionTerminated"> {
+  return {
+    logger: observabilityEventLogger(observability),
+    onSubscriptionTerminated: natsSubscriptionTerminationCounter(observability),
+  };
+}
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {

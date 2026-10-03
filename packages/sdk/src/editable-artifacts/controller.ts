@@ -378,6 +378,15 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
   }
 
   getView(): EditableArtifactSyncView {
+    const blockedPending = this.allBlockedPending();
+    const authoringBlockedReason =
+      this.modality !== "spreadsheet" && blockedPending.length > 0
+        ? "pending_conflict"
+        : this.orderedPending().some(
+              (transaction) => transaction.replicaId !== this.writerReplicaId,
+            )
+          ? "prior_writer"
+          : undefined;
     return {
       artifactId: this.artifactId,
       modality: this.modality,
@@ -386,7 +395,8 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       headSequence: this.headSequence,
       writable: this.writable,
       pendingTransactions: this.pending.size,
-      blockedPending: this.allBlockedPending(),
+      blockedPending,
+      authoringBlockedReason,
       queuedMessages: this.liveQueue.length,
       reconnectAttempt: this.reconnectAttempt,
       lastError: this.lastError,

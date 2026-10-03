@@ -163,6 +163,7 @@ export function TimelineAnnotationSelection({
 }) {
   const [candidate, setCandidate] = useState<SelectionCandidate | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const initialSelectionObservedRef = useRef(false);
   const pointerOriginRef = useRef<"unset" | "inside" | "outside">("unset");
   const portalStyle = usePortalTokenStyle(rootRef.current);
 
@@ -175,6 +176,12 @@ export function TimelineAnnotationSelection({
     const update = (keyboard: boolean) => {
       setCandidate(buildCandidate(root, sources, keyboard));
     };
+    // A user may finish selecting text before this lazy component arrives.
+    // Reconcile once; later prop changes must not revive dismissed selections.
+    if (!initialSelectionObservedRef.current) {
+      initialSelectionObservedRef.current = true;
+      update(false);
+    }
     const onRootPointerUp = (event: PointerEvent) => {
       if (event.target instanceof Node && buttonRef.current?.contains(event.target)) return;
       // Tests may fire only pointerup on the source. A real click that started

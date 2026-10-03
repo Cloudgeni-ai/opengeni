@@ -4,14 +4,17 @@ import {
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
+  agentPromptResourcesFor,
   composeAgentInstructions,
+  inspectPersistentAgentInstructions,
   requestRemoteCompactionV2,
   preparedCompactionRequest,
   queuePreparedCompaction,
   compactionThresholdTokens,
   CompactionNeededError,
   compactionProviderRejection,
-  SUMMARY_BUFFER_TOKENS,
+  estimateSerializedValueTokens,
+  compactionSummaryOutputTokens,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
@@ -43,6 +46,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { reserveModelCallBudget } from "./admission";
 
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -63,6 +67,7 @@ export type CompactionPrepDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  entitlements?: ActivityServices["entitlements"];
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -85,6 +90,7 @@ export type CompactionPrepDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
+  workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
@@ -130,6 +136,59 @@ export type PostAgentCompactionOutcome =
   | { exit: RunAgentTurnResult }
   | { ok: PostAgentCompactionOk };
 
+/**
+ * System instructions for the standalone (chat-provider) compaction request.
+ * A session with an agent configuration uses the same modular composer and
+ * module selection as its turns; a legacy session keeps the historical
+ * persona + CORE + governance + session + memory string byte-for-byte.
+ */
+export function standaloneCompactionInstructions(input: {
+  settings: Settings;
+  session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources">;
+  workspaceAgentInstructions: string | null | undefined;
+  workspaceAgentIdentity: string | null;
+  workspaceGovernance: string | null | undefined;
+  structuredWorkspacePolicyActive: boolean;
+  workspaceMemory: string | null | undefined;
+  rig: { name: string; version: number } | undefined;
+}): string {
+  if (input.session.agent) {
+    return inspectPersistentAgentInstructions(input.settings, {
+      agentConfig: input.session.agent,
+      ...(input.workspaceAgentIdentity
+        ? { workspaceAgentIdentity: input.workspaceAgentIdentity }
+        : {}),
+      ...(input.workspaceGovernance ? { workspaceGovernance: input.workspaceGovernance } : {}),
+      ...(input.workspaceMemory ? { workspaceMemory: input.workspaceMemory } : {}),
+      ...(input.session.instructions ? { sessionInstructions: input.session.instructions } : {}),
+      ...(input.rig ? { rig: input.rig } : {}),
+      // Session-level facts only: per-turn attachments do not apply to a
+      // standalone compaction request.
+      agentPromptResources: agentPromptResourcesFor(
+        input.settings,
+        input.session.resources.filter((resource) => resource.kind !== "file"),
+        input.rig ? { rig: input.rig } : {},
+      ),
+    }).composed;
+  }
+  return appendWorkspaceMemory(
+    appendSessionInstructions(
+      appendWorkspaceGovernance(
+        composeAgentInstructions(
+          input.structuredWorkspacePolicyActive
+            ? input.settings.agentInstructionsTemplate
+            : (input.workspaceAgentInstructions ?? input.settings.agentInstructionsTemplate),
+          undefined,
+          input.rig,
+        ),
+        input.workspaceGovernance ?? undefined,
+      ),
+      input.session.instructions ?? undefined,
+    ),
+    input.workspaceMemory ?? undefined,
+  );
+}
+
 export async function prepareCompaction(deps: CompactionPrepDeps): Promise<CompactionPrepOutcome> {
   const {
     input,
@@ -154,6 +213,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     turnExecutionPolicy,
     resolvedModel,
     workspaceAgentInstructions,
+    workspaceAgentIdentity,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
     workspaceMemory,
@@ -168,11 +228,21 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const remotePrefix: RemoteCompactionPrefix = {
     agent: null,
   };
+  const portableResponsesNeedsAgentPrefix =
+    resolvedModel?.provider.api === "responses" &&
+    !(billingState.isCodexTurn && session.codexCompactionMode === "remote_v2");
+  const preparedPortableRequest = () => {
+    if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
+    return preparedCompactionRequest(remotePrefix.agent);
+  };
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
-  const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-    await processCompactionModelUsageEvent({
+  const recordCompactionUsage = async (
+    usage: ModelResponseUsage,
+    reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null,
+  ) => {
+    const result = await processCompactionModelUsageEvent({
       usage,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
@@ -198,10 +268,42 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       leaseLost: leases.servingLost,
       leaseLostMessage: "Provider credential lease expired during context compaction",
       contextContributions: eventing.companyBrainContextContributions,
+      ...(reservation ? { reservationReleases: reservation.reservationReleases } : {}),
     });
+    if (reservation && result.usageReported)
+      billingState.pendingUsageReservations.delete(reservation.callId);
   };
-  const compactionSummarizerFor = (systemInstructions?: string) =>
-    resolvedModel
+  const compactionCallAccounting = (maxOutputTokens: number) => {
+    let reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
+    return {
+      onModelCallAdmission: async () => {
+        reservation = await reserveModelCallBudget({
+          settings: eventing.modelRunSettings,
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          turnAttemptId: input.attemptId,
+          model: resolvedModel?.configured.id ?? turn.model,
+          isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+          ...(deps.entitlements ? { entitlements: deps.entitlements } : {}),
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+          countsTowardTokenCap: billingState.countsTowardTokenCap,
+          initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+          latencyMode: turnExecutionPolicy.latencyMode,
+          maxOutputTokens,
+        });
+        if (reservation.held) {
+          billingState.pendingUsageReservations.set(reservation.callId, reservation.held);
+        }
+        return { maxOutputTokens: reservation.maxOutputTokens };
+      },
+      onUsage: (usage: ModelResponseUsage) => recordCompactionUsage(usage, reservation),
+    };
+  };
+  const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
+    const summarize: CompactionSummarizer = resolvedModel
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withProviderRequestContext(() =>
             summarizeContextForCompaction(s, m, {
@@ -209,20 +311,37 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               provider: resolvedModel.provider,
               api: resolvedModel.provider.api,
               model: turnExecutionPolicy.upstreamModelId,
-              maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-              onUsage: recordCompactionUsage,
+              maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+              ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
+              ...(portableResponsesNeedsAgentPrefix
+                ? { preparedRequest: preparedPortableRequest() }
+                : {}),
             }),
           )
       : (s: Settings, m: Array<Record<string, unknown>>) =>
           summarizeContextForCompaction(s, m, {
             model: turnExecutionPolicy.upstreamModelId,
-            maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-            onUsage: recordCompactionUsage,
+            maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
+            ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+            ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
+    summarize.estimatePrefixTokens = () => {
+      if (resolvedModel?.provider.api === "chat") {
+        return estimateSerializedValueTokens(systemInstructions ?? "");
+      }
+      const prepared = portableResponsesNeedsAgentPrefix ? preparedPortableRequest() : null;
+      return (
+        estimateSerializedValueTokens(prepared?.systemInstructions ?? systemInstructions ?? "") +
+        (prepared ? estimateSerializedValueTokens(prepared.tools) : 0)
+      );
+    };
+    return summarize;
+  };
   // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
   // tools → instructions → history. Filled after buildAgent for every
   // compact path (including operator /compact, which now builds the agent
@@ -240,7 +359,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              onUsage: recordCompactionUsage,
+              ...compactionCallAccounting(s.contextWindowTokens),
             });
           })
       : undefined;
@@ -265,13 +384,9 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
 
-  // Operator /compact:
-  // - portable (incl. Codex portable): early maintenance path — no
-  //   prepareTools/sandbox; summarizer only needs composed instructions.
-  // - remote_v2: fall through to prepareTools/buildAgent so the compact
-  //   request reuses the ordinary tools→instructions cache prefix, then
-  //   settle without inference. (Requester is also wired for Codex portable
-  //   turns but unused there — gate on the frozen session mode.)
+  // Responses compaction, portable or remote, prepares the ordinary agent
+  // request first so tool schemas and instructions match the warm cache prefix.
+  // Chat providers keep the standalone portable maintenance path.
   const compactionOnlyTurn = turn.source === "compaction";
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
@@ -308,23 +423,21 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
-  if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
-    const compactionInstructions = appendWorkspaceMemory(
-      appendSessionInstructions(
-        appendWorkspaceGovernance(
-          composeAgentInstructions(
-            structuredWorkspacePolicyActive
-              ? eventing.modelRunSettings.agentInstructionsTemplate
-              : (workspaceAgentInstructions ?? eventing.modelRunSettings.agentInstructionsTemplate),
-            undefined,
-            rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
-          ),
-          workspaceGovernance ?? undefined,
-        ),
-        session.instructions ?? undefined,
-      ),
-      workspaceMemory ?? undefined,
-    );
+  if (
+    compactionOnlyTurn &&
+    !remoteV2CompactionNeedsAgentPrefix &&
+    !portableResponsesNeedsAgentPrefix
+  ) {
+    const compactionInstructions = standaloneCompactionInstructions({
+      settings: eventing.modelRunSettings,
+      session,
+      workspaceAgentInstructions,
+      workspaceAgentIdentity,
+      workspaceGovernance,
+      structuredWorkspacePolicyActive,
+      workspaceMemory,
+      rig: rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+    });
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (requested) {
@@ -476,6 +589,7 @@ export async function runPostAgentCompaction(
     claimedResult,
     turn,
     session,
+    resolvedModel,
     remotePrefix,
     remoteCompactionRequester,
     publishCompactionLiveEvents,
@@ -490,10 +604,13 @@ export async function runPostAgentCompaction(
   } = deps;
 
   const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
+  const preparedPortable =
+    resolvedModel?.provider.api === "responses" &&
+    !(remoteCompactionRequester && session.codexCompactionMode === "remote_v2");
   const compactSummarizer = compactionSummarizerFor(
     agentInstructions.trim() ? agentInstructions : undefined,
   );
-  if (remoteCompactionRequester) {
+  if (remoteCompactionRequester || preparedPortable) {
     // The prefix is captured only after this agent passes normal SDK preparation.
     remotePrefix.agent = agent;
   }
@@ -501,7 +618,11 @@ export async function runPostAgentCompaction(
   if (compactionOnlyTurn) {
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
-    if (requested && remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+    if (
+      requested &&
+      (preparedPortable ||
+        (remoteCompactionRequester && session.codexCompactionMode === "remote_v2"))
+    ) {
       queuePreparedCompaction(
         agent,
         new CompactionNeededError({
@@ -630,7 +751,10 @@ export async function runPostAgentCompaction(
     return { exit: claimedResult({ status: "idle" }) };
   }
 
-  if (remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+  if (
+    preparedPortable ||
+    (remoteCompactionRequester && session.codexCompactionMode === "remote_v2")
+  ) {
     const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
     if (

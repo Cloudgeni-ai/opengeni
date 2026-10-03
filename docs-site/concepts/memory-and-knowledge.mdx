@@ -22,6 +22,11 @@ relevant. Personal preferences must keep their intended scope rather than
 silently becoming rules for everyone in a shared workspace. If the appropriate
 destination is unavailable, the agent should explain that limitation.
 
+Agents and the manual editor use the same instruction size limit of 262,144
+characters. Agents append new rules or make exact localized edits, preserving
+unrelated instructions rather than rewriting the whole policy. Keep new rules
+concise: active instructions are included in applicable prompts.
+
 Each destination still follows its Agent learning setting. The agent should tell
 you whether the instruction or Skill is active, awaiting review, or not saved.
 Saving Knowledge does not guarantee that a behavior will apply in future chats.
@@ -47,17 +52,18 @@ serve different purposes:
 
 Original bytes live in object storage. Source text, findings, collections,
 relationships and revision history live in Postgres. Search indexes are
-rebuildable. The **Agent Knowledge** page brings these together with Knowledge,
-Files, Instructions and Skills tabs. Files open their preview, extracted text
-and related entries. Knowledge uses a compact folder tree: expand a collection to
-see its entries and nested collections, then click an entry to read it. Short
-collection descriptions stay visible below folder names. An entry can appear in
+rebuildable. The **Knowledge** page brings these together with Library,
+Instructions and Review tabs (Review appears while proposals wait). Files are a
+Type filter in the Library and open their preview, extracted text and related
+entries. The Library shows a flat list or a **By collection** layout, where
+collections can nest: each top-level collection lists its sub-collections, then
+its entries. Click an entry or collection to open its page, which shows the
+collections it sits in, such as "Runbooks › Payments". An entry can appear in
 several collections without being copied. Before saving, the agent can fetch
 the collection structure and descriptions together with related published and
 pending entries. It reuses unchanged knowledge and updates existing entries
 instead of appending duplicates. File sources open their original preview with
-extracted text available below it. A collection's menu opens its details
-or adds knowledge and subcollections. Search finds entries across the tree.
+extracted text available below it. Search finds entries across collections.
 
 A scheduled task reads its configured source through an agent, just as ordinary
 chat work does. It saves through the same Knowledge service and uses its own
@@ -74,30 +80,33 @@ evidence. A human can explicitly copy text into a new workspace entry.
 
 The SDK retains the compatibility names `memory` and `memoryScope` for selecting
 this scope. The chat facade accepts `memory: "workspace" | "user" | false`.
-With default `agentAccess: "session"`, omitted `memory` is `false`; with user or
-workspace access it follows that scope. `false` initializes Knowledge authoring
+Omitted `memory` follows `chats`: `"user"` for private chats (the default) and
+`"workspace"` for shared chats. `false` initializes Knowledge authoring
 to Off; it does not erase history or disable authorized Knowledge retrieval.
 Personal ownership requires the server-verified user, not an opaque label.
-See [product integration](/guides/integrate-your-product#choose-agent-access-and-memory).
+See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
 
 ## Agent learning and review
 
-**Settings → Agent learning** puts these categories in one place:
+**Knowledge → Learning** puts these categories in one place:
 
-| Category               | Default      | What changes                               |
-| ---------------------- | ------------ | ------------------------------------------ |
-| Knowledge              | Automatic    | Retained sources, findings and collections |
-| Workspace instructions | Review first | Short rules composed into agent prompts    |
-| Skills                 | Review first | Reusable procedures loaded when relevant   |
+| Category               | Default   | What changes                               |
+| ---------------------- | --------- | ------------------------------------------ |
+| Knowledge              | Automatic | Retained sources, findings and collections |
+| Workspace instructions | Automatic | Short rules composed into agent prompts    |
+| Skills                 | Automatic | Reusable procedures loaded when relevant   |
+
+These initial defaults do not overwrite saved workspace or personal choices,
+chat or scheduled-task overrides, or policies already accepted by a running turn.
 
 Each category supports **Automatic**, **Review first** and **Off**. Workspace or
 personal defaults apply unless a chat or scheduled task overrides that category.
-Chat options and a schedule's collapsed learning settings provide shortcuts;
+Chat options and the Advanced section of a schedule's form set overrides;
 existing schedule edits apply with Save and Cancel discards them.
 
-In **+ → Chat settings**, the choices are phrased as permissions: **Allow updates**,
-**Review first**, and **Don’t allow updates**. The closed control shows the effective
-permission; choose **Use default** inside its menu to remove a chat-specific override.
+In **+ → Chat settings**, each category offers **Automatic**, **Review first** and
+**Off**. The closed control shows the effective mode; choose **Default** in its menu
+to remove a chat-specific override.
 These controls govern what agents can add or update, not what they can read or use.
 
 Automatic publishes a change immediately. Review first stores a pending revision

@@ -3,6 +3,7 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexRotationSettings,
+  CodexUsageMap,
   SessionCodexAccountsResponse,
   SessionEvent,
 } from "@opengeni/sdk";
@@ -60,7 +61,7 @@ export type CodexAccountsClientLike = {
     target: string,
   ) => Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>;
   /** Optional (absent ⇒ the card hides live refresh): batched live /wham/usage refresh. */
-  refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: Record<string, unknown> }>;
+  refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: CodexUsageMap }>;
 };
 
 export type UseCodexAccountsOptions = ClientOverride &
@@ -96,6 +97,8 @@ export type UseCodexAccountsResult = {
    * No-op (resolves false) when the client can't refresh usage.
    */
   refreshUsage: () => Promise<boolean>;
+  /** Live provider readings override stale cached labels after refreshUsage. */
+  liveUsage: CodexUsageMap;
   /** True while a live usage refresh is in flight (drives the bar skeleton). */
   refreshingUsage: boolean;
   /** Pin (or unpin via "auto") the session's account; returns true on success. */
@@ -174,6 +177,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   });
   const { run: runMutation, mutating: pinning, mutationError } = useMutationRunner();
   const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
+  const [liveUsage, setLiveUsage] = useState<CodexUsageMap>({});
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
   const [switchReceipt, setSwitchReceipt] = useState<{
     sessionId: string;
@@ -221,7 +225,8 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
       return false;
     }
     const result = await runUsageMutation(async () => {
-      await codexClient.refreshCodexUsage!(workspaceId);
+      const fresh = await codexClient.refreshCodexUsage!(workspaceId);
+      setLiveUsage(fresh.usage);
       return true;
     });
     if (result) await refresh();
@@ -231,13 +236,17 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   // Reauthorization failure must remove a previously visible session pool.
   const data = (sessionId && error ? null : loadedData) ?? EMPTY_STATE;
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;
+  const withLiveUsage = (account: CodexAccount): CodexAccount => {
+    const live = liveUsage[account.id]?.usage;
+    return live ? { ...account, fiveHour: live.fiveHour, weekly: live.weekly } : account;
+  };
 
   return {
-    currentAccount: data.currentAccount,
+    currentAccount: data.currentAccount ? withLiveUsage(data.currentAccount) : null,
     currentSelection: data.currentSelection,
     switchAppliedTo:
       switchReceipt?.sessionId === sessionId ? (switchReceipt?.appliedTo ?? null) : null,
-    accounts: data.accounts,
+    accounts: data.accounts.map(withLiveUsage),
     activeAccountId: data.activeAccountId,
     pinnedAccountId: data.pinnedAccountId,
     effectiveAccountId,
@@ -247,6 +256,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     error,
     refresh,
     refreshUsage,
+    liveUsage,
     refreshingUsage,
     pin,
     pinning,

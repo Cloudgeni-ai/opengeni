@@ -312,3 +312,47 @@ describe("admission output bound", () => {
     expect(inner.requests[1]?.modelSettings.maxTokens).toBeUndefined();
   });
 });
+
+test("wire snapshots name the instruction sections they start with, including prompt modules", async () => {
+  const { buildProviderRequestSnapshot } = await import("../src/model-context-inspector");
+  const { ModelContextSnapshot } = await import("@opengeni/contracts");
+  const identity = "You are Acme's assistant.";
+  const contract = "Base behavior text.\n\nRuntime mechanics text.";
+  const persistentLayers = [
+    { id: "identity" as const, title: "Identity", content: identity, joinBefore: "" },
+    {
+      id: "operational_contract" as const,
+      title: "Operational contract",
+      content: contract,
+      joinBefore: "\n\n",
+      modules: [
+        { id: "base_behavior" as const, chars: "Base behavior text.".length },
+        { id: "runtime_mechanics" as const, chars: "Runtime mechanics text.".length },
+      ],
+    },
+  ];
+  const instructions = `${identity}\n\n${contract}`;
+  const snapshot = ModelContextSnapshot.parse(
+    buildProviderRequestSnapshot({
+      provider: "test",
+      requestIndex: 1,
+      body: JSON.stringify({ instructions, input: [] }),
+      persistentLayers,
+      genesisTitleDirective: "",
+    }),
+  );
+  expect(snapshot.layers.map((layer) => layer.id)).toEqual(["identity", "operational_contract"]);
+  expect(snapshot.layers[1]?.modules?.map((module) => module.id)).toEqual([
+    "base_behavior",
+    "runtime_mechanics",
+  ]);
+  // An unrecognized prompt names no sections: the wire body stays the only truth.
+  const unrelated = buildProviderRequestSnapshot({
+    provider: "test",
+    requestIndex: 2,
+    body: JSON.stringify({ instructions: "Something else entirely.", input: [] }),
+    persistentLayers,
+  });
+  expect(unrelated.layers).toEqual([]);
+  expect(unrelated.instructions).toBe("");
+});

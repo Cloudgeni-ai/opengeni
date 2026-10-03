@@ -347,6 +347,183 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  test("heartbeat cannot revive a lease expired behind an unchanged row lock", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "contended-heartbeat-fixture");
+    const turnId = await seedTurn(ws!);
+    const lease = await acquire(dbA, ws!, turnId);
+    await admin`update codex_credential_leases set leased_until = clock_timestamp() + interval '700 milliseconds'
+      where turn_id = ${turnId}`;
+    let notifyLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      notifyLocked = resolve;
+    });
+    let releaseLock!: () => void;
+    const unlock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocking = admin.begin(async (tx) => {
+      await tx`select id from codex_credential_leases where turn_id = ${turnId} for update`;
+      notifyLocked();
+      await unlock;
+    });
+    await locked;
+    const renewal = heartbeatCodexCredentialLeaseUntil(
+      dbA,
+      ws!.accountId,
+      ws!.workspaceId,
+      turnId,
+      lease.holderId!,
+      lease.generation!,
+    );
+    try {
+      await Bun.sleep(800);
+    } finally {
+      releaseLock();
+      await blocking;
+    }
+    expect(await renewal).toBeNull();
+  }, 180_000);
+
+  for (const source of ["workspace", "organization"] as const) {
+    for (const acceptedPolicy of [false, true]) {
+      test(`lease ${source} ${acceptedPolicy ? "reacquisition" : "first allocation"} does not invert queued workspace and turn locks`, async () => {
+        if (!available) return;
+        const [ws] = await freshAccount();
+        let credentialId: string;
+        if (source === "workspace") {
+          credentialId = await connectCredential(ws!, "lock-order-test");
+        } else {
+          const [credential] = await admin<{ id: string }[]>`
+          insert into codex_subscription_credentials
+            (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+          values (${ws!.accountId}, ${ws!.accountId}, 'organization', 'ciphertext', 'lock-order-test', 'active')
+          returning id`;
+          credentialId = credential!.id;
+          await admin`
+          insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+          values (${ws!.accountId}, ${credentialId}, true)`;
+        }
+        const turnId = await seedTurn(ws!);
+        if (acceptedPolicy) {
+          // Reacquisition must preserve the accepted policy and holder identity.
+          const initial = await acquire(dbA, ws!, turnId);
+          expect(
+            await releaseCodexCredentialLease(
+              dbA,
+              ws!.accountId,
+              ws!.workspaceId,
+              turnId,
+              initial.holderId!,
+              initial.generation!,
+            ),
+          ).toBe(true);
+        }
+        const connectionUse = await admin.reserve();
+        const workspaceWriter = await admin.reserve();
+        const [useBackend] = await connectionUse<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        const [writerBackend] = await workspaceWriter<
+          { pid: number }[]
+        >`select pg_backend_pid() as pid`;
+        const usePid = useBackend!.pid;
+        const writerPid = writerBackend!.pid;
+        let useTransactionOpen = false;
+        let writerTransactionOpen = false;
+        const pending: Promise<unknown>[] = [];
+        const waitForBlocker = async (blockedPid: number | null, blockerPid: number) => {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            const rows = await admin<{ pid: number }[]>`
+            select pid from pg_stat_activity
+            where datname = current_database()
+              and pid <> ${writerPid!}
+              and (${blockedPid}::int is null or pid = ${blockedPid})
+              and ${blockerPid} = any(pg_blocking_pids(pid))`;
+            if (rows[0]) return rows[0].pid;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          throw new Error(`Expected lock waiter behind backend ${blockerPid}`);
+        };
+        try {
+          await connectionUse`begin`;
+          useTransactionOpen = true;
+          await connectionUse`select id from workspaces where id = ${ws!.workspaceId} for update`;
+
+          await workspaceWriter`begin`;
+          writerTransactionOpen = true;
+          const writer = workspaceWriter`
+          select id from workspaces where id = ${ws!.workspaceId} for update
+        `.then(
+            async () => {
+              await workspaceWriter`commit`;
+              writerTransactionOpen = false;
+            },
+            async (error: unknown) => {
+              await workspaceWriter`rollback`;
+              writerTransactionOpen = false;
+              throw error;
+            },
+          );
+          pending.push(writer);
+          void writer.catch(() => undefined);
+          const deadline = Date.now() + 10_000;
+          while (true) {
+            const [row] = await admin<{ blocked: boolean }[]>`
+            select ${usePid!} = any(pg_blocking_pids(${writerPid!})) as blocked`;
+            if (row?.blocked) break;
+            if (Date.now() >= deadline) throw new Error("Workspace writer never queued");
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          const allocation = acquire(dbA, ws!, turnId);
+          pending.unshift(allocation);
+          void allocation.catch(() => undefined);
+          await waitForBlocker(null, writerPid!);
+
+          // This transaction already owns the workspace and now resolves a turn.
+          // Allocation must not own that turn while waiting behind workspace writers.
+          const use = connectionUse`
+          select id from session_turns where id = ${turnId} for update
+        `.then(
+            async () => {
+              await connectionUse`commit`;
+              useTransactionOpen = false;
+            },
+            async (error: unknown) => {
+              await connectionUse`rollback`;
+              useTransactionOpen = false;
+              throw error;
+            },
+          );
+          pending.push(use);
+          void use.catch(() => undefined);
+          const outcomes = await Promise.allSettled(pending);
+          expect(
+            outcomes.map((outcome) =>
+              outcome.status === "fulfilled"
+                ? outcome.status
+                : `rejected:${outcome.reason?.code ?? outcome.reason?.cause?.code ?? "unknown"}`,
+            ),
+          ).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+          const lease = await allocation;
+          expect(lease.credentialId).toBe(credentialId);
+          expect(lease.holderId).toBe(`holder:${turnId}`);
+          expect(lease.generation).toBe(1);
+          const reacquired = await acquire(dbB, ws!, turnId);
+          expect(reacquired.reused).toBe(true);
+          expect(reacquired.holderId).toBe(lease.holderId);
+          expect(reacquired.generation).toBe(lease.generation);
+        } finally {
+          if (useTransactionOpen) await connectionUse`rollback`;
+          if (writerTransactionOpen) await workspaceWriter`rollback`;
+          await Promise.allSettled(pending);
+          connectionUse.release();
+          workspaceWriter.release();
+        }
+      }, 180_000);
+    }
+  }
+
   for (const source of ["workspace", "organization"] as const) {
     test(`settled ${source} usage keeps exact accepted authority after source drift`, async () => {
       if (!available) return;
@@ -3329,4 +3506,351 @@ test("observed Codex assignments survive same-turn recovery without changing fro
   expect(
     (await getSessionCodexState(dbA, ws!.workspaceId, oldFence.sessionId))?.lastCredentialId,
   ).toBe(b);
+});
+
+describe("Codex plan entitlement state", () => {
+  const acceptedModel = "codex/gpt-5.6-sol";
+
+  function modelAwareSelector(context: CodexCredentialLeaseSelectionContext) {
+    return selectCodexCredentialLeaseForTurn({
+      context,
+      sessionId: crypto.randomUUID(),
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      now: new Date(),
+    });
+  }
+
+  test("a plan quarantine excludes one model, records a plan receipt, and the same turn fails over", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const a = await connectCredential(ws!, "plan-downgrade-a");
+    const b = await connectCredential(ws!, "plan-downgrade-b");
+    const turnId = await seedTurn(ws!, 1);
+    const fence = await attemptFenceForTurn(turnId);
+    const first = await acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...fence,
+        turnId,
+        holderId: `plan:${turnId}`,
+        advanceActivePointer: true,
+      },
+      modelAwareSelector,
+    );
+    const serving = first.credentialId!;
+    const alternate = serving === a ? b : a;
+    // The plan re-check observed Free before the refusal is recorded.
+    await recordCodexAccountUsage(dbA, ws!.workspaceId, serving, {
+      planType: "free",
+      planCheckedAt: new Date(),
+    });
+    const version = (await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, serving))!
+      .version;
+    const receipt = await quarantineCodexCredentialForLease(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...fence,
+      turnId,
+      credentialId: serving,
+      credentialVersion: version,
+      holderId: first.holderId!,
+      generation: first.generation!,
+      maxFailovers: first.failoverLimit,
+      quarantine: {
+        kind: "plan_entitlement",
+        modelId: acceptedModel,
+        planType: "free",
+        planObserved: true,
+      },
+    });
+    expect(receipt).toMatchObject({ action: "recorded", failoverCount: 1, exhausted: false });
+
+    const statuses = await listCodexAccountStatuses(dbA, ws!.workspaceId, turnId);
+    const servingStatus = statuses.find((account) => account.id === serving);
+    expect(servingStatus).toMatchObject({
+      status: "active",
+      planType: "free",
+      planPreviousType: "pro",
+      exhaustedUntil: null,
+      planEntitlementExclusion: {
+        planType: "free",
+        models: [{ modelId: acceptedModel, excludedAt: expect.any(Date) }],
+      },
+    });
+    expect(servingStatus?.planCheckedAt).toBeInstanceOf(Date);
+    expect(servingStatus?.planChangedAt).toBeInstanceOf(Date);
+    const [metadata] = await admin<{ evidence: unknown }[]>`
+      select metadata->'codexCredentialFailureEvidenceV1'->${serving}::text as evidence
+      from session_turns where id = ${turnId}`;
+    expect(metadata?.evidence).toEqual({
+      kind: "plan",
+      credentialVersion: version,
+      planType: "free",
+    });
+
+    const settled = await settleCodexCredentialFailover(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: fence.sessionId,
+      turnId,
+      attemptId: fence.attemptId,
+      holderId: first.holderId!,
+      generation: first.generation!,
+      expectedRedispatches: 0,
+      maxFailovers: first.failoverLimit,
+      recoveryPayload: {
+        reason: "codex_credential_failover",
+        credentialId: serving,
+        failureKind: "plan_entitlement",
+      },
+    });
+    expect(settled.action).toBe("recovering");
+    await startRecoveryAttempt(ws!, turnId);
+    const recoveredFence = await attemptFenceForTurn(turnId);
+    const resumed = await acquireCodexCredentialLease(
+      dbB,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...recoveredFence,
+        turnId,
+        holderId: `plan-recovered:${turnId}`,
+        advanceActivePointer: true,
+      },
+      modelAwareSelector,
+    );
+    expect(resumed.credentialId).toBe(alternate);
+    const [turnCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_turns where session_id = ${fence.sessionId}`;
+    expect(turnCount?.count).toBe(1);
+  });
+
+  test("a different observed plan retires the exclusion from usage polling and token refresh", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credential = await connectCredential(ws!, "plan-observation");
+    const [connected] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(connected).toMatchObject({
+      planType: "pro",
+      planPreviousType: null,
+      planChangedAt: null,
+      planEntitlementExclusion: null,
+    });
+    expect(connected?.planCheckedAt).toBeInstanceOf(Date);
+
+    const excludedAt = new Date().toISOString();
+    const exclusionJson = (planType: string) =>
+      JSON.stringify({
+        planType,
+        models: [{ modelId: "codex/gpt-5.6-sol", excludedAt }],
+      });
+    await admin`
+      update codex_subscription_credentials
+      set plan_type = 'free',
+          plan_entitlement_exclusion = ${exclusionJson("free")}::text::jsonb
+      where id = ${credential}`;
+    // Same plan: the exclusion stays, only the timestamp advances.
+    const samePlanAt = new Date(Date.now() + 1_000);
+    await recordCodexAccountUsage(dbA, ws!.workspaceId, credential, {
+      planType: "free",
+      planCheckedAt: samePlanAt,
+    });
+    let [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row?.planEntitlementExclusion).toEqual({
+      planType: "free",
+      models: [{ modelId: "codex/gpt-5.6-sol", excludedAt: new Date(excludedAt) }],
+    });
+    expect(row?.planCheckedAt?.getTime()).toBe(samePlanAt.getTime());
+    // The admin edit bypassed the observation path, so no change is recorded.
+    expect(row?.planPreviousType).toBeNull();
+
+    // An upgrade observed by /wham/usage retires the exclusion and counts as a
+    // capacity-truth change.
+    const upgraded = await recordCodexAccountUsageWithWakeTargets(
+      dbA,
+      ws!.workspaceId,
+      credential,
+      { planType: "pro", planCheckedAt: new Date(Date.now() + 2_000) },
+    );
+    expect(upgraded.result).toBe(true);
+    [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row).toMatchObject({
+      planType: "pro",
+      planPreviousType: "free",
+      planEntitlementExclusion: null,
+    });
+    const upgradedAt = row?.planChangedAt?.getTime();
+    expect(upgradedAt).toBeNumber();
+
+    // A rotated id_token is also a plan observation.
+    await admin`
+      update codex_subscription_credentials
+      set plan_entitlement_exclusion = ${exclusionJson("pro")}::text::jsonb
+      where id = ${credential}`;
+    const current = (await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, credential))!;
+    expect(
+      await recordCodexTokenRefresh(dbA, {
+        id: credential,
+        version: current.version,
+        workspaceId: ws!.workspaceId,
+        credentialEncrypted: "v1:rotated",
+        expiresAt: new Date(Date.now() + 60_000),
+        lastRefreshAt: new Date(),
+        planType: "plus",
+      }),
+    ).toBe(true);
+    [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row).toMatchObject({
+      planType: "plus",
+      planPreviousType: "pro",
+      planEntitlementExclusion: null,
+    });
+    const downgradedAt = row!.planChangedAt!.getTime();
+    expect(downgradedAt).not.toBe(upgradedAt!);
+
+    // Observers that see the SAME plan never overwrite the recorded change:
+    // it stays evidence for the next ambiguous refusal of this account.
+    await recordCodexAccountUsage(dbA, ws!.workspaceId, credential, {
+      planType: "plus",
+      planCheckedAt: new Date(Date.now() + 5_000),
+    });
+    [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row).toMatchObject({ planType: "plus", planPreviousType: "pro" });
+    expect(row?.planChangedAt?.getTime()).toBe(downgradedAt);
+
+    // Reconnecting is a fresh observation and starts without exclusions; the
+    // plan change it reveals is recorded.
+    await admin`
+      update codex_subscription_credentials
+      set plan_entitlement_exclusion = ${exclusionJson("plus")}::text::jsonb
+      where id = ${credential}`;
+    await connectCredential(ws!, "plan-observation");
+    [row] = await listCodexAccountStatuses(dbA, ws!.workspaceId);
+    expect(row).toMatchObject({
+      planType: "pro",
+      planPreviousType: "plus",
+      planEntitlementExclusion: null,
+    });
+  });
+
+  test("inherited organization credentials accept runtime plan observations only with a new stamp", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const [credential] = await admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, organization_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status, allocator_enabled, plan_type
+      ) values (
+        ${ws!.accountId}, null, ${ws!.accountId}, 'organization',
+        'ciphertext', ${crypto.randomUUID()}, 'active', true, 'pro'
+      ) returning id`;
+    await admin`
+      insert into organization_codex_rotation_settings (
+        account_id, active_credential_id, rotation_enabled
+      ) values (${ws!.accountId}, ${credential!.id}, true)`;
+
+    expect(
+      await recordCodexAccountUsage(dbA, ws!.workspaceId, credential!.id, {
+        planType: "free",
+        planCheckedAt: new Date(),
+      }),
+    ).toBe(true);
+    const [observed] = await admin<{ plan_type: string; plan_checked_at: Date | null }[]>`
+      select plan_type, plan_checked_at from codex_subscription_credentials
+      where id = ${credential!.id}`;
+    expect(observed?.plan_type).toBe("free");
+    expect(observed?.plan_checked_at).not.toBeNull();
+
+    const rejected = await withRlsContext(
+      dbA,
+      { accountId: ws!.accountId, workspaceId: ws!.workspaceId },
+      (scoped) =>
+        scoped.execute(sql`
+          update codex_subscription_credentials set plan_type = 'team'
+          where id = ${credential!.id}`),
+    ).catch((error: unknown) => error);
+    expect(rejected).toBeInstanceOf(Error);
+    const cause = (rejected as { cause?: { code?: string; message?: string } }).cause;
+    expect(cause?.code).toBe("42501");
+    expect(cause?.message).toContain("organization administration");
+
+    // A token refresh from workspace runtime context rotates tokens and records
+    // a plan change on the inherited organization credential in one write;
+    // this goes through the guard's second (token-refresh shape) block.
+    const refreshedAt = new Date(Date.now() + 1_000);
+    const [beforeRefresh] = await admin<{ version: number }[]>`
+      select version from codex_subscription_credentials where id = ${credential!.id}`;
+    expect(
+      await recordCodexTokenRefresh(dbA, {
+        id: credential!.id,
+        version: beforeRefresh!.version,
+        workspaceId: ws!.workspaceId,
+        credentialEncrypted: "rotated-ciphertext",
+        expiresAt: new Date(Date.now() + 60_000),
+        lastRefreshAt: refreshedAt,
+        planType: "plus",
+      }),
+    ).toBe(true);
+    const [refreshed] = await admin<
+      {
+        plan_type: string;
+        plan_previous_type: string | null;
+        plan_checked_at: Date;
+        version: number;
+        credential_encrypted: string;
+      }[]
+    >`
+      select plan_type, plan_previous_type, plan_checked_at, version, credential_encrypted
+      from codex_subscription_credentials where id = ${credential!.id}`;
+    expect(refreshed).toMatchObject({
+      plan_type: "plus",
+      plan_previous_type: "free",
+      version: beforeRefresh!.version + 1,
+      credential_encrypted: "rotated-ciphertext",
+    });
+    expect(refreshed?.plan_checked_at.getTime()).toBe(refreshedAt.getTime());
+
+    // The change record may not move without a new plan observation stamp.
+    const rewritten = await withRlsContext(
+      dbA,
+      { accountId: ws!.accountId, workspaceId: ws!.workspaceId },
+      (scoped) =>
+        scoped.execute(sql`
+          update codex_subscription_credentials set plan_previous_type = 'enterprise'
+          where id = ${credential!.id}`),
+    ).catch((error: unknown) => error);
+    expect((rewritten as { cause?: { code?: string } }).cause?.code).toBe("42501");
+
+    // The replaced guard keeps its hardened definer posture.
+    const [guard] = await admin<{ prosecdef: boolean; proconfig: string[] | null }[]>`
+      select p.prosecdef, p.proconfig
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'opengeni_private'
+        and p.proname = 'enforce_organization_codex_runtime_update'`;
+    expect(guard?.prosecdef).toBe(true);
+    expect(guard?.proconfig).toEqual(["search_path=pg_catalog"]);
+
+    // The exclusion shape is bounded by a CHECK constraint. (postgres.js
+    // queries start on `.then`, so resolve them explicitly.)
+    for (const malformed of [
+      '{"planType":"free","models":[]}',
+      '{"planType":"free","modelIds":["codex/gpt-5.6-sol"]}',
+      '["free"]',
+    ]) {
+      const error = await admin`
+        update codex_subscription_credentials
+        set plan_entitlement_exclusion = ${malformed}::jsonb
+        where id = ${credential!.id}`.then(
+        () => null,
+        (rejection: unknown) => rejection,
+      );
+      expect(String((error as { message?: string } | null)?.message)).toContain(
+        "codex_credentials_plan_entitlement_exclusion_shape_chk",
+      );
+    }
+  });
 });

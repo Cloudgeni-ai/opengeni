@@ -15,6 +15,7 @@ import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
+import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
@@ -164,11 +165,16 @@ function parseIntHeader(value: string | null): number | null {
 /**
  * Resolve a window reset instant from the response headers: prefer the absolute
  * `*-reset-at` (epoch SECONDS → ms, mirroring codex-token-resolver's usage parse),
- * else the relative `*-reset-after-seconds` from now, else now (a missing reset
- * reads as "already cleared" — availableAt treats an elapsed reset as a bounded
- * default cooldown, so the ranker never strands on it).
+ * else the relative `*-reset-after-seconds` from now. Absent timing is unknown,
+ * not already cleared; the ranker keeps an exhausted window capped under a
+ * bounded cooldown until live refresh.
  */
-function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs: number): Date {
+function resolveResetAt(
+  headers: Headers,
+  atKey: string,
+  afterKey: string,
+  nowMs: number,
+): Date | null {
   const at = parseIntHeader(headers.get(atKey));
   if (at !== null) {
     return new Date(at * 1000);
@@ -177,43 +183,57 @@ function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs
   if (after !== null) {
     return new Date(nowMs + after * 1000);
   }
-  return new Date(nowMs);
+  return null;
 }
 
 /**
- * Multi-account P4 (Part A): scrape the full usage snapshot the codex backend
- * stamps on every `/codex/responses` response in `x-codex-primary-*` /
- * `x-codex-secondary-*` headers (integer-identical to GET /wham/usage, for free).
- *
- * CRITICAL clobber-fix: return null unless BOTH windows expose a valid used-percent
- * integer. recordCodexAccountUsage writes all five columns unconditionally, so a
- * primary-only snapshot would null the weekly column. Both windows are always
- * emitted together on `/codex/responses`; gating on both makes every write a full
- * 5-column snapshot byte-identical to the poll path, and a malformed/absent header
- * set simply no-ops (the /wham/usage poll fallback still covers it).
+ * Only cache response-header usage when BOTH windows have an explicit, known
+ * duration. The provider's primary/secondary slots are not stable 5h/weekly
+ * labels: a weekly-only account can place its weekly quota in primary. Most
+ * responses omit duration headers, in which case the authoritative /wham/usage
+ * poll supplies the labeled windows instead. Never clobber a good cache with
+ * percentages whose time windows cannot be identified.
  */
 export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapshot | null {
-  const primaryUsedPercent = parseIntHeader(headers.get("x-codex-primary-used-percent"));
-  const secondaryUsedPercent = parseIntHeader(headers.get("x-codex-secondary-used-percent"));
-  if (primaryUsedPercent === null || secondaryUsedPercent === null) {
-    return null; // not a full both-windows snapshot — no-op (never a partial clobber)
+  const duration = (slot: "primary" | "secondary"): number | null => {
+    const raw = headers.get(`x-codex-${slot}-limit-window-seconds`);
+    if (raw === null || !/^\d+$/.test(raw.trim())) return null;
+    return Number(raw.trim());
+  };
+  const primarySeconds = duration("primary");
+  const secondarySeconds = duration("secondary");
+  if (
+    !(
+      (primarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS &&
+        secondarySeconds === CODEX_WEEKLY_WINDOW_SECONDS) ||
+      (primarySeconds === CODEX_WEEKLY_WINDOW_SECONDS &&
+        secondarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS)
+    )
+  ) {
+    return null;
   }
+  const first = parseIntHeader(headers.get("x-codex-primary-used-percent"));
+  const second = parseIntHeader(headers.get("x-codex-secondary-used-percent"));
+  if (first === null || second === null) return null; // never write a partial snapshot
   const nowMs = Date.now();
+  const primaryResetAt = resolveResetAt(
+    headers,
+    "x-codex-primary-reset-at",
+    "x-codex-primary-reset-after-seconds",
+    nowMs,
+  );
+  const secondaryResetAt = resolveResetAt(
+    headers,
+    "x-codex-secondary-reset-at",
+    "x-codex-secondary-reset-after-seconds",
+    nowMs,
+  );
+  const firstIsFiveHour = primarySeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS;
   return {
-    primaryUsedPercent,
-    primaryResetAt: resolveResetAt(
-      headers,
-      "x-codex-primary-reset-at",
-      "x-codex-primary-reset-after-seconds",
-      nowMs,
-    ),
-    secondaryUsedPercent,
-    secondaryResetAt: resolveResetAt(
-      headers,
-      "x-codex-secondary-reset-at",
-      "x-codex-secondary-reset-after-seconds",
-      nowMs,
-    ),
+    primaryUsedPercent: firstIsFiveHour ? first : second,
+    primaryResetAt: firstIsFiveHour ? primaryResetAt : secondaryResetAt,
+    secondaryUsedPercent: firstIsFiveHour ? second : first,
+    secondaryResetAt: firstIsFiveHour ? secondaryResetAt : primaryResetAt,
     checkedAt: new Date(nowMs),
   };
 }
@@ -963,8 +983,14 @@ async function bufferCodexErrorResponse(res: Response): Promise<Response> {
   let errorType: string | undefined;
   let responseBody = bodyText;
   try {
-    const parsed = JSON.parse(bodyText) as { error?: { type?: unknown } };
+    const parsed = JSON.parse(bodyText) as { error?: { type?: unknown }; detail?: unknown };
     errorType = typeof parsed.error?.type === "string" ? parsed.error.type : undefined;
+    // Codex also returns FastAPI's { detail: string } envelope. The OpenAI SDK
+    // reads only error.message, otherwise replacing this useful explanation
+    // with "status code (no body)". Retain the original fields and exact text.
+    if (parsed.error === undefined && typeof parsed.detail === "string") {
+      responseBody = JSON.stringify({ ...parsed, error: { message: parsed.detail } });
+    }
   } catch {
     /* non-JSON error body — leave as-is, no retry-header override */
   }

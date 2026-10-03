@@ -58,4 +58,58 @@ describe("compact conversation card states", () => {
     expect(html).toContain("Connected · Available in this conversation");
     expect(html).not.toContain("agent continues");
   });
+
+  test("provider-specific completion copy and a busy opener stay truthful", () => {
+    const connected = renderToStaticMarkup(
+      <SessionCapabilityFrame
+        {...props}
+        skill={false}
+        complete
+        completeLabel="Connected to this workspace"
+      />,
+    );
+    expect(connected).toContain("Connected to this workspace");
+    expect(connected).not.toContain("Available in this conversation");
+    const opening = renderToStaticMarkup(
+      <SessionCapabilityFrame
+        {...props}
+        skill={false}
+        busy
+        opensDialog={false}
+        actionLabel="Opening GitHub…"
+      />,
+    );
+    expect(opening).toContain("Opening GitHub…");
+    expect(opening).toContain('disabled=""');
+    expect(opening).not.toContain('aria-haspopup="dialog"');
+  });
+
+  test("an unavailable action is explained in place of the button", () => {
+    const html = renderToStaticMarkup(
+      <SessionCapabilityFrame
+        {...props}
+        skill={false}
+        actionUnavailable="Only workspace admins can connect GitHub."
+        note="Ask a workspace admin to connect GitHub."
+      />,
+    );
+    expect(html).toContain("Only workspace admins can connect GitHub.");
+    expect(html).toContain('role="note"');
+    expect(html).not.toContain("<button");
+    expect(html).not.toContain("You choose what to authorize");
+    expect(html).toContain("Ask a workspace admin to connect GitHub.");
+  });
+
+  test("host details render inside the card in both states", () => {
+    for (const complete of [false, true]) {
+      const html = renderToStaticMarkup(
+        <SessionCapabilityFrame {...props} complete={complete} details={<ul data-details="" />} />,
+      );
+      const shell = html.slice(
+        html.indexOf("og-session-capability-shell"),
+        html.indexOf("</section>"),
+      );
+      expect(shell).toContain("data-details");
+    }
+  });
 });

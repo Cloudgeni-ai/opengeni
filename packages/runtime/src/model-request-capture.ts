@@ -33,6 +33,11 @@ export function withModelCallOutputBound<T>(
   return modelCallOutputBound.run(cell, fn);
 }
 
+/** Reservation-backed requests cannot blindly replay potentially paid work. */
+export function hasModelCallOutputBound(): boolean {
+  return modelCallOutputBound.getStore()?.maxTokens !== undefined;
+}
+
 /**
  * Clamp the provider request's output budget to the admission-granted
  * headroom. A smaller explicit maxTokens always wins; when no admission ran
@@ -49,6 +54,27 @@ export function applyModelCallOutputBound(request: ModelRequest): ModelRequest {
     ...request,
     modelSettings: { ...request.modelSettings, maxTokens: bound },
   };
+}
+
+/** Awaited producer-side authority, separate from observational request capture. */
+export type ModelCallLifecycle = {
+  beforeModelRequest?: () => Promise<void>;
+  /** Register before yielding so the next model entry waits for consumer settlement. */
+  onModelResponse?: (event: StreamEvent) => Promise<void>;
+};
+const modelCallLifecycle = new AsyncLocalStorage<ModelCallLifecycle>();
+
+export function withModelCallLifecycle<T>(lifecycle: ModelCallLifecycle, fn: () => T): T {
+  return modelCallLifecycle.run(lifecycle, fn);
+}
+
+export async function beforeModelRequest(): Promise<void> {
+  await modelCallLifecycle.getStore()?.beforeModelRequest?.();
+}
+
+export function modelResponseSettlement(event: StreamEvent): Promise<void> | undefined {
+  if (event.type !== "response_done") return undefined;
+  return modelCallLifecycle.getStore()?.onModelResponse?.(event);
 }
 
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
@@ -170,6 +196,7 @@ export class ModelRequestCaptureModel implements Model {
   constructor(private readonly inner: Model) {}
 
   async getResponse(request: ModelRequest) {
+    await beforeModelRequest();
     const bounded = applyModelCallOutputBound(request);
     rememberPreparedModelRequest(bounded);
     void notifyModelRequestCapture(bounded);
@@ -177,10 +204,15 @@ export class ModelRequestCaptureModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    await beforeModelRequest();
     const bounded = applyModelCallOutputBound(request);
     rememberPreparedModelRequest(bounded);
     void notifyModelRequestCapture(bounded);
-    yield* this.inner.getStreamedResponse(bounded);
+    for await (const event of this.inner.getStreamedResponse(bounded)) {
+      const settlement = modelResponseSettlement(event);
+      void settlement?.catch(() => undefined);
+      yield event;
+    }
   }
 
   getRetryAdvice(args: Parameters<NonNullable<Model["getRetryAdvice"]>>[0]) {

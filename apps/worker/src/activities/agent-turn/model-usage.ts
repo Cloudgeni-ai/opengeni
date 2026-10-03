@@ -178,10 +178,10 @@ export function assertModelResponseLatencyMode(input: {
  *
  * The pinned Responses SDK mirrors one provider terminal response as both a
  * normalized `response_done` and a raw `model/response.completed` event. Claim
- * the stable response/source key before lease renewal or any side effect, and
+ * the stable response/source key after its billing transaction commits, and
  * use that one positional ordinal for both response identity and same-run
- * context binding. A response without usage still clears attempt-owned token
- * state. When usage exists, the durable `agent.model.usage` source-key fence
+ * context binding. A response without usage retains its unknown-spend hold.
+ * When usage exists, the durable `agent.model.usage` source-key fence
  * remains the cross-restart authority: a replay may retry the idempotent billing
  * write, but it cannot advance metrics, context, or attempt-owned signals.
  */
@@ -240,12 +240,13 @@ export async function processModelResponseTerminalEvent(input: {
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
   }
-  input.state.claimedSourceKeys.add(sourceKey);
-  input.state.responseCount = responseOrdinal;
 
   const responseUsage = terminal.usage;
 
   const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
+  const usageReported =
+    responseUsage !== null &&
+    (!input.reservationReleases?.length || hasCompleteModelCallTelemetry(normalizedUsage));
   const accountContext = modelCallAccountContext({
     servingCredentialId: input.servingCredentialId,
     priorSessionCredentialId: input.priorSessionCredentialId,
@@ -260,14 +261,10 @@ export async function processModelResponseTerminalEvent(input: {
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
       if (!responseUsage) {
-        // A usage-less response still ends this call's budget hold.
-        if (input.reservationReleases?.length) {
-          await recordUsageEventsAndApplyCreditDebit(input.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            usageEvents: input.reservationReleases,
-          });
-        }
+        // The provider accepted this call, but its actual spend is unknown.
+        // Keep its hold for conservative attempt settlement.
+        input.state.claimedSourceKeys.add(sourceKey);
+        input.state.responseCount = responseOrdinal;
         return;
       }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
@@ -294,6 +291,9 @@ export async function processModelResponseTerminalEvent(input: {
           ? { reservationReleases: input.reservationReleases }
           : {}),
       });
+      if (!usageReported) return;
+      input.state.claimedSourceKeys.add(sourceKey);
+      input.state.responseCount = responseOrdinal;
       authoritative = await emitModelCallUsage({
         observability: input.observability,
         publish: input.publish,
@@ -354,15 +354,15 @@ export async function processModelResponseTerminalEvent(input: {
     status: "processed",
     sourceKey,
     authoritative,
-    usageReported: responseUsage !== null,
+    usageReported,
   };
 }
 
 /**
  * Apply the same source-key authority ordering to the compaction summarizer's
  * usage callback. The summarizer can retry or mirror a terminal response just
- * like the main stream, so claim before lease renewal, billing, durable usage,
- * logging, or cache metrics. Durable source-key idempotency remains the
+ * like the main stream, so claim only after billing succeeds and before lease
+ * renewal, durable usage, logging, or cache metrics. Durable source-key idempotency remains the
  * cross-process authority after a worker restart.
  */
 export async function processCompactionModelUsageEvent(input: {
@@ -392,9 +392,10 @@ export async function processCompactionModelUsageEvent(input: {
   leaseLost: () => boolean;
   leaseLostMessage: string;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  reservationReleases?: UsageEventWriteInput[];
 }): Promise<
-  | { status: "duplicate"; sourceKey: string }
-  | { status: "processed"; sourceKey: string; authoritative: boolean }
+  | { status: "duplicate"; sourceKey: string; usageReported: boolean }
+  | { status: "processed"; sourceKey: string; authoritative: boolean; usageReported: boolean }
 > {
   const usageOrdinal = input.state.usageCount + 1;
   const sourceKey = modelUsageSourceKey({
@@ -402,44 +403,53 @@ export async function processCompactionModelUsageEvent(input: {
     dispatchId: input.dispatchId,
     positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
   });
+  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
+  const usageReported =
+    !input.reservationReleases?.length || hasCompleteModelCallTelemetry(normalizedUsage);
+  const recordBilling = () =>
+    recordModelUsageAndDebitCredits(input.settings, input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      model: input.model,
+      externallyBilled: input.externallyBilled,
+      ...(input.chargesOpenGeniCredits !== undefined
+        ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+        : {}),
+      ...(input.countsTowardTokenCap !== undefined
+        ? { countsTowardTokenCap: input.countsTowardTokenCap }
+        : {}),
+      usage: input.usage.usage,
+      normalizedUsage,
+      gatewayBilling: input.usage.gatewayBilling,
+      sourceKey,
+      observability: input.observability,
+      ...(input.reservationReleases ? { reservationReleases: input.reservationReleases } : {}),
+    });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
-    return { status: "duplicate", sourceKey };
+    // Replay the same idempotent facts and validate telemetry before releasing.
+    if (input.reservationReleases?.length) await recordBilling();
+    return { status: "duplicate", sourceKey, usageReported };
   }
-  input.state.claimedSourceKeys.add(sourceKey);
-  input.state.usageCount = usageOrdinal;
-
   const accountContext = modelCallAccountContext({
     servingCredentialId: input.servingCredentialId,
     priorSessionCredentialId: input.priorSessionCredentialId,
     isFirstCallOfTurn: usageOrdinal === 1,
   });
-  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
   let authoritative = false;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        turnAttemptId: input.turnAttemptId,
-        model: input.model,
-        externallyBilled: input.externallyBilled,
-        ...(input.chargesOpenGeniCredits !== undefined
-          ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
-          : {}),
-        ...(input.countsTowardTokenCap !== undefined
-          ? { countsTowardTokenCap: input.countsTowardTokenCap }
-          : {}),
-        usage: input.usage.usage,
-        normalizedUsage,
-        gatewayBilling: input.usage.gatewayBilling,
-        sourceKey,
-        observability: input.observability,
-      });
+      const billing = await recordBilling();
+      if (!usageReported) return;
+      // A duplicate may release its hold only after the original usage committed.
+      // A failed billing transaction leaves this source available for retry.
+      input.state.claimedSourceKeys.add(sourceKey);
+      input.state.usageCount = usageOrdinal;
       authoritative = await emitModelCallUsage({
         observability: input.observability,
         publish: input.publish,
@@ -480,7 +490,7 @@ export async function processCompactionModelUsageEvent(input: {
       }
     },
   });
-  return { status: "processed", sourceKey, authoritative };
+  return { status: "processed", sourceKey, authoritative, usageReported };
 }
 
 export async function processSessionTitleModelUsageEvent(
@@ -624,6 +634,14 @@ export type ModelUsageBillingRecord = {
   upstreamProvider?: string;
 };
 
+function hasCompleteModelCallTelemetry(usage: ModelCallUsageNormalization): boolean {
+  return (
+    usage.telemetry.inputTokens !== null &&
+    usage.telemetry.outputTokens !== null &&
+    usage.rejectedFields.length === 0
+  );
+}
+
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
@@ -646,8 +664,8 @@ export async function recordModelUsageAndDebitCredits(
     observability?: ActivityServices["observability"];
     /**
      * Reservation-release rows for the hold that admitted this call. They
-     * commit inside the same transaction as the usage facts and credit debit,
-     * so a hold cannot outlive its reconcile nor survive a double-write.
+     * commit inside the same transaction as the usage facts and credit debit
+     * once complete, valid telemetry can replace the hold.
      */
     reservationReleases?: UsageEventWriteInput[];
   },
@@ -656,6 +674,11 @@ export async function recordModelUsageAndDebitCredits(
     return null;
   }
   const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
+  if (input.reservationReleases?.length && !hasCompleteModelCallTelemetry(normalizedUsage)) {
+    // A final idempotency key must not commit partial usage. Keep the hold until
+    // complete telemetry can replace it, or attempt settlement accounts for it.
+    return null;
+  }
   const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
   const inputTokens = sanitizedUsage.inputTokens ?? 0;
   const outputTokens = sanitizedUsage.outputTokens ?? 0;

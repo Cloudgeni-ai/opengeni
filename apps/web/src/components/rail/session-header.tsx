@@ -11,7 +11,7 @@ import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
 } from "@opengeni/react";
-import type { SessionEventsConnectionState } from "@opengeni/react";
+import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
@@ -31,7 +31,7 @@ import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { sessionInputWait } from "@/lib/session-rail";
-import { displayModel } from "@/lib/format";
+import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -104,7 +104,7 @@ export function SessionHeader({
   lastStartedModel?: string;
   lastStartedReasoningEffort?: IntelligenceEffort;
   lastStartedLatencyMode?: LatencyMode;
-  /** Billing rail for the provider mark (OpenGeni / Codex / BYOK). */
+  /** Billing rail: Codex account chip, or the mark for makers without a logo. */
   billingClass?: BillingClass;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string;
@@ -115,10 +115,17 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  const startup = useSessionStartup({ ...session, status });
+  const startupLabel =
+    startup === "starting"
+      ? "Starting"
+      : startup === "delayed" || startup === "retrying"
+        ? "Waiting to start"
+        : undefined;
   const modelId = lastStartedModel?.trim() || session.model;
   const resolvedBilling: BillingClass =
     billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
-  const resolvedModel = modelLabel?.trim() || displayModel(modelId);
+  const resolvedModel = modelLabel?.trim() || modelDisplayName(modelId);
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
   // Codex → clickable account chip. Other rails → static provider icon only
@@ -138,14 +145,19 @@ export function SessionHeader({
       />
     ))
   ) : (
-    <BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0 text-fg-muted" />
+    // The model maker's logo; the payment rail only when the maker has none.
+    <ModelMark
+      model={modelId}
+      className="size-3.5 text-fg-muted"
+      fallback={<BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0" />}
+    />
   );
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
+    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65">
       {leading}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them, and a
@@ -213,25 +225,28 @@ export function SessionHeader({
           {session.effectiveControl.state === "active" ? (
             waiting ? (
               <span
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-1 px-2 py-0.5 text-control font-medium text-fg-muted"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
                 data-session-wait-badge=""
               >
                 <span aria-hidden className="size-1.5 rounded-full bg-current" />
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} />
+              <SessionStatusBadge status={status} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
           )}
         </div>
-        <span className="sr-only md:hidden">
-          Connection {connectionState}.{" "}
-          {session.effectiveControl.state === "active"
-            ? `Session ${waiting ? "waiting" : status}.`
-            : "Workstream paused."}
-        </span>
+        {/* Phones keep a compact, non-interactive lifecycle indicator; the
+            full badge and connection pill above take over from md. */}
+        <CompactSessionStatus
+          paused={session.effectiveControl.state !== "active"}
+          waiting={Boolean(waiting)}
+          status={status}
+          label={startupLabel}
+        />
+        <span className="sr-only md:hidden">Connection {connectionState}.</span>
         {keyAuthRequired ? (
           <Button
             type="button"
@@ -261,6 +276,52 @@ export function SessionHeader({
         </Button>
       </div>
     </header>
+  );
+}
+
+/** Small-screen status: dot + short label, sized to wrap inside the header. */
+function CompactSessionStatus({
+  paused,
+  waiting,
+  status,
+  label,
+}: {
+  paused: boolean;
+  waiting: boolean;
+  status: Session["status"];
+  label?: string;
+}) {
+  if (paused) {
+    return (
+      <span
+        data-compact-session-status="paused"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-waiting/35 bg-status-waiting/10 px-1.5 py-px text-2xs font-medium text-fg md:hidden"
+      >
+        <PauseIcon aria-hidden className="size-2.5 shrink-0 fill-current text-status-waiting" />
+        Paused
+      </span>
+    );
+  }
+  if (waiting) {
+    return (
+      <span
+        data-compact-session-status="waiting"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface px-1.5 py-px text-2xs font-medium text-fg-muted md:hidden"
+      >
+        <span aria-hidden className="size-1 rounded-full bg-current" />
+        Waiting
+      </span>
+    );
+  }
+  return (
+    <span data-compact-session-status={status} className="inline-flex shrink-0 md:hidden">
+      <SessionStatusBadge
+        status={status}
+        size="sm"
+        label={label}
+        {...(status === "waiting_capacity" ? { label: "Waiting" } : {})}
+      />
+    </span>
   );
 }
 

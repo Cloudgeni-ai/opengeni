@@ -80,7 +80,6 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
         grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "channels:join"],
       }),
       ...[
-        "files:write",
         "reactions:write",
         "chat:write.customize",
         "users:read.email",

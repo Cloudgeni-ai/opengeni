@@ -50,6 +50,106 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  test.each([390, 1440])(
+    "stock and opted-in model branding preserve credit/free truth at %spx",
+    async (width) => {
+      const context = await browser.newContext({
+        viewport: { width, height: 1000 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      try {
+        for (const theme of ["light", "dark"]) {
+          for (const selected of ["credits", "free"]) {
+            for (const branding of ["stock", "opengeni"]) {
+              const query = new URLSearchParams({
+                models: "deployment",
+                selected,
+                theme,
+                width: String(width === 390 ? 390 : 768),
+              });
+              if (branding !== "stock") query.set("branding", branding);
+              await page.goto(`${baseUrl}/composer-responsive.html?${query}`, {
+                waitUntil: "networkidle",
+              });
+              const trigger = page.getByRole("button", { name: "Model and effort", exact: true });
+              await trigger.waitFor();
+              expect(
+                await trigger
+                  .getByRole("img", {
+                    name: branding === "stock" ? "Models" : "Opengeni",
+                    exact: true,
+                  })
+                  .count(),
+              ).toBe(1);
+              expect(
+                await trigger
+                  .locator(
+                    branding === "stock"
+                      ? ".lucide-sparkles"
+                      : '[data-testid="opted-in-opengeni-mark"]',
+                  )
+                  .count(),
+              ).toBe(1);
+              await trigger.click();
+              const menu = page.getByTestId("model-picker-menu");
+              await menu.waitFor();
+              expect(
+                await menu
+                  .locator(`section[aria-label="${branding === "stock" ? "Models" : "Opengeni"}"]`)
+                  .count(),
+              ).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("billing-class-icon-codex_subscription")
+                  .locator('svg[viewBox="0 0 24 24"]')
+                  .count(),
+              ).toBe(1);
+              expect(await menu.getByText("ChatGPT / Codex plan", { exact: true }).count()).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("model-picker-choice-deployment/free")
+                  .getByText("Free", { exact: true })
+                  .count(),
+              ).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("model-picker-choice-deployment/credits")
+                  .getByText("Free", { exact: true })
+                  .count(),
+              ).toBe(0);
+              expect(
+                await menu
+                  .getByTestId(`model-picker-choice-deployment/${selected}`)
+                  .getByLabel("Selected", { exact: true })
+                  .count(),
+              ).toBe(1);
+              if (branding === "stock") expect(await menu.innerText()).not.toContain("Opengeni");
+              expect(await page.locator('svg[viewBox="0 0 140 133"]').count()).toBe(0);
+              expect(
+                await page.evaluate(() => document.documentElement.scrollWidth),
+              ).toBeLessThanOrEqual(width);
+              const bounds = await page.locator(".og-model-policy-menu").boundingBox();
+              expect(bounds!.x).toBeGreaterThanOrEqual(-1);
+              expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
+              await page.keyboard.press("Escape");
+              await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
+              await page.waitForFunction(
+                () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
+              );
+              expect(await trigger.evaluate((element) => element === document.activeElement)).toBe(
+                true,
+              );
+            }
+          }
+        }
+      } finally {
+        await context.close();
+      }
+    },
+    60_000,
+  );
+
   // Two cold demo navigations and real accessibility scans need the same
   // explicit browser-test budget as the adjacent resize journey, not Bun's
   // default five seconds (baseline CI already measures this case near four).
@@ -204,6 +304,12 @@ describe("container-responsive public composer demo", () => {
     await search.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
+    expect(await page.locator(".og-model-policy-menu").isVisible()).toBe(true);
+    expect(await search.inputValue()).toBe("codex");
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
+    await page.keyboard.press("Escape");
     await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
     await page.waitForFunction(
       () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
@@ -265,6 +371,50 @@ describe("container-responsive public composer demo", () => {
     expect(axe.violations).toEqual([]);
     await context.close();
   }, 90_000);
+
+  test.each([1440, 390])(
+    "model and effort changes keep the picker open at %spx until dismissed",
+    async (width) => {
+      const context = await browser.newContext({
+        viewport: { width, height: 1000 },
+        reducedMotion: "reduce",
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(
+          `${baseUrl}/composer-responsive.html?width=${width === 1440 ? 768 : 320}&branding=host`,
+        );
+        await openModelMenu(page);
+        const menu = page.getByTestId("model-picker-content");
+        const choice = page.getByTestId("model-picker-choice-host/example");
+        await choice.click();
+        expect(await menu.isVisible()).toBe(true);
+        expect(await choice.getByLabel("Selected").count()).toBe(1);
+        const high = page.getByRole("radio", { name: "High", exact: true });
+        await high.click();
+        expect(await menu.isVisible()).toBe(true);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+        await choice.focus();
+        await page.keyboard.press("Enter");
+        expect(await menu.isVisible()).toBe(true);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+
+        // Outside interactions, Escape, and the trigger still dismiss normally.
+        await page.getByRole("textbox", { name: "Message the agent" }).click();
+        await menu.waitFor({ state: "detached" });
+        await openModelMenu(page);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+        await page.keyboard.press("Escape");
+        await menu.waitFor({ state: "detached" });
+        await openModelMenu(page);
+        await page.getByRole("button", { name: "Model and effort" }).click();
+        await menu.waitFor({ state: "detached" });
+      } finally {
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   test("density/theme stay orthogonal and coarse pointers retain 44px targets", async () => {
     const context = await browser.newContext({

@@ -96,3 +96,10 @@ therefore cannot silently replay a side effect. `@opengeni/ogtool` also re-expor
 tool authority, not a second tool or credential surface. Aborting the CLI/client wait stops only
 local observation; it does not cancel a journaled server operation, which must be reconciled by the
 same operation id or settled by the owning attempt lifecycle.
+
+Calls and result reads are scoped to the same live execution attempt. Keep an agent's
+attempt open while its Codemode CLI call is pending: use `command_wait` or `command_read`,
+not a turn-ending `wait_for_input`. Once the attempt ends, its credentials are invalid;
+a later attempt cannot read the earlier attempt's operation ID. An expired polling
+credential does not prove that the operation failed or was cancelled. Inspect retained
+command output and session tool receipts before issuing another call, especially a mutation.

@@ -19,6 +19,7 @@ import {
   ComputerActionRequest,
   ComputerActionReceipt,
   ComputerClipboard,
+  ComputerSessionCapabilities,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerTargetListResponse,
@@ -86,6 +87,30 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("preserves optional background input capability without changing native defaults", () => {
+    const native = {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    };
+    expect(ComputerSessionCapabilities.parse(native)).toEqual(native);
+    expect(ComputerSessionCapabilities.parse({ ...native, backgroundInput: true })).toEqual({
+      ...native,
+      backgroundInput: true,
+    });
+    expect(
+      ComputerSessionCapabilities.safeParse({ ...native, backgroundInput: "true" }).success,
+    ).toBe(false);
+  });
+
   test("keeps public actions actor-free and defaults new browsers to headless", () => {
     expect(
       CreateBrowserSessionRequest.parse({
@@ -401,6 +426,35 @@ describe("interaction contracts", () => {
           url: "wss://computer.example.test/v1/rfb",
           protocols: ["binary"],
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("defaults old RFB attachments to view only and preserves explicit input scope", () => {
+    const attachment = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+      stream: {
+        kind: "direct_rfb",
+        url: "wss://computer.example.test/rfb",
+        protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+      },
+    };
+    for (const inputAllowed of [undefined, false, true]) {
+      const parsed = ComputerSessionAttachment.parse({
+        ...attachment,
+        stream: { ...attachment.stream, ...(inputAllowed === undefined ? {} : { inputAllowed }) },
+      });
+      expect(parsed.stream.kind).toBe("direct_rfb");
+      if (parsed.stream.kind === "direct_rfb")
+        expect(parsed.stream.inputAllowed).toBe(inputAllowed === true);
+    }
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...attachment,
+        stream: { ...attachment.stream, inputAllowed: "true" },
       }).success,
     ).toBe(false);
   });

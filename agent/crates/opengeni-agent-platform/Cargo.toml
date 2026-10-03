@@ -47,6 +47,8 @@ command-group = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 x11rb = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 xattr = { workspace = true }
 rustix = { version = "1.1.4", features = ["fs"] }
 
@@ -55,6 +57,7 @@ rustix = { version = "1.1.4", features = ["fs"] }
 # build, feature off) never pull the objc2 dependency tree.
 [target.'cfg(target_os = "macos")'.dependencies]
 opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = true }
+opengeni-agent-files-ffi = { path = "../opengeni-agent-files-ffi" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "net"] }

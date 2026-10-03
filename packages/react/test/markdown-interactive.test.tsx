@@ -97,3 +97,15 @@ test("retained images use the host loader and reject malformed artifact URLs", (
   );
   expect(images).toHaveLength(1);
 });
+
+test("search-style previews suppress both remote and retained images", () => {
+  const output = renderToStaticMarkup(
+    <Markdown
+      suppressImages
+    >{`![remote](https://example.invalid/pixel.png) ![saved](artifact:11111111-2222-4333-8444-555555555555)`}</Markdown>,
+  );
+  expect(output).not.toContain("<img");
+  expect(output).not.toContain("example.invalid");
+  expect(output).toContain("remote (preview unavailable)");
+  expect(output).toContain("saved (preview unavailable)");
+});

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
@@ -53,7 +53,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function makeClient(responder: (request: RecordedRequest) => Response): {
+function makeClient(
+  responder: (request: RecordedRequest) => Response,
+  options: Pick<OpenGeniClientOptions, "apiContract"> = {},
+): {
   client: OpenGeniClient;
   requests: RecordedRequest[];
 } {
@@ -62,11 +65,118 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
     baseUrl: "https://api.example.test/",
     apiKey: "og_test_key",
     fetch,
+    ...options,
   });
   return { client, requests };
 }
 
+const STRICT = { apiContract: "strict" } as const;
+
 describe("OpenGeniClient", () => {
+  test.each([undefined, false, true])(
+    "defaults legacy Computer RFB grants to view only (%p)",
+    async (inputAllowed) => {
+      const { client } = makeClient(() =>
+        jsonResponse({
+          computerSessionId: SESSION_ID,
+          controllerGeneration: "controller-1",
+          targetId: "screen-1",
+          expiresAt: "2026-08-10T12:00:00.000Z",
+          stream: {
+            kind: "direct_rfb",
+            url: "wss://computer.example.test/rfb",
+            protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+            ...(inputAllowed === undefined ? {} : { inputAllowed }),
+          },
+        }),
+      );
+      const attachment = await client.attachComputerSession(WORKSPACE_ID, SESSION_ID, {
+        targetId: "screen-1",
+      });
+      expect(attachment.stream.kind).toBe("direct_rfb");
+      if (attachment.stream.kind === "direct_rfb")
+        expect(attachment.stream.inputAllowed).toBe(inputAllowed === true);
+    },
+  );
+
+  test("Claude sign-in uses scoped JSON browser mutations without passing tokens or requesting inference", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ connected: true, credentialVersion: 1 }),
+    );
+    const input = {
+      attemptId: "22222222-2222-4222-8222-222222222222",
+      code: "one-use-code#state",
+    };
+    await client.startWorkspaceClaudeSubscriptionOAuth(WORKSPACE_ID);
+    await client.completeWorkspaceClaudeSubscriptionOAuth(WORKSPACE_ID, input);
+    await client.startOrganizationClaudeSubscriptionOAuth("organization");
+    await client.completeOrganizationClaudeSubscriptionOAuth("organization", input);
+    expect(
+      requests.map((r) => [
+        new URL(r.url).pathname,
+        r.method,
+        r.headers["content-type"],
+        JSON.parse(r.body!),
+      ]),
+    ).toEqual([
+      [
+        `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/oauth/start`,
+        "POST",
+        "application/json",
+        {},
+      ],
+      [
+        `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/oauth/complete`,
+        "POST",
+        "application/json",
+        input,
+      ],
+      [
+        "/v1/organizations/organization/model-providers/claude_subscription/oauth/start",
+        "POST",
+        "application/json",
+        {},
+      ],
+      [
+        "/v1/organizations/organization/model-providers/claude_subscription/oauth/complete",
+        "POST",
+        "application/json",
+        input,
+      ],
+    ]);
+  });
+  test("Claude quota reads and refreshes preserve workspace/organization scope and never request inference", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        connected: false,
+        credentialVersion: null,
+        windows: [],
+        observedAt: null,
+        source: null,
+        refreshStatus: "not_checked",
+        refreshCheckedAt: null,
+      }),
+    );
+    await client.getWorkspaceClaudeSubscriptionUsage(WORKSPACE_ID);
+    await client.refreshWorkspaceClaudeSubscriptionUsage(WORKSPACE_ID);
+    await client.getOrganizationClaudeSubscriptionUsage("organization");
+    await client.refreshOrganizationClaudeSubscriptionUsage("organization");
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname])).toEqual([
+      ["GET", `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/usage`],
+      ["POST", `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/usage/refresh`],
+      ["GET", "/v1/organizations/organization/model-providers/claude_subscription/usage"],
+      ["POST", "/v1/organizations/organization/model-providers/claude_subscription/usage/refresh"],
+    ]);
+    for (const request of requests) {
+      if (request.method === "POST") {
+        // Browser mutation routes require JSON even when no input fields are needed.
+        expect(request.headers["content-type"]).toBe("application/json");
+        expect(JSON.parse(request.body!)).toEqual({});
+      } else {
+        expect(request.body).toBeNull();
+      }
+    }
+  });
   test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
     const projection = {
       version: 1 as const,
@@ -1055,8 +1165,11 @@ describe("OpenGeniClient", () => {
     expect(observedGenerations).toEqual([1, 2]);
 
     expect(
-      ((await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & { request: number })
-        .request,
+      (
+        (await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & {
+          request: number;
+        }
+      ).request,
     ).toBe(3);
     expect(requests).toBe(3);
     expect(causalGeneration).toBe(3);
@@ -2034,10 +2147,11 @@ describe("OpenGeniClient", () => {
     expect((error as Error).message.length).toBeLessThan(256);
   });
 
-  test("JSON and void requests fail closed when the API response contract differs", async () => {
+  test("strict JSON and void requests fail closed when the API response contract differs", async () => {
     const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
     const jsonClient = makeClient(
       () => new Response(JSON.stringify({ id: SESSION_ID }), { headers: mismatchHeaders }),
+      STRICT,
     ).client;
     await expect(jsonClient.getSession(WORKSPACE_ID, SESSION_ID)).rejects.toEqual(
       expect.objectContaining({
@@ -2049,19 +2163,70 @@ describe("OpenGeniClient", () => {
 
     const voidClient = makeClient(
       () => new Response(null, { status: 204, headers: mismatchHeaders }),
+      STRICT,
     ).client;
     await expect(voidClient.clearSessionContext(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
       OpenGeniApiContractMismatchError,
     );
   });
 
-  test("client bootstrap validates its payload contract even if a proxy strips the header", async () => {
-    const { client } = makeClient(() => jsonResponse({ apiContractRevision: "future-contract" }));
+  test("strict client bootstrap validates its payload contract even if a proxy strips the header", async () => {
+    const { client } = makeClient(
+      () => jsonResponse({ apiContractRevision: "future-contract" }),
+      STRICT,
+    );
     await expect(client.getClientConfig()).rejects.toMatchObject({
       name: "OpenGeniApiContractMismatchError",
       expected: OPENGENI_API_CONTRACT_REVISION,
       actual: "future-contract",
     });
+  });
+
+  test("a server-side API key client keeps working across additive contract revisions", async () => {
+    const mismatchHeaders = { [OPENGENI_API_CONTRACT_HEADER]: "future-contract" };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith("/v1/config/client")
+        ? new Response(JSON.stringify({ apiContractRevision: "future-contract" }), {
+            headers: { "content-type": "application/json", ...mismatchHeaders },
+          })
+        : request.method === "GET"
+          ? new Response(JSON.stringify({ id: SESSION_ID }), {
+              headers: { "content-type": "application/json", ...mismatchHeaders },
+            })
+          : new Response(null, { status: 204, headers: mismatchHeaders }),
+    );
+    expect((await client.getClientConfig()).apiContractRevision).toBe("future-contract");
+    expect(await client.getSession(WORKSPACE_ID, SESSION_ID)).toMatchObject({ id: SESSION_ID });
+    await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);
+    // It still states its own revision so the API can refuse a truly breaking one.
+    expect(requests.at(-1)!.headers[OPENGENI_API_CONTRACT_HEADER]).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
+  });
+
+  test("a browser client without an API key defaults to strict", async () => {
+    const globals = globalThis as { window?: unknown; document?: unknown };
+    const previous = { window: globals.window, document: globals.document };
+    globals.window = {};
+    globals.document = {};
+    try {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse({ apiContractRevision: "future-contract" }),
+      );
+      const browser = new OpenGeniClient({ baseUrl: "https://api.example.test", fetch });
+      await expect(browser.getClientConfig()).rejects.toBeInstanceOf(
+        OpenGeniApiContractMismatchError,
+      );
+      const keyed = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        apiKey: "delegated-token",
+        fetch,
+      });
+      expect((await keyed.getClientConfig()).apiContractRevision).toBe("future-contract");
+    } finally {
+      globals.window = previous.window;
+      globals.document = previous.document;
+    }
   });
 
   test("merges extra headers from a header factory", async () => {
@@ -2078,6 +2243,80 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[0]!.headers["x-request-id"]).toBe("rid-1");
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
+  });
+
+  test("requires a dedicated attention-filter receipt and forwards complete totals", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { needsYouOnly: true }),
+    ).rejects.toThrow("attention session filtering");
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, {
+        parentSessionId: null,
+        includeTotals: true,
+      }),
+    ).rejects.toThrow("complete session totals");
+    const totals = { needsYouCount: 12, groups: [] };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        needsYouOnly: true,
+        totals,
+      }),
+    );
+    expect(
+      (
+        await client.listSessionSummaryPage(WORKSPACE_ID, {
+          parentSessionId: null,
+          includeTotals: true,
+          needsYouOnly: true,
+        })
+      ).totals,
+    ).toEqual(totals);
+    expect(requests[0]!.url).toContain("includeTotals=true");
+    expect(requests[0]!.url).toContain("needsYouOnly=true");
+  });
+
+  test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: "next-page",
+        filtersApplied: true,
+        sortBy: "name",
+      }),
+    );
+    expect(
+      await client.listSessionSummaryPage(WORKSPACE_ID, { channelId: null, sortBy: "name" }),
+    ).toEqual({
+      projection: "summary",
+      pinned: [],
+      sessions: [],
+      nextCursor: "next-page",
+      filtersApplied: true,
+      sortBy: "name",
+    });
+    expect(new URL(requests[0]!.url).searchParams.get("projection")).toBe("summary");
+    const older = makeClient(() => jsonResponse([])).client;
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { cursor: "opaque" })).rejects.toThrow(
+      "stable session-page cursors",
+    );
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
+      "filtered session lists",
+    );
+    const summaryServer = makeClient(() =>
+      jsonResponse({ projection: "summary", pinned: [], sessions: [], nextCursor: null }),
+    ).client;
+    await expect(summaryServer.listSessionPage(WORKSPACE_ID)).rejects.toThrow(
+      "full session details",
+    );
+    expect((await summaryServer.listSessionSummaryPage(WORKSPACE_ID)).projection).toBe("summary");
   });
 
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
@@ -2123,6 +2362,16 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+  });
+
+  test("can request ordinary pages without repeatedly hydrating pinned details", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await client.listSessionPage(WORKSPACE_ID, { limit: 4, includePinned: false });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=4&includePinned=false`,
     );
   });
 
@@ -2467,6 +2716,7 @@ describe("OpenGeniClient", () => {
             [OPENGENI_API_CONTRACT_HEADER]: "future-contract",
           },
         }),
+      STRICT,
     );
     await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toBeInstanceOf(
       OpenGeniApiContractMismatchError,
@@ -2500,4 +2750,22 @@ test("sets a workspace duration timer through the public endpoint", async () => 
   expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
   expect(requests[0]!.method).toBe("POST");
   expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+});
+
+test("Claude account disconnects send JSON for scoped browser mutation guards", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ disconnected: true }));
+  await client.disconnectClaudeSubscriptionAccount(
+    WORKSPACE_ID,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.disconnectOrganizationClaudeSubscriptionAccount(
+    "22222222-2222-4222-8222-222222222222",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  expect(requests).toHaveLength(2);
+  for (const request of requests) {
+    expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
 });

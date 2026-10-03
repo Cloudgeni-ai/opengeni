@@ -95,6 +95,56 @@ cookie, then repeats exact OAuth authority proof before updating the binding.
 This keeps repository reconfiguration working even if GitHub omits `state` from
 its update redirect.
 
+### Links are minted on click
+
+The `installUrl`, `linkUrl`, and per-installation `configureUrl` values in the
+status response carry that ten-minute signed state, so a copy captured when a
+page loaded goes stale. The new-session and follow-up repository pickers treat
+`installUrl` only as "this principal may connect": **Connect workspace App**
+opens the same native Connect dialog as the Plugins page GitHub card, which
+starts a durable attempt and mints the authorization link at that moment, and
+**Repositories** fetches a fresh `configureUrl` before navigating. The dialog
+host lives outside the repository menu, because the menu closes when the
+authorization popup takes focus.
+
+The browser-navigation routes (`/github/connect`, `/github/setup`,
+`/github/install/callback`, `/github/oauth/callback`,
+`/github/installations/select`, installation `configure`, and the manifest
+callback) answer failures with a readable page and a **Back to OpenGeni** link to
+the workspace Plugins page, never a JSON body. The HTTP status is the one the API
+error handler gives that failure. An expired or reused link, GitHub's **Cancel**
+(`error=access_denied`), a non-owner's authority denial, a missing permission, an
+organization integration policy that does not allow GitHub (403), and a
+signed-out browser each get their own explanation. Any other failure, including
+an unexpected server fault, shows a generic page without internal detail. The
+native Connect callback also renders the expired page when its state is stale or
+unreadable.
+
+### Using a repository from the conversation card
+
+When an agent calls `capability_authorization_request` for `api:github-app`, the
+conversation shows the GitHub App card. Connecting binds the workspace, as
+above; it does not give the chat a repository. Once the workspace is bound, the
+same card lists the repositories the binding shares. **Use** (**Use in this
+chat** when only one is shared) sends an ordinary human message
+(`Use owner/repo`) carrying the same repository resource the composer picker
+builds, through the same Send endpoint, with the composer's model, control and
+connection-account choices. The server validates it as any other Send
+(`sessions:control`, the workspace allowlist). On a running or paused chat it
+queues like Send; on a chat waiting for a human answer the card first confirms,
+because the Send replaces that request; an ended chat explains instead. Clone,
+push, and the `github_app` pull-request tools are available from the next turn. The agent
+cannot attach a repository itself: the card only offers the human action.
+
+The card updates in place when GitHub status changes, including after a
+connection finished in another tab (it refreshes when the tab regains focus).
+It marks repositories already in the chat, keeps one GitHub App token per chat
+(another account's repositories need a new chat, as in the composer), shows a
+mounted repository whose GitHub access was removed, and explains who can act
+when the deployment has no GitHub App, the viewer cannot connect it, or the
+viewer cannot message the chat. **Choose repositories on GitHub** mints a fresh
+installation settings link in a new tab.
+
 ## Supported authority matrix
 
 | GitHub case | Self-service binding | Evidence / result |

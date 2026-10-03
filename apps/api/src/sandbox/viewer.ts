@@ -36,10 +36,8 @@ import {
   acquireLease,
   getLiveEnrollmentConnection,
   getSandbox,
-  getScheduledScopedRigVersionMetadata,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolderStatus,
-  loadWorkspaceEnvironmentForRun,
   markSandboxProviderReady,
   markWarmLeaseInstanceLost,
   readLease,
@@ -92,6 +90,7 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
+import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -156,51 +155,11 @@ export async function sessionAttachEnvironment(
    *  the materialization audit fact. Null records the legacy service sentinel. */
   attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
-  const workspaceEnvironmentValues: Record<string, string> = {};
-  const rigVersion =
-    session.rigId && session.rigVersionId
-      ? await getScheduledScopedRigVersionMetadata(
-          services.db,
-          {
-            accountId: session.accountId,
-            workspaceId,
-            subjectId: attachSubjectId ?? "session-attach",
-          },
-          session.rigId,
-          session.rigVersionId,
-        )
-      : null;
-  for (const variableSetId of rigVersion?.version.defaultVariableSetIds ?? []) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-      services.db,
-      services.settings,
-      {
-        accountId: session.accountId,
-        workspaceId,
-        variableSetId,
-        authority: { kind: "session_attach", sessionId: session.id, subjectId: attachSubjectId },
-      },
-    );
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
-  // Older persisted/test projections can omit the plural field. Preserve the
-  // legacy final alias as the single explicit selection until every caller is
-  // guaranteed to have crossed the plural contract boundary.
-  const explicitVariableSetIds =
-    session.variableSetIds ?? (session.variableSetId ? [session.variableSetId] : []);
-  for (const variableSetId of explicitVariableSetIds) {
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-      services.db,
-      services.settings,
-      {
-        accountId: session.accountId,
-        workspaceId,
-        variableSetId,
-        authority: { kind: "session_attach", sessionId: session.id, subjectId: attachSubjectId },
-      },
-    );
-    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
-  }
+  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(
+    services.db,
+    services.settings,
+    { accountId: session.accountId, workspaceId, session, subjectId: attachSubjectId },
+  );
   // Build the env with the SESSION's backend, not the deployment default: the
   // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
   // git token-file/askpass pointers derive from HOME), the box is established
@@ -308,6 +267,7 @@ export async function attachViewer(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,

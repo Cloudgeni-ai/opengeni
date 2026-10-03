@@ -3,6 +3,91 @@ import { CancelledFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("legacy activity inputs use the workspace account for both owner observations", async () => {
+    const owned = {
+      kind: "attempt-owned" as const,
+      turnId: "turn",
+      attemptId: "attempt",
+      executionGeneration: 2,
+      activityRef: { workflowId: "workflow", workflowRunId: "run", activityId: "activity" },
+    };
+    const db = {};
+    const workspace = mock(async () => ({ accountId: "workspace-account" }) as any);
+    const peek = mock(async () => owned);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db,
+          inspectSessionAttemptActivity: async () => {
+            throw new Error("metadata transport unavailable");
+          },
+        }) as any,
+      { getWorkspace: workspace, peekSessionWork: peek },
+    );
+    expect(
+      await activities.peekSessionWork({
+        workspaceId: "workspace",
+        sessionId: "session",
+        includeAdmissionFence: true,
+      }),
+    ).toEqual({ ...owned, ownerActivityState: "unknown" });
+    expect(workspace).toHaveBeenCalledWith(db, "workspace");
+    expect(peek).toHaveBeenCalledTimes(2);
+    for (const call of peek.mock.calls) {
+      expect(call).toEqual([db, "workspace", "session", true, "workspace-account"]);
+    }
+  });
+
+  test("explicit observer scope is never replaced by a workspace lookup", async () => {
+    const workspace = mock(async () => ({ accountId: "different-account" }) as any);
+    const peek = mock(async () => ({ kind: "unavailable" as const }));
+    const db = {};
+    const activities = createSessionStateActivities(async () => ({ db }) as any, {
+      getWorkspace: workspace,
+      peekSessionWork: peek,
+    });
+    expect(
+      await activities.peekSessionWork({
+        workspaceId: "workspace",
+        sessionId: "session",
+        observerAccountId: "explicit-account",
+      }),
+    ).toEqual({ kind: "unavailable" });
+    expect(workspace).not.toHaveBeenCalled();
+    expect(peek).toHaveBeenCalledWith(db, "workspace", "session", undefined, "explicit-account");
+  });
+
+  test("legacy missing workspace is unavailable without owner inspection or queue telemetry", async () => {
+    const inspect = mock(async () => "settled" as const);
+    const count = mock(async () => 0);
+    const peek = mock(async () => ({ kind: "idle" as const }));
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, inspectSessionAttemptActivity: inspect }) as any,
+      { getWorkspace: mock(async () => null), peekSessionWork: peek, countQueuedTurns: count },
+    );
+    expect(
+      await activities.peekSessionWork({ workspaceId: "workspace", sessionId: "session" }),
+    ).toEqual({ kind: "unavailable" });
+    expect(peek).not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  test("legacy workspace lookup failures still retry", async () => {
+    const error = new Error("database unavailable");
+    const peek = mock(async () => ({ kind: "idle" as const }));
+    const activities = createSessionStateActivities(async () => ({ db: {} }) as any, {
+      getWorkspace: mock(async () => {
+        throw error;
+      }),
+      peekSessionWork: peek,
+    });
+    await expect(
+      activities.peekSessionWork({ workspaceId: "workspace", sessionId: "session" }),
+    ).rejects.toBe(error);
+    expect(peek).not.toHaveBeenCalled();
+  });
+
   test("optional inspection never suppresses activity cancellation", async () => {
     const cancelled = new CancelledFailure("cancelled by control");
     const peek = mock(async () => ({
@@ -365,6 +450,126 @@ describe("failSessionAttempt child-terminal identity", () => {
     }
     expect(recoveryCalls).toHaveLength(0);
   });
+
+  test("DB-only recovery preserves incomplete setup without authorizing a retry or terminal failure", async () => {
+    const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+    const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({ db: {}, bus: {}, settings: {}, observability: {}, wakeSessionWorkflow: null }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 4,
+              metadata: { providerRecoveryCount: 5 },
+            }) as any,
+        ),
+        requestSessionTurnRecovery: recovery as any,
+        applySessionTurnSettlement: terminal as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+          sandboxSetupOutcomeUnknown: true,
+        },
+      }),
+    ).toEqual({ action: "recovering" });
+    expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+      reason: "sandbox_command_start_outcome_unknown",
+      sandboxSetupOutcomeUnknown: true,
+      detail: { retryable: false, setupOutcome: "unknown", replay: "blocked" },
+    });
+    expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+    expect(terminal).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [0, {}, false],
+    [4, {}, false],
+    [5, {}, true],
+    [6, {}, false],
+    [5, { triggerEventId: "other-trigger" }, false],
+    [5, { executionGeneration: 8 }, false],
+    [5, { sandboxSetupOutcomeUnknown: true }, false],
+    [5, { providerRecoveryCount: 6, providerFailureCode: "provider_unavailable" }, false],
+  ] as const)(
+    "DB-only setup exhaustion preserves only the exact exhausted budget %s with authority %j",
+    async (count, authority, parks) => {
+      const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+      const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+      const activities = createSessionStateActivities(
+        async () =>
+          ({ db: {}, bus: {}, settings: {}, observability: {}, wakeSessionWorkflow: null }) as any,
+        {
+          requireSession: mock(async () => ({ status: "running" }) as any),
+          getSessionTurnForAttempt: mock(
+            async () =>
+              ({
+                id: "turn-1",
+                triggerEventId: "trigger-1",
+                executionGeneration: 4,
+                metadata: { providerRecoveryCount: count },
+              }) as any,
+          ),
+          requestSessionTurnRecovery: recovery as any,
+          applySessionTurnSettlement: terminal as any,
+          publishDurableSessionEvents: mock(async () => undefined),
+          countQueuedTurns: mock(async () => 0),
+          recordTurnsQueuedGauge: mock(() => undefined),
+        },
+      );
+      const input = {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+          sandboxSetupRecoveryExhausted: true,
+          ...authority,
+        },
+      } as const;
+      expect(await activities.failSessionAttempt(input)).toEqual({
+        action: parks ? "recovering" : "stale",
+      });
+      if (parks) {
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_start_recovery_exhausted",
+          sandboxSetupRecoveryExhausted: true,
+          detail: {
+            retryable: false,
+            setupOutcome: "not_started",
+            replay: "blocked",
+            providerRecoveryCount: 5,
+          },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+      } else {
+        expect(recovery).not.toHaveBeenCalled();
+      }
+      expect(terminal).not.toHaveBeenCalled();
+    },
+  );
 
   test("recovers an ambiguously committed claim from retryable pre-claim truth", async () => {
     const recoveryCalls: unknown[] = [];

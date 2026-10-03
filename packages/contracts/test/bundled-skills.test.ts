@@ -7,13 +7,18 @@ import {
   resolveBundledSkillSelection,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
+  storedBundledSkillSelectionIdentity,
 } from "../src";
 
 const documents = "builtin:opengeni-documents" as const;
 const sites = "builtin:opengeni-sites" as const;
 const projects = "builtin:opengeni-projects" as const;
 
-for (const help of ["builtin:opengeni-help", "builtin:opengeni-client"] as const)
+for (const help of [
+  "builtin:opengeni-help",
+  "builtin:opengeni-client",
+  "builtin:opengeni-schedules",
+] as const)
   test(`${help} is addressable and cannot escape a host's empty selection`, () => {
     expect(
       CreateSessionRequest.parse({ initialMessage: "Help", bundledSkillIds: [help] })
@@ -101,4 +106,30 @@ test("arbitrary metadata cannot override typed selection at admission", () => {
     bundledSkillSelectionFromMetadata(withBundledSkillSelectionMetadata(metadata, [documents])),
   ).toEqual([documents]);
   expect(JSON.stringify(metadata)).toBe(original);
+});
+
+test("stored selection drops ids this build does not know, while input stays strict", () => {
+  const key = "_opengeni_bundled_skill_ids_v1";
+  const unknown = "builtin:not-in-this-build";
+  expect(bundledSkillSelectionFromMetadata({ [key]: [unknown, sites, documents] })).toEqual([
+    documents,
+    sites,
+  ]);
+  // Dropping can only narrow: a stored list of unknown ids reads as an explicit none.
+  expect(bundledSkillSelectionFromMetadata({ [key]: [unknown] })).toEqual([]);
+  expect(bundledSkillSelectionFromMetadata({})).toBeUndefined();
+  expect(() => bundledSkillSelectionFromMetadata({ [key]: "not a list" })).toThrow();
+  // Only unknown id strings are tolerated; a non-string entry is not an id.
+  expect(() => bundledSkillSelectionFromMetadata({ [key]: [sites, null] })).toThrow();
+  // Replay identity keeps the exact stored value, including unknown ids.
+  expect(storedBundledSkillSelectionIdentity({ [key]: [unknown, sites] })).toEqual([
+    unknown,
+    sites,
+  ]);
+  expect(storedBundledSkillSelectionIdentity({})).toBeUndefined();
+  expect(BundledSkillSelection.safeParse([documents, unknown]).success).toBe(false);
+  expect(() => withBundledSkillSelectionMetadata({}, [unknown as typeof documents])).toThrow();
+  expect(
+    CreateSessionRequest.safeParse({ initialMessage: "Run", bundledSkillIds: [unknown] }).success,
+  ).toBe(false);
 });

@@ -8,12 +8,29 @@ Those components do not consume this simplified chat-handler protocol.
 
 ## Run
 
+Before running, an organization owner or admin must enable **Only me chats**
+in the web app under **Organization settings > Security & data**. If the
+setting is unavailable, ask the installation operator to activate private
+chats first. The chat facade defaults to private chats; neither onboarding
+nor the chat handler enables this organization setting. Until it is enabled,
+chat requests fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError`
+in the SDK) instead of creating a chat or changing the setting.
+
 ```bash
 cd examples/chat-quickstart
 cp .env.example .env.local
-# Set OPENGENI_API_KEY and OPENGENI_ORGANIZATION_ID.
+# Set OPENGENI_API_KEY (a full-access organization key) and OPENGENI_ORGANIZATION_ID.
+bun run onboard u_42
 bun run server
 ```
+
+`bun run onboard u_42` creates the demo tenant's workspace and makes the
+product user `u_42` a member with the permissions the chat needs
+(`CHAT_USER_PERMISSIONS` in `quickstart.ts`). Chat requests never grant
+workspace membership, so without this step the API answers `403`. A real
+product runs the same `onboardChatUser` call once, when it admits a user to a
+tenant, not on every message. The command prints its operation id before
+calling; after an uncertain result, retry with `bun run onboard u_42 <that id>`.
 
 Send a message with the demo-only identity header:
 
@@ -28,10 +45,12 @@ curl -N http://127.0.0.1:4200/api/chat \
 This executes an agent and may incur usage charges. `GET /api/chat` with the
 same headers restores history and pending decisions; `POST /api/chat/respond`
 answers a pending decision. Replace the spoofable demo identity header with
-real server-side authentication before exposing this server to other users.
+real server-side authentication before exposing this server to other users;
+it listens on 127.0.0.1 only.
 
-The backend's existing user-namespaced conversation addressing and memory
-settings are unchanged. It is not an example of shared-chat identity.
+Conversation ids are not namespaced per user: OpenGeni authorization decides
+who may open a conversation, so a real product also checks that the
+authenticated user may use the conversation id the page sends.
 
 ## Wire formats
 

@@ -124,11 +124,23 @@ export const StoredKnowledgeEntryContent = KnowledgeEntryContent.safeExtend({
   relationships: z.array(KnowledgeEntryRelationship).default([]),
 });
 
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+/**
+ * Omit on create: the host derives the entry id from the operation, so an exact
+ * retry replays the same entry. Required to correct an existing entry.
+ */
+const KnowledgeWriteEntryId = z
+  .uuid()
+  .refine((value) => value !== NIL_UUID, {
+    message: "entryId must be a real entry id; omit it to create a new entry",
+  })
+  .optional();
+
 /** Scope identity and agent policy are resolved by the host, never supplied by the model. */
 export const KnowledgeEntrySaveRequest = z
   .object({
     operationId: z.uuid(),
-    entryId: z.uuid(),
+    entryId: KnowledgeWriteEntryId,
     expectedVersion: z.number().int().nonnegative(),
     scope: KnowledgeEntryScope.optional(),
     entry: KnowledgeEntryContent.safeExtend({ title: z.string().min(1).max(1024) }),
@@ -139,7 +151,7 @@ export type KnowledgeEntrySaveRequest = z.input<typeof KnowledgeEntrySaveRequest
 export const KnowledgeTaskNotePromotionRequest = z
   .object({
     operationId: z.uuid(),
-    entryId: z.uuid(),
+    entryId: KnowledgeWriteEntryId,
     expectedVersion: z.literal(0),
     noteId: z.uuid(),
     expectedNoteVersion: z.literal(1),

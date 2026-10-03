@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   signDelegatedAccessToken,
+  resolveAgentConfig,
   type AttemptToolCatalog,
   type FirstPartyMcpToolName,
   type Permission,
+  type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import { digestAttemptToolCatalog } from "@opengeni/codemode";
 import {
@@ -515,8 +517,14 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
   async function seedRunningAttempt(
     grant: Grant,
     firstPartyMcpTools: FirstPartyMcpToolName[],
+    agentConfig?: ResolvedAgentConfig,
   ): Promise<Attempt> {
     const session = await narrowedRootSession(grant, firstPartyMcpTools);
+    if (agentConfig) {
+      await shared!.admin`
+        UPDATE sessions SET agent_config = ${JSON.stringify(agentConfig)}::jsonb
+        WHERE id = ${session.id}`;
+    }
     const executionGeneration = 2;
     const [turn] = await shared!.admin<{ id: string }[]>`
       INSERT INTO session_turns (
@@ -586,6 +594,49 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     });
   }
 
+  test("configured subagents off denies create despite widened live session tools (AC9)", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const app = fullApp();
+    const agentConfig = resolveAgentConfig({
+      creator: "api",
+      request: { capabilities: { from: "none", workspaceAdmin: true } },
+      deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+      workspace: { defaults: null, humanInputEnabled: true },
+      goal: false,
+    }).config!;
+    const attempt = await seedRunningAttempt(
+      grant,
+      ["session_create", "sessions_list", "session_steer", "set_session_title", "project_create"],
+      agentConfig,
+    );
+    const authorization = await codemodeBearer(grant, attempt);
+    for (const [method, path, body] of [
+      ["POST", "/sessions", { initialMessage: "escape", resources: [] }],
+      ["GET", "/sessions", undefined],
+      ["POST", `/sessions/${attempt.sessionId}/control`, { action: "pause" }],
+    ] as const) {
+      const response = await app.request(
+        `/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host${path}`,
+        {
+          method,
+          headers: { authorization, "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: "forbidden" } });
+    }
+    const workspace = await app.request(
+      `/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host`,
+      { headers: { authorization } },
+    );
+    expect(workspace.status).toBe(200);
+    const current = await getSession(client.db, grant.workspaceId, attempt.sessionId);
+    expect(current?.agent?.capabilities.subagents).toBe(false);
+    expect(current?.firstPartyMcpTools).toContain("session_create");
+  });
+
   test("a title-only session can no longer list or create sessions through the proxy", async () => {
     if (!available) return;
     const grant = await fixture();
@@ -640,6 +691,38 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       },
     );
     expect(create.status).toBe(403);
+  });
+
+  test("the local dev API serves the proxy on the Docker sandbox route", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const attempt = await seedRunningAttempt(grant, ["sessions_list"]);
+    const authorization = await codemodeBearer(grant, attempt);
+    const app = createApp({
+      settings: settings({
+        productAccessMode: "local",
+        environment: "local",
+        sandboxBackend: "docker",
+        opengeniMcpUrl: "http://172.18.0.1:8000/v1/workspaces/{workspaceId}/mcp",
+        webBaseUrl: "http://127.0.0.1:3000",
+        publicBaseUrl: undefined,
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as SessionWorkflowClient,
+    });
+    const proxied = `http://172.18.0.1:8000/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host/sessions`;
+    // The proxy re-dispatches without the sandbox's Host, to a session path
+    // outside the sandbox routes; the local browser boundary still admits it.
+    const list = await app.request(proxied, {
+      headers: { authorization, host: "172.18.0.1:8000" },
+    });
+    expect(list.status).toBe(200);
+    // A browser request on the sandbox address is refused before the proxy runs.
+    const browser = await app.request(proxied, {
+      headers: { authorization, host: "172.18.0.1:8000", origin: "http://172.18.0.1:8000" },
+    });
+    expect(browser.status).toBe(403);
   });
 
   test("configuration and control routes retain normal permission checks behind the proxy", async () => {

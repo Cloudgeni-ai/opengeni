@@ -5,6 +5,8 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
+  getSessionGoal,
   initializeSessionStartAtomically,
   type ApplySessionTurnSettlementInput,
   withWorkspaceRls,
@@ -124,6 +126,66 @@ function settlementInput(
 }
 
 describe("atomic turn settlement retained-output evidence", () => {
+  test("allowance refusal and goal pause commit once without consuming continuation budget", async () => {
+    const value = await fixture();
+    const goal = await createSessionGoal(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      text: "Finish within the allowance",
+      createdBy: "api",
+    });
+    const refusal = {
+      code: "allowance_exhausted",
+      scope: "member",
+      subjectId: "frozen-human",
+      resetsAt: "2026-10-01T00:00:00.000Z",
+      message: "The member usage allowance is exhausted.",
+    };
+    const input = {
+      ...settlementInput(value, {
+        type: "turn.completed",
+        payload: { output: "", segmentLimit: "budget_exhausted", ...refusal },
+      }),
+      events: [
+        { type: "usage.exhausted" as const, payload: refusal },
+        {
+          type: "turn.completed" as const,
+          payload: { output: "", segmentLimit: "budget_exhausted", ...refusal },
+        },
+        { type: "session.status.changed" as const, payload: { status: "idle" } },
+      ],
+      allowanceGoalPause: { rationale: refusal.message },
+    };
+    const settled = await applySessionTurnSettlement(client.db, value.grant.workspaceId!, input);
+    expect(settled.action).toBe("settled");
+    if (settled.action !== "settled") throw new Error("allowance settlement failed");
+    expect(settled.events.map((event) => event.type)).toContain("usage.exhausted");
+    expect(settled.events.filter((event) => event.type === "goal.paused")).toHaveLength(1);
+    expect(settled.events.find((event) => event.type === "goal.paused")?.payload).toMatchObject({
+      reason: "allowance",
+    });
+    expect(
+      await getSessionGoal(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({
+      status: "paused",
+      pausedReason: "allowance",
+      autoContinuations: goal.autoContinuations,
+      version: goal.version + 1,
+    });
+    expect(
+      await persistedTurnEvent(value.grant.workspaceId!, value.session.id, value.turn.id),
+    ).toMatchObject(refusal);
+    expect(
+      (await applySessionTurnSettlement(client.db, value.grant.workspaceId!, input)).action,
+    ).toBe("stale");
+    expect(
+      await getSessionGoal(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({
+      version: goal.version + 1,
+    });
+  });
+
   test("preserves exact canonical output while a valid receipt serves bounded projections", async () => {
     const value = await fixture();
     const artifactId = crypto.randomUUID();

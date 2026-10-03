@@ -5,6 +5,7 @@ import { RepositoryRefInput } from "@/components/repository-ref-input";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { userErrorText } from "@/lib/api-error";
 import type { RepoDraft } from "@/lib/session-tools";
 
 export type ManualRepositoryAttachResult = { warning?: string } | void;
@@ -53,7 +54,7 @@ export function ManualRepositoryEditor(props: {
       });
       setWarning(result?.warning ?? null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(userErrorText(caught));
     } finally {
       setChecking(false);
     }

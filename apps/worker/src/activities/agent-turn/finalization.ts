@@ -2,6 +2,8 @@ import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
   recordCodexAccountUsageForFinalization,
+  recordClaudeAccountUsage,
+  releaseClaudeCredentialLease,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
@@ -11,7 +13,7 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
-import type { Settings } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { signalCodexCapacityWakeTargets } from "../codex-capacity";
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
@@ -73,6 +75,8 @@ export type TurnFinalizationDeps = {
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   signalSessionAttemptQuiesced: ActivityServices["signalSessionAttemptQuiesced"];
   signalCodexCapacityWorkflow: ActivityServices["signalCodexCapacityWorkflow"];
+  requestWorkerDrain: ActivityServices["requestWorkerDrain"];
+  turnFinalizationTimeoutMs: ActivityServices["turnFinalizationTimeoutMs"];
   cancellationSignal: AbortSignal | undefined;
   sandboxResumeController: AbortController;
   activityContext: ReturnType<typeof currentActivityContext>;
@@ -112,6 +116,9 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   deps.eventing.heartbeatTimer = startActivityHeartbeat(deps.activityContext, details);
   const monitor = startTurnFinalizationMonitor({
     observability: deps.observability,
+    ...(deps.turnFinalizationTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: deps.turnFinalizationTimeoutMs }),
     details,
     heartbeat: (value) => {
       try {
@@ -120,7 +127,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         // A closed Temporal transport is not proof of physical quiescence.
       }
     },
-    terminateWorker: () => process.exit(1),
+    requestWorkerDrain: deps.requestWorkerDrain,
   });
   try {
     monitor.enter("tool_writers");
@@ -213,6 +220,8 @@ async function finalizeTurnAttemptSteps(
       renewals.codemodeTokenRenewal as CodemodeTokenRenewalController | null;
     renewals.codemodeTokenRenewal = null;
     renewals.runCredentialRenewalClosed = true;
+    renewals.runMcpCredentials?.close();
+    delete renewals.runMcpCredentials;
     const runRenewalToStop = renewals.runCredentialRenewal as RunCredentialRenewalController | null;
     renewals.runCredentialRenewal = null;
 
@@ -408,10 +417,41 @@ async function finalizeTurnAttemptSteps(
     // best-effort (same discipline as today's usage write). Both writers skip
     // version/updatedAt, so neither can race the token-refresh CAS.
     monitor.enter("provider_leases");
+    const claudeEncryptionKey = environmentsEncryptionKeyBytes(settings);
+    if (claudeEncryptionKey && providerTurn.claudeAuthoritySnapshot && leases.claude.subjectId) {
+      for (const snapshot of providerTurn.latestClaudeUsage.values()) {
+        if (
+          (!snapshot.observation && !snapshot.refresh) ||
+          snapshot.expectedConnectionId !== providerTurn.effectiveClaudeCredentialId ||
+          snapshot.expectedCredentialVersion !== providerTurn.effectiveClaudeCredentialVersion
+        )
+          continue;
+        await waitForTurnFinalizerStep(
+          recordClaudeAccountUsage(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: leases.claude.subjectId,
+              credentialId: snapshot.expectedConnectionId,
+              authoritySnapshot: providerTurn.claudeAuthoritySnapshot,
+            },
+            {
+              encryptionKey: claudeEncryptionKey,
+              token: snapshot.token,
+              expectedCredentialVersion: snapshot.expectedCredentialVersion,
+              ...(snapshot.observation ? { observation: snapshot.observation } : {}),
+              ...(snapshot.refresh ? { refresh: snapshot.refresh } : {}),
+            },
+          ).catch(() => null),
+          finalizerSignal,
+        );
+      }
+    }
     if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
-      // is byte-identical to the /wham/usage write — no partial-window clobber.
+      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
+      // so untyped response headers cannot mislabel weekly-only quota.
       if (
         providerTurn.latestCodexUsage &&
         attempt.turnId &&
@@ -497,25 +537,30 @@ async function finalizeTurnAttemptSteps(
         );
       }
     }
-    leases.xai.stopHeartbeat();
-    if (
-      leases.xai.held &&
-      attempt.turnId &&
-      leases.xai.subjectId &&
-      leases.xai.holderId &&
-      leases.xai.generation !== null
-    ) {
-      await waitForTurnFinalizerStep(
-        releaseXaiCredentialLease(db, {
-          workspaceId: input.workspaceId,
-          subjectId: leases.xai.subjectId,
-          turnId: attempt.turnId,
-          holderId: leases.xai.holderId,
-          generation: leases.xai.generation,
-        }).catch(() => undefined),
-        finalizerSignal,
-      );
-      leases.xai.held = false;
+    for (const [lease, release] of [
+      [leases.xai, releaseXaiCredentialLease],
+      [leases.claude, releaseClaudeCredentialLease],
+    ] as const) {
+      lease.stopHeartbeat();
+      if (
+        lease.held &&
+        attempt.turnId &&
+        lease.subjectId &&
+        lease.holderId &&
+        lease.generation !== null
+      ) {
+        await waitForTurnFinalizerStep(
+          release(db, {
+            workspaceId: input.workspaceId,
+            subjectId: lease.subjectId,
+            turnId: attempt.turnId,
+            holderId: lease.holderId,
+            generation: lease.generation,
+          }).catch(() => undefined),
+          finalizerSignal,
+        );
+        lease.held = false;
+      }
     }
     // Workbench v2 turn-end workspace capture — runs FIRST in
     // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last

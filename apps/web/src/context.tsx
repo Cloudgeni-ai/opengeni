@@ -3,7 +3,10 @@ import {
   noteSuccessfulLogin,
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -47,6 +50,8 @@ import {
   createOpenGeniClient,
   fetchAuthSession,
   fetchClientConfig,
+  checkDeploymentRevision,
+  mountApiUpdateNotice,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -65,6 +70,7 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { readBootstrap } from "@/lib/bootstrap-read";
+import { startDeploymentRefresh } from "@/lib/deployment-refresh";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -87,7 +93,7 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
-import { isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@/lib/model-access";
 import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
@@ -99,6 +105,8 @@ import {
   isAuthorizedWorkspaceId,
   workspaceNavigationPreferenceStorageId,
   writeLastWorkspaceId,
+  writeLastWorkspaceIdForOrganization,
+  organizationWorkspacePreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
 import {
   buildResources,
@@ -408,7 +416,8 @@ export type AppContextValue = {
       /** Atomic create-time session visibility. */
       visibility?: "private" | "workspace";
       /** Exact attempted request and classified outcome for host reconciliation. */
-      onFailure?: (failure: StartSessionFailure) => void;
+      /** Return true when the caller handles this failure (including its user-facing error). */
+      onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
@@ -571,6 +580,11 @@ export function useLatestCallback<Args extends unknown[], Result>(
   return useCallback((...args: Args) => callbackRef.current(...args), []);
 }
 
+/** The app context where one exists; null in hosts that render a piece of the app alone. */
+export function useOptionalAppContext(): AppContextValue | null {
+  return useContext(AppContext);
+}
+
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {
@@ -626,6 +640,17 @@ export function RootRouteComponent() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
+  useEffect(() => {
+    const retireReconciledCreation = () => {
+      const feed = sessionEventFeedStore.getSnapshot();
+      if (!feed) return;
+      setSessionCreationHandoff((current) =>
+        creationHandoffReconciled(current, feed.events) ? null : current,
+      );
+    };
+    retireReconciledCreation();
+    return sessionEventFeedStore.subscribe(retireReconciledCreation);
+  }, [sessionEventFeedStore]);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -717,6 +742,11 @@ export function RootRouteComponent() {
       : true;
   const managedSocialProviders =
     clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
+  // An older API omits the field; only an explicit false pauses account creation.
+  const managedNewSignupsEnabled =
+    clientConfig?.auth.mode === "managedSession"
+      ? clientConfig.auth.newSignupsEnabled !== false
+      : true;
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
@@ -742,8 +772,8 @@ export function RootRouteComponent() {
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
-      pathname === "/dev/agent-topology" ||
-      pathname === "/dev/onboarding");
+      pathname === "/dev/onboarding" ||
+      pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
@@ -894,6 +924,7 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
+    let stopDeploymentRefresh = () => {};
     const controller = new AbortController();
     // Let synchronous effect cleanup (including StrictMode's discarded mount)
     // cancel before starting I/O. Active requests still abort on real cleanup.
@@ -918,6 +949,7 @@ export function RootRouteComponent() {
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
         setLatencyMode("standard");
+        stopDeploymentRefresh = startDeploymentRefresh(checkDeploymentRevision);
       })
       .catch((error) => {
         if (cancelled) {
@@ -929,6 +961,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
       controller.abort();
+      stopDeploymentRefresh();
     };
   }, [configRequestVersion, isPublicDevHarness]);
 
@@ -1108,6 +1141,15 @@ export function RootRouteComponent() {
       workspaceNavigationPreferenceStorageId(accessContext.subjectId),
       workspaceId,
     );
+    // Switching back to this organization returns to this workspace.
+    const accountId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+    if (accountId) {
+      writeLastWorkspaceIdForOrganization(
+        organizationWorkspacePreferenceStorageId(accessContext.subjectId),
+        accountId,
+        workspaceId,
+      );
+    }
   }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices
@@ -1226,7 +1268,7 @@ export function RootRouteComponent() {
       created = creation.value;
     } catch (error) {
       toast.error("Failed to create workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1267,7 +1309,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to rename workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1343,7 +1385,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update workspace settings", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1368,7 +1410,7 @@ export function RootRouteComponent() {
       return update.value;
     } catch (error) {
       toast.error("Failed to update the workspace default sandbox environment", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1407,7 +1449,7 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to rename session", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return null;
     }
@@ -1495,7 +1537,7 @@ export function RootRouteComponent() {
           ? "Session pin changed elsewhere"
           : `Couldn't ${pinned ? "pin" : "unpin"} session`,
         {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         },
       );
       return null;
@@ -1520,7 +1562,7 @@ export function RootRouteComponent() {
       if (deletion.status === "stale") return false;
     } catch (error) {
       toast.error("Failed to delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     }
@@ -1595,7 +1637,7 @@ export function RootRouteComponent() {
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
         toast.error("GitHub status unavailable", {
-          description: String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (githubRefreshId.current === refreshId && ownsRefresh()) {
@@ -1689,7 +1731,7 @@ export function RootRouteComponent() {
         if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
         setPersonalGitHubCatalogReady(true);
         toast.error("Your GitHub account is unavailable", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (ownsRefresh()) setPersonalGitHubBusy(false);
@@ -1710,10 +1752,12 @@ export function RootRouteComponent() {
       });
       if (attempt.nextAction.type !== "authorize")
         throw new Error("GitHub did not return an authorization link");
+      // The exact-return Connect redirect carries no outcome parameters.
+      await markIntegrationConnectRedirect("github", "oauth", { returnsWithOutcome: false });
       window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -1732,7 +1776,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your GitHub account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1760,7 +1804,7 @@ export function RootRouteComponent() {
       return true;
     } catch (error) {
       toast.error("Couldn't update GitHub repository access", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1879,7 +1923,7 @@ export function RootRouteComponent() {
       agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       startMode?: "realtime";
       visibility?: "private" | "workspace";
-      onFailure?: (failure: StartSessionFailure) => void;
+      onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ): Promise<Session | null> {
     const startedOperation = beginWorkspaceOperation(
@@ -2013,20 +2057,20 @@ export function RootRouteComponent() {
           workspaceId,
         )
       ) {
-        if (attempted) {
-          options?.onFailure?.({
-            error: problem,
-            request: attempted.request,
-            outcomeUnknown,
-          });
-        }
+        const handled = attempted
+          ? options?.onFailure?.({
+              error: problem,
+              request: attempted.request,
+              outcomeUnknown,
+            })
+          : false;
         if (isPaymentRequiredError(problem)) {
           const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
           setCreditRequired({
             workspaceId,
             accountId: workspace?.accountId ?? null,
           });
-        } else {
+        } else if (handled !== true) {
           toast.error("Failed to start session", {
             description: composerSubmissionErrorMessage(problem),
           });
@@ -2088,7 +2132,7 @@ export function RootRouteComponent() {
         )
       ) {
         toast.error("GitHub App setup failed", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
     } finally {
@@ -2197,7 +2241,7 @@ export function RootRouteComponent() {
         setSelectedRepoIds(previousSelectedIds);
         setSelectedRepoRefs(previousSelectedRefs);
         toast.error("Failed to unlink GitHub installation", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
       return false;
@@ -2363,16 +2407,19 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
-    invalidatePrincipalWorkspaceState();
+    // Unmount authenticated readers before sign-out can invalidate their
+    // cookie. Keep the neutral surface until an ambiguous response is
+    // reconciled against the authoritative session.
+    flushSync(() => {
+      invalidatePrincipalWorkspaceState();
+      setAuthSession(undefined);
+      setAccessContext(null);
+      setWorkspaces([]);
+      setAccessError(null);
+    });
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
-    // Keep the authenticated tree hidden until an ambiguous response has been
-    // reconciled against the authoritative cookie session.
-    setAuthSession(undefined);
-    setAccessContext(null);
-    setWorkspaces([]);
-    setAccessError(null);
     const reconciliation = await runCurrentTransitionInvocation({
       isCurrent: ownsInvocation,
       request: async () =>
@@ -2461,6 +2508,17 @@ export function RootRouteComponent() {
   const revalidatePrincipalAccess = useCallback(
     () => setAccessKeyVersion((version) => version + 1),
     [],
+  );
+  // Onboarding may finish in a chat it opened (developer setup); go there
+  // while access revalidates, so the app opens on that chat.
+  const completeOrganizationOnboarding = useCallback(
+    (destination?: { workspaceId: string; sessionId: string }) => {
+      if (destination) {
+        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
+      }
+      revalidatePrincipalAccess();
+    },
+    [navigate, revalidatePrincipalAccess],
   );
   async function refreshPrincipalAccess(): Promise<boolean> {
     if (!clientConfig || !authReady) return false;
@@ -2754,7 +2812,7 @@ export function RootRouteComponent() {
     // AppContext. The isolated account-auth popup is intentionally included.
     <Outlet />
   ) : !clientConfig && !configError ? (
-    <LoadingPanel label="Loading OpenGeni" />
+    <LoadingPanel />
   ) : configError ? (
     <ProblemPanel
       title={configError.title}
@@ -2762,7 +2820,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => {
             setConfigError(null);
             setConfigRequestVersion((version) => version + 1);
@@ -2780,13 +2838,14 @@ export function RootRouteComponent() {
       onSubmit={saveAccessKey}
     />
   ) : managedAuthRequired && authSession === undefined ? (
-    <LoadingPanel label="Checking session" />
+    <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
-    <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
-      <SignedOutPage>
+    <Suspense fallback={<LoadingPanel />}>
+      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             emptySetRegistrationPanel={
               clientConfig?.managedAuthSessionSetMode === "broker" ||
@@ -2797,6 +2856,7 @@ export function RootRouteComponent() {
                   presentation="embedded"
                   onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                   emailVerificationRequired={managedEmailVerificationRequired}
+                  newSignupsEnabled={managedNewSignupsEnabled}
                 />
               ) : undefined
             }
@@ -2804,10 +2864,12 @@ export function RootRouteComponent() {
         ) : (
           <ManagedAuthPanel
             presentation="embedded"
+            search={window.location.search}
             invitation={organizationInvitationContinuation}
             onDismissInvitation={clearOrganizationInvitationContinuation}
             onSubmit={handleManagedAuth}
             emailVerificationRequired={managedEmailVerificationRequired}
+            newSignupsEnabled={managedNewSignupsEnabled}
             socialProviders={managedSocialProviders}
             onSocialSubmit={handleManagedSocialAuth}
           />
@@ -2822,7 +2884,7 @@ export function RootRouteComponent() {
     // grant. Keep this after authentication but before access/onboarding gates.
     // The outer BrowserAccountsRuntime still owns broker actor transitions.
     browserAccountsConfigured && !browserAccountsEnabled ? (
-      <LoadingPanel label="Loading the selected browser account" />
+      <LoadingPanel />
     ) : (
       <PersonalSecurityProvider
         value={{
@@ -2843,7 +2905,7 @@ export function RootRouteComponent() {
       action={
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           onClick={() => setAccessKeyVersion((version) => version + 1)}
         >
           Retry
@@ -2863,12 +2925,13 @@ export function RootRouteComponent() {
         supergrokEnabled={clientConfig.models.some(
           (catalogModel) => catalogModel.source === "supergrok",
         )}
+        modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
+        onComplete={completeOrganizationOnboarding}
       />
     ) : (
-      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+      <Suspense fallback={<LoadingPanel />}>
         <OrganizationOnboardingPanel
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
@@ -2876,19 +2939,21 @@ export function RootRouteComponent() {
           supergrokEnabled={clientConfig.models.some(
             (catalogModel) => catalogModel.source === "supergrok",
           )}
+          modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
-              toast.error("Sign out failed", { description: String(error) }),
+              toast.error("Sign out failed", { description: userErrorText(error) }),
             );
           }}
-          onComplete={revalidatePrincipalAccess}
+          onSignOut={handleManagedSignOut}
+          onComplete={completeOrganizationOnboarding}
         />
       </Suspense>
     )
   ) : accessLoading || !appContext ? (
-    <LoadingPanel label="Loading workspace access" />
+    <LoadingPanel />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
     <ProblemPanel
       title="No workspace access"
@@ -2921,7 +2986,7 @@ export function RootRouteComponent() {
 
   const actorFencedSurface =
     browserAccountsEnabled && !isPublicAuthRoute ? (
-      <Suspense fallback={<LoadingPanel label="Loading browser accounts" />}>
+      <Suspense fallback={<LoadingPanel />}>
         <BrowserAccountsRuntime
           bootstrapLegacySession={
             clientConfig?.managedAuthSessionSetMode === "dual" && Boolean(authSession)
@@ -2942,13 +3007,27 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
-      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
+      <div ref={mountApiUpdateNotice} className="shrink-0" />
+      <SignInCallbackNotice
+        userId={authSession?.user.id ?? null}
+        verificationLinkError={
+          !clientConfig || (managedAuthRequired && authSession === undefined)
+            ? "pending"
+            : managedAuthRequired &&
+                !authSession &&
+                !browserAccountsEnabled &&
+                managedEmailVerificationRequired
+              ? "auth-panel"
+              : "notice"
+        }
+      />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
+            analyticsAccountResolved={accessContext !== null || accessError !== null}
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
@@ -3027,9 +3106,9 @@ function AccessKeyPanel(props: {
   onSubmit: () => void;
 }) {
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           props.onSubmit();
@@ -3044,7 +3123,7 @@ function AccessKeyPanel(props: {
             <p className="text-sm text-fg-subtle">
               Enter the{" "}
               {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
-              for this OpenGeni instance.
+              for this Opengeni instance.
             </p>
           </div>
         </div>

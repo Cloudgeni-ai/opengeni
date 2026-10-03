@@ -546,7 +546,7 @@ export const attachedBrowserInventories = pgTable(
     valuesValid: check(
       "attached_browser_inventories_values_check",
       sql`octet_length(${table.bridgeGeneration}) between 1 and 256
-        and ${table.bridgeGeneration} ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+        and ${table.bridgeGeneration} ~ '^[A-Za-z0-9_-][A-Za-z0-9._:-]*$'
         and ${table.revision} >= 0`,
     ),
   }),

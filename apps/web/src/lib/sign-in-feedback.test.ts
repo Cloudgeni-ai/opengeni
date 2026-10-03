@@ -9,6 +9,10 @@ test("callback failures provide a safe next step without rendering provider text
   expect(signInCallbackError("account_not_linked")).toContain("Personal settings → Security");
   expect(signInCallbackError("state_mismatch")).toContain("Start sign-in again");
   expect(signInCallbackError("email_not_verified")).toContain("Verify your email");
+  expect(readSignInCallbackError("?error=TOKEN_EXPIRED")).toContain(
+    "verification link has expired",
+  );
+  expect(readSignInCallbackError("?error=INVALID_TOKEN")).toContain("new verification email");
   expect(readSignInCallbackError("?error=%3Cscript%3E&error_description=secret")).not.toContain(
     "secret",
   );
@@ -37,4 +41,10 @@ test("integration callbacks and success hints cannot claim a login change", () =
   expect(readSignInCallbackError("?github=connected&google=success")).toBeNull();
   expect(readSignInCallbackError("?signin=connected")).toBeNull();
   expect(signInCallbackError(null)).toBeNull();
+});
+
+test("a refused social sign-up while new accounts are paused says so and points to sign-in", () => {
+  const message = readSignInCallbackError("?error=signup_disabled");
+  expect(message).toContain("We're at capacity for new accounts right now.");
+  expect(message).toContain("sign in with the method you used before");
 });

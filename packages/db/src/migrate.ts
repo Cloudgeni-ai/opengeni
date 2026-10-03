@@ -6,6 +6,10 @@ import { KNOWLEDGE_MIGRATION_MARKER, migrateRetainedKnowledge } from "./knowledg
 import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 import {
+  CLAUDE_POOL_MIGRATION_MARKER,
+  migrateClaudeSubscriptionPoolCredentials,
+} from "./claude-subscription-pool-migration";
+import {
   SKILL_METADATA_MIGRATION_MARKER,
   createSkillMetadataMigrationStage,
   stageSkillMetadataMigration,
@@ -39,6 +43,8 @@ export interface ConcurrentIndexMigration {
 }
 
 export type MigrationRuntimeOptions = {
+  /** Existing operator key; used only by the closed Claude maintenance conversion. */
+  environmentsEncryptionKey?: Uint8Array;
   maxNestedAgentDepth?: number;
   /**
    * For managed Postgres where an administrator preinstalls pgvector but the
@@ -180,10 +186,31 @@ export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
-  options?: Pick<MigrationRuntimeOptions, "preinstalledVector">,
+  options?: Pick<MigrationRuntimeOptions, "preinstalledVector" | "environmentsEncryptionKey">,
 ): Promise<void> {
   if (file === "0000_initial.sql" && options?.preinstalledVector) {
     sqlText = await initialMigrationWithPreinstalledVector(sql, sqlText);
+  }
+  if (sqlText.includes(CLAUDE_POOL_MIGRATION_MARKER)) {
+    if (file !== "0598_claude_subscription_account_pools.sql")
+      throw new Error("Claude account conversion is restricted to migration 0598");
+    const parts = sqlText.split(CLAUDE_POOL_MIGRATION_MARKER);
+    if (parts.length !== 2) throw new Error("0598 requires exactly one Claude conversion stage");
+    await sql.begin(async (transaction) => {
+      await transaction`CREATE TEMP TABLE claude_pool_conversion_0587(completed boolean NOT NULL) ON COMMIT DROP`;
+      await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+      await transaction.unsafe(parts[0]!);
+      await migrateClaudeSubscriptionPoolCredentials(
+        transaction,
+        options?.environmentsEncryptionKey,
+      );
+      await transaction`INSERT INTO pg_temp.claude_pool_conversion_0587 VALUES(true)`;
+      await transaction.unsafe(parts[1]!);
+      await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+    });
+    return;
   }
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
     if (file !== "0433_unified_skill_lifecycle.sql")
@@ -264,8 +291,13 @@ export async function executeMigrationFile(
     // makes a fresh database capable of applying maintenance migration 0138
     // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
+    // Bound ordinary DDL lock acquisition in that same implicit transaction.
+    // The migration body follows this preamble, so its own SET LOCAL can still
+    // override the default; a lock timeout aborts the whole body before the
+    // caller writes its separate success receipt.
     await sql.unsafe(
       `SELECT
+  pg_catalog.set_config('lock_timeout', '5s', true),
   pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
   pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${file === "0434_ordered_model_history.sql" ? "SET CONSTRAINTS ALL IMMEDIATE;\n" : ""}${sqlText}`,
     );
@@ -529,7 +561,15 @@ export async function migrate(
       if (sqlText === undefined) {
         throw new Error(`Pending migration source was not loaded: ${file}`);
       }
-      await executeMigrationFile(sql, file, sqlText, { preinstalledVector });
+      const configuredKey =
+        runtimeOptions?.environmentsEncryptionKey ??
+        (process.env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
+          ? new Uint8Array(Buffer.from(process.env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY, "base64"))
+          : undefined);
+      await executeMigrationFile(sql, file, sqlText, {
+        preinstalledVector,
+        ...(configuredKey ? { environmentsEncryptionKey: configuredKey } : {}),
+      });
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }
     // Reconcile even when all migration names were already recorded. This is

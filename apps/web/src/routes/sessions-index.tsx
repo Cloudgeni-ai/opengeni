@@ -1,6 +1,8 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
+import { useGitHubAppConnectLauncher } from "@/components/github-app-connect-launcher";
+import { openGitHubInstallationSettings } from "@/lib/github-app-connect";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
@@ -27,12 +29,14 @@ import {
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
+  ModelMark,
+  modelDisplayName,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
-import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
+import { resolveWorkspaceSessionToolDefaults, stableJson } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import { NewSessionRealtimeControl, useRealtimeModelSelection } from "@opengeni/react/realtime";
 import {
@@ -45,14 +49,12 @@ import {
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  BoxIcon,
-  CheckIcon,
   ChevronDownIcon,
+  CreditCardIcon,
   FolderIcon,
-  MonitorOffIcon,
+  LockIcon,
   PlusIcon,
   ServerCogIcon,
-  ServerIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -72,8 +74,18 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
+import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
+import {
+  RunsOnMenuBody,
+  RunsOnNotice,
+  VisibilityMenuBody,
+  hasRunsOnChoices,
+  runsOnAttention,
+  hasVisibilityChoice,
+  runsOnSummary,
+  visibilitySummary,
+} from "@/components/session/new-session-settings-menu";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
@@ -84,13 +96,12 @@ import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
@@ -101,6 +112,7 @@ import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
+  modelProvidedAfterLaunch,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
 import {
@@ -108,8 +120,7 @@ import {
   type CreateComposerFocusIntent,
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
-import { displayModel } from "@/lib/format";
-import { preferredConnectedModelId } from "@/lib/model-access-onboarding";
+import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -117,7 +128,6 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
-  defaultEffortForModel,
   modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
@@ -141,16 +151,26 @@ import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
+import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
+import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import {
+  capabilityAvailability,
+  capabilitySummary,
+  draftFromRequest,
+  requestFromDraft,
+  workspaceAgentDefaultsDraft,
+  type AgentCapabilityDraft,
+} from "@/lib/agent-capabilities";
 import {
   emptySessionDraft,
+  fitToolPolicyToAgentCapabilities,
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
   rememberedMachineFolder,
-  selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
-  type ConnectedMachineTarget,
+  workspaceDefaultRigOptionLabel,
   type SessionDraft,
 } from "@/lib/session-create";
 import {
@@ -163,8 +183,10 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
+import { userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import {
+  newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
@@ -184,6 +206,11 @@ const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : u
 const EmptyCreditsNotice = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.EmptyCreditsNotice,
+  })),
+);
+const CreditTopupPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -220,8 +247,14 @@ function SessionsIndexRouteContent({
       selectedIds: [...context.selectedCapabilityToolIds],
     },
     context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"),
   );
   const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
+  // Hosted here, outside the repository menu, so the menu closing when the
+  // authorization popup opens does not unmount GitHub App setup.
+  const githubAppConnect = useGitHubAppConnectLauncher(workspaceId);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
     [context.clientConfig],
@@ -269,10 +302,54 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [capabilitiesOpenRequest, setCapabilitiesOpenRequest] = useState<
+    { panel: "capabilities"; nonce: number } | undefined
+  >(undefined);
+  // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
+  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
+  const agentAvailability = useMemo(
+    () => capabilityAvailability(context.clientConfig.agentConfig),
+    [context.clientConfig.agentConfig],
+  );
+  const workspaceAgentDraft = useMemo(
+    () =>
+      workspaceAgentDefaultsDraft({
+        capabilities: resolveWorkspaceAgentDefaults(workspace?.settings)?.capabilities,
+        legacyHumanInputOff: workspace?.settings.agentHumanInputEnabled === false,
+      }),
+    [workspace?.settings],
+  );
+  const composerAgentCapabilities = agentConfigEnabled
+    ? {
+        customized: draft.agentCapabilities !== undefined,
+        draft:
+          draft.agentCapabilities !== undefined
+            ? draftFromRequest(draft.agentCapabilities)
+            : workspaceAgentDraft,
+        availability: agentAvailability,
+        onCustomizedChange: (customized: boolean) =>
+          setDraft((current) => {
+            if (!customized) {
+              const { agentCapabilities: _dropped, ...rest } = current;
+              return rest;
+            }
+            return {
+              ...current,
+              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+            };
+          }),
+        onChange: (next: AgentCapabilityDraft) =>
+          setDraft((current) => ({
+            ...current,
+            agentCapabilities: requestFromDraft(next, agentAvailability),
+          })),
+      }
+    : undefined;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -532,6 +609,20 @@ function SessionsIndexRouteContent({
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
+  // "+" > Runs on: where the new chat runs and on which environment or folder.
+  const runsOnChoices = {
+    draft,
+    machines,
+    rigs: selectableRigs,
+    workspaceDefaultRigId: workspace?.defaultRigId ?? null,
+    selfhostedPrimary: defaultSandboxBackend === "selfhosted",
+    // A 404 means Connected Machines are off here, not a failure.
+    fleetLoadFailed:
+      fleet.error != null &&
+      !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404),
+    selectedChannelId,
+    selectionHistory,
+  };
   const fleetEmpty = machines.length === 0;
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
@@ -599,6 +690,10 @@ function SessionsIndexRouteContent({
     },
   );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  // Whether the person chose the composer's model policy. False follows the
+  // server-resolved new-chat default; undefined means an older server that
+  // does not report the marker, so none is sent back.
+  const [modelProvided, setModelProvided] = useState<boolean | undefined>(undefined);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const followWorkspaceConnectors = () => {
@@ -738,14 +833,17 @@ function SessionsIndexRouteContent({
     (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
   const persistedToolPolicy = useMemo(
     () =>
-      newSessionDraftToolPolicy({
-        selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
-        catalogReady: context.workspaceMcpCatalogReady,
-        customizing: connectorCustomizing,
-        explicit: toolSelectionExplicit,
-        ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
-      }),
+      fitToolPolicyToAgentCapabilities(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: context.selectedCapabilityToolIds,
+          workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
+          catalogReady: context.workspaceMcpCatalogReady,
+          customizing: connectorCustomizing,
+          explicit: toolSelectionExplicit,
+          ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
+        }),
+        draft.agentCapabilities,
+      ),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
@@ -753,6 +851,7 @@ function SessionsIndexRouteContent({
       toolSelectionExplicit,
       connectorCustomizing,
       connectorExclusions,
+      draft.agentCapabilities,
     ],
   );
   const persistedValue = useMemo(
@@ -767,6 +866,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
+      ...(modelProvided !== undefined ? { modelProvided } : {}),
       ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
       options: {
         ...newSessionDraftOptionsFromSessionDraft(
@@ -788,6 +888,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
+      modelProvided,
       createVisibility,
       persistedToolPolicy,
       projectProvenancePresent,
@@ -856,6 +957,7 @@ function SessionsIndexRouteContent({
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
+      setModelProvided(remote.modelProvided);
       const customize = newSessionConnectorCustomizeState({
         toolsProvided: remote.toolsProvided,
         tools: remote.tools,
@@ -904,6 +1006,7 @@ function SessionsIndexRouteContent({
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
     hydrateResources,
+    suspendAutosave: submitting,
     // Establish the passive baseline only after effective visibility settles.
     // Otherwise a late Personal-workspace capability response turns hydration
     // into an autosave, racing navigation and sibling drafts without a user edit.
@@ -957,16 +1060,23 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     if (modelCatalog.loading || newSessionDraft.loading) return;
     if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
-    const nextId =
-      preferredConnectedModelId(modelCatalog.models) ??
-      modelCatalog.rows.find((row) => row.selectable)?.id ??
-      null;
-    if (!nextId || nextId === context.model) return;
-    const next = modelCatalog.models.find((model) => model.id === nextId);
-    setModel(nextId);
-    if (next) setReasoningEffort(defaultEffortForModel(next));
+    // The server-resolved default comes first (saved workspace default, then a
+    // connected subscription, then credits, then the deployment default); the
+    // client ranking only covers a default that is itself unavailable.
+    const resolvedDefault = modelCatalog.defaultSelection;
+    const next = composerFallbackModel({
+      models: modelCatalog.models,
+      rows: modelCatalog.rows,
+      defaultSelection: resolvedDefault,
+    });
+    if (!next || next.id === context.model) return;
+    setModel(next.id);
+    setReasoningEffort(next.effort);
+    // An automatic replacement is not the person's choice.
+    setModelProvided((current) => (current === undefined ? current : false));
   }, [
     context.model,
+    modelCatalog.defaultSelection,
     modelCatalog.loading,
     modelCatalog.models,
     modelCatalog.rows,
@@ -994,13 +1104,11 @@ function SessionsIndexRouteContent({
               : "model_policy_unavailable"
           : privateCreateUnavailable
             ? "private_session_unavailable"
-            : newSessionDraft.conflict
-              ? "draft_conflict"
-              : attachments.hasUnresolved
-                ? "attachments_pending"
-                : !computeReady
-                  ? "compute_unavailable"
-                  : null;
+            : attachments.hasUnresolved
+              ? "attachments_pending"
+              : !computeReady
+                ? "compute_unavailable"
+                : null;
   useEffect(() => {
     const record = () => {
       if (startBlocker)
@@ -1047,7 +1155,6 @@ function SessionsIndexRouteContent({
         busy ||
         !context.workspaceMcpCatalogReady ||
         newSessionDraft.loading ||
-        newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
@@ -1081,7 +1188,7 @@ function SessionsIndexRouteContent({
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
-            "Start the session with a message first so OpenGeni can attach the machine to an accepted turn.",
+            "Start the session with a message first so Opengeni can attach the machine to an accepted turn.",
         });
         return false;
       }
@@ -1094,6 +1201,25 @@ function SessionsIndexRouteContent({
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
+      // One Send always refers to one visible snapshot, even if a sibling edit
+      // forces a draft save or create retry while the user continues typing.
+      const visibleSignature = stableJson(persistedValue);
+      const submittedSnapshot = newSessionCreateSnapshot(
+        persistedValue,
+        realtimeModel ? persistedValue.text : text,
+        {
+          model,
+          reasoningEffort,
+          latencyMode,
+        },
+      );
+      const preserveNewerLocalDraft = async () => {
+        if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
+          // A definitive create failure must not leave text typed during the
+          // attempt unsaved after a retry persisted the clicked snapshot.
+          await (realtimeModel ? newSessionDraft.flush() : newSessionDraft.flushForSend());
+        }
+      };
       setSubmitting(true);
       try {
         return await runNewSessionRouteSubmission({
@@ -1104,13 +1230,81 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
-              const flushed = await newSessionDraft.flush();
+              for (let attempt = 0; attempt < 3; attempt += 1) {
+                // Voice launch does not consume the draft. Save local edits if
+                // possible, but never rebase an old voice draft over a sibling's
+                // newer unsent message merely to start a realtime session.
+                const flushed = await newSessionDraft.flush();
+                if (!flushed) {
+                  toast.error("Couldn't save the draft", {
+                    description: draftSaveFailureText(newSessionDraft),
+                  });
+                  return null;
+                }
+                const submission = submissionFromSessionDraft(
+                  draft,
+                  defaultFirstPartyMcpTools,
+                  personalResourceAttachment.intent,
+                );
+                let draftConflict = false;
+                let outcomeUnknown = false;
+                const created = await context.startSession(
+                  workspaceId,
+                  {
+                    text: "",
+                    resources: [],
+                    tools: submittedSnapshot.tools,
+                    model,
+                    reasoningEffort,
+                    latencyMode,
+                    ...submission.extras,
+                  },
+                  {
+                    targetSandboxId: submission.options.targetSandboxId,
+                    workingDir: submission.options.workingDir,
+                    channelId: selectedChannelId,
+                    omitWorkspaceResources: submission.omitWorkspaceResources,
+                    installedSkillIds: launch.skillCapabilityId
+                      ? [launch.skillCapabilityId]
+                      : undefined,
+                    startMode: "realtime",
+                    expectedNewSessionDraftRevision: flushed.revision,
+                    newSessionDraftToolPolicy: persistedToolPolicy,
+                    agentLearning: draft.agentLearning,
+                    visibility: newSessionCreateVisibility(
+                      personalWorkspace,
+                      submission.options.visibility ?? "workspace",
+                      tenancyCapabilities?.canCreatePrivate === true,
+                    ),
+                    onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                      draftConflict = newSessionDraft.captureConflict(error);
+                      outcomeUnknown = uncertain;
+                      recoverPersonalResourceAttachment(error, request);
+                      return draftConflict;
+                    },
+                  },
+                );
+                if (!created) {
+                  if (draftConflict) continue;
+                  if (!outcomeUnknown) await preserveNewerLocalDraft();
+                  return null;
+                }
+                return {
+                  sessionId: created.id,
+                  settleDraft: async () => true,
+                };
+              }
+              await preserveNewerLocalDraft();
+              toast.error("Couldn't start voice", { description: "Try again." });
+              return null;
+            }
+
+            const submittedResources = submittedSnapshot.resources;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+              const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
                 toast.error("Couldn't save the draft", {
-                  description:
-                    newSessionDraft.error?.message ??
-                    newSessionDraft.conflict?.message ??
-                    "Resolve the draft conflict, then try again.",
+                  description: draftSaveFailureText(newSessionDraft),
                 });
                 return null;
               }
@@ -1119,16 +1313,19 @@ function SessionsIndexRouteContent({
                 defaultFirstPartyMcpTools,
                 personalResourceAttachment.intent,
               );
+              let draftConflict = false;
+              let outcomeUnknown = false;
               const created = await context.startSession(
                 workspaceId,
                 {
-                  text: "",
-                  resources: [],
-                  tools: persistedValue.tools,
+                  text,
+                  resources: submittedResources,
+                  tools: submittedSnapshot.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
                   ...submission.extras,
+                  connectionAccounts: connectionAccounts.selections,
                 },
                 {
                   targetSandboxId: submission.options.targetSandboxId,
@@ -1138,7 +1335,6 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
-                  startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1147,94 +1343,60 @@ function SessionsIndexRouteContent({
                     submission.options.visibility ?? "workspace",
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
-                  onFailure: ({ error, request }) => {
-                    newSessionDraft.captureConflict(error);
+                  onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                    draftConflict = newSessionDraft.captureConflict(error);
+                    outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
+                    return draftConflict;
                   },
                 },
               );
-              if (!created) return null;
+              if (!created) {
+                if (draftConflict) continue;
+                if (!outcomeUnknown) await preserveNewerLocalDraft();
+                return null;
+              }
               return {
                 sessionId: created.id,
-                settleDraft: async () => true,
+                settleDraft: async () => {
+                  const acknowledged = await newSessionDraft.acknowledgeConsumed(
+                    flushed,
+                    visibleSignature,
+                  );
+                  if (
+                    acknowledged?.kind === "consumed" &&
+                    newSessionDraft.isCurrentSignature(visibleSignature)
+                  ) {
+                    setMessage("");
+                    setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
+                    attachments.removeReadyFiles(
+                      submittedResources.flatMap((resource) =>
+                        resource.kind === "file" ? [resource.fileId] : [],
+                      ),
+                    );
+                  } else if (
+                    acknowledged?.kind !== "preserved" ||
+                    !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                  ) {
+                    // The message was already accepted. If there is no newer
+                    // local edit, leave a sibling's later draft untouched.
+                    if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
+                      return true;
+                    }
+                    const preserved = await newSessionDraft.flushForSend();
+                    if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                      return false;
+                    }
+                  }
+                  return true;
+                },
               };
             }
-
-            const submittedResources = persistedValue.resources;
-            const flushed = await newSessionDraft.flush();
-            if (!flushed) {
-              toast.error("Couldn't save the draft", {
-                description:
-                  newSessionDraft.error?.message ??
-                  newSessionDraft.conflict?.message ??
-                  "Resolve the draft conflict, then try again.",
-              });
-              return null;
-            }
-            const submission = submissionFromSessionDraft(
-              draft,
-              defaultFirstPartyMcpTools,
-              personalResourceAttachment.intent,
-            );
-            const created = await context.startSession(
-              workspaceId,
-              {
-                text,
-                resources: submittedResources,
-                tools: persistedValue.tools,
-                model,
-                reasoningEffort,
-                latencyMode,
-                ...submission.extras,
-                connectionAccounts: connectionAccounts.selections,
-              },
-              {
-                targetSandboxId: submission.options.targetSandboxId,
-                workingDir: submission.options.workingDir,
-                channelId: selectedChannelId,
-                omitWorkspaceResources: submission.omitWorkspaceResources,
-                installedSkillIds: launch.skillCapabilityId
-                  ? [launch.skillCapabilityId]
-                  : undefined,
-                expectedNewSessionDraftRevision: flushed.revision,
-                newSessionDraftToolPolicy: persistedToolPolicy,
-                agentLearning: draft.agentLearning,
-                visibility: newSessionCreateVisibility(
-                  personalWorkspace,
-                  submission.options.visibility ?? "workspace",
-                  tenancyCapabilities?.canCreatePrivate === true,
-                ),
-                onFailure: ({ error, request }) => {
-                  newSessionDraft.captureConflict(error);
-                  recoverPersonalResourceAttachment(error, request);
-                },
-              },
-            );
-            if (!created) return null;
-            return {
-              sessionId: created.id,
-              settleDraft: async () => {
-                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-                if (acknowledged?.kind === "consumed") {
-                  setMessage("");
-                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
-                  attachments.removeReadyFiles(
-                    submittedResources.flatMap((resource) =>
-                      resource.kind === "file" ? [resource.fileId] : [],
-                    ),
-                  );
-                } else if (
-                  !acknowledged ||
-                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                ) {
-                  const preserved = await newSessionDraft.flush();
-                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                    return false;
-                  }
-                }
-                return true;
-              },
-            };
+            await preserveNewerLocalDraft();
+            toast.error("Couldn't send", {
+              description: "Your message is still here. Try again.",
+            });
+            return null;
           },
           navigate: async (sessionId) => {
             await navigate({
@@ -1258,15 +1420,29 @@ function SessionsIndexRouteContent({
   const launchEffort = launch.effort;
   const launchLatency = launch.latency;
   const launchRealtime = launch.realtime;
+  const launchFollowDefault = launch.followDefault === true;
   const launchSkillCapabilityId = launch.skillCapabilityId;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!launchKey || handledLaunchKeyRef.current === launchKey) return;
-    if (newSessionDraft.loading || newSessionDraft.conflict !== null) return;
+    if (newSessionDraft.loading) return;
     if (launchModel) setModel(launchModel);
     if (launchEffort) setReasoningEffort(launchEffort);
     if (launchLatency) setLatencyMode(launchLatency);
+    // A checkout return carries the credits default and keeps following the
+    // default; any other launch policy is the person's choice.
+    setModelProvided((current) =>
+      modelProvidedAfterLaunch(
+        {
+          ...(launchModel ? { model: launchModel } : {}),
+          ...(launchEffort ? { effort: launchEffort } : {}),
+          ...(launchLatency ? { latency: launchLatency } : {}),
+          ...(launchFollowDefault ? { followDefault: true } : {}),
+        },
+        current,
+      ),
+    );
     if (!launchRealtime) {
       handledLaunchKeyRef.current = launchKey;
       void navigate({
@@ -1303,6 +1479,7 @@ function SessionsIndexRouteContent({
     computeReady,
     context.workspaceMcpCatalogReady,
     launchEffort,
+    launchFollowDefault,
     launchLatency,
     launchModel,
     launchRealtime,
@@ -1310,7 +1487,6 @@ function SessionsIndexRouteContent({
     launchKey,
     launch.channelId,
     navigate,
-    newSessionDraft.conflict,
     newSessionDraft.loading,
     newSessionPolicyValid,
     setLatencyMode,
@@ -1337,7 +1513,6 @@ function SessionsIndexRouteContent({
         attachments.readyResources.length > 0) &&
       !busy &&
       !newSessionDraft.loading &&
-      !newSessionDraft.conflict &&
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
       (createdSessionAuthority !== null ||
@@ -1355,22 +1530,32 @@ function SessionsIndexRouteContent({
     draftRevision: newSessionDraft.revision,
     draftLoading: newSessionDraft.loading,
     draftSaving: newSessionDraft.saving,
-    draftConflict: newSessionDraft.conflict,
+    // A stale autosaved draft must not block or distract from explicit Send.
+    draftConflict: null,
     policy: {
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
     },
-    setModel: context.setModel,
-    setReasoningEffort: context.setReasoningEffort,
-    setLatencyMode: context.setLatencyMode,
+    setModel: (model) => {
+      setModelProvided(true);
+      context.setModel(model);
+    },
+    setReasoningEffort: (effort) => {
+      setModelProvided(true);
+      context.setReasoningEffort(effort);
+    },
+    setLatencyMode: (latencyMode) => {
+      setModelProvided(true);
+      context.setLatencyMode(latencyMode);
+    },
     draftPersistence: "disabled",
     applyDraft: () => {},
     reloadDraft: newSessionDraft.reload,
     resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: newSessionDraft.error,
+    error: newSessionDraft.conflict ? null : newSessionDraft.error,
     clearError: newSessionDraft.clearError,
     send: async () => await submitNewSession(null),
     steer: async () => {
@@ -1412,11 +1597,38 @@ function SessionsIndexRouteContent({
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
+      {githubAppConnect.element}
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
+          {context.clientConfig.billingMode === "stripe" &&
+          workspace?.accountId &&
+          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => setCreditTopupOpen(true)}
+              >
+                <CreditCardIcon className="size-4" />
+                Add credits
+              </Button>
+              <Suspense fallback={null}>
+                <CreditTopupPrompt
+                  purpose="topup"
+                  open={creditTopupOpen}
+                  workspaceId={workspaceId}
+                  accountId={workspace.accountId}
+                  canBuyCredits
+                  onOpenChange={setCreditTopupOpen}
+                />
+              </Suspense>
+            </>
+          ) : null}
         </section>
 
         {launchSkillCapabilityId ? (
@@ -1452,97 +1664,164 @@ function SessionsIndexRouteContent({
             composer={createComposer}
             attachments={attachments}
             autoFocus
-            disabled={newSessionDraft.loading}
+            disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
-              <ComposerMobilePlus
-                connectorActions={{
-                  accountControls: {
-                    groups: connectionAccounts.availableAccountGroups,
-                    choices: connectionAccounts.accountChoices,
-                    onChoose: connectionAccounts.selectAccount,
-                    loading: connectionAccounts.loading,
-                    error: connectionAccounts.error,
-                    onRefresh: () => void connectionAccounts.refresh(),
-                    disabled: busy || newSessionDraft.loading,
-                  },
-                }}
-                menuSide="bottom"
-                draftChatSettings={{
-                  workspaceId,
-                  scope:
-                    createVisibility === "private" || personalWorkspace ? "personal" : "workspace",
-                  value: draft.agentLearning ?? {},
-                  onChange: (agentLearning) =>
-                    setDraft((current) => ({ ...current, agentLearning })),
-                }}
-                workspaceId={workspaceId}
-                disabled={busy || newSessionDraft.loading}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={context.toolMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                toolsDisabled={busy || newSessionDraft.loading}
-                connectorCustomizing={connectorCustomizing}
-                onConnectorCustomizingChange={(next) => {
-                  if (next) setConnectorCustomizing(true);
-                  else followWorkspaceConnectors();
-                }}
-                onToolSelectionChange={(selection) => {
-                  changeConnectorSelection(selection);
-                }}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      repositories: {
-                        selectedCount:
-                          context.selectedRepoIds.size +
-                          context.selectedPersonalGitHubRepoIds.size +
-                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <WorkspaceRepositoryMenuBody
-                            workspaceId={workspaceId}
-                            disabled={busy || newSessionDraft.loading}
-                            catalogRefresh={repositoryCatalogRefresh}
-                          />
-                        ),
-                      },
+              <>
+                <ComposerMobilePlus
+                  openRequest={capabilitiesOpenRequest}
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.availableAccountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled: busy || newSessionDraft.loading,
+                    },
+                  }}
+                  menuSide="bottom"
+                  {...(composerAgentCapabilities
+                    ? {
+                        agentCapabilities: {
+                          ...composerAgentCapabilities,
+                          disabled: busy || newSessionDraft.loading,
+                        },
+                      }
+                    : {})}
+                  draftChatSettings={{
+                    workspaceId,
+                    scope:
+                      createVisibility === "private" || personalWorkspace
+                        ? "personal"
+                        : "workspace",
+                    value: draft.agentLearning ?? {},
+                    onChange: (agentLearning) =>
+                      setDraft((current) => ({ ...current, agentLearning })),
+                  }}
+                  workspaceId={workspaceId}
+                  disabled={busy || newSessionDraft.loading}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={context.toolMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={{
+                    mcpServerIds: context.selectedCapabilityToolIds,
+                    firstPartyToolIds: draft.firstPartyMcpTools,
+                  }}
+                  toolsDisabled={busy || newSessionDraft.loading}
+                  connectorCustomizing={connectorCustomizing}
+                  onConnectorCustomizingChange={(next) => {
+                    if (next) setConnectorCustomizing(true);
+                    else followWorkspaceConnectors();
+                  }}
+                  onToolSelectionChange={(selection) => {
+                    changeConnectorSelection(selection);
+                  }}
+                  {...(hasRunsOnChoices(runsOnChoices)
+                    ? {
+                        runsOn: {
+                          summary: runsOnSummary(runsOnChoices),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <RunsOnMenuBody
+                              {...runsOnChoices}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={setDraft}
+                              onComputeChange={setExplicitComputeDraft}
+                              onRetryMachines={() => void fleet.refresh()}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(hasVisibilityChoice({
+                    personalWorkspace,
+                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+                  })
+                    ? {
+                        visibility: {
+                          summary: visibilitySummary(draft.visibility),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <VisibilityMenuBody
+                              value={draft.visibility}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={(visibility) =>
+                                setDraft((current) => ({ ...current, visibility }))
+                              }
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        repositories: {
+                          selectedCount:
+                            context.selectedRepoIds.size +
+                            context.selectedPersonalGitHubRepoIds.size +
+                            context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <WorkspaceRepositoryMenuBody
+                              workspaceId={workspaceId}
+                              disabled={busy || newSessionDraft.loading}
+                              catalogRefresh={repositoryCatalogRefresh}
+                              onConnectWorkspaceApp={githubAppConnect.open}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        variableSets: {
+                          selectedCount: draft.variableSetIds.length,
+                          panel: (
+                            <ManagedSandboxFields
+                              variableSetsOnly
+                              variableSetWorkspaceId={workspaceId}
+                              canAttachVariableSets={canAttachVariableSets}
+                              canUseVariableSets={canUseVariableSets}
+                              draft={draft}
+                              onChange={setDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              variableSets={selectableVariableSets}
+                              rigs={selectableRigs}
+                              personalResourceAccess={{
+                                names: selectedPersonalResourceNames,
+                                visibility: createVisibility,
+                              }}
+                              catalogRecovery={{
+                                error: fixedResourceCatalogError,
+                                refreshing: personalResourceCatalogRefreshPending,
+                                onRetry: () => void refreshPersonalResourceCatalogs(),
+                              }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                />
+                {composerAgentCapabilities?.customized ? (
+                  <ComposerCapabilitiesChip
+                    summary={capabilitySummary(
+                      composerAgentCapabilities.draft.values,
+                      composerAgentCapabilities.availability,
+                    )}
+                    disabled={busy || newSessionDraft.loading}
+                    onOpen={() =>
+                      setCapabilitiesOpenRequest((current) => ({
+                        panel: "capabilities",
+                        nonce: (current?.nonce ?? 0) + 1,
+                      }))
                     }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      variableSets: {
-                        selectedCount: draft.variableSetIds.length,
-                        panel: (
-                          <ManagedSandboxFields
-                            variableSetsOnly
-                            variableSetWorkspaceId={workspaceId}
-                            canAttachVariableSets={canAttachVariableSets}
-                            canUseVariableSets={canUseVariableSets}
-                            draft={draft}
-                            onChange={setDraft}
-                            disabled={busy || newSessionDraft.loading}
-                            variableSets={selectableVariableSets}
-                            rigs={selectableRigs}
-                            personalResourceAccess={{
-                              names: selectedPersonalResourceNames,
-                              visibility: createVisibility,
-                            }}
-                            catalogRecovery={{
-                              error: fixedResourceCatalogError,
-                              refreshing: personalResourceCatalogRefreshPending,
-                              onRetry: () => void refreshPersonalResourceCatalogs(),
-                            }}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-              />
+                  />
+                ) : null}
+              </>
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
@@ -1554,6 +1833,7 @@ function SessionsIndexRouteContent({
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
                   workspaceId={workspaceId}
+                  onPolicyChosen={() => setModelProvided(true)}
                 />
               </div>
             }
@@ -1570,7 +1850,6 @@ function SessionsIndexRouteContent({
                   disabled={
                     busy ||
                     newSessionDraft.loading ||
-                    newSessionDraft.conflict !== null ||
                     attachments.hasUnresolved ||
                     !newSessionPolicyValid ||
                     !computeReady ||
@@ -1578,19 +1857,17 @@ function SessionsIndexRouteContent({
                     !context.workspaceMcpCatalogReady
                   }
                   disabledReason={
-                    newSessionDraft.conflict
-                      ? "Resolve the draft conflict before starting voice."
-                      : attachments.hasUnresolved
-                        ? "Wait for attachments to finish before starting voice."
-                        : !newSessionPolicyValid
-                          ? "Choose supported model settings before starting voice."
-                          : !computeReady
-                            ? "Choose where this session should run first."
-                            : personalMachineSelected
-                              ? "Start with a message so personal machine access can attach to an accepted turn."
-                              : !context.workspaceMcpCatalogReady
-                                ? "Wait for session tools to finish loading."
-                                : null
+                    attachments.hasUnresolved
+                      ? "Wait for attachments to finish before starting voice."
+                      : !newSessionPolicyValid
+                        ? "Choose supported model settings before starting voice."
+                        : !computeReady
+                          ? "Choose where this session should run first."
+                          : personalMachineSelected
+                            ? "Start with a message so personal machine access can attach to an accepted turn."
+                            : !context.workspaceMcpCatalogReady
+                              ? "Wait for session tools to finish loading."
+                              : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
@@ -1607,16 +1884,19 @@ function SessionsIndexRouteContent({
             }
           />
 
-          {connectionAccounts.loading ||
-          connectionAccounts.error ||
-          connectionAccounts.accountChoiceMessage ? (
-            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+          {personalWorkspace ? <PrivateWorkspaceNote /> : null}
+          {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
+
+          {/* Accounts load quietly with the composer: only a problem shows here,
+              never a loading line behind an open menu. */}
+          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+            <div role="alert" className="mt-3">
               <Notice
-                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                tone="waiting"
                 action={
-                  connectionAccounts.error ? (
+                  connectionAccounts.error && !connectionAccounts.accessDenied ? (
                     <Button
-                      variant="secondary"
+                      variant="outline"
                       size="sm"
                       onClick={() => void connectionAccounts.refresh()}
                     >
@@ -1625,23 +1905,14 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.loading
-                  ? "Checking connected accounts…"
-                  : connectionAccounts.error
-                    ? "Couldn't check connected accounts. Retry to send your message."
-                    : connectionAccounts.accountChoiceMessage}
+                {connectionAccounts.error
+                  ? connectionAccounts.accessDenied
+                    ? connectionAccounts.error
+                    : "Couldn't check connected accounts. Retry to send your message."
+                  : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
           ) : null}
-
-          <SessionVisibilityPicker
-            id="new-session"
-            personalWorkspace={personalWorkspace}
-            value={personalWorkspace ? "private" : draft.visibility}
-            capabilities={tenancyCapabilities}
-            disabled={busy || newSessionDraft.loading}
-            onChange={(visibility) => setDraft((current) => ({ ...current, visibility }))}
-          />
 
           <ComputeTargetControl
             workspaceId={workspaceId}
@@ -1658,6 +1929,7 @@ function SessionsIndexRouteContent({
             machines={machines}
             variableSets={selectableVariableSets}
             rigs={selectableRigs}
+            workspaceDefaultRigId={workspace?.defaultRigId ?? null}
             catalogRecovery={{
               error: fixedResourceCatalogError,
               refreshing: personalResourceCatalogRefreshPending,
@@ -1692,6 +1964,12 @@ function SessionsIndexRouteContent({
   );
 }
 
+/** A draft that didn't save: the message is kept, then what to do. */
+function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
+  if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
+  return `Your message is still here. ${userErrorText(draft.error)}`;
+}
+
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
 // A calm section below the composer: the most recent sessions as compact rows
 // (status, title, provider mark + catalog model label, relative time). Reuses
@@ -1718,7 +1996,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 
   return (
     <section className="mt-12">
-      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Recent sessions
       </h2>
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
@@ -1767,7 +2045,7 @@ function recentSessionModelPresentation(
 ): { label: string; billingClass: PickerModelRow["billingClass"] } {
   const row = findPickerRow([...catalogRows], modelId);
   return {
-    label: row?.label ?? displayModel(modelId),
+    label: row?.label ?? modelDisplayName(modelId),
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
@@ -1793,7 +2071,7 @@ function RecentSessionRow({
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: session.id }}
-        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-surface-2/50"
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
       >
         <StatusDot
           tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
@@ -1803,10 +2081,16 @@ function RecentSessionRow({
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
-              <BillingClassMark
-                billingClass={model.billingClass}
+              <ModelMark
+                model={session.model}
                 className="size-3 text-fg-muted"
-                aria-label=""
+                fallback={
+                  <BillingClassMark
+                    billingClass={model.billingClass}
+                    className="size-3"
+                    aria-label=""
+                  />
+                }
               />
               <span className="truncate">{metaBits.join(" · ")}</span>
             </span>
@@ -1856,12 +2140,15 @@ function SessionModelControl({
   policyError,
   disabled,
   workspaceId,
+  onPolicyChosen,
 }: {
   hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
   workspaceId: string;
+  /** The person picked a model, reasoning level, or speed. */
+  onPolicyChosen: () => void;
 }) {
   const context = useAppContext();
   return (
@@ -1876,9 +2163,18 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
-      onModelChange={context.setModel}
-      onEffortChange={context.setReasoningEffort}
-      onLatencyModeChange={context.setLatencyMode}
+      onModelChange={(model) => {
+        onPolicyChosen();
+        context.setModel(model);
+      }}
+      onEffortChange={(effort) => {
+        onPolicyChosen();
+        context.setReasoningEffort(effort);
+      }}
+      onLatencyModeChange={(latencyMode) => {
+        onPolicyChosen();
+        context.setLatencyMode(latencyMode);
+      }}
     />
   );
 }
@@ -1903,7 +2199,7 @@ function SessionFolderPicker({
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}
@@ -1915,23 +2211,22 @@ function SessionFolderPicker({
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-56">
+      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
         <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon className="size-4" />
+          <FolderIcon />
           <span className="min-w-0 flex-1 truncate">Default</span>
-          {selectedChannelId === null ? <CheckIcon className="size-4" /> : null}
+          <DropdownMenuCheck checked={selectedChannelId === null} />
         </DropdownMenuItem>
         {channels.map((channel) => (
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <FolderIcon className="size-4" />
+            <FolderIcon />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            {channel.id === selectedChannelId ? <CheckIcon className="size-4" /> : null}
+            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon className="size-4" />
+          <PlusIcon />
           New project
         </DropdownMenuItem>
       </DropdownMenuContent>
@@ -1943,6 +2238,7 @@ function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
   disabled: boolean,
+  onConnectWorkspaceApp: () => void,
 ): RepositoryContextPickerProps {
   return {
     setupMode:
@@ -2118,6 +2414,9 @@ function workspaceRepositoryPickerProps(
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),
+    onConnectWorkspaceApp,
+    onConfigureInstallation: (installationId: number) =>
+      openGitHubInstallationSettings(context.client, workspaceId, installationId),
     onDisconnectInstallation: async (installationId: number) => {
       await context.disconnectGitHubInstallation(workspaceId, installationId);
     },
@@ -2129,16 +2428,18 @@ function WorkspaceRepositoryMenuBody({
   disabled,
   leading,
   catalogRefresh,
+  onConnectWorkspaceApp,
 }: {
   workspaceId: string;
   disabled: boolean;
   leading?: ReactNode;
   catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
+  onConnectWorkspaceApp: () => void;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
-      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...workspaceRepositoryPickerProps(context, workspaceId, disabled, onConnectWorkspaceApp)}
       {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />
@@ -2170,6 +2471,7 @@ function ComputeTargetControl(props: {
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];
+  workspaceDefaultRigId: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
@@ -2178,11 +2480,6 @@ function ComputeTargetControl(props: {
   const { fleet, machines } = props;
   const fleetEmpty = machines.length === 0;
   const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
-  // A 404 is the expected "self-hosted machines are disabled here" signal, not a
-  // failure — only a genuine load error (network/5xx) is surfaced, so the machine
-  // option isn't silently swallowed by a transient outage (states #4).
-  const fleetLoadFailed =
-    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   // Managed-primary deployments keep Connected Machine opt-in and hide the
   // chooser when the fleet is empty. Selfhosted-primary deployments always show
   // the required machine path, including its honest unavailable state.
@@ -2294,196 +2591,67 @@ function ComputeTargetControl(props: {
     props.selectionHistory,
   ]);
 
-  const selectKind = (kind: ComputeKind) => {
-    if (kind === draft.compute.kind) {
-      return;
-    }
-    if (kind === "sandbox") {
-      // Composer no longer exposes a managed-backend override — always the
-      // deployment default (empty wire field).
-      props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
-      return;
-    }
-    // Auto-pick the first selectable machine so the common single-machine case is
-    // submit-ready immediately; otherwise leave it unpicked (submit stays blocked).
-    const project = props.selectionHistory.projects.find(
-      (candidate) => candidate.channelId === props.selectedChannelId,
-    );
-    const rememberedMachine = project?.machines.find((remembered) =>
-      machines.some(
-        (machine) =>
-          machine.sandboxId === remembered.sandboxId && isMachineComputeSelectable(machine.state),
-      ),
-    );
-    const firstSelectable =
-      (rememberedMachine
-        ? machines.find((machine) => machine.sandboxId === rememberedMachine.sandboxId)
-        : null) ??
-      machines.find((machine) => isMachineComputeSelectable(machine.state)) ??
-      null;
-    props.onComputeChange({
-      ...draft,
-      compute: {
-        kind: "machine",
-        sandboxId: firstSelectable?.sandboxId ?? null,
-        folder: firstSelectable
-          ? rememberedMachineFolder(
-              props.selectionHistory,
-              props.selectedChannelId,
-              firstSelectable.sandboxId,
-            )
-          : { kind: "root" },
-      },
-    });
-  };
+  // A 404 means Connected Machines are off here, not a failure.
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
+  const attention = runsOnAttention({
+    draft,
+    machines,
+    fleetLoadFailed,
+    fleetLoading: fleet.loading,
+  });
 
-  // Clean sandbox-only default: no "Where should this run?" header, no segmented
-  // control, no machine clutter — just the managed sandbox fields, plus a subtle
-  // opt-in link to reveal the Connected Machine path. The sandbox compute is
-  // narrowed defensively (the normalization effect keeps the draft in sync).
-  if (!showComputeTarget) {
-    // No machines → no compute chooser. Rig/variable-set card only when needed;
-    // ManagedSandboxFields returns null when empty so we don't leave a blank gap.
-    if (fleetLoadFailed) {
-      return (
-        <section className="mt-5 grid gap-2">
-          <ManagedSandboxFields
-            draft={draft}
-            onChange={onChange}
-            disabled={props.disabled}
-            personalResourceAccess={props.personalResourceAccess}
-            variableSets={props.variableSets}
-            rigs={props.rigs}
-            catalogRecovery={props.catalogRecovery}
-          />
-          <FleetErrorNotice onRetry={() => void fleet.refresh()} />
-        </section>
-      );
-    }
-    return (
-      <ManagedSandboxFields
-        draft={draft}
-        onChange={onChange}
-        disabled={props.disabled}
-        personalResourceAccess={props.personalResourceAccess}
-        variableSets={props.variableSets}
-        rigs={props.rigs}
-        catalogRecovery={props.catalogRecovery}
-      />
-    );
-  }
-
+  // Where it runs is chosen under "+" > Runs on. Only what needs attention
+  // shows under the composer: why Send waits on where it runs (with a retry
+  // for a failed machine load), a catalog that couldn't be verified, and the
+  // personal resources this chat will use.
   return (
-    <section className="mt-5 grid gap-3">
-      <p className="px-0.5 text-2xs font-medium uppercase tracking-[0.08em] text-fg-subtle">
-        Where should this run?
-      </p>
-      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-        {selfhostedPrimary ? null : (
-          <ComputeKindButton
-            selected={draft.compute.kind === "sandbox"}
+    <>
+      {attention ? (
+        <div className="mt-3">
+          <RunsOnNotice
+            attention={attention}
+            machines={machines}
             disabled={props.disabled}
-            icon={<BoxIcon className="size-4 shrink-0" />}
-            title="Managed sandbox"
-            subtitle="A fresh sandbox, set up for you"
-            onClick={() => selectKind("sandbox")}
+            onRetryMachines={() => void fleet.refresh()}
+            connectAction={
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  to="/workspaces/$workspaceId/machines"
+                  params={{ workspaceId: props.workspaceId }}
+                >
+                  Connect a machine
+                </Link>
+              </Button>
+            }
           />
-        )}
-        <ComputeKindButton
-          selected={draft.compute.kind === "machine"}
-          disabled={props.disabled || fleetEmpty}
-          icon={<ServerIcon className="size-4 shrink-0" />}
-          title="Connected machine"
-          subtitle={
-            fleetLoadFailed
-              ? "Couldn't load machines"
-              : fleetEmpty
-                ? "Connect one to use it"
-                : "Run on your own machine"
-          }
-          onClick={() => selectKind("machine")}
-        />
-      </div>
-
-      {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
-
-      {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields
-          draft={draft}
-          onChange={onChange}
-          disabled={props.disabled}
-          personalResourceAccess={props.personalResourceAccess}
-          variableSets={props.variableSets}
-          rigs={props.rigs}
-          catalogRecovery={props.catalogRecovery}
-        />
-      ) : (
-        <ConnectedMachineFields
-          draft={draft}
-          compute={draft.compute}
-          machines={machines}
-          onChange={props.onComputeChange}
-          disabled={props.disabled}
-          selectedChannelId={props.selectedChannelId}
-          selectionHistory={props.selectionHistory}
-        />
-      )}
-      {draft.compute.kind === "machine" ? (
-        <PersonalResourceAccessInline access={props.personalResourceAccess} />
+        </div>
       ) : null}
-    </section>
-  );
-}
-
-type ComputeKind = SessionDraft["compute"]["kind"];
-
-function ComputeKindButton(props: {
-  selected: boolean;
-  disabled: boolean;
-  icon: ReactNode;
-  title: string;
-  subtitle: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={props.selected}
-      disabled={props.disabled}
-      onClick={props.onClick}
-      className={cn(
-        "group flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-[color,background-color,border-color,box-shadow]",
-        "disabled:cursor-not-allowed disabled:opacity-50",
-        props.selected
-          ? "border-brand/60 bg-brand/[0.08] ring-1 ring-inset ring-brand/20"
-          : "border-border bg-surface/40 hover:border-border-strong hover:bg-surface-2/60",
-      )}
-    >
-      <span
-        className={cn(
-          "mt-0.5 transition-colors",
-          props.selected ? "text-brand" : "text-fg-subtle group-hover:text-fg-muted",
-        )}
-      >
-        {props.icon}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-fg">{props.title}</span>
-        <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{props.subtitle}</span>
-      </span>
-      <span
-        aria-hidden
-        className={cn(
-          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full transition-all",
-          props.selected
-            ? "scale-100 bg-brand text-brand-fg"
-            : "scale-90 border border-border-strong opacity-0 group-hover:opacity-60",
-        )}
-      >
-        <CheckIcon className="size-2.5" strokeWidth={3} />
-      </span>
-    </button>
+      {props.catalogRecovery.error ? (
+        <div role="alert" className="mt-3">
+          <Notice
+            tone="failed"
+            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={props.disabled || props.catalogRecovery.refreshing}
+                onClick={props.catalogRecovery.onRetry}
+              >
+                Try again
+              </Button>
+            }
+          >
+            Try again to reload your available resources before starting this session.
+          </Notice>
+        </div>
+      ) : null}
+      <div className="mt-3">
+        <PersonalResourceAccessInline access={props.personalResourceAccess} />
+      </div>
+    </>
   );
 }
 
@@ -2502,6 +2670,7 @@ function ManagedSandboxFields(props: {
   personalResourceAccess: NewSessionPersonalResourceAccess;
   variableSets: VariableSet[];
   rigs: Rig[];
+  workspaceDefaultRigId?: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
 }) {
   const { draft, onChange } = props;
@@ -2542,7 +2711,7 @@ function ManagedSandboxFields(props: {
               <Button
                 type="button"
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 disabled={props.disabled || props.catalogRecovery.refreshing}
                 onClick={props.catalogRecovery.onRetry}
               >
@@ -2557,7 +2726,7 @@ function ManagedSandboxFields(props: {
       {/* Rig picker — offered only when the workspace has at least one rig.
           Picking a rig preselects its default variable sets in the control
           below (still user-overridable). Empty ⇒ the workspace default rig,
-          resolved server-side. */}
+          resolved server-side; its option names that default. */}
       {showRigs ? (
         <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
@@ -2576,7 +2745,9 @@ function ManagedSandboxFields(props: {
             }}
             className="h-8 w-auto max-w-56 text-xs"
           >
-            <option value="">Workspace default</option>
+            <option value="">
+              {workspaceDefaultRigOptionLabel(props.workspaceDefaultRigId, props.rigs)}
+            </option>
             {workspaceRigs.map((rig) => (
               <option key={rig.id} value={rig.id}>
                 {rig.name}
@@ -2639,215 +2810,12 @@ function PersonalResourceAccessInline(props: {
   );
 }
 
-// ── Connected Machine kind: machine picker, folder, env note ──────────────────
-
-function ConnectedMachineFields(props: {
-  draft: SessionDraft;
-  compute: ConnectedMachineTarget;
-  machines: MachineView[];
-  onChange: (draft: SessionDraft) => void;
-  disabled: boolean;
-  selectedChannelId: string | null;
-  selectionHistory: NewSessionSelectionHistory;
-}) {
-  const { draft, compute, onChange, machines } = props;
-  const setCompute = (next: ConnectedMachineTarget) => onChange({ ...draft, compute: next });
-  const pickedMachine = compute.sandboxId
-    ? (machines.find((machine) => machine.sandboxId === compute.sandboxId) ?? null)
-    : null;
-  const customPath = compute.folder.kind === "path" ? compute.folder.path : "";
-  const capabilityChips = selfhostedCapabilityChips(pickedMachine);
-
+/** One quiet line on the new-chat page of a Personal workspace: its chats are private. */
+function PrivateWorkspaceNote() {
   return (
-    <div className="grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
-      <div className="grid gap-2">
-        <Label className="flex items-center gap-1.5 text-xs">
-          <ServerIcon className="size-3 shrink-0 text-fg-subtle" />
-          Machine
-        </Label>
-        <Select
-          value={compute.sandboxId ?? ""}
-          disabled={props.disabled}
-          onChange={(event) => {
-            const sandboxId = event.target.value || null;
-            setCompute({
-              ...compute,
-              sandboxId,
-              folder: sandboxId
-                ? rememberedMachineFolder(
-                    props.selectionHistory,
-                    props.selectedChannelId,
-                    sandboxId,
-                  )
-                : { kind: "root" },
-            });
-          }}
-        >
-          <option value="" disabled>
-            Choose a machine…
-          </option>
-          {machines.map((machine) => (
-            <option
-              key={machine.sandboxId}
-              value={machine.sandboxId}
-              disabled={!isMachineComputeSelectable(machine.state)}
-            >
-              {machine.name}
-              {machine.os ? ` · ${machine.os}/${machine.arch}` : ""}
-              {machine.state !== "online" ? ` (${machine.state})` : ""}
-            </option>
-          ))}
-        </Select>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {capabilityChips.map((chip) => (
-            <CapabilityChip key={chip}>{chip}</CapabilityChip>
-          ))}
-          {pickedMachine && !pickedMachine.hasDisplay ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border-strong px-1.5 py-0.5 text-2xs font-medium text-fg-subtle">
-              <MonitorOffIcon className="size-3 shrink-0" />
-              No display
-            </span>
-          ) : null}
-        </div>
-        {compute.sandboxId === null ? (
-          <p className="text-2xs text-fg-muted">Pick a machine to run on.</p>
-        ) : null}
-      </div>
-
-      {/* Project / folder — the agent's working directory on the machine (D4/D5,
-          functional via Stage A's workingDir for root + custom path). */}
-      <div className="grid gap-2.5 border-t border-border pt-4">
-        <Label className="flex items-center gap-1.5 text-xs">
-          <FolderIcon className="size-3 shrink-0 text-fg-subtle" />
-          Project / folder
-        </Label>
-        <div className="grid gap-2">
-          <FolderRadio
-            checked={compute.folder.kind === "root"}
-            disabled={props.disabled}
-            onSelect={() => setCompute({ ...compute, folder: { kind: "root" } })}
-            label="Machine root"
-            hint="the agent's launch directory"
-          />
-          <FolderRadio
-            checked={false}
-            disabled
-            onSelect={() => {}}
-            label="Project"
-            hint="a named path"
-            badge="Soon"
-          />
-          <FolderRadio
-            checked={compute.folder.kind === "path"}
-            disabled={props.disabled}
-            onSelect={() =>
-              setCompute({
-                ...compute,
-                folder: { kind: "path", path: customPath },
-              })
-            }
-            label="Custom path"
-            hint="absolute, or relative to the launch root"
-          />
-          {compute.folder.kind === "path" ? (
-            <Input
-              value={customPath}
-              disabled={props.disabled}
-              onChange={(event) =>
-                setCompute({
-                  ...compute,
-                  folder: { kind: "path", path: event.target.value },
-                })
-              }
-              placeholder="e.g. /home/me/repos/project or packages/runtime"
-              aria-label="Custom working directory"
-              className="ml-[1.375rem] h-9 w-[calc(100%_-_1.375rem)] text-sm"
-            />
-          ) : null}
-        </div>
-        <p className="text-2xs text-fg-subtle">
-          Where the agent, terminal, and file dock open. Defaults to the machine&apos;s workspace
-          root.
-        </p>
-      </div>
-
-      {/* Variable set injection — hidden on a connected machine (D2). Repos live
-          in the composer pills for managed sandboxes only (not cloned here). */}
-      <div className="grid gap-1 border-t border-border pt-4">
-        <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
-          <BoxIcon className="size-3 shrink-0" />
-          Uses this machine&apos;s checkout, git auth, and environment
-        </p>
-        <p className="text-2xs text-fg-subtle">
-          Workspace repositories and variable sets aren&apos;t injected onto a connected machine.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function CapabilityChip({ children }: { children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-md border border-border bg-surface-2/60 px-1.5 py-0.5 text-2xs font-medium text-fg-muted">
-      {children}
-    </span>
-  );
-}
-
-// A genuine fleet-load failure (not the expected selfhosted-disabled 404): a
-// calm, retryable note so the machine option is never silently swallowed.
-function FleetErrorNotice({ onRetry }: { onRetry: () => void }) {
-  return (
-    <Notice
-      tone="muted"
-      className="p-2.5 text-xs"
-      action={
-        <button
-          type="button"
-          onClick={onRetry}
-          className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg"
-        >
-          Retry
-        </button>
-      }
-    >
-      Couldn&apos;t load your connected machines.
-    </Notice>
-  );
-}
-
-function FolderRadio(props: {
-  checked: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-  label: string;
-  hint: string;
-  badge?: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={props.checked}
-      disabled={props.disabled}
-      onClick={props.onSelect}
-      className="group flex items-center gap-2 rounded-md text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-55"
-    >
-      <span
-        className={cn(
-          "flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors",
-          props.checked ? "border-brand" : "border-border-strong group-hover:border-fg-subtle",
-        )}
-      >
-        {props.checked ? <span className="size-1.5 rounded-full bg-brand-strong" /> : null}
-      </span>
-      <span className="font-medium text-fg">{props.label}</span>
-      {props.badge ? (
-        <span className="rounded border border-border px-1 py-px text-2xs font-medium uppercase tracking-wide text-fg-subtle">
-          {props.badge}
-        </span>
-      ) : null}
-      <span className="text-2xs text-fg-subtle">— {props.hint}</span>
-    </button>
+    <p className="mt-3 flex items-center gap-1.5 px-0.5 text-xs text-fg-muted">
+      <LockIcon aria-hidden="true" className="size-3.5 shrink-0" />
+      Private: only you can see chats here.
+    </p>
   );
 }

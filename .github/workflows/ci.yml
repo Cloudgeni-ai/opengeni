@@ -5,7 +5,11 @@ on:
     branches:
       - main
       - production
+  # Launch window (until 2026-10-04 22:00 Oslo): pull requests into main skip
+  # CI; agents merge on targeted local checks. Restore after the launch window.
   pull_request:
+    branches:
+      - production
   schedule:
     # Weekly full-mode drift coverage complements impact-selected pull-request
     # CI without rebuilding an unchanged source/image matrix every day.
@@ -381,6 +385,10 @@ jobs:
 
       - name: Run exactly the explained source guards
         timeout-minutes: 16
+        env:
+          # The published-SDK compatibility guard boots the API on real
+          # PostgreSQL; fail closed instead of skipping when docker is missing.
+          OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
@@ -813,7 +821,8 @@ jobs:
         run: |
           bun scripts/run-browser-e2e.ts \
             ./test/e2e/timeline-scroll.browser.e2e.ts \
-            ./test/e2e/timeline-tip-follow.browser.e2e.ts
+            ./test/e2e/timeline-tip-follow.browser.e2e.ts \
+            ./test/e2e/timeline-exchange-fold.browser.e2e.ts
 
       - name: Public realtime SDK demo browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
@@ -824,11 +833,11 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        # Includes a production web build, real PostgreSQL setup, and 23 serial
-        # browser cases. Baseline fa2b99a6 took 229s; run 34257100987 passed 22
-        # cases in 247s before the old 4m cap stopped the last case. Keep the
-        # individual test deadlines strict while allowing suite-level headroom.
-        timeout-minutes: 6
+        # Includes a production web build, real PostgreSQL setup, and 29 serial
+        # browser cases. Runs on 17c5f19e and b8fd5140 passed all 29 cases but
+        # hit the old 6m cap at 362s (337s tests, 25s setup/teardown). Allow
+        # bounded suite headroom without changing individual test deadlines.
+        timeout-minutes: 8
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -963,6 +972,8 @@ jobs:
             /tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png
             /tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png
             /tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png
+            /tmp/opengeni-onboarding-evidence/contrast-failure.json
+            /tmp/opengeni-onboarding-evidence/contrast-failure.png
 
       - name: Upload workbench visual evidence
         if: >-
@@ -1120,6 +1131,69 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      # PR jobs execute a merged workflow but check out the exact candidate.
+      # Keep workflow-owned regressions with their own immutable tooling tree;
+      # never skip them or replace the candidate when it predates these files.
+      - name: Check out registry export guard tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci/registry-export-guard
+          persist-credentials: false
+
+      - name: Set up registry export guard Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .ci/registry-export-guard/.bun-version
+
+      - name: Install registry export guard tooling dependencies
+        working-directory: .ci/registry-export-guard
+        run: bun install --frozen-lockfile
+
+      - name: Registry dependency export guard regression
+        working-directory: .ci/registry-export-guard
+        run: |
+          set -euo pipefail
+          bun --no-env-file -e '
+          const manifest = await Bun.file("package.json").json();
+          for (const script of ["test:registry-dependency-exports", "test:effective-dependency-exports"]) {
+            if (typeof manifest.scripts?.[script] !== "string" || !manifest.scripts[script].trim()) {
+              throw new Error("Missing workflow-owned guard declaration: " + script);
+            }
+          }
+          '
+          for guard_test in \
+            scripts/test-registry-dependency-exports.test.ts \
+            scripts/test-effective-dependency-exports.test.ts \
+            scripts/dependency-export-workflow-contract.test.ts; do
+            if [ ! -f "$guard_test" ]; then
+              echo "Missing workflow-owned guard test: $guard_test" >&2
+              exit 1
+            fi
+          done
+          for guard_helper in \
+            scripts/test-registry-dependency-exports.ts \
+            scripts/test-effective-dependency-exports.ts \
+            scripts/publishable-workspaces.ts \
+            scripts/rewrite-entry-points.ts \
+            scripts/rewrite-workspace-deps.ts \
+            scripts/release-publish.sh; do
+            if [ ! -f "$guard_helper" ]; then
+              echo "Missing workflow-owned guard helper: $guard_helper" >&2
+              exit 1
+            fi
+          done
+          bun --no-env-file test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+
+      - name: Restore candidate Bun after registry export regression
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Frozen Version PR effective registry export closure
+        if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''
+        run: bun run test:effective-dependency-exports
+
       - name: Runtime embedding consumer
         run: bun run test:runtime-embedding-consumer
 
@@ -1174,11 +1248,15 @@ jobs:
         timeout-minutes: 6
         run: |
           set -euo pipefail
+          # Use the shipped desktop software compositor on this GPU-less CI host.
           chromium_binary="$(bun -e 'import { chromium } from "playwright"; process.stdout.write(chromium.executablePath())')"
-          printf '#!/usr/bin/env bash\nexec %q --no-sandbox "$@"\n' "$chromium_binary" > "$RUNNER_TEMP/opengeni-test-chromium"
+          printf '#!/usr/bin/env bash\nexec %q --no-sandbox --disable-gpu "$@"\n' "$chromium_binary" > "$RUNNER_TEMP/opengeni-test-chromium"
           chmod 700 "$RUNNER_TEMP/opengeni-test-chromium"
           export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           bun run --cwd packages/browserd test:e2e
+          OPENGENI_BROWSERD_HEADED_E2E=1 xvfb-run --auto-servernum \
+            bun test --timeout 120000 packages/browserd/test/cdp-driver.e2e.test.ts \
+            --test-name-pattern 'streams a mobile headed tab continuously'
 
   test:
     name: Typecheck and unit tests
@@ -1438,6 +1516,27 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Run deployment tests
+        run: |
+          # Unit-shard test discovery does not include deploy/, so the chart
+          # render and dashboard tests run here, where Helm is installed. Each
+          # file runs in its own process, as in the unit shards.
+          mapfile -t test_files < <(git ls-files 'deploy/*.test.ts')
+          if [ "${#test_files[@]}" -eq 0 ]; then
+            echo "no deployment test files found" >&2
+            exit 1
+          fi
+          failed=0
+          for test_file in "${test_files[@]}"; do
+            echo "::group::${test_file}"
+            if ! bun test "./${test_file}"; then
+              echo "::error file=${test_file}::deployment test failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
 
       - name: Validate Terraform
         run: |

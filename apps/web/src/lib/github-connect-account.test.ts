@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { ConnectController, type ConnectAttempt, type ConnectTransport } from "@opengeni/connect";
+import {
+  ConnectController,
+  ConnectPopupClosedError,
+  type ConnectAttempt,
+  type ConnectTransport,
+} from "@opengeni/connect";
 import { selectGitHubConnectAccount } from "./github-connect-account";
 
 const selection: ConnectAttempt = {
@@ -39,7 +44,7 @@ const complete: ConnectAttempt = {
   nextAction: { type: "none" },
 };
 
-async function fixture() {
+async function fixture({ completeOnNavigation = true }: { completeOnNavigation?: boolean } = {}) {
   let current = selection;
   let advance!: (value: ConnectAttempt) => void;
   let submitted: unknown;
@@ -62,16 +67,21 @@ async function fixture() {
   };
   const controller = new ConnectController(transport, "workspace");
   await controller.recover(selection.id);
+  let popupClosed = false;
   const popup = {
     opener: {} as unknown,
+    get closed() {
+      return popupClosed;
+    },
     location: {
       replace(url: string) {
         expect(popup.opener).toBeNull();
         calls.push(url);
-        current = complete;
+        if (completeOnNavigation) current = complete;
       },
     },
     close() {
+      popupClosed = true;
       calls.push("close");
     },
   };
@@ -91,7 +101,10 @@ async function fixture() {
     calls,
     browser,
     popup,
-    finish: (value = authorization) => advance(value),
+    finish: (value = authorization) => {
+      current = value;
+      advance(value);
+    },
     submitted: () => submitted,
   };
 }
@@ -149,6 +162,26 @@ test("closing setup during selection prevents late navigation", async () => {
     f.controller.dispose();
   }
 });
+
+test("closing the GitHub authorization popup reports cancellation and keeps its attempt", async () => {
+  const f = await fixture({ completeOnNavigation: false });
+  try {
+    const pending = selectGitHubConnectAccount(
+      f.controller,
+      "42",
+      f.browser,
+      new AbortController().signal,
+    );
+    f.finish();
+    await Bun.sleep(0);
+    expect(f.calls).toContain("https://github.com/login/oauth/authorize?state=exact");
+    f.popup.close();
+    await expect(pending).rejects.toBeInstanceOf(ConnectPopupClosedError);
+    expect(f.controller.getSnapshot().attempt?.state).toBe("requires_user_action");
+  } finally {
+    f.controller.dispose();
+  }
+}, 5_000);
 
 test("unsafe server navigation closes the reservation without loading it", async () => {
   const f = await fixture();

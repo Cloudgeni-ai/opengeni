@@ -1,6 +1,11 @@
-import OpenAI from "openai";
+import { hasModelCallOutputBound } from "./model-request-capture";
+import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
 import { types as utilTypes } from "node:util";
+import {
+  rethrowModelTransportAdmissionRefusal,
+  sdkModelTransportAdmissionFetch,
+} from "./model-preparation-diagnostics";
 
 const TARGET_CHUNK_CHARS = 64 * 1024;
 const LARGE_STRING_SOURCE_CHARS = 32 * 1024;
@@ -99,8 +104,21 @@ export class ReplayableJsonOpenAI extends OpenAI {
   private readonly modelRequestPolicy: ModelJsonRequestPolicy | undefined;
 
   constructor(options: OpenAIOptions, hooks: ReplayableJsonOpenAIHooks = {}) {
-    super(options);
+    super({
+      ...options,
+      fetch: sdkModelTransportAdmissionFetch(options?.fetch ?? globalThis.fetch),
+    });
     this.modelRequestPolicy = hooks.modelRequestPolicy;
+  }
+
+  protected override makeStatusError(
+    status: number,
+    error: NonNullable<Parameters<typeof APIError.generate>[1]>,
+    message: string | undefined,
+    headers: Headers,
+  ): APIError {
+    rethrowModelTransportAdmissionRefusal(headers);
+    return super.makeStatusError(status, error, message, headers);
   }
 
   override post<Rsp>(path: string, opts?: OpenAIPostOptions): APIPromise<Rsp> {
@@ -122,6 +140,9 @@ export class ReplayableJsonOpenAI extends OpenAI {
           };
         }
       }
+      // A financial admission covers one request. SDK retries of network or
+      // server failures may replay paid work without a fresh durable grant.
+      if (hasModelCallOutputBound()) prepared = { ...prepared, maxRetries: 0 };
       return wrapJsonRequestOptions(prepared);
     });
     return super.post<Rsp>(path, wrapped);

@@ -9,6 +9,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { MemoryEventBus, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { Hono } from "hono";
 import { acquireSearchTestDatabase } from "../../../packages/db/test/session-message-search-fixture";
+import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const secret = `search-test-${crypto.randomUUID()}`;
@@ -242,4 +243,99 @@ test("unauthenticated, cross-workspace, invalid and out-of-bound requests fail c
     (await app.request(`${f.path}?query=twice`, { headers: { authorization: f.authorization } }))
       .status,
   ).toBe(403);
+}, 180_000);
+
+test("selected preview returns only exact visible text through the 12,000 UTF-16 boundary", async () => {
+  const f = await fixture();
+  const app = appWith();
+  const base = `/v1/workspaces/${f.grant.workspaceId}/sessions/${f.session.id}/events`;
+  const request = (eventId: string, sequence: number) =>
+    app.request(`${base}/${eventId}/message-preview?sequence=${sequence}`, {
+      headers: { authorization: f.authorization },
+    });
+  const texts = [
+    "a".repeat(12_000),
+    "a".repeat(12_001),
+    "a".repeat(8_191) + "🙂" + "b".repeat(3_807),
+    "🙂".repeat(6_001),
+    "a\u0000\ud800" + "b".repeat(11_997),
+  ];
+  for (const [index, text] of texts.entries()) {
+    const sequence = index + 4;
+    const canonical = index === 4;
+    const [row] = await shared.admin<{ id: string }[]>`
+      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, payload_codec_version)
+      values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, ${sequence}, 'agent.message.completed',
+        ${shared.admin.json(canonical ? toPostgresLosslessJson({ text, modelContext: "secret" }) : { text, modelContext: "secret" })},
+        ${canonical ? 1 : null}) returning id`;
+    const response = await request(row!.id, sequence);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual(
+      text.length <= 12_000 ? { status: "available", text } : { status: "unavailable" },
+    );
+    expect(JSON.stringify(body)).not.toContain("secret");
+  }
+}, 180_000);
+
+test("selected preview rejects stale, duplicate, non-message, malformed and unauthorized references", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const app = appWith();
+  const [original] = await shared.admin<{ id: string }[]>`
+    select id from session_events where workspace_id = ${f.grant.workspaceId}
+      and session_id = ${f.session.id} and sequence = 2`;
+  const base = `/v1/workspaces/${f.grant.workspaceId}/sessions/${f.session.id}/events`;
+  const read = (id: string, sequence: string, authorization = f.authorization) =>
+    app.request(`${base}/${id}/message-preview?sequence=${sequence}`, {
+      headers: { authorization },
+    });
+  expect((await read(original!.id, "1")).status).toBe(404);
+  expect((await read(crypto.randomUUID(), "2")).status).toBe(404);
+  expect((await read(original!.id, "2", other.authorization)).status).toBe(403);
+  expect((await app.request(`${base}/${original!.id}/message-preview?sequence=2`)).status).toBe(
+    401,
+  );
+  for (const sequence of ["", "0", "-1", "2.5", "NaN", "2147483648"]) {
+    expect((await read(original!.id, sequence)).status).toBe(400);
+  }
+  expect((await read("not-a-uuid", "2")).status).toBe(400);
+  for (const [sequence, type, payload] of [
+    [4, "agent.toolCall.output", { text: "tool" }],
+    [5, "agent.model.usage", { sourceKey: "canonical-usage" }],
+  ] as const) {
+    const [row] = await shared.admin<{ id: string }[]>`
+      insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, ${sequence}, ${type},
+        ${shared.admin.json(payload)}) returning id`;
+    expect((await read(row!.id, String(sequence))).status).toBe(404);
+  }
+  const [canonicalUsage] = await shared.admin<{ id: string }[]>`
+    select id from session_events where workspace_id = ${f.grant.workspaceId}
+      and session_id = ${f.session.id} and sequence = 5`;
+  // The database permits duplicate classification only for model-usage events.
+  const [duplicateUsage] = await shared.admin<{ id: string }[]>`
+    insert into session_events (account_id, workspace_id, session_id, sequence, type, payload,
+      turn_association, duplicate_of_event_id, duplicate_reason)
+    values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, 6, 'agent.model.usage',
+      ${shared.admin.json({ sourceKey: "duplicate-usage" })}, 'duplicate', ${canonicalUsage!.id},
+      'duplicate_provider_response_usage') returning id`;
+  expect((await read(duplicateUsage!.id, "6")).status).toBe(404);
+  const [structured] = await shared.admin<{ id: string }[]>`
+    insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values (${f.grant.accountId}, ${f.grant.workspaceId}, ${f.session.id}, 7, 'user.message',
+      ${shared.admin.json({ text: { nested: "no scalar" } })}) returning id`;
+  expect((await read(structured!.id, "7")).status).toBe(404);
+  const denied = appWith({
+    authorizeSession: async () => ({ allowed: false, reason: "forbidden" }),
+    resolveListScope: async () => ({ kind: "all" }),
+  });
+  // Target-session denials are deliberately non-enumerating on HTTP routes.
+  expect(
+    (
+      await denied.request(`${base}/${original!.id}/message-preview?sequence=2`, {
+        headers: { authorization: f.authorization },
+      })
+    ).status,
+  ).toBe(404);
 }, 180_000);

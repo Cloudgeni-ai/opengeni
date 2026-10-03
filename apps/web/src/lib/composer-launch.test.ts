@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   composerLaunchSearchAfterPolicyApply,
   composerLaunchSearchKey,
+  modelProvidedAfterLaunch,
   parseComposerLaunchSearch,
 } from "./composer-launch";
+import { creditCheckoutSuccessUrl } from "./model-access-onboarding";
 
 describe("parseComposerLaunchSearch", () => {
   test("accepts model, effort, latency, realtime, a folder, and one selected Skill", () => {
@@ -63,5 +65,32 @@ describe("parseComposerLaunchSearch", () => {
     });
     expect(composerLaunchSearchAfterPolicyApply({ model: "gpt-5.6-sol" })).toEqual({});
     expect(composerLaunchSearchKey({})).toBeNull();
+  });
+
+  test("a credit-purchase return keeps following the default instead of pinning a choice", () => {
+    const returned = new URL(
+      creditCheckoutSuccessUrl("https://app.example.test", "workspace-a", {
+        id: "gpt-6-luna",
+        effort: "xhigh",
+      }),
+    );
+    const launch = parseComposerLaunchSearch(Object.fromEntries(returned.searchParams));
+    expect(launch).toEqual({ model: "gpt-6-luna", effort: "xhigh", followDefault: true });
+    // The draft stays on the default, so a later subscription connect moves it.
+    expect(modelProvidedAfterLaunch(launch, false)).toBe(false);
+    expect(modelProvidedAfterLaunch(launch, true)).toBe(false);
+    // An older server that reports no marker gets none back.
+    expect(modelProvidedAfterLaunch(launch, undefined)).toBeUndefined();
+    expect(composerLaunchSearchKey(launch)).not.toBe(
+      composerLaunchSearchKey({ model: "gpt-6-luna", effort: "xhigh" }),
+    );
+  });
+
+  test("any other launch policy is the person's choice", () => {
+    expect(modelProvidedAfterLaunch({ model: "codex/gpt-5.6-sol" }, false)).toBe(true);
+    expect(modelProvidedAfterLaunch({ effort: "low" }, undefined)).toBe(true);
+    // A launch without policy leaves the marker alone.
+    expect(modelProvidedAfterLaunch({ channelId: "default" }, false)).toBe(false);
+    expect(modelProvidedAfterLaunch({ followDefault: true }, false)).toBe(false);
   });
 });

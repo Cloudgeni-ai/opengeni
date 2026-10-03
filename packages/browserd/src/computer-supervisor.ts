@@ -14,7 +14,7 @@ import {
   type ComputerInteractionAuthority,
   type ComputerInteractionDriver,
 } from "@opengeni/interaction";
-import { NativeComputerDriver } from "./computer-driver";
+import { ComputerDriver } from "./computer-driver";
 import {
   ExistingComputerEnvironmentAllocator,
   type ComputerEnvironmentAllocator,
@@ -106,7 +106,7 @@ export class ComputerSupervisor {
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
-  private displaceGate: Promise<void> = Promise.resolve();
+  private displaceGate: Promise<void> | null = null;
   private closed = false;
 
   private constructor(options: ComputerSupervisorOptions) {
@@ -132,7 +132,7 @@ export class ComputerSupervisor {
             cwd: context.sessionDirectory,
           });
         const client = await clientFactory();
-        return new NativeComputerDriver({
+        return new ComputerDriver({
           computerSessionId: context.computerSessionId,
           controllerGeneration: context.controllerGeneration,
           client,
@@ -168,7 +168,7 @@ export class ComputerSupervisor {
       return await this.describe(runtime);
     }
     if (this.displaceExistingSessions) {
-      const displaced = this.displaceGate.then(async () => {
+      const displaced = (this.displaceGate ?? Promise.resolve()).then(async () => {
         const current = this.sessions.get(options.computerSessionId);
         if (current) {
           this.assertSameBinding(current, options);
@@ -183,10 +183,25 @@ export class ComputerSupervisor {
         await this.displaceOtherSessions(options.computerSessionId);
         return await this.installSession(options);
       });
-      this.displaceGate = displaced.then(() => undefined).catch(() => undefined);
-      return await displaced;
+      const gate = displaced.then(() => undefined).catch(() => undefined);
+      this.displaceGate = gate;
+      try {
+        return await displaced;
+      } finally {
+        if (this.displaceGate === gate) this.displaceGate = null;
+      }
     }
     return await this.installSession(options);
+  }
+
+  /** A queued shared-seat create owns work before its runtime exists. */
+  isIdle(): boolean {
+    return (
+      this.displaceGate === null &&
+      this.sessions.size === 0 &&
+      this.creating.size === 0 &&
+      this.ending.size === 0
+    );
   }
 
   listSessions(): Array<
@@ -261,7 +276,11 @@ export class ComputerSupervisor {
   /** Resolve the private loopback RFB endpoint for one exact isolated screen.
    * The endpoint is consumed only by BrowserControlServer's authenticated
    * WebSocket proxy and is never returned across the placement boundary. */
-  async rfbPort(reference: ComputerSessionReference, targetId: string): Promise<number> {
+  async rfbPort(
+    reference: ComputerSessionReference,
+    targetId: string,
+    scope?: { targetGeneration: string; inputAllowed: boolean },
+  ): Promise<number> {
     const runtime = this.requireActive(reference);
     if (runtime.environmentLease.rfbPort === null) {
       throw new InteractionControllerError(
@@ -275,6 +294,15 @@ export class ComputerSupervisor {
         "invalid_action",
         "RFB is available only for a complete screen target",
       );
+    }
+    if (scope && target.targetGeneration !== scope.targetGeneration) {
+      throw new InteractionControllerError("target_stale", "RFB screen generation is stale");
+    }
+    if (
+      scope?.inputAllowed &&
+      (!runtime.driver.capabilities.pointerInput || !runtime.driver.capabilities.keyboardInput)
+    ) {
+      throw new InteractionControllerError("permission_denied", "RFB native input is unavailable");
     }
     return runtime.environmentLease.rfbPort;
   }
@@ -308,6 +336,7 @@ export class ComputerSupervisor {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await this.displaceGate;
     await Promise.allSettled([...this.creating.values()]);
     const results = await Promise.allSettled(
       [...this.sessions.values()].map(async (runtime) => await this.endSession(binding(runtime))),
@@ -384,7 +413,6 @@ export class ComputerSupervisor {
     let environmentLease: ComputerEnvironmentLease | null = null;
     let driver: ComputerSupervisorDriver | null = null;
     try {
-      const initialJournal = journal.loadAndRecover();
       environmentLease = await this.environmentAllocator.allocate({
         computerSessionId: options.computerSessionId,
         controllerGeneration: options.controllerGeneration,
@@ -403,25 +431,30 @@ export class ComputerSupervisor {
         environment,
       });
       let runtime: Runtime | undefined;
-      const controller = new ComputerInteractionController({
-        computerSessionId: options.computerSessionId,
-        controllerGeneration: options.controllerGeneration,
-        driver,
-        initialJournal,
-        onJournalRecord: (record) => journal.write(record),
-        authority: {
-          authorizeDispatch: async (command) => {
-            if (runtime?.lifecycle !== "active") {
-              throw new InteractionControllerError(
-                "resource_unavailable",
-                "computer session is changing state",
-                true,
-              );
-            }
-            await runtime.options.authority?.authorizeDispatch(command);
-          },
-        },
-      });
+      const controllerDriver = driver;
+      const controller = journal.withRecoveredRecords(
+        (initialJournal) =>
+          new ComputerInteractionController({
+            computerSessionId: options.computerSessionId,
+            controllerGeneration: options.controllerGeneration,
+            driver: controllerDriver,
+            initialJournal,
+            onJournalRecord: (record) => journal.write(record),
+            loadJournalRecord: (operationId) => journal.read(operationId),
+            authority: {
+              authorizeDispatch: async (command) => {
+                if (runtime?.lifecycle !== "active") {
+                  throw new InteractionControllerError(
+                    "resource_unavailable",
+                    "computer session is changing state",
+                    true,
+                  );
+                }
+                await runtime.options.authority?.authorizeDispatch(command);
+              },
+            },
+          }),
+      );
       runtime = {
         options,
         sessionDirectory,

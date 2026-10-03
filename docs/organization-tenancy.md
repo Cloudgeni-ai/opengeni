@@ -559,6 +559,17 @@ The managed-human API surface is:
   Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
+Workspace deletion is a hard delete, not an archive or retirement command.
+Both workspace DELETE routes return `409` when retained audit or other linked
+records prevent deletion; the transaction rolls back and no external schedule
+cleanup runs. Keep that workspace and use the existing key-revocation,
+membership-revocation, and scheduled-task pause/delete operations to remove
+operational access and automation. These separate operations require their
+existing permissions and concurrency preconditions; DELETE does not perform
+them. There is currently no supported workspace archive/retirement endpoint,
+so this containment does not remove the retained workspace from inventory.
+Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct
 managed-human cookie session or the exact provenance-stamped single-user local
@@ -611,6 +622,26 @@ renaming an existing initial workspace back to `Default workspace`, so a later
 administrator rename is durable. Migration 0314 itself sends no provider
 message; the later 0348 API delivery path below does.
 
+In the default `legacy` session-set mode, the first successful click of an
+email verification link also signs the user in (Better Auth
+`autoSignInAfterVerification`), so a new user lands directly in organization
+setup. A reused link only redirects and never mints another session. `dual` and
+`broker` modes leave it off: there, sign-in belongs to the isolated browser
+transaction (see `docs/browser-login-session-sets.md`).
+
+This is a deliberate trade-off with two known edges. While an unused link is
+live (one hour), whoever holds it gets a session for a brand-new, empty
+account; anyone who can read that mailbox could already reset the password.
+The reverse case is pre-account takeover: someone signs up with another
+person's email and a password they know, and that person clicks the
+unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
+reset the password, which revokes sessions and locks the other party out; now
+the victim is signed in and may start using an account whose password someone
+else holds. Every verification email therefore says to ignore it if the
+recipient did not create an OpenGeni account. Signing in only when the link is
+opened in the browser that signed up would close that edge and remains a
+possible follow-up.
+
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 
 Migration `0348_named_signup_and_user_setup.sql` makes both onboarding paths
@@ -654,9 +685,43 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. Connecting selects the model in the human’s
-actor-private new-session draft with its expected revision, preserving the
-other draft fields. It never writes workspace settings or requires
+model or buy OpenGeni credits. When the deployment bills credits and the new
+Personal workspace's model catalog reports a server-resolved default
+(`defaultSelection`) that is a selectable credits-billed model, the step reads
+the organization's balance (`GET /v1/billing`) and, while it is positive (for
+example the one-time verified-signup trial grant), leads with starting to chat
+on those credits: it shows the actual balance and the resolved default model
+and reasoning, names the free deployment model (when one is confirmed) as what
+new chats use after the credits run out, and presents connecting a
+subscription, bringing a key, or buying more credits as optional. When the
+balance read fails but the resolved default's source is `credits` (which the
+server only reports while the balance is positive), the same copy appears
+without the amount. It never hardcodes a model id or an amount. Otherwise, when
+the deployment's client-config default model is free (or deployment-paid on a
+deployment that does not bill credits), and the catalog confirms that model is
+selectable there (client config carries no credential-readiness or policy
+signal), the step leads with starting to chat on that model and presents every
+connection or purchase as an optional upgrade. An unconfirmed or unreadable
+catalog shows the ordinary choice screen instead.
+Connecting selects a model from the connected family (Codex, SuperGrok, or the
+provider key) in the human’s actor-private new-session draft with its expected
+revision, preserving the other draft fields, and never falls back to the free
+default. A credit purchase returns to the new-chat composer through the
+ordinary `?model=&effort=` launch contract with the server's credits default
+selected (the configured credits model, GPT-6 Luna at extra high reasoning by
+default), unless a connected subscription or saved workspace default would
+still win. `?modelSource=default` keeps that draft following the default, so
+connecting a subscription later still moves it. The verified-signup trial
+grant counts like any other credits, so a new organization holding it already
+defaults to the credits model. Beyond onboarding, a new chat that follows the default moves to a
+connected subscription, or to the credits default while the organization holds
+a positive credit balance, on its own; see "Default model for new work" in
+[`model-providers.md`](model-providers.md). When the composer's selected model
+later stops being selectable, its fallback takes that resolved default first,
+then prefers a selectable Codex, SuperGrok, or workspace provider model, then
+the free deployment model, and only then an organization-paid provider.
+Device-code logins can be cancelled, explain ChatGPT's device-code setting,
+and never block leaving the step. It never writes workspace settings or requires
 `workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
 accept still complete immediately. The step does not widen
 `POST /v1/auth/organization-onboarding`, invitation accept, or any worker
@@ -818,6 +883,14 @@ No session is created until normal sign-in, no temporary or plaintext password
 exists, and the user has only the inviting organization, their canonical
 Personal workspace, and the invitation's selected shared-workspace grants.
 
+This invitation-bound setup is independent of public sign-up. When an operator
+pauses new account sign-ups (the 0585 runtime switch or the
+`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` ceiling, see
+[New account sign-up switch](deployment.md#new-account-sign-up-switch-0585)),
+ordinary email and implicit social sign-up are refused, but an invited person
+can still create their account here and an already-registered invitee can
+still sign in and accept.
+
 0348 is a drained maintenance protocol cutover, not a rolling migration. Stop
 every old API, control worker, and turn worker; provide the exact old/new
 application database role list through
@@ -826,9 +899,9 @@ application database role list through
 0348; and never restart a pre-0348 image. The migration checks
 `pg_stat_activity` before and after its exclusive writer fence and aborts with
 SQLSTATE `55000` if a configured application login remains. The Personal-only
-product mutations are also API-contract fenced, and the web sends the exact
-release contract revision, so a stale client cannot cross the cutover after
-service resumes.
+product mutations are also API-contract fenced for cookie-authenticated browser
+sessions, and the web sends the exact release contract revision, so a stale tab
+cannot cross the cutover after service resumes.
 
 The canonical repository acceptance for this lifecycle is
 `test/e2e/organization-onboarding-acceptance.e2e.ts`. It composes the real
@@ -911,6 +984,36 @@ remain visible but disabled with the instruction to assign another active owner
 first. The setup screen renders the frozen invitation preview and states that
 no Personal workspace is shared.
 
+Organization usage (`GET /v1/billing/usage-summary` and the Insights usage
+query, Organization settings > Insights) exposes Personal workspaces only as
+amounts. Organization and
+workspace totals count every usage ledger row in the period, including another
+member's Only me/private chats and retained usage whose session is missing or
+deleted; billing debits are not rewritten and missing owners are not invented.
+Detail/sample lists remain actor-visible: totals never grant access to unseen
+content, titles, session/root ids, or drilldown links. Shared-workspace
+per-person private amounts appear only in `privateChats`. Organization summary
+rows contain only `workspaceId`, nullable `membershipId`/`name`, and
+`eventType`/`unit`/`quantity` totals for other members' Only me chats, capped at
+200 person/workspace rows with the largest `model.cost`; `privateChatsTruncated` defaults to
+false. Workspace Insights private rows identify the invisible session owner by
+opaque `ownerKey`, nullable `name`, and `you`, with calls, tokens, credit USD,
+estimated provider USD, and known-provider-cost call counts; they are capped at
+200, ordered by tokens descending, obey the same provider/model filters, and
+are empty for root/session scopes. Both `privateChats` lists default to `[]`
+for older replicas. Existing `personalWorkspaces` amounts remain one row per
+member whose Personal workspace had usage, keyed by organization membership
+id with the same metric totals as shared workspace rows: no Personal workspace
+id/name, session identity, content, or link. Zero-use rows are absent; the list
+contains the 50 largest spenders and `personalWorkspaceCount` counts all with
+usage. Names come from the already-visible People roster. Organization model
+usage also returns top-level `payers` totals from all facts, uncapped and
+independent of the 50-model cap, never per-workspace payer rows. Payer totals
+carry the model-usage metrics without `billingPath`: credits map to
+`opengeni_credits`, external `codex-subscription`/`supergrok-subscription` to
+`subscription`, and other external calls to `own_key`. The additive payer list
+defaults to `[]`; unknown provider cost remains unknown, not zero.
+
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
 shared-workspace graph. Migration 0348 replaces the same database function in
@@ -965,6 +1068,26 @@ server-owned array rather than accepting caller permissions. Existing or newly
 authored advanced permission sets remain an explicit `custom` escape hatch;
 the server validates them against workspace-scoped permission vocabulary and
 never lets custom workspace access smuggle account or billing authority.
+The named Member role is a superset of Viewer plus ordinary collaborator
+capabilities, and holds no administrative power. Migration 0516 added
+`connections:read`; migration 0555 adds Viewer's `artifacts:read`,
+`stream:view`, and `rigs:use`, plus `stream:acknowledge` (the caller's own
+desktop-stream consent) and `artifacts:publish`, so every member can create and publish
+Sites and editable artifacts. Publish, rollback, and archive/restore act on any
+artifact in the workspace, not only the caller's own; they are reversible,
+because archive keeps the source and every version, restore brings an archived
+Site back, and rollback restores an earlier version without discarding the
+current one. Workspace administration, member and API-key management, shared
+connection, GitHub App, and Sandbox Environment administration, Connected
+Machines (`enrollments:read`/`enrollments:manage`, which also gate picking or
+attaching a machine for a session), terminal attach, sandbox file writes, and
+inline MCP servers stay Admin-only. Each such
+rollout normalizes only rows whose permissions exactly equal an older named
+Member set (any JSONB order), through a writer trigger for overlapping old
+binaries plus a batched backfill; custom sets are never rewritten. Since 0555
+external (`external_user:`) memberships are excluded too: an organization
+service key stores them as role `member` with a caller-chosen permission set,
+which a preset change must not widen.
 Organization owners and administrators may create and rename shared
 workspaces, grant or replace access, and revoke access. Ordinary organization
 members, cross-organization membership ids, and every Personal workspace fail
@@ -1170,7 +1293,16 @@ subject and causal human from the standard context GUCs, writes a
 `variable_set.materialized` audit event with actor kind `session_attach` and
 the live session authority tuple from the exact locked session row, and an
 old image that sets no subject records the explicit `service:session`
-sentinel rather than nothing.
+sentinel rather than nothing. Since migration 0531 that lane selects from the
+same candidate sets as an agent turn of the same session: the session's own
+selection plus the defaults of its frozen Sandbox Environment version (never a
+later version's defaults). Its authorization stays its own and is not
+identical to the turn's: a personal set still needs the attaching human as
+owner with a live session or always `variable_set.use` grant (a turn instead
+uses its accepted attempt snapshot), and the session-status and workspace
+checks are unchanged. Any other set is a 42501 denial with its denial fact,
+which the terminal, Files, Git and viewer routes answer as a 403 rather than a
+500.
 
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents

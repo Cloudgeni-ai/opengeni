@@ -34,8 +34,8 @@ export function PreviewLoading() {
         canvas!.height = Math.round(h * d);
       }
       const style = getComputedStyle(canvas!);
-      const ink = style.getPropertyValue("--_og-preview-ink").trim() || "#bca3ef";
-      const glowColor = style.getPropertyValue("--_og-preview-glow").trim() || "#8f6ccc";
+      const ink = style.getPropertyValue("--_og-preview-ink").trim() || "#9fdccd";
+      const glowColor = style.getPropertyValue("--_og-preview-glow").trim() || "#5fb8a3";
       context.setTransform(d, 0, 0, d, 0, 0);
       context.clearRect(0, 0, w, h);
       const cx = w * (0.5 + 0.13 * Math.sin(time * 0.21));

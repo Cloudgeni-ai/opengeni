@@ -1,5 +1,198 @@
 # @opengeni/config
 
+## 3.3.0
+
+### Minor Changes
+
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+
+### Patch Changes
+
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- 4a63d4f: A Modal box kept warm only by legacy background commands (a dev server, a command whose large output is still draining, a stopped command the provider no longer answers for) is no longer held until the provider deadline kills it uncaptured, which left the session unable to restore. Once every session of the sandbox group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default 30 minutes; above the idle grace, below the rotation lead, and before an explicit Modal idle timeout), the reaper checkpoints the current workspace excluding exactly those commands, stops the box, and settles the commands `lost` with reason `idle_containment`. The next turn restores the saved workspace. "Unused" comes from durable facts only: no open turn or pending approval or human-input request, no pending quiescence, no `wait_for_input` or unclaimed turn-starting input within the window (counted from the wait deadline and the input creation), no other holder or writer, and the newest turn, holder change and write older than the window. A command the agent is waiting on keeps running until the provider-deadline backstop. That backstop now also captures behind a cancelled, failed or superseded owner without a quiescence receipt, instead of letting the box die uncaptured. Rolling migration 0547 stamps holder changes on the lease and adds a health-independent containment inventory, replacing the separate unobservable-command and stopping-with-provider-errors predicates; pre-0547 workers keep their unchanged inventory. Commands settled by containment, by provider-deadline rotation (`provider_deadline_containment`), by provider loss during that drain, by provider loss seen while routing, or by the operator cold-loss reconciliation now get `session.command.finished` and the agent notice in the same transaction, for example "`bun run dev` was stopped because nobody used this session for 30 minutes and nothing was waiting on it; the workspace was saved. Restart it if you still need it." Previously those settlements were silent. Supervised commands keep their own proof gate. The reaper exports `opengeni_sandbox_command_containment_total{outcome}`.
+- 91cc03e: Correct native Claude model effort levels and defaults, apply per-model context
+  and output limits, and preserve terminal provider rejections and prompt stream
+  cancellation.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/codex@0.2.32
+
+## 3.2.1
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/codex@0.2.31
+
+## 3.2.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [6a97313]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/xai-subscription@0.1.5
+
+## 3.1.1
+
+### Patch Changes
+
+- aad6598: Claude subscription setup and replacement require only the setup token. Observe
+  provider usage and reset windows from ordinary model responses, including quota
+  errors, and expose scoped cached reads and authorized refreshes. Preserve the last
+  reading when inference-only tokens cannot use the separate usage endpoint; fence
+  cached readings against credential replacement and revocation.
+- b591ea1: Support native Claude Messages with separate encrypted Anthropic API-key and Claude subscription setup-token connections, workspace access policies, streaming tools and thinking, prompt caching and usage accounting. Add connection UI and payment-source labels. Migration 0544 expands organization connection kinds and lifecycle validation.
+
+  Pin the Claude subscription client identity headers, persist account/device metadata with encrypted credentials, and add request-scoped attribution. Existing token-only connections require replacement with identity metadata. The captured billing checksum remains unverified and is not replayed.
+
+  Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
+
+  Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
+
+  Polish Claude setup with local settings import, full-page token renewal, named model choices, provider marks, accurate subscription payment labels, and workspace discovery of organization-owned connections.
+
+  Support workspace-owned Claude credentials, model generations, access controls and setup/account screens alongside organization connections. Migration 0545 expands workspace custom-model provider kinds. Gate Claude subscriptions behind OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED (default off), leaving Anthropic API keys and other providers unchanged.
+
+- 126a395: Make agent effort proportional to the request. The operational contract now asks for a direct answer with minimal tool use on simple asks, reuse of the earlier approach on repeat asks, one-sentence progress updates without a forced opening update, answer-first final responses, answers from web or published sources that are short but not partial (the best-supported finding, figures in the user's terms, and a source link beside each study or figure), and reading each Skill once without announcing it. A question asked mid-run gets an answer instead of restarting work; while work is still in flight the agent answers in one or two sentences in the user's terms, naming a blocker only when the user must act on it, and registers the wait again with the earlier reason and remaining time, even with an active goal, so its result still resumes the agent without pushing back a timed recheck, and a question alone no longer resumes a paused goal. Answers stay in chat by default; a document Artifact is created only when the user asks for one or the deliverable is large or meant to be kept or shared, and a session no longer creates a goal only to declare a document. The default persona is a general assistant; it works on a branch with a pull request only when the repository has a remote and git provider credentials, and otherwise leaves changes in the working tree without branch or pull request talk unless the user asks, saying only that the changes are not pushed when the repository has a remote, and the Sites and visualize Skill descriptors apply when the user asks or clearly benefits.
+- 2088678: Support an optional exact email allowlist for native human account admission.
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [8019cac]
+- Updated dependencies [e14db2a]
+- Updated dependencies [e917ce3]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/codex@0.2.29
+
+## 3.1.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- 74e0dfb: Refresh the default Modal desktop image to the verified publication supporting
+  viewport actions and focused DOM reads. Report exact legacy controller schema
+  and route mismatches as unsupported controller features without replaying browser
+  actions or restarting live sessions.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/codex@0.2.28
+
+## 3.0.0
+
+### Major Changes
+
+- f48191e: Key managed sign-in, sign-up, verification, and password-reset rate limits, the address recorded on auth sessions, and every other API abuse quota on one trusted request source address, with IPv6 clients keyed on their /64. Managed auth adds explicit per-client-address limits and two-tier per-email throttles (per email and address, then per email), the browser session-set sign-in returns `Retry-After` on a per-email refusal, and the managed-auth database pool keeps serving when the server closes its connections instead of crashing the API.
+
+  Breaking: `OPENGENI_API_TRUSTED_PROXY_HOPS` (optionally narrowed by `OPENGENI_API_TRUSTED_PROXY_CIDRS`) replaces `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS` and `Settings.mcpOauthTrustedProxyHops` is now `Settings.apiTrustedProxyHops`. API startup and runtime-artifact generation fail while the old variable is set to anything but `0`; rename it. Managed deployments behind a proxy must now set `OPENGENI_API_TRUSTED_PROXY_HOPS`: Better Auth previously read a single-value `X-Forwarded-For` by default and now ignores forwarding headers unless the hop count is declared, so without it every user shares the proxy's address and its sign-in and sign-up limits.
+
+### Minor Changes
+
+- b6d65a1: Add `OPENGENI_API_METRICS_PORT`. When it is set, the API serves `GET /metrics` only on that dedicated internal listener and never on the public API port, so an ingress that forwards every path to the API cannot publish Prometheus metrics. The listener applies the same deployment-key rules as before. Leaving it unset keeps the existing single-port behavior. The Helm chart now sets it by default (`api.metricsPort: 9464`). Upgrade note: on a cluster that enforces NetworkPolicy, only the bundled collector and `networkPolicy.monitoring` reach that port, so set `networkPolicy.monitoring` for any other Prometheus that scrapes the API. Managed-auth email verification now signs the user in on the first successful link click in the default `legacy` session-set mode, and every verification email tells a recipient who did not sign up to ignore it.
+- 1a427e0: Add the optional Jev-backed `code_search` agent tool. It finds where something is implemented, configured or decided in the workspace in one call and returns verbatim, line-numbered passages with a coverage status. It is controlled by `OPENGENI_CODE_SEARCH_MODE` (`off` by default, `opt_in`, `default_on`, or `experiment` for a fixed per-session half), the `OPENGENI_JEV_*` settings, and a per-workspace `codeSearchEnabled` setting (`null` follows the deployment). Each session freezes its decision when it is created (`sessions.code_search_enabled`, rolling migration 0520, exposed as `codeSearchEnabled` on the session), and children keep their parent's, so later setting changes never add the tool to a running session's cached prompt; only the deployment switch-off and a workspace Off, and undoing them, reach running sessions. Each call records Jev usage per workspace. The Jev key stays on the server (API and worker processes) and never reaches a sandbox or Connected Machine, which only run allowlisted read-only ripgrep and file reads. Windows Connected Machines do not get the tool. `tool_search` now lists every tool the query names exactly before BM25 results.
+- d582db0: Guard the unauthenticated local development API against browser attacks. In `local` access mode with `OPENGENI_ENVIRONMENT=local`, the API now answers only requests whose `Host` names this computer, which blocks DNS rebinding: loopback and the hosts of `OPENGENI_WEB_BASE_URL`, `OPENGENI_PUBLIC_BASE_URL`, `OPENGENI_GITHUB_APP_MANIFEST_BASE_URL`, and the new `OPENGENI_LOCAL_ALLOWED_ORIGINS` for browsers, plus sandbox-only names (`host.docker.internal` with the Docker sandbox, and the hosts of `OPENGENI_MCP_URL` and `OPENGENI_MCP_INTERNAL_URL`) that serve only the Codemode, first-party MCP, and Git broker routes and refuse browser requests. Refused requests are logged once per distinct `Host` or `Origin`. Browser requests are accepted only from the configured web origin, the API's own address, or an exact origin listed in `OPENGENI_LOCAL_ALLOWED_ORIGINS`; any other `Origin` gets 403, and local mode no longer answers with wildcard CORS. Requests without an `Origin` (the SDK, servers, sandbox callbacks) are unaffected. Managed and configured access modes, and local access mode under any other `OPENGENI_ENVIRONMENT`, are unchanged.
+
+### Patch Changes
+
+- 084616e: Advertise the product documentation the web console links from its Help menu.
+  `ClientConfig` gains an optional `documentationUrl` field (an absolute http(s)
+  URL, or `null` when the deployment hides the link) served by
+  `/v1/config/client`, and `@opengeni/contracts` exports
+  `DEFAULT_OPENGENI_DOCUMENTATION_URL`. Operators set it with the new
+  `OPENGENI_DOCUMENTATION_URL` setting: unset means `https://docs.opengeni.ai`,
+  `none` hides the link, and any other value fails startup. An absent
+  field means a server that predates it, so clients show no link.
+- 48a8774: Generate automatic session titles on chat-completions providers, such as OpenRouter connections, through one direct request outside the agent runner instead of a runner-only traced call that always failed. Routes without a resolved provider client now take the same direct path. The title request uses the model's lowest runnable reasoning effort and a larger output budget, a response stopped by the output limit keeps only whole words, and inline `<think>` reasoning before the answer is dropped. Automatic titles no longer keep a dangling closing quote or markdown mark from a wrapped title such as `"Pod Crash Debugging"` or `**Pod Crash Debugging**`. The managed OpenRouter free route (`isManagedOpenRouterFreeRoute`: the deployment-funded OpenRouter provider serving a `:free` variant) sends no title request, because it would spend the deployment key's shared per-minute and per-day request limits that users' turns need; those sessions keep the prompt preview until a turn on another route titles them.
+- Updated dependencies [084616e]
+- Updated dependencies [1a427e0]
+- Updated dependencies [6eb431b]
+- Updated dependencies [48a8774]
+- Updated dependencies [e422b62]
+- Updated dependencies [bd365b7]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/codex@0.2.27
+
+## 2.1.1
+
+### Patch Changes
+
+- 31cf6ac: Preserve accepted Codex Astra turns across the implicit prompt-caching metadata
+  rollout. Recover typed model-definition setup mismatches with bounded same-turn
+  retries and truthful failure diagnostics, without changing accepted model authority
+  or replaying completed external work.
+- c41aecd: Use the Codex subscription's 272K context limits for GPT-6 models instead of the direct API limits.
+- Updated dependencies [23f4717]
+- Updated dependencies [d0b5efd]
+  - @opengeni/contracts@5.1.1
+  - @opengeni/codex@0.2.26
+
 ## 2.1.0
 
 ### Minor Changes

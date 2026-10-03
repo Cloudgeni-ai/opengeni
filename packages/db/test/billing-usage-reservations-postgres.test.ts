@@ -236,7 +236,7 @@ describe("bounded usage reservations (BILL-01/BILL-02)", () => {
     ).toBe(0);
   });
 
-  test("a retried reservation reuses its hold instead of double-counting", async () => {
+  test("a persisted reservation cannot authorize a second provider dispatch", async () => {
     if (!shared || !client) return;
     const fix = await fixture();
     const since = monthStart();
@@ -254,11 +254,8 @@ describe("bounded usage reservations (BILL-01/BILL-02)", () => {
       ],
     };
     const first = await tryReserveUsageBudget(client.db, input);
-    const second = await tryReserveUsageBudget(client.db, input);
-    expect(first.allowed && second.allowed).toBe(true);
-    if (first.allowed && second.allowed) {
-      expect(second.holds).toEqual(first.holds);
-    }
+    expect(first.allowed).toBe(true);
+    await expect(tryReserveUsageBudget(client.db, input)).rejects.toThrow("fresh call identity");
     const open = await listOpenUsageReservations(client.db, {
       accountId: fix.accountId,
       workspaceId: fix.workspaceId,
@@ -267,16 +264,16 @@ describe("bounded usage reservations (BILL-01/BILL-02)", () => {
       since: openSince,
     });
     // One logical hold of 500 — not 1000 — after the replayed reservation.
-    expect(open.get(1)?.costMicros).toBe(500);
+    expect(open.get("1")?.costMicros).toBe(500);
   });
 
-  test("stale holds older than the TTL cutoff do not block admission", async () => {
+  test("unreconciled prior-month holds remain charged after the old TTL cutoff", async () => {
     if (!shared || !client) return;
     const fix = await fixture();
     const since = monthStart();
     const cap = 1_000;
-    // A crashed turn left a 1000-quantity hold last week; its TTL has lapsed.
-    const staleAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    // A dispatched call has no authoritative usage yet, even after a month change.
+    const staleAt = new Date(since.getTime() - 1);
     await recordUsageEvent(client.db, {
       accountId: fix.accountId,
       workspaceId: fix.workspaceId,
@@ -301,10 +298,15 @@ describe("bounded usage reservations (BILL-01/BILL-02)", () => {
       openReservationSince: new Date(Date.now() - 60 * 60 * 1000),
       reservations: [reservationRequest(fix, { ordinal: 1, quantity: 800, cap, suffix: "s" })],
     });
-    expect(result.allowed).toBe(true);
-    if (result.allowed) {
-      expect(result.holds[0]!.quantity).toBe(800);
-    }
+    expect(result.allowed).toBe(false);
+    expect(
+      await openUsageReservationQuantity(client.db, {
+        accountId: fix.accountId,
+        eventType: "model.cost.reserved",
+        since,
+        holdSince: new Date(),
+      }),
+    ).toBe(1_000);
   });
 
   test("an expired hold's release cannot net against another call's live hold", async () => {
@@ -437,7 +439,19 @@ describe("bounded usage reservations (BILL-01/BILL-02)", () => {
       turnAttemptId: fix.attemptId,
       since: openSince,
     });
-    expect(open.has(1)).toBe(false);
+    expect(open.has("1")).toBe(false);
+    await expect(
+      tryReserveUsageBudget(client.db, {
+        accountId: fix.accountId,
+        workspaceId: fix.workspaceId,
+        sessionId: fix.sessionId,
+        turnId: fix.turn.id,
+        turnAttemptId: fix.attemptId,
+        since,
+        openReservationSince: openSince,
+        reservations: [request],
+      }),
+    ).rejects.toThrow("fresh call identity");
     // The released budget admits a full follow-up reservation.
     const again = await tryReserveUsageBudget(client.db, {
       accountId: fix.accountId,
@@ -573,7 +587,7 @@ describe("terminal settlement usage facts (BILL-04)", () => {
     expect(events[0]?.turn_attempt_id).toBe(fix.attemptId);
   });
 
-  test("closing an attempt on a terminal path releases its open holds", async () => {
+  test("closing an attempt retains holds for calls with unknown billing outcomes", async () => {
     if (!shared || !client) return;
     const fix = await fixture();
     const since = monthStart();
@@ -605,8 +619,7 @@ describe("terminal settlement usage facts (BILL-04)", () => {
       }),
     ).toBe(400);
     // A cancelled turn closes its attempt through the same settlement seam
-    // every terminal path uses; the close must release the hold in the same
-    // transaction, not wait out the TTL.
+    // every terminal path uses; logical closure cannot prove whether the provider billed the request.
     const settled = await applySessionTurnSettlement(client.db, fix.workspaceId, {
       sessionId: fix.sessionId,
       turnId: fix.turn.id,
@@ -621,15 +634,12 @@ describe("terminal settlement usage facts (BILL-04)", () => {
       ],
     });
     expect(settled.action).toBe("settled");
-    // The release row lands under the hold's own `<key>:release` idempotency
-    // key, so it is compatible with any worker-side release already written.
+    // Closure must not manufacture a zero-cost outcome for this dispatch.
     const releases = await shared!.admin<Array<{ quantity: string; source_resource_id: string }>>`
       select quantity, source_resource_id from usage_events
       where idempotency_key = ${`${request.idempotencyKey}:release`}`;
-    expect(releases).toHaveLength(1);
-    expect(Number(releases[0]!.quantity)).toBe(-400);
-    expect(releases[0]!.source_resource_id).toBe(request.sourceResourceId);
-    // The budget is immediately available again — no TTL wait.
+    expect(releases).toHaveLength(0);
+    // Unknown billable work retains its hold until authoritative reconciliation.
     expect(
       await openUsageReservationQuantity(client.db, {
         accountId: fix.accountId,
@@ -638,7 +648,7 @@ describe("terminal settlement usage facts (BILL-04)", () => {
         since,
         holdSince,
       }),
-    ).toBe(0);
+    ).toBe(400);
     expect(
       await listOpenUsageReservations(client.db, {
         accountId: fix.accountId,
@@ -647,7 +657,7 @@ describe("terminal settlement usage facts (BILL-04)", () => {
         turnAttemptId: fix.attemptId,
         since: holdSince,
       }),
-    ).toEqual(new Map());
+    ).toEqual(new Map([["1", { costMicros: 400 }]]));
   });
 });
 

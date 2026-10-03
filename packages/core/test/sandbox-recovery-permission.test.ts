@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  requireSandboxRecoveryPreviewHuman,
   getManagedHumanSandboxRecovery,
   consentManagedHumanSandboxRecovery,
 } from "../src/application/sandbox-recovery";
@@ -60,4 +61,34 @@ test("read-only grant and wrong tenant cannot authorize consent", async () => {
       {} as never,
     ),
   ).rejects.toThrow("managed-human");
+});
+
+test("the exact built-in local human may preview but cannot submit managed-human consent", async () => {
+  const local = authorization({
+    authenticatedSubjectId: "dev",
+    canonicalManagedHumanSession: false,
+    canonicalLocalHumanSession: true,
+  });
+  local.grant.subjectId = "dev";
+  local.grant.principalKind = "human_session";
+  expect(() => requireSandboxRecoveryPreviewHuman(local, workspaceId)).not.toThrow();
+  await expect(
+    consentManagedHumanSandboxRecovery({} as never, local, workspaceId, sessionId, {} as never),
+  ).rejects.toThrow("managed-human");
+  expect(() =>
+    requireSandboxRecoveryPreviewHuman(
+      authorization({ canonicalManagedHumanSession: false, canonicalLocalHumanSession: true }),
+      workspaceId,
+    ),
+  ).toThrow("managed-human");
+  expect(() =>
+    requireSandboxRecoveryPreviewHuman(
+      authorization({
+        canonicalManagedHumanSession: false,
+        canonicalLocalHumanSession: true,
+        contextIntegrity: false,
+      }),
+      workspaceId,
+    ),
+  ).toThrow("managed-human");
 });

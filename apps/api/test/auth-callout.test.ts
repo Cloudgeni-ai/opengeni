@@ -8,6 +8,7 @@
 import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 import { signEnrollmentBearer } from "@opengeni/contracts";
 import { decodeAuthRequest, mintAuthResponse, nkeys } from "@opengeni/events";
+import { createLogThrottle } from "@opengeni/observability";
 
 const SECRET = "test-enrollment-signing-secret";
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -86,8 +87,11 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
-const { handleAuthorizationRequest, NATS_USER_JWT_TTL_SECONDS } =
-  await import("../src/sandbox/auth-callout");
+const {
+  AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS,
+  handleAuthorizationRequest,
+  NATS_USER_JWT_TTL_SECONDS,
+} = await import("../src/sandbox/auth-callout");
 
 const account = nkeys.createAccount();
 const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
@@ -176,6 +180,51 @@ describe("handleAuthorizationRequest", () => {
     const res = readResponse(out);
     expect(res.granted).toBe(false);
     expect(res.error).toMatch(/invalid|expired/i);
+  });
+
+  test("repeated rejections of one stale bearer log once per interval with a count", async () => {
+    let now = 0;
+    const warnings: Array<{ message: string; attributes: Record<string, unknown> }> = [];
+    const throttled = {
+      ...deps(),
+      observability: {
+        warn: (message: string, attributes: Record<string, unknown>) =>
+          warnings.push({ message, attributes }),
+      } as never,
+      denialWarningThrottle: createLogThrottle({
+        intervalMs: AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS,
+        now: () => now,
+      }),
+    };
+    const staleBearer = "oge_stale-machine.sig";
+    // A stale machine re-dialing about once a second for a minute.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const res = readResponse(
+        await handleAuthorizationRequest(throttled, authRequest(staleBearer)),
+      );
+      // Throttling bounds the log only; every request is still denied.
+      expect(res.granted).toBe(false);
+      now += 1_000;
+    }
+    // A different stale machine is its own first occurrence.
+    await handleAuthorizationRequest(throttled, authRequest("oge_other-machine.sig"));
+    now += 1_000;
+    await handleAuthorizationRequest(throttled, authRequest(staleBearer));
+    expect(warnings).toEqual([
+      {
+        message: "auth-callout: rejected an invalid enrollment bearer",
+        attributes: { reason: "invalid_bearer" },
+      },
+      {
+        message: "auth-callout: rejected an invalid enrollment bearer",
+        attributes: { reason: "invalid_bearer" },
+      },
+      {
+        message: "auth-callout: rejected an invalid enrollment bearer",
+        attributes: { reason: "invalid_bearer", suppressedCount: 59 },
+      },
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain("stale-machine");
   });
 
   test("an EXPIRED bearer is denied", async () => {

@@ -1,4 +1,5 @@
 import { and, count, eq, isNull, sql } from "drizzle-orm";
+import { unionAll } from "drizzle-orm/pg-core";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
@@ -9,7 +10,11 @@ export type DeploymentModelCatalogRow = {
   updatedAt: Date;
 };
 
-export type WorkspaceCustomModelProviderKind = "vercel_gateway" | "openrouter";
+export type WorkspaceCustomModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 export type WorkspaceProviderCustomModel = {
   id: string;
@@ -74,15 +79,30 @@ export class WorkspaceOpenRouterCustomModelHistoryLimitError extends Error {
 }
 
 function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription")
+    return new WorkspaceClaudeCustomModelLimitError(false);
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelLimitError()
     : new WorkspaceOpenRouterCustomModelLimitError();
 }
 
 function customModelHistoryLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription")
+    return new WorkspaceClaudeCustomModelLimitError(true);
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelHistoryLimitError()
     : new WorkspaceOpenRouterCustomModelHistoryLimitError();
+}
+
+export class WorkspaceClaudeCustomModelLimitError extends Error {
+  constructor(history: boolean) {
+    super(
+      history
+        ? "Workspace Claude custom model history limit reached"
+        : "Workspace Claude custom model limit reached",
+    );
+    this.name = "WorkspaceClaudeCustomModelLimitError";
+  }
 }
 
 function workspaceCustomModelLockKey(
@@ -91,7 +111,7 @@ function workspaceCustomModelLockKey(
 ): string {
   return providerKind === "vercel_gateway"
     ? `workspace-gateway-custom-models:${workspaceId}`
-    : `workspace-openrouter-custom-models:${workspaceId}`;
+    : `workspace-${providerKind}-custom-models:${workspaceId}`;
 }
 
 /** Serialize one provider's custom-model mutations while allowing concurrent acceptance reads. */
@@ -204,7 +224,30 @@ export async function getDeploymentModelCatalog(
   return row ?? null;
 }
 
-async function listWorkspaceProviderCustomModels(
+function workspaceProviderCustomModelsQuery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: WorkspaceCustomModelProviderKind;
+  },
+) {
+  return db
+    .select()
+    .from(schema.workspaceGatewayCustomModels)
+    .where(
+      and(
+        eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+        eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+        eq(schema.workspaceGatewayCustomModels.providerKind, input.providerKind),
+        isNull(schema.workspaceGatewayCustomModels.retiredAt),
+      ),
+    )
+    .orderBy(schema.workspaceGatewayCustomModels.createdAt, schema.workspaceGatewayCustomModels.id)
+    .limit(MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1);
+}
+
+export async function listWorkspaceProviderCustomModels(
   db: Database,
   input: {
     accountId: string;
@@ -213,26 +256,50 @@ async function listWorkspaceProviderCustomModels(
   },
 ): Promise<WorkspaceProviderCustomModel[]> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceGatewayCustomModels)
-      .where(
-        and(
-          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
-          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
-          eq(schema.workspaceGatewayCustomModels.providerKind, input.providerKind),
-          isNull(schema.workspaceGatewayCustomModels.retiredAt),
-        ),
-      )
-      .orderBy(
-        schema.workspaceGatewayCustomModels.createdAt,
-        schema.workspaceGatewayCustomModels.id,
-      )
-      .limit(MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1);
+    const rows = await workspaceProviderCustomModelsQuery(scopedDb, input);
     if (rows.length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
       throw customModelLimitError(input.providerKind);
     }
     return rows.map(mapCustomModel);
+  });
+}
+
+/** One scoped query with the existing ordering and bound applied to each provider. */
+export async function listWorkspaceProviderCustomModelsByKind(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly WorkspaceCustomModelProviderKind[];
+  },
+): Promise<Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>> {
+  const models: Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]> = {
+    vercel_gateway: [],
+    openrouter: [],
+    anthropic: [],
+    claude_subscription: [],
+  };
+  const providerKinds = [...new Set(input.providerKinds)];
+  if (providerKinds.length === 0) return models;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const queries = providerKinds.map((providerKind) =>
+      workspaceProviderCustomModelsQuery(scopedDb, { ...input, providerKind }),
+    );
+    const [first, second, ...remaining] = queries;
+    // The nonempty provider list guarantees the first query exists. Each branch
+    // keeps its own LIMIT; a global limit could hide another provider's overflow.
+    const bounded = (second ? unionAll(first!, second, ...remaining) : first!).as("models");
+    const rows = await scopedDb
+      .select()
+      .from(bounded)
+      .orderBy(bounded.providerKind, bounded.createdAt, bounded.id);
+    for (const row of rows) models[row.providerKind].push(mapCustomModel(row));
+    for (const providerKind of providerKinds) {
+      if (models[providerKind].length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
+        throw customModelLimitError(providerKind);
+      }
+    }
+    return models;
   });
 }
 
@@ -260,7 +327,7 @@ export async function listWorkspaceOpenRouterCustomModels(
   ).map(asOpenRouterCustomModel);
 }
 
-async function lockActiveWorkspaceProviderCustomModelForAdmission(
+export async function lockActiveWorkspaceProviderCustomModelForAdmission(
   db: Database,
   input: {
     accountId: string;
@@ -318,7 +385,7 @@ type ReplayWorkspaceProviderCustomModelCreateResult =
   | { outcome: "conflict" }
   | { outcome: "success"; model: WorkspaceProviderCustomModel };
 
-async function replayWorkspaceProviderCustomModelCreate(
+export async function replayWorkspaceProviderCustomModelCreate(
   db: Database,
   input: {
     accountId: string;
@@ -403,7 +470,7 @@ type CreateWorkspaceProviderCustomModelInput = {
   createdBySubjectId: string;
 };
 
-async function createWorkspaceProviderCustomModel(
+export async function createWorkspaceProviderCustomModel(
   db: Database,
   input: CreateWorkspaceProviderCustomModelInput & {
     providerKind: WorkspaceCustomModelProviderKind;
@@ -524,7 +591,7 @@ type DeleteWorkspaceProviderCustomModelResult =
   | { outcome: "conflict" }
   | { outcome: "not_found" };
 
-async function deleteWorkspaceProviderCustomModel(
+export async function deleteWorkspaceProviderCustomModel(
   db: Database,
   input: DeleteWorkspaceProviderCustomModelInput & {
     providerKind: WorkspaceCustomModelProviderKind;
@@ -628,7 +695,7 @@ export async function deleteWorkspaceOpenRouterCustomModel(
 }
 
 /** Retired rows remain executable for an accepted turn or existing continuation. */
-async function getWorkspaceProviderCustomModelForExecution(
+export async function getWorkspaceProviderCustomModelForExecution(
   db: Database,
   input: {
     accountId: string;

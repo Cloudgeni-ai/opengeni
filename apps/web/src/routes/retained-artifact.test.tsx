@@ -28,6 +28,10 @@ const context = {
   accessKeyVersion: 0,
   client: {
     createVideoArtifactPlaybackSource: playback,
+    createRetainedArtifactDownloadUrl: async () => ({
+      url: "https://media.example/image.png",
+      expiresAt: "2099-01-01T00:00:00Z",
+    }),
     downloadRetainedArtifact: genericDownload,
     getRetainedArtifact: async () => {
       if (loadError) throw loadError;
@@ -36,6 +40,17 @@ const context = {
         artifactId,
         kind: artifactKind,
         contentType: artifactKind === "generated_video" ? "video/mp4" : "image/png",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-09-01T00:00:00Z",
+        dimensions: { width: 1, height: 1 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1048576,
+        },
       };
     },
     getFile: async () => null,
@@ -86,7 +101,7 @@ async function renderRoute(embedded = false) {
   };
 }
 
-test("malformed retained-file ids show unavailable copy and All artifacts", async () => {
+test("malformed retained-file ids show unavailable copy and the Artifacts back link", async () => {
   artifactId = "does-not-exist";
   loadError = new OpenGeniApiError(
     404,
@@ -97,13 +112,13 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
   try {
     expect(rendered.container.textContent).toContain("Artifact unavailable");
     expect(rendered.container.textContent).toContain("This file isn't available.");
-    expect(rendered.container.textContent).toContain("All artifacts");
+    expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Support reference");
     expect(rendered.container.textContent).toContain("corr-malformed");
     expect(rendered.container.textContent).not.toContain("OpenGeni API");
     expect(rendered.container.textContent).not.toContain("Retry");
     const link = rendered.container.querySelector("a");
-    expect(link?.textContent).toContain("All artifacts");
+    expect(link?.textContent?.trim()).toBe("Artifacts");
     expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts`);
   } finally {
     await rendered.unmount();
@@ -111,7 +126,7 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
 });
 
 for (const state of ["loading", "loaded", "error"] as const) {
-  test(`embedded retained artifact omits All artifacts while ${state}`, async () => {
+  test(`embedded retained artifact omits the Artifacts back link while ${state}`, async () => {
     artifactId = missingUuid;
     loadError = state === "error" ? new Error("Unavailable") : null;
     const originalLoad = context.client.getRetainedArtifact;
@@ -120,7 +135,7 @@ for (const state of ["loading", "loaded", "error"] as const) {
     }
     const rendered = await renderRoute(true);
     try {
-      expect(rendered.container.textContent).not.toContain("All artifacts");
+      expect(rendered.container.textContent).not.toContain("Artifacts");
       expect(rendered.container.textContent).toContain(
         state === "loading"
           ? "Loading artifact"
@@ -128,6 +143,12 @@ for (const state of ["loading", "loaded", "error"] as const) {
             ? "Artifact unavailable"
             : "Download",
       );
+      if (state === "loaded") {
+        expect(rendered.container.querySelector("[data-chat-media]")).toBeNull();
+        expect(rendered.container.querySelector("img")?.getAttribute("src")).toBe(
+          "https://media.example/image.png",
+        );
+      }
     } finally {
       await rendered.unmount();
       context.client.getRetainedArtifact = originalLoad;
@@ -201,7 +222,7 @@ test("transient retained-file failures keep retry without raw API prefix", async
   const rendered = await renderRoute();
   try {
     expect(rendered.container.textContent).toContain("Couldn't load this file");
-    expect(rendered.container.textContent).toContain("All artifacts");
+    expect(rendered.container.textContent).toContain("Artifacts");
     expect(rendered.container.textContent).toContain("Retry");
     expect(rendered.container.textContent).toContain("corr-503");
     expect(rendered.container.textContent).not.toContain("OpenGeni API");

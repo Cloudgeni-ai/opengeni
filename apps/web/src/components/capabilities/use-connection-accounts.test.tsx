@@ -30,17 +30,35 @@ function Harness({
   id = "session",
   workspaceId = "workspace",
   selectedIds = selectedMailIds,
+  canReadConnections = true,
+  items = catalog,
 }: {
   client: OpenGeniBrowserClient;
   id?: string;
   workspaceId?: string;
   selectedIds?: string[];
+  canReadConnections?: boolean | null;
+  items?: CapabilityCatalogItem[];
 }) {
-  state = useConnectionAccounts(client, { id, workspaceId, selectedIds }, catalog);
+  state = useConnectionAccounts(
+    client,
+    { id, workspaceId, selectedIds },
+    items,
+    canReadConnections,
+  );
   return null;
 }
 function clientFor(load: () => Promise<ConnectionMetadata[]>) {
   return { listOwnConnectionAccounts: load } as unknown as OpenGeniBrowserClient;
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -132,19 +150,151 @@ test("caller, session and workspace changes reset choices and fence stale invent
 test("failed inventory blocks sending and retry recovers without forgetting exclusions", async () => {
   let fail = false;
   const client = clientFor(async () => {
-    if (fail) throw new Error("Cannot load accounts");
+    if (fail) {
+      throw Object.assign(
+        new Error("OpenGeni API 500: accounts store down Reference: req-accounts."),
+        {
+          status: 500,
+        },
+      );
+    }
     return accounts;
   });
   await act(async () => root.render(<Harness client={client} />));
   await act(async () => state.selectAccount("mail", ["two"]));
   fail = true;
   await act(async () => state.refresh());
-  expect(state.error).toBe("Cannot load accounts");
+  expect(state.error).toBe(
+    "Couldn't check connected accounts. Opengeni couldn't finish the request. Try again in a moment. Reference: req-accounts.",
+  );
   expect(state.selections).toEqual([]);
   fail = false;
   await act(async () => state.refresh());
   expect(state.error).toBeNull();
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+  expect(state.accessDenied).toBe(false);
+});
+
+test("403 refresh hides prior accounts and gives scoped permission guidance until access returns", async () => {
+  let denied = false;
+  const client = clientFor(async () => {
+    if (denied) throw { status: 403 };
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} />));
+  expect(state.selections).toHaveLength(2);
+  denied = true;
+  await act(async () => state.refresh());
+  expect(state.availableAccountGroups).toEqual([]);
+  expect(state.selections).toEqual([]);
+  expect(state.error).toContain("Ask a workspace admin for connection access");
+  expect(state.accessDenied).toBe(true);
+
+  denied = false;
+  await act(async () => state.refresh());
+  expect(state.error).toBeNull();
+  expect(state.accessDenied).toBe(false);
+  expect(state.selections).toHaveLength(2);
+});
+
+test("a member without selected native connectors retains the normal Send gate after a 403", async () => {
+  const client = clientFor(async () => {
+    throw { status: 403 };
+  });
+  await act(async () => root.render(<Harness client={client} selectedIds={[]} />));
+  expect(state.loading).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.accessDenied).toBe(false);
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toEqual([]);
+});
+
+test("same-client live grant loss masks cached labels and choices before effects; restoration fences old responses", async () => {
+  for (const outcome of ["success", "403", "503"] as const) {
+    const stale = deferred<ConnectionMetadata[]>();
+    const restored = deferred<ConnectionMetadata[]>();
+    let reads = 0;
+    const client = clientFor(() => {
+      reads++;
+      return reads === 1
+        ? Promise.resolve(accounts)
+        : reads === 2
+          ? stale.promise
+          : restored.promise;
+    });
+    await act(async () => root.render(<Harness client={client} />));
+    expect(state.selections).toHaveLength(2);
+    await act(async () => state.selectAccount("mail", ["two"]));
+    const oldSelect = state.selectAccount;
+    const oldReset = state.resetEmptyChoices;
+    const oldRefresh = state.refresh;
+    // The hook refresh is explicit; start a second inventory read before revocation.
+    await act(async () => {
+      void state.refresh();
+    });
+    expect(reads).toBe(2);
+
+    await act(async () => root.render(<Harness client={client} canReadConnections={false} />));
+    expect(state.availableAccountGroups).toEqual([]);
+    expect(state.accountGroups).toEqual([]);
+    expect(state.accountChoices).toEqual({});
+    expect(state.selections).toEqual([]);
+    expect(state.accessDenied).toBe(true);
+    expect(state.error).toContain("Ask a workspace admin");
+    await act(async () => {
+      oldSelect("mail", ["one"]);
+      oldReset();
+      await oldRefresh();
+    });
+    expect(reads).toBe(2);
+
+    await act(async () => root.render(<Harness client={client} canReadConnections />));
+    expect(reads).toBe(3);
+    expect(state.loading).toBe(true);
+    expect(state.accountChoices).toEqual({});
+    expect(state.availableAccountGroups).toEqual([]);
+    await act(async () => {
+      oldSelect("mail", ["two"]);
+      oldReset();
+      await oldRefresh();
+    });
+    expect(reads).toBe(3);
+    await act(async () => {
+      if (outcome === "success") stale.resolve(accounts);
+      else stale.reject({ status: Number(outcome) });
+      await Bun.sleep(0);
+    });
+    expect(state.selections).toEqual([]);
+    expect(state.availableAccountGroups).toEqual([]);
+    await act(async () => {
+      restored.resolve([accounts[0]!]);
+      await Bun.sleep(0);
+    });
+    expect(state.error).toBeNull();
+    expect(state.selections).toEqual([{ serverId: "mail", connectionId: "one" }]);
+    expect(state.accountChoices).toEqual({});
+    // Between cases use a new identity, not a stale result or an in-flight hook.
+    await act(async () => root.render(<Harness client={client} id={`done-${outcome}`} />));
+  }
+});
+
+test("bootstrapping never reads accounts and a missing grant does not block Send without a native connector", async () => {
+  let reads = 0;
+  const client = clientFor(async () => {
+    reads++;
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} canReadConnections={null} />));
+  expect(reads).toBe(0);
+  expect(state.selections).toEqual([]);
+  await act(async () =>
+    root.render(<Harness client={client} canReadConnections={false} selectedIds={[]} />),
+  );
+  expect(state.loading).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.requiresAccountChoice).toBe(false);
+  await act(async () => root.render(<Harness client={client} canReadConnections />));
+  expect(reads).toBe(1);
 });
 
 test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {
@@ -162,4 +312,23 @@ test("returning to connector defaults restores emptied accounts but preserves no
   await act(async () => state.selectAccount("mail", ["two"]));
   await act(async () => state.resetEmptyChoices());
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+});
+
+test("a refreshed catalog keeps the last accounts on screen while it reloads, never loading", async () => {
+  const reload = deferred<ConnectionMetadata[]>();
+  let reads = 0;
+  const client = clientFor(() => (++reads === 1 ? Promise.resolve(accounts) : reload.promise));
+  await act(async () => root.render(<Harness client={client} />));
+  expect(state.selections).toHaveLength(2);
+  // Opening + > Connectors refreshes the workspace catalog: a new array.
+  await act(async () => root.render(<Harness client={client} items={[...catalog]} />));
+  expect(reads).toBe(2);
+  expect(state.loading).toBe(false);
+  expect(state.availableAccountGroups).toHaveLength(1);
+  expect(state.selections).toHaveLength(2);
+  await act(async () => {
+    reload.resolve([accounts[0]!]);
+    await Bun.sleep(0);
+  });
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "one" }]);
 });

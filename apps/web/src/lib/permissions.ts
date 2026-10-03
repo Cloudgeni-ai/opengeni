@@ -45,6 +45,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
   "api_keys:manage": "Admin & account",
+  "usage_allowances:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
   "capabilities:manage": "Connections",
@@ -103,13 +104,28 @@ export function apiKeyPermissionGroups(): PermissionGroup[] {
   return cachedApiKeyPermissionGroups;
 }
 
-// Mirrors the API's ensureDelegablePermissions: a workspace:admin grant can
-// delegate everything, any other grant only its own permissions.
-export function delegableApiKeyPermissions(grantPermissions: readonly string[]): Set<string> {
+// Mirrors the API's ensureDelegablePermissions: workspace:admin delegates most
+// workspace scopes, but high-trust scopes require literal grants in the right
+// authority (workspace or organization). Other grants delegate only themselves.
+export function delegableApiKeyPermissions(
+  grantPermissions: readonly string[],
+  accountGrantPermissions: readonly string[] = [],
+): Set<string> {
   if (grantPermissions.includes("workspace:admin")) {
+    const accountLiteralPermissions = new Set<string>([
+      "account:read",
+      "account:admin",
+      "workspace:create",
+      "billing:read",
+      "billing:manage",
+    ]);
+    const workspaceLiteralPermissions = new Set<string>(["members:manage", "secrets:read"]);
     return new Set<string>(
       Permission.options.filter(
-        (permission) => permission !== "secrets:read" || grantPermissions.includes("secrets:read"),
+        (permission) =>
+          (!accountLiteralPermissions.has(permission) ||
+            accountGrantPermissions.includes(permission)) &&
+          (!workspaceLiteralPermissions.has(permission) || grantPermissions.includes(permission)),
       ),
     );
   }
@@ -151,6 +167,7 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   const notFirstPartyMcp = new Set<string>(["codemode:call"]);
   return buildApiKeyPermissionGroups()
@@ -184,6 +201,7 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   // Membership itself is the workspace-access boundary. `workspace:read` is
   // the baseline capability that lets an admitted human discover and open the
@@ -208,15 +226,18 @@ export function workspaceMemberPermissionGroups(): PermissionGroup[] {
 }
 
 /**
- * The default permission set for a newly-added workspace member: full
- * collaborator access minus the admin/management powers (which an admin grants
- * deliberately). Mirrors the API-key default set plus goals management.
+ * The default permission set for a newly-added workspace member: everything a
+ * Viewer holds plus full collaborator access, minus the admin/management powers
+ * (which an admin grants deliberately). Mirrors the server's named `member`
+ * preset (migration 0555) exactly, order included.
  */
 export const defaultWorkspaceMemberPermissions = new Set<string>([
   "workspace:read",
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "stream:view",
+  "stream:acknowledge",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -224,6 +245,7 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "github:use",
+  "connections:read",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -232,20 +254,31 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "secrets:list",
   "secrets:write",
   "goals:manage",
+  "rigs:use",
+  "artifacts:read",
+  "artifacts:publish",
 ]);
 
 export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
 
-export const workspaceAccessLevels: ReadonlyArray<{
+export type WorkspaceAccessLevelDefinition = {
   role: WorkspaceAccessLevel;
   label: string;
   description: string;
   permissions: readonly string[];
-}> = [
+};
+
+/**
+ * Named workspace roles. These mirror the server catalog
+ * (`opengeni_private.workspace_member_role_permissions`, returned as the
+ * organization overview `roles`) exactly, labels and descriptions included;
+ * keep them in sync when a migration changes a preset.
+ */
+export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition> = [
   {
     role: "viewer",
     label: "Viewer",
-    description: "Can browse sessions and shared workspace content.",
+    description: "Can view shared workspace sessions, files, and approved knowledge.",
     permissions: [
       "workspace:read",
       "sessions:read",
@@ -261,13 +294,13 @@ export const workspaceAccessLevels: ReadonlyArray<{
   {
     role: "member",
     label: "Member",
-    description: "Can create sessions and work with the workspace's shared resources.",
+    description: "Can create sessions and contribute shared workspace content.",
     permissions: [...defaultWorkspaceMemberPermissions],
   },
   {
     role: "admin",
     label: "Workspace admin",
-    description: "Can manage this workspace, including its members and integrations.",
+    description: "Can manage shared workspace settings, access, and integrations.",
     permissions: [
       "workspace:read",
       "workspace:admin",
@@ -323,6 +356,27 @@ export function hasWorkspacePermission(
     (grant.permissions.includes(permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
+}
+
+/**
+ * True only when the viewer's loaded grant for this workspace provably lacks
+ * `permission`. A missing grant (still loading, local mode, or no access at
+ * all) is not evidence of a narrower role.
+ */
+export function lacksWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  return (
+    Boolean(context?.workspaceGrants?.some((grant) => grant.workspaceId === workspaceId)) &&
+    !hasWorkspacePermission(context, workspaceId, permission)
+  );
+}
+
+/** An authorization failure needs an access explanation, not a retry prompt. */
+export function isWorkspacePermissionDenied(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 403);
 }
 
 export function hasAccountPermission(

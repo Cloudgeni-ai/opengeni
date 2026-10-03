@@ -7,9 +7,18 @@ import {
   type UpdateOrganizationIntegrationPolicyRequest,
 } from "@opengeni/sdk/organization-integration-policy";
 import { useEffect, useRef, useState } from "react";
+import { RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ErrorMessage } from "@/components/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { Notice } from "@/components/ui/notice";
+import { Section, SectionStack } from "@/components/ui/section";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
+import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
 import {
   beginOrganizationAdminOperation,
   ownsOrganizationAdminOperation,
@@ -34,10 +43,9 @@ export function OrganizationIntegrationsSection(props: Props) {
   return authorized ? (
     <IntegrationPolicyEditor key={organizationAdminIdentityKey(props.identity)} {...props} />
   ) : (
-    <p className="text-sm text-fg-muted">
-      Only organization owners and administrators using an organization administrator session can
-      manage integrations.
-    </p>
+    <Notice tone="muted" title="Only owners and admins can change this">
+      Ask an organization owner or admin to choose which integrations workspaces can connect.
+    </Notice>
   );
 }
 
@@ -179,145 +187,187 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   const query = search.trim().toLowerCase();
   const options = catalog?.integrations ?? [];
   const unknownKeys = selected.filter((key) => !options.some((item) => item.key === key));
-  const groups = [
-    { title: "Catalog integrations", items: options.filter((item) => item.kind === "curated") },
-    { title: "Custom integrations", items: options.filter((item) => item.kind === "custom") },
-    {
-      title: "Previously selected keys",
-      items: unknownKeys.map((key) => ({ key, label: "Not in the current catalog" })),
-    },
+  const rows = [
+    ...options.map((item) => ({
+      key: item.key,
+      label: item.label,
+      description: item.kind === "custom" ? "A connection your team sets up itself" : undefined,
+    })),
+    ...unknownKeys.map((key) => ({
+      key,
+      label: key,
+      description: "No longer in the catalog",
+    })),
   ];
-  return (
-    <section
-      className="grid min-w-0 gap-5 border-b border-border pb-6"
-      aria-label="Integration policy"
-    >
-      <p className="max-w-2xl text-sm leading-6 text-fg-muted">
-        This policy applies to all organization workspaces. Existing connections remain connected
-        and manageable; it controls which integrations can be newly connected.
-      </p>
-      {error ? (
-        <p role="alert" className="text-sm text-fg">
-          {error}
-        </p>
-      ) : null}
-      {!policy || !catalog ? (
-        busy ? (
-          <p role="status" className="text-sm text-fg-muted">
-            Loading integration settings…
-          </p>
+  const shown = rows.filter((item) => `${item.label} ${item.key}`.toLowerCase().includes(query));
+  const discard = () => {
+    if (!policy) return;
+    setMode(policy.mode);
+    setSelected(policy.allowedIntegrationKeys);
+    setMessage("");
+  };
+  const toggle = (key: string, allowed: boolean) => {
+    setSelected((keys) =>
+      allowed ? [...keys.filter((each) => each !== key), key] : keys.filter((each) => each !== key),
+    );
+    setMessage("");
+  };
+
+  if (!policy || !catalog) {
+    return (
+      <section aria-label="Integration policy" className="min-w-0">
+        {error ? (
+          <ErrorMessage
+            variant="block"
+            title="Couldn't load integration settings."
+            announce
+            action={
+              <RowButton disabled={busy} onClick={() => void load()}>
+                Try again
+              </RowButton>
+            }
+          >
+            Check your connection and try again.
+          </ErrorMessage>
         ) : (
-          <Button variant="secondary" onClick={() => void load()}>
-            Try loading again
-          </Button>
-        )
-      ) : (
-        <>
-          <label className="grid gap-2 text-sm font-medium">
-            Allowed integrations
-            <Select
-              value={mode}
-              disabled={locked}
-              onChange={(event) => {
-                setMode(event.target.value as typeof mode);
-                setMessage("");
-              }}
-            >
-              <option value="unrestricted">Unrestricted — allow all integrations</option>
-              <option value="restricted">Selected integrations only</option>
-            </Select>
-          </label>
-          <p className="text-sm text-fg-muted">
-            {mode === "unrestricted"
-              ? "All catalog integrations and custom MCP, OpenAPI, and GraphQL connections are allowed."
-              : "Only selected integrations are allowed. Custom MCP, OpenAPI, and GraphQL must each be explicitly selected below."}
-          </p>
-          <div className="grid gap-2">
-            <label htmlFor="integration-policy-search" className="text-sm font-medium">
-              Search integrations by name or stable key
-            </label>
-            <Input
-              id="integration-policy-search"
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-            <p role="status" className="text-xs text-fg-muted">
-              {mode === "restricted" ? `${selected.length} selected` : "All integrations allowed"}
-            </p>
-            {mode === "restricted" && selected.length === 0 ? (
-              <p className="text-sm text-fg">
-                No integrations selected. Saving will block all new integration connections.
-              </p>
-            ) : null}
+          <div role="status" aria-label="Loading integration settings…">
+            <SettingRowGroup>
+              <RowList label="Integrations" busy flush>
+                <ListRowSkeleton count={3} />
+              </RowList>
+            </SettingRowGroup>
           </div>
-          {groups.map((group) => {
-            const filtered = group.items.filter((item) =>
-              `${item.label} ${item.key}`.toLowerCase().includes(query),
-            );
-            if (!group.items.length) return null;
-            return (
-              <fieldset key={group.title} className="min-w-0">
-                <legend className="mb-2 text-sm font-medium">{group.title}</legend>
-                <div className="grid max-h-80 gap-1 overflow-y-auto">
-                  {filtered.map((item) => (
-                    <label
-                      key={item.key}
-                      className="flex min-h-11 min-w-0 cursor-pointer items-start gap-3 rounded-md px-2 py-2 hover:bg-bg-subtle focus-within:ring-2 focus-within:ring-brand"
-                    >
-                      <input
-                        type="checkbox"
-                        className="mt-1 size-4 shrink-0 accent-brand"
-                        disabled={locked || mode === "unrestricted"}
-                        checked={mode === "unrestricted" || selected.includes(item.key)}
-                        onChange={(event) => {
-                          setSelected((keys) =>
-                            event.target.checked
-                              ? [...keys, item.key]
-                              : keys.filter((key) => key !== item.key),
-                          );
-                          setMessage("");
-                        }}
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section aria-label="Integration policy" className="min-w-0">
+      <SectionStack>
+        <Section title="Allowed integrations">
+          <SettingRowGroup>
+            <SettingRow
+              label="Available to workspaces"
+              description={
+                mode === "unrestricted"
+                  ? "Includes custom MCP, OpenAPI and GraphQL connections. Connections that already exist keep working."
+                  : "Only the integrations switched on below. Connections that already exist keep working."
+              }
+              controlWidth="auto"
+              control={
+                <SegmentedControl<OrganizationIntegrationPolicy["mode"]>
+                  size="sm"
+                  aria-label="Available to workspaces"
+                  disabled={locked}
+                  value={mode}
+                  onValueChange={(value) => {
+                    setMode(value);
+                    setMessage("");
+                  }}
+                  options={[
+                    { value: "unrestricted", label: "All integrations" },
+                    { value: "restricted", label: "Only selected" },
+                  ]}
+                />
+              }
+            />
+          </SettingRowGroup>
+        </Section>
+        {mode === "restricted" ? (
+          <Section
+            title="Selected integrations"
+            description={
+              <span role="status">
+                {selected.length} selected
+                {selected.length === 0
+                  ? ". Saving will block all new integration connections."
+                  : ""}
+              </span>
+            }
+          >
+            <div className="flex min-w-0 flex-col gap-3">
+              <Toolbar>
+                <ToolbarSearch
+                  value={search}
+                  onValueChange={setSearch}
+                  placeholder="Search integrations"
+                  aria-label="Search integrations"
+                />
+              </Toolbar>
+              {options.length === 0 && unknownKeys.length === 0 ? (
+                <EmptyState
+                  variant="inline"
+                  title="No integrations are available in the catalog."
+                />
+              ) : shown.length === 0 ? (
+                <EmptyState variant="inline" title={`No integration matches "${search.trim()}".`} />
+              ) : (
+                <RowList label="Integrations" flush>
+                  {shown.map((item) => {
+                    const allowed = selected.includes(item.key);
+                    return (
+                      <ListRow
+                        key={item.key}
+                        leading={<LogoTile name={item.label} />}
+                        title={item.label}
+                        description={item.description}
+                        control={
+                          <Switch
+                            checked={allowed}
+                            disabled={locked}
+                            aria-label={`Allow ${item.label}`}
+                            title={item.key}
+                            onCheckedChange={(next) => toggle(item.key, next)}
+                          />
+                        }
                       />
-                      <span className="grid min-w-0 gap-1 text-sm">
-                        <span>{item.label}</span>
-                        <code className="select-text break-all text-xs text-fg-muted">
-                          {item.key}
-                        </code>
-                      </span>
-                    </label>
-                  ))}
-                  {!filtered.length ? (
-                    <p className="text-sm text-fg-muted">No matching integrations in this group.</p>
-                  ) : null}
-                </div>
-              </fieldset>
-            );
-          })}
-          {!options.length ? (
-            <p className="text-sm text-fg-muted">No integrations are available in the catalog.</p>
-          ) : null}
-          <p className="text-xs text-fg-muted">
-            Stable keys are shown below each name and can be selected and copied.
+                    );
+                  })}
+                </RowList>
+              )}
+            </div>
+          </Section>
+        ) : null}
+      </SectionStack>
+      {error ? (
+        <div className="mt-6">
+          <ErrorMessage
+            variant="inline"
+            title={error}
+            announce
+            action={
+              conflict || permissionDenied ? (
+                <RowButton disabled={busy} onClick={() => void load()}>
+                  Discard draft and refresh
+                </RowButton>
+              ) : undefined
+            }
+          />
+        </div>
+      ) : null}
+      {dirty || pending || message ? (
+        <div className="sticky bottom-0 mt-6 flex min-w-0 flex-wrap items-center justify-end gap-3 border-t border-border bg-bg py-3">
+          <p role="status" className="mr-auto min-w-0 text-xs leading-[18px] text-fg-muted">
+            {message || (dirty && !pending && !conflict ? "Unsaved changes" : "")}
           </p>
-          <div className="flex flex-wrap items-center gap-3">
+          {dirty && !pending && !busy ? (
+            <Button type="button" variant="ghost" onClick={discard} className="pointer-coarse:h-11">
+              Cancel
+            </Button>
+          ) : null}
+          {dirty || pending ? (
             <Button
+              type="button"
               disabled={busy || conflict || permissionDenied || (!dirty && !pending)}
               onClick={() => void save()}
+              className="pointer-coarse:h-11"
             >
               {busy ? "Saving…" : pending ? "Retry same save" : "Save changes"}
             </Button>
-            {conflict || permissionDenied ? (
-              <Button variant="secondary" disabled={busy} onClick={() => void load()}>
-                Discard draft and refresh
-              </Button>
-            ) : null}
-            <p role="status" className="text-sm text-fg-muted">
-              {message || (dirty && !pending && !conflict ? "Unsaved changes" : "")}
-            </p>
-          </div>
-        </>
-      )}
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

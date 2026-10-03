@@ -230,7 +230,7 @@ describe("HumanInputForm async host boundary", () => {
       await Promise.resolve();
     });
     expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
-      "Host submission failed",
+      "The request could not be completed.",
     );
   });
 

@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "../src/vendor/*.d.ts",
+    "session-sidebar-*.ts",
+    "session-sidebar-*.tsx",
+    "../../../test/e2e/session-sidebar.browser.e2e.ts"
+  ]
+}

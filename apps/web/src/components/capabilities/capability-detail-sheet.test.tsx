@@ -117,6 +117,43 @@ function installedCuratedSkill(): CapabilityCatalogItem {
 }
 
 describe("connection ownership UI", () => {
+  test("a personal connector enabled by another member waits for this viewer's account before reading permissions", async () => {
+    const capability = CapabilityCatalogItemSchema.parse({
+      id: "mcp:slack",
+      kind: "mcp",
+      source: "manual",
+      name: "Slack",
+      enabled: true,
+      authKind: "oauth2",
+      mcpUrl: "https://mcp.slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { available: true },
+    });
+    const rendered = await render(
+      <DetailBody
+        workspaceId="33333333-3333-4333-8333-333333333333"
+        item={capability}
+        inline
+        health={{ state: "attention", connection: null }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial
+        onAction={() => {}}
+      />,
+    );
+    try {
+      expect(rendered.container.querySelector('[aria-label="Tool permissions"]')).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Couldn't load tool permissions");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   for (const authKind of ["oauth2", "api_key"] as const) {
     test(`${authKind} discloses the supplied account truthfully without changing default scope`, async () => {
       const capability = CapabilityCatalogItemSchema.parse({

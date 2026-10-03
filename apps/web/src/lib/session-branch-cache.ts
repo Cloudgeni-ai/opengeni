@@ -1,9 +1,10 @@
-import type { Session } from "@/types";
+import type { Session as SessionDetails } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 import { mergeSessionForRail } from "./sessions-group";
 
-export type SessionBranchPage = {
-  sessions: Session[];
+export type SessionBranchPage<T extends Session = SessionDetails> = {
+  sessions: T[];
   /** Per-row causal generations for rows returned by accepted branch reads. */
   channelGenerations: ReadonlyMap<string, number>;
   nextCursor: string | null;
@@ -56,9 +57,17 @@ export function sessionBranchSummaryKey(session: Session, readRevision = 0): str
  * timestamps and may own treeStats.
  */
 export function upsertSessionBranchChild(
-  pages: ReadonlyMap<string, SessionBranchPage>,
-  child: Session,
-): ReadonlyMap<string, SessionBranchPage> {
+  pages: ReadonlyMap<string, SessionBranchPage<SessionDetails>>,
+  child: SessionDetails,
+): ReadonlyMap<string, SessionBranchPage<SessionDetails>>;
+export function upsertSessionBranchChild<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
+  child: T,
+): ReadonlyMap<string, SessionBranchPage<T>>;
+export function upsertSessionBranchChild<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
+  child: T,
+): ReadonlyMap<string, SessionBranchPage<T>> {
   const parentSessionId = child.parentSessionId;
   if (!parentSessionId) return pages;
   const page = pages.get(parentSessionId);
@@ -94,13 +103,13 @@ export function upsertSessionBranchChild(
 }
 
 /** Mark one exact branch request active without discarding loaded children. */
-export function beginSessionBranchRequest(
-  pages: ReadonlyMap<string, SessionBranchPage>,
+export function beginSessionBranchRequest<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
   parentSessionId: string,
   requestId: number,
   cursor?: string,
   options: { feedbackVisible?: boolean | undefined } = {},
-): ReadonlyMap<string, SessionBranchPage> {
+): ReadonlyMap<string, SessionBranchPage<T>> {
   const previous = pages.get(parentSessionId);
   return new Map(pages).set(parentSessionId, {
     sessions: previous?.sessions ?? [],
@@ -116,14 +125,12 @@ export function beginSessionBranchRequest(
 }
 
 /** Refresh the already-loaded window with bounded, opaque-cursor reads. */
-export async function readLoadedSessionBranchWindow(
-  readPage: (
-    cursor?: string,
-  ) => Promise<{ sessions: Session[]; pinned: Session[]; nextCursor: string | null }>,
+export async function readLoadedSessionBranchWindow<T extends Session = SessionDetails>(
+  readPage: (cursor?: string) => Promise<{ sessions: T[]; pinned: T[]; nextCursor: string | null }>,
   minimumCount: number,
   initialCursor?: string,
-): Promise<{ sessions: Session[]; nextCursor: string | null }> {
-  const sessions = new Map<string, Session>();
+): Promise<{ sessions: T[]; nextCursor: string | null }> {
+  const sessions = new Map<string, T>();
   const seen = new Set<string>();
   let cursor = initialCursor;
   for (let reads = 0; reads <= Math.max(1, minimumCount); reads += 1) {
@@ -141,20 +148,44 @@ export async function readLoadedSessionBranchWindow(
 
 /** Commit one server child page or a fully refreshed loaded window. */
 export function commitSessionBranchPage(
-  pages: ReadonlyMap<string, SessionBranchPage>,
+  pages: ReadonlyMap<string, SessionBranchPage<SessionDetails>>,
   parentSessionId: string,
-  input: { sessions: readonly Session[]; nextCursor: string | null },
+  input: { sessions: readonly SessionDetails[]; nextCursor: string | null },
+  options?: {
+    append?: boolean;
+    replaceWindow?: boolean;
+    preserve?: readonly SessionDetails[];
+    requestId?: number;
+    readGeneration?: number;
+  },
+): ReadonlyMap<string, SessionBranchPage<SessionDetails>>;
+export function commitSessionBranchPage<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
+  parentSessionId: string,
+  input: { sessions: readonly T[]; nextCursor: string | null },
+  options?: {
+    append?: boolean;
+    replaceWindow?: boolean;
+    preserve?: readonly T[];
+    requestId?: number;
+    readGeneration?: number;
+  },
+): ReadonlyMap<string, SessionBranchPage<T>>;
+export function commitSessionBranchPage<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
+  parentSessionId: string,
+  input: { sessions: readonly T[]; nextCursor: string | null },
   options: {
     append?: boolean;
     replaceWindow?: boolean;
-    preserve?: readonly Session[] | undefined;
+    preserve?: readonly T[] | undefined;
     requestId?: number;
     readGeneration?: number;
   } = {},
-): ReadonlyMap<string, SessionBranchPage> {
+): ReadonlyMap<string, SessionBranchPage<T>> {
   const previous = pages.get(parentSessionId);
   if (options.requestId !== undefined && previous?.requestId !== options.requestId) return pages;
-  const merged = new Map<string, Session>();
+  const merged = new Map<string, T>();
   const channelGenerations = options.append
     ? new Map(previous?.channelGenerations ?? [])
     : new Map<string, number>();
@@ -197,11 +228,11 @@ export function commitSessionBranchPage(
 }
 
 /** Current branch rows that may own channel filing, with their actual read starts. */
-export function authoritativeSessionBranchChannels(
-  page: SessionBranchPage,
-): Array<readonly [session: Session, readGeneration: number]> {
+export function authoritativeSessionBranchChannels<T extends Session = SessionDetails>(
+  page: SessionBranchPage<T>,
+): Array<readonly [session: T, readGeneration: number]> {
   const byId = new Map(page.sessions.map((session) => [session.id, session]));
-  const evidence: Array<readonly [session: Session, readGeneration: number]> = [];
+  const evidence: Array<readonly [session: T, readGeneration: number]> = [];
   for (const [sessionId, readGeneration] of page.channelGenerations) {
     const session = byId.get(sessionId);
     if (session && readGeneration > 0) evidence.push([session, readGeneration]);
@@ -210,11 +241,11 @@ export function authoritativeSessionBranchChannels(
 }
 
 /** Fail only the still-current request and expose its exact retry cursor. */
-export function failSessionBranchRequest(
-  pages: ReadonlyMap<string, SessionBranchPage>,
+export function failSessionBranchRequest<T extends Session = SessionDetails>(
+  pages: ReadonlyMap<string, SessionBranchPage<T>>,
   parentSessionId: string,
   requestId: number,
-): ReadonlyMap<string, SessionBranchPage> {
+): ReadonlyMap<string, SessionBranchPage<T>> {
   const previous = pages.get(parentSessionId);
   if (!previous || previous.requestId !== requestId) return pages;
   return new Map(pages).set(parentSessionId, {
@@ -231,7 +262,9 @@ export function failSessionBranchRequest(
 }
 
 /** A fresh cached page already owns the active child's parent branch. */
-export function sessionBranchNeedsHydration(page: SessionBranchPage | undefined): boolean {
+export function sessionBranchNeedsHydration<T extends Session = SessionDetails>(
+  page: SessionBranchPage<T> | undefined,
+): boolean {
   return page === undefined || page.failed || page.stale;
 }
 

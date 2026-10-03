@@ -1,3 +1,5 @@
+import { allowanceMigrationTail } from "./allowance-migration-tail";
+
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
@@ -51,4 +53,32 @@ export const embeddingMigrationTail = [
   "0509_verified_signup_trial_credits.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  // Patches learning resolvers introduced by the withheld 0461 migration.
+  "0515_autonomous_learning_defaults.sql",
+  // Patches the 0509 trial grant trigger; replay after it.
+  "0521_verified_signup_trial_runtime_switch.sql",
+  // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
+  "0534_scheduled_admission_diagnostics.sql",
+  // References the files scope identity introduced by withheld 0461.
+  "0535_slack_file_upload_operations.sql",
+  // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
+  "0539_scheduled_admission_refusals.sql",
+  // Installs inventory read policies with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0547_idle_command_containment.sql",
+  // Allowance receipts compile against the withheld Knowledge/embedding and
+  // scheduled-refusal lifecycle. Replay them after those prerequisites.
+  ...allowanceMigrationTail,
+  // Extends the attachment helper from withheld 0499; replay after it.
+  "0560_archived_session_imports.sql",
+  // Patches the scheduled producer fence after its withheld prerequisites.
+  "0561_scheduled_session_agent_identity.sql",
+  // Patches the reaper installed by withheld 0345/0388/0391/0397.
+  "0564_browser_deadline_checkpoints.sql",
+  // Patches the producer fence from withheld 0275/0414/0561; replay after them.
+  "0582_scheduled_setup_policy_identity.sql",
+  // Replaces the private instruction helper from withheld 0466; replay after it.
+  "0584_agent_instruction_size_parity.sql",
+  // Extends the cursor table and meaningful index withheld by these fixtures.
+  "0585_session_attention_cursor.sql",
 ];

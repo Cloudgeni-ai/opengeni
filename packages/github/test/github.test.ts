@@ -10,6 +10,7 @@ import {
   createSignedState,
   discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
+  findInaccessibleGitHubAppInstallationRepositories,
   githubAppBotIdentity,
   githubAppBotIdentityWarnings,
   GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING,
@@ -763,6 +764,49 @@ describe("GitHub App installation repository lookup", () => {
     }
   });
 
+  test("reports archived and size only when GitHub reported them", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_lookup", expires_at: "2026-07-14T11:00:00Z" },
+          { status: 201 },
+        );
+      }
+      const base = {
+        private: true,
+        default_branch: "main",
+        owner: { login: "acme", type: "Organization" },
+      };
+      if (url.endsWith("/repos/acme/empty")) {
+        return Response.json({
+          ...base,
+          id: 1,
+          full_name: "acme/empty",
+          name: "empty",
+          archived: true,
+          size: 0,
+        });
+      }
+      if (url.endsWith("/repos/acme/bare")) {
+        return Response.json({ ...base, id: 2, full_name: "acme/bare", name: "bare" });
+      }
+      return Response.json({ message: "Not Found" }, { status: 404 });
+    }) as typeof fetch;
+    try {
+      const lookup = createGitHubAppInstallationRepositoryLookup(signingSettings());
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "empty" }),
+      ).resolves.toMatchObject({ archived: true, sizeKb: 0 });
+      const bare = await lookup({ installationId: 123, owner: "acme", name: "bare" });
+      expect(bare).not.toHaveProperty("archived");
+      expect(bare).not.toHaveProperty("sizeKb");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("lists a bounded branch page with one exact repository-scoped token", async () => {
     const requests: Array<{
       method: string;
@@ -975,6 +1019,96 @@ describe("GitHub App installation repository lookup", () => {
   test("refuses to build a lookup without GitHub App credentials", () => {
     expect(() => createGitHubAppInstallationRepositoryLookup({ githubAppId: "1" } as any)).toThrow(
       "GitHub App is not configured",
+    );
+  });
+});
+
+describe("findInaccessibleGitHubAppInstallationRepositories", () => {
+  async function withTokenMint(
+    respond: (repositoryIds: number[]) => { status: number; body?: unknown },
+    run: (bodies: number[][]) => Promise<void>,
+  ): Promise<void> {
+    const originalFetch = globalThis.fetch;
+    const bodies: number[][] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.endsWith("/app/installations/77/access_tokens")) {
+        throw new Error(`unexpected request ${url}`);
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        repository_ids: number[];
+        permissions: Record<string, string>;
+      };
+      // Only a metadata-read probe token; never contents or write access.
+      expect(body.permissions).toEqual({ metadata: "read" });
+      bodies.push(body.repository_ids);
+      const { status, body: payload } = respond(body.repository_ids);
+      return new Response(JSON.stringify(payload ?? { message: "refused" }), { status });
+    }) as typeof fetch;
+    try {
+      await run(bodies);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+  const ok = { status: 201, body: { token: "probe", expires_at: "2099-01-01T00:00:00Z" } };
+
+  test("one scoped probe answers when every repository is still reachable", async () => {
+    await withTokenMint(
+      () => ok,
+      async (bodies) => {
+        expect(
+          await findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: [1, 2],
+          }),
+        ).toEqual([]);
+        expect(bodies).toEqual([[1, 2]]);
+      },
+    );
+  });
+
+  test("a refused list is split so only the unreachable repository is reported", async () => {
+    await withTokenMint(
+      (ids) => (ids.includes(2) ? { status: 422 } : ok),
+      async (bodies) => {
+        expect(
+          await findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: [1, 2, 3],
+          }),
+        ).toEqual([2]);
+        expect(bodies[0]).toEqual([1, 2, 3]);
+        expect(bodies.slice(1).sort()).toEqual([[1], [2], [3]]);
+      },
+    );
+  });
+
+  test("a missing installation makes every repository unreachable", async () => {
+    await withTokenMint(
+      () => ({ status: 404 }),
+      async () => {
+        expect(
+          await findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: [1, 2],
+          }),
+        ).toEqual([1, 2]);
+      },
+    );
+  });
+
+  test("an outage proves nothing about a repository and throws", async () => {
+    await withTokenMint(
+      () => ({ status: 503 }),
+      async () => {
+        await expect(
+          findInaccessibleGitHubAppInstallationRepositories(authoritySettings(), {
+            installationId: 77,
+            repositoryIds: [1],
+          }),
+        ).rejects.toThrow();
+      },
     );
   });
 });

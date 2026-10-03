@@ -1,3 +1,7 @@
+import { ClaudeMark } from "./claude-mark";
+import { GrokMark } from "./grok-mark";
+import { ChatGptMark, ModelMark, modelHasMark } from "./model-mark";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -17,15 +21,16 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
-  type SVGProps,
 } from "react";
 import { cn } from "../lib/cn";
+import { MENU_CHEVRON_CLASS } from "../lib/menu-styles";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   effortOptionsForModel,
   findPickerRow,
   labelReasoningEffort,
   projectClientModelRows,
+  scopedBillingClassLabel,
   type PickerBillingClass,
   type PickerModelRow,
 } from "../model-policy";
@@ -96,12 +101,13 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   free: "Free",
 
   billingHints: {
-    opengeni_credits: "Provided by OpenGeni",
+    opengeni_credits: "Provided by Opengeni",
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
-    byok: "Billed to the workspace provider account",
-    organization_byok: "Billed to the organization provider account",
+    claude_subscription: "Claude plan",
+    byok: "Billed to the connected provider account",
+    organization_byok: "Billed to the connected provider account",
   },
 };
 
@@ -131,6 +137,13 @@ export type ModelPolicyPickerProps = {
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
+  /**
+   * Default true: show models the way people choose them, with clean names,
+   * maker marks, one "API keys" group for organization- and workspace-connected
+   * keys, and one row for identical copies. Models settings passes false to
+   * keep its scope-aware presentation (raw catalog labels, scoped groups).
+   */
+  collapseScopes?: boolean | undefined;
   /** Hide latency controls on surfaces whose saved policy does not include latency. */
   allowLatencyMode?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
@@ -140,6 +153,15 @@ export type ModelPolicyPickerProps = {
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
   contentStyle?: CSSProperties | undefined;
   className?: string | undefined;
+  /**
+   * "pill" (default) is the composer's quiet rounded trigger with the effort.
+   * "field" is a settings control: a bordered rectangle with the model name
+   * and `triggerMeta` (for example the payer) in muted text. The effort stays
+   * in the menu.
+   */
+  triggerStyle?: "pill" | "field" | undefined;
+  /** Muted text after the model name in the "field" trigger. */
+  triggerMeta?: ReactNode;
   messages?: Partial<ModelPolicyPickerMessages> | undefined;
   onModelChange: (modelId: string) => void;
   onEffortChange: (effort: ReasoningEffort) => void;
@@ -148,38 +170,6 @@ export type ModelPolicyPickerProps = {
 
 const SLIDE_EASE = [0.22, 1, 0.36, 1] as const;
 
-// Solid facets keep the brand legible at the picker’s 14px icon size.
-function OpenGeniMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 140 133" fill="currentColor" aria-hidden="true" {...props}>
-      <g transform="translate(-17.5,-20.999893188476562) scale(1.75)">
-        <g transform="translate(0,-952.36218)">
-          <path d="m 60.7828,964.36215 27.1809,0.8834 -27.1809,25.9958 z m -1.9745,1.4513 0,26.7845 -25.2681,0 c 8.6166,-8.7334 16.8796,-17.8103 25.2681,-26.7845 z m 27.7053,3.628 3.4864,1.1989 -12.5877,7.4768 z m -68.1835,2.9656 5.5226,0 12.8654,14.0705 -5.9854,6.1204 -12.4026,0 c 9e-4,-6.7347 0,-13.4597 0,-20.1909 z m -1.9746,1.2304 0,5.8364 -6.3555,0 z m 3.363,20.9796 38.627,0 -10.7675,29.43465 z m 39.0898,4.54286 0,41.20229 -12.5878,-6.8775 c 4.1972,-11.443 8.3886,-22.879 12.5878,-34.32479 z" />
-        </g>
-      </g>
-    </svg>
-  );
-}
-
-function ChatGptMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3653-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8414 3.3698-2.02 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.783-2.7622a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
-    </svg>
-  );
-}
-
-function XaiMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 466.04 516.93" fill="currentColor" aria-hidden="true" {...props}>
-      <polygon points="0.12 182.71 234.14 516.92 338.15 516.92 104.13 182.71 0.12 182.71" />
-      <polygon points="0 516.92 104.08 516.92 156.08 442.67 104.04 368.34 0 516.92" />
-      <polygon points="466.04 0 361.96 0 182.1 256.86 234.15 331.18 466.04 0" />
-      <polygon points="380.78 516.92 466.04 516.92 466.04 37.16 380.78 158.92 380.78 516.92" />
-    </svg>
-  );
-}
-
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
   presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
@@ -187,12 +177,13 @@ export function BillingClassMark(props: {
   "aria-label"?: string | undefined;
 }) {
   const labels: Record<PickerBillingClass, string> = {
-    opengeni_credits: "OpenGeni",
+    opengeni_credits: "Models",
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
-    byok: "Workspace provider account",
-    organization_byok: "Organization provider account",
+    claude_subscription: "Claude",
+    byok: "API key",
+    organization_byok: "API key",
   };
   if (props.presentation?.icon === null) return null;
   const label = props["aria-label"] ?? props.presentation?.label ?? labels[props.billingClass];
@@ -214,13 +205,15 @@ export function BillingClassMark(props: {
       {props.presentation?.icon !== undefined ? (
         props.presentation.icon
       ) : props.billingClass === "opengeni_credits" ? (
-        <OpenGeniMark className={mark} />
+        <SparklesIcon className={mark} aria-hidden />
       ) : props.billingClass === "external" ? (
         <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
+      ) : props.billingClass === "claude_subscription" ? (
+        <ClaudeMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (
-        <XaiMark className={mark} />
+        <GrokMark className={mark} />
       ) : (
         <KeyRoundIcon className={mark} aria-hidden />
       )}
@@ -233,6 +226,10 @@ function isCodexModel(model: ClientModel): boolean {
 }
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("workspace-anthropic/")) return "byok";
+  if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
+  if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   // A deployment OpenRouter ID does not encode its workspace-facing cost.
@@ -261,12 +258,101 @@ function applyCodexOnly(
   );
 }
 
+/**
+ * The trigger shows who makes the chosen model. Subscription rails already
+ * carry their maker's mark (ChatGPT, Claude, Grok), and explicit host branding
+ * for a payment group always wins; otherwise API-key and deployment models show
+ * the maker's logo instead of a generic key, falling back to the group mark.
+ */
+function SelectedModelMark(input: {
+  props: ModelPolicyPickerProps;
+  selected: ClientPickerModelRow | null;
+}) {
+  const billingClass =
+    input.selected?.billingClass ?? billingClassForMissingSelection(input.props.model);
+  const presentation = groupPresentationFor(input.props, billingClass);
+  const model = input.selected?.catalog ?? input.props.model;
+  if (input.props.collapseScopes === false) {
+    return (
+      <BillingClassMark
+        billingClass={billingClass}
+        presentation={presentation}
+        aria-label={presentation?.label ?? SCOPED_MARK_LABELS[billingClass]}
+        className="text-og-fg"
+      />
+    );
+  }
+  if (
+    presentation?.icon !== undefined ||
+    BRANDED_BILLING_CLASSES.has(billingClass) ||
+    !modelHasMark(model)
+  ) {
+    return (
+      <BillingClassMark
+        billingClass={billingClass}
+        presentation={presentation}
+        className="text-og-fg"
+      />
+    );
+  }
+  return <ModelMark model={model} className="text-og-fg" />;
+}
+
+const SCOPED_MARK_LABELS: Partial<Record<PickerBillingClass, string>> = {
+  byok: "Workspace provider account",
+  organization_byok: "Organization provider account",
+};
+
+/** Models settings keeps naming who is billed for a key. */
+export const SCOPED_BILLING_HINTS: Partial<Record<PickerBillingClass, string>> = {
+  byok: "Billed to the workspace provider account",
+  organization_byok: "Billed to the organization provider account",
+};
+
+/**
+ * Host branding for a payment group. While scopes are collapsed, API keys are
+ * one group, so either API-key presentation serves both.
+ */
+export function groupPresentationFor(
+  props: Pick<ModelPolicyPickerProps, "groupPresentation" | "collapseScopes">,
+  billingClass: PickerBillingClass,
+): ModelPolicyPickerGroupPresentation[PickerBillingClass] {
+  const own = props.groupPresentation?.[billingClass];
+  if (own !== undefined || props.collapseScopes === false) return own;
+  if (billingClass === "byok") return props.groupPresentation?.organization_byok;
+  if (billingClass === "organization_byok") return props.groupPresentation?.byok;
+  return undefined;
+}
+
+/** A selection the catalog no longer lists: its clean name (settings keep the id). */
+function fallbackName(props: ModelPolicyPickerProps): string {
+  return props.collapseScopes === false ? props.model : modelDisplayName(props.model);
+}
+
+const BRANDED_BILLING_CLASSES: ReadonlySet<PickerBillingClass> = new Set([
+  "codex_subscription",
+  "claude_subscription",
+  "supergrok_subscription",
+]);
+
 export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
   return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
-    const label = props.groupPresentation?.[row.billingClass]?.label;
-    return label === undefined ? row : { ...row, billingClassLabel: label };
+    const scoped =
+      props.collapseScopes === false
+        ? {
+            ...row,
+            label: row.catalog.label,
+            billingClassLabel: scopedBillingClassLabel(row.billingClass),
+          }
+        : row;
+    if (props.collapseScopes === false) {
+      if (row.catalog.shortLabel) scoped.shortLabel = row.catalog.shortLabel;
+      else delete scoped.shortLabel;
+    }
+    const label = groupPresentationFor(props, row.billingClass)?.label;
+    return label === undefined ? scoped : { ...scoped, billingClassLabel: label };
   });
 }
 
@@ -292,25 +378,20 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        // The one menu row (lib/menu-styles.ts), with density tokens for embedders.
+        "flex min-h-8 w-full cursor-pointer items-center gap-2.5 rounded-og-md px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
       {props.icon}
       <span className="min-w-0 flex-1">
-        <span className={cn("block truncate text-og-menu", props.active && "font-medium")}>
-          {props.label}
-        </span>
+        <span className="block truncate text-og-menu">{props.label}</span>
         {props.hint ? (
-          <span className="mt-0.5 block truncate text-og-control text-og-fg-subtle">
-            {props.hint}
-          </span>
+          <span className="mt-0.5 block truncate text-og-sm text-og-fg-muted">{props.hint}</span>
         ) : null}
       </span>
       {props.trailing ? <span className="ml-auto shrink-0">{props.trailing}</span> : null}
-      {props.showChevron === false ? null : (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
-      )}
+      {props.showChevron === false ? null : <ChevronRightIcon className={MENU_CHEVRON_CLASS} />}
     </button>
   );
 }
@@ -322,14 +403,16 @@ export function PickerBackHeader(props: {
   trailing?: ReactNode;
 }) {
   return (
-    <div className="mb-1 flex items-center gap-0.5 border-b border-og-border/70 px-0.5 pb-1.5">
+    <div className="mb-1.5 flex min-h-9 items-center gap-1 border-b border-og-border pb-1.5">
       <button
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-og-md pr-2.5 text-left text-og-fg outline-hidden transition-colors duration-[120ms] hover:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 pointer-coarse:min-h-11"
       >
-        <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
+        <span className="flex size-8 shrink-0 items-center justify-center text-og-fg-muted">
+          <ChevronLeftIcon className="size-4" />
+        </span>
         {props.icon}
         <span className="min-w-0 flex-1 truncate text-og-menu font-medium">{props.label}</span>
       </button>
@@ -386,11 +469,60 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
       <span
         className={cn(
           "og-root inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
+          props.triggerStyle === "field" && "w-[180px] rounded-og-md",
           props.className,
         )}
         aria-label={messages.loading}
         data-testid="model-picker-loading"
       />
+    );
+  }
+  if (props.triggerStyle === "field") {
+    return (
+      <>
+        <button
+          ref={trigger.ref}
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? contentId : undefined}
+          data-state={open ? "open" : "closed"}
+          data-trigger-style="field"
+          onClick={() => setOpen(!open)}
+          disabled={props.disabled}
+          aria-label={messages.label}
+          className={cn(
+            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            props.className,
+          )}
+        >
+          {needsModel ? (
+            <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
+          ) : (
+            <SelectedModelMark props={props} selected={selected} />
+          )}
+          <span className="min-w-0 truncate font-medium">
+            {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
+          </span>
+          {props.triggerMeta && !needsModel ? (
+            <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">
+              {props.triggerMeta}
+            </span>
+          ) : null}
+          <ChevronDownIcon className="ml-auto size-3.5 shrink-0 text-og-fg-muted" />
+        </button>
+        {open ? (
+          <Suspense fallback={null}>
+            <LazyModelPolicyPickerMenu
+              {...props}
+              anchor={trigger.currentRef}
+              contentId={contentId}
+              portalStyle={portalStyle}
+              onOpenChange={setOpen}
+            />
+          </Suspense>
+        ) : null}
+      </>
     );
   }
   return (
@@ -407,8 +539,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         aria-label={messages.label}
         className={cn(
           "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          // With no usable model the pill is the one thing that unblocks the
+          // composer, so it takes the primary wash.
           needsModel
-            ? "border-og-border bg-og-surface-2 text-og-fg hover:bg-og-surface-3"
+            ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
             : "border-transparent text-og-fg-muted hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg",
           props.className,
         )}
@@ -416,23 +550,15 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         {needsModel ? (
           <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
         ) : (
-          <BillingClassMark
-            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
-            presentation={
-              props.groupPresentation?.[
-                selected?.billingClass ?? billingClassForMissingSelection(props.model)
-              ]
-            }
-            className="text-og-fg"
-          />
+          <SelectedModelMark props={props} selected={selected} />
         )}
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
-          {needsModel ? messages.connectTitle : (selected?.label ?? props.model)}
+          {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
         </span>
         <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
           {needsModel
             ? messages.connectTitle
-            : (selected?.shortLabel ?? selected?.label ?? props.model)}
+            : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}
         </span>
         {selected &&
         !needsModel &&

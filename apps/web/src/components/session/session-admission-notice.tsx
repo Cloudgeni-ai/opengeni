@@ -139,7 +139,6 @@ export function SessionAdmissionNotice({
       ) : canControl ? (
         <Button
           type="button"
-          variant="outline"
           className="mt-2 min-h-11"
           disabled={busy || checking}
           aria-busy={checking}

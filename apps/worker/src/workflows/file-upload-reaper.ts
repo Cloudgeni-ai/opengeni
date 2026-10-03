@@ -8,6 +8,7 @@ const reaperActivity = proxyActivities<
     | "maintainRetainedScreenshots"
     | "maintainBrowserStateArtifacts"
     | "recoverVideoGenerationWorkflows"
+    | "reconcileRecentModelCallFacts"
   >
 >({
   startToCloseTimeout: "5 minutes",
@@ -20,4 +21,5 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   await reaperActivity.maintainRetainedScreenshots();
   await reaperActivity.maintainBrowserStateArtifacts();
   await reaperActivity.recoverVideoGenerationWorkflows();
+  await reaperActivity.reconcileRecentModelCallFacts();
 }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   boundWorkspaceControlEvent,
   childPausedClassification,
@@ -8,7 +9,7 @@ import {
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
-import { and, eq, inArray, like, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { nestedPostgresSqlState } from "./persistence-errors";
@@ -251,7 +252,7 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings";
   },
 ): Promise<void> {
   if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
@@ -931,8 +932,9 @@ export async function registerSessionTurnAttemptClaim(
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
     existing.personalResourceProtocolVersion !== input.personalResourceProtocolVersion ||
-    JSON.stringify(existing.connectorActionPolicies) !==
-      JSON.stringify(input.connectorActionPolicies) ||
+    // JSONB changes object key order; compare the immutable snapshot by value
+    // so exact-attempt reentry remains idempotent after a database round trip.
+    !isDeepStrictEqual(existing.connectorActionPolicies, input.connectorActionPolicies) ||
     existing.state === "closed"
   ) {
     throw new SessionControlInvariantError(
@@ -1021,76 +1023,6 @@ export function sessionAuthoritySnapshotsEqual(
 }
 
 /**
- * Release every still-open monthly-cap budget hold owned by one attempt,
- * inside the transaction that closes it. Holds are `<eventType>.reserved`
- * usage_events rows; a closed attempt can never spend again, so every hold it
- * still carries must die with it — cancellation, failure, supersede, recovery,
- * and graceful-shutdown paths all funnel through this one seam and can no
- * longer pin the account's remaining allowance until the TTL. Each hold and
- * its releases share `source_resource_id`; groups are netted per reservation
- * and the release reuses the hold's `<idempotencyKey>:release` key, so this is
- * idempotent with worker-side reconcile releases — whichever path lands first
- * wins.
- */
-async function releaseAttemptUsageReservationsInTransaction(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    turnId: string;
-    attemptId: string;
-  },
-): Promise<void> {
-  const groups = await db
-    .select({
-      eventType: schema.usageEvents.eventType,
-      sourceResourceId: schema.usageEvents.sourceResourceId,
-      sessionId: sql<
-        string | null
-      >`(array_agg(${schema.usageEvents.sessionId}) filter (where ${schema.usageEvents.quantity} > 0))[1]`,
-      unit: sql<
-        string | null
-      >`max(${schema.usageEvents.unit}) filter (where ${schema.usageEvents.quantity} > 0)`,
-      holdKey: sql<
-        string | null
-      >`min(${schema.usageEvents.idempotencyKey}) filter (where ${schema.usageEvents.quantity} > 0)`,
-      net: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
-    })
-    .from(schema.usageEvents)
-    .where(
-      and(
-        eq(schema.usageEvents.accountId, input.accountId),
-        eq(schema.usageEvents.workspaceId, input.workspaceId),
-        eq(schema.usageEvents.turnId, input.turnId),
-        eq(schema.usageEvents.turnAttemptId, input.attemptId),
-        like(schema.usageEvents.eventType, "%.reserved"),
-      ),
-    )
-    .groupBy(schema.usageEvents.eventType, schema.usageEvents.sourceResourceId);
-  for (const group of groups) {
-    const net = Number(group.net);
-    if (net <= 0 || !group.holdKey || !group.sourceResourceId || !group.unit) continue;
-    await db
-      .insert(schema.usageEvents)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: group.sessionId,
-        eventType: group.eventType,
-        quantity: -net,
-        unit: group.unit,
-        sourceResourceType: "model_call_reservation",
-        sourceResourceId: group.sourceResourceId,
-        turnId: input.turnId,
-        turnAttemptId: input.attemptId,
-        idempotencyKey: `${group.holdKey}:release`,
-        occurredAt: new Date(),
-      })
-      .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
-  }
-}
-
-/**
  * The account-scoped usage-budget reservation lock. Lock order in the
  * reservation protocol is always ADVISORY-THEN-ROW on both sides: the
  * usage_events execution-context trigger takes FOR KEY SHARE on the
@@ -1132,8 +1064,7 @@ export async function closeSessionTurnAttemptInTransaction(
   // Fence hold creation against this close: tryReserveUsageBudget checks
   // attempt liveness under the same account advisory lock, so a hold can
   // never be committed for an attempt after this close commits, and a hold
-  // committed before the lock was acquired still lands inside the release
-  // scan below. The advisory is taken BEFORE the attempt row lock —
+  // committed before closure retains its hold until authoritative reconciliation. The advisory is taken BEFORE the attempt row lock —
   // advisory-then-row, the same order admissions and reconcile writers use —
   // or this close (row lock held, waiting on the advisory) deadlocks against
   // an admission (advisory held, waiting on this row through the usage
@@ -1168,14 +1099,6 @@ export async function closeSessionTurnAttemptInTransaction(
         `Attempt ${input.id} is already closed as ${attempt.outcome ?? "unknown"}`,
       );
     }
-    // Attempts closed before reservation release existed can still carry open
-    // holds; the idempotency-keyed release is a no-op when none remain.
-    await releaseAttemptUsageReservationsInTransaction(db, {
-      accountId: attempt.accountId,
-      workspaceId: attempt.workspaceId,
-      turnId: attempt.turnId,
-      attemptId: attempt.id,
-    });
     return { action: "already_closed" };
   }
   if (attempt.state !== "claimed" && attempt.state !== "running") {
@@ -1206,15 +1129,8 @@ export async function closeSessionTurnAttemptInTransaction(
   if (!closed) {
     throw new SessionControlInvariantError(`Attempt ${input.id} changed while locked`);
   }
-  // A closed attempt can never reach the provider again: release its open
-  // budget holds in the same transaction so no terminal path can pin the
-  // account's remaining allowance until the stale-hold TTL.
-  await releaseAttemptUsageReservationsInTransaction(db, {
-    accountId: attempt.accountId,
-    workspaceId: attempt.workspaceId,
-    turnId: attempt.turnId,
-    attemptId: attempt.id,
-  });
+  // An in-flight request can remain billable after logical closure. Its hold
+  // survives until authoritative usage reconciliation.
   return { action: "closed" };
 }
 
@@ -2487,6 +2403,16 @@ export async function registerSessionWorkflowWakeInTransaction(
  * Internal producers share one outstanding session-level receipt. While a wake
  * remains undelivered, another update makes that same batch richer instead of
  * manufacturing another transport revision or sequential model turn.
+ *
+ * Producers outside the workflow should signal after commit in both cases, so
+ * `shouldSignal` is always `true`; the field stays for callers that read it. An
+ * undelivered row is often a delayed wake that nothing signals before its time
+ * (a `wait_for_input` deadline or goal idle backoff); pulling `next_attempt_at`
+ * to now alone leaves the input waiting for the periodic dispatcher. The signal
+ * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
+ * whole pending batch, and the admission-aware acknowledgement keeps this
+ * revision open until it does. Terminal background-command settlement does not
+ * signal from its settlement callers yet, so the dispatcher delivers that wake.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,
@@ -2496,7 +2422,7 @@ export async function registerInternalUpdateWakeInTransaction(
     sessionId: string;
     temporalWorkflowId: string;
   },
-): Promise<{ wakeRevision: number; shouldSignal: boolean }> {
+): Promise<{ wakeRevision: number; shouldSignal: true }> {
   const [existing] = await db
     .select()
     .from(schema.sessionWorkflowWakeOutbox)
@@ -2519,7 +2445,7 @@ export async function registerInternalUpdateWakeInTransaction(
         updatedAt: new Date(),
       })
       .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId));
-    return { wakeRevision: existing.wakeRevision, shouldSignal: false };
+    return { wakeRevision: existing.wakeRevision, shouldSignal: true };
   }
   return {
     wakeRevision: await registerSessionWorkflowWakeInTransaction(db, {

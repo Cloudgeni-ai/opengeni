@@ -2,6 +2,7 @@ import type { ModelRequest, RunContext, SerializedTool, Tool } from "@openai/age
 import type {
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSnapshot,
   ModelContextTool,
@@ -15,6 +16,13 @@ export type PersistentAgentInstructionLayerDraft = {
   id: ModelContextInstructionLayerId;
   title: string;
   content: string;
+  /** Modular operational contract only: its prompt modules in order. */
+  modules?: readonly ModelContextInstructionModule[];
+  /**
+   * Separator placed before this layer. Modular layers set it; legacy layers
+   * omit it and keep the historical joins byte-for-byte.
+   */
+  joinBefore?: string;
 };
 
 function contextTextEstimate(value: unknown): number | null {
@@ -39,6 +47,15 @@ export function buildProviderRequestSnapshot(input: {
   body: string | null;
   unavailableReason?: string;
   requestIndex: number;
+  /**
+   * The agent's persistent instruction layers. When the wire `instructions`
+   * start with them, the snapshot names those sections (identity, the
+   * operational contract with its prompt modules, governance, ...) so an
+   * inspector can show them with titles. The wire body stays the source of
+   * truth; an unrecognized prompt yields no sections.
+   */
+  persistentLayers?: readonly PersistentAgentInstructionLayerDraft[];
+  genesisTitleDirective?: string;
 }): ModelContextSnapshot {
   let body = input.body;
   let unavailableReason = input.unavailableReason;
@@ -61,15 +78,29 @@ export function buildProviderRequestSnapshot(input: {
   }));
   const instructionsTokens =
     parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
+  const wireInstructions = typeof payload.instructions === "string" ? payload.instructions : null;
+  const sectionLayers =
+    wireInstructions && input.persistentLayers?.length
+      ? splitCapturedInstructions({
+          persistentLayers: input.persistentLayers,
+          capturedInstructions: wireInstructions,
+          genesisTitleDirective: input.genesisTitleDirective ?? "",
+        })
+      : [];
+  // Only a recognized structure is worth repeating; a raw blob adds nothing.
+  const layers = sectionLayers.some((layer) => layer.id !== "sent_system_instructions")
+    ? sectionLayers
+    : [];
   const toolsTokens = parts.find((part) => part.key === "tools")?.estimatedTokens ?? 0;
   return {
     version: MODEL_CONTEXT_SNAPSHOT_VERSION,
     source: "model_request",
     capturedAt: new Date().toISOString(),
     requestIndex: input.requestIndex,
-    // Wire body owns the contents. Legacy prefix fields are not reconstructed.
+    // Wire body owns the contents. Legacy prefix fields are not reconstructed;
+    // `layers` only names sections of the wire instructions.
     instructions: "",
-    layers: [],
+    layers,
     tools: [],
     skills: [],
     tokens: {
@@ -101,12 +132,14 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   session_instructions: "Session instructions",
   workspace_memory: "Workspace memory",
   codemode: "Codemode",
+  code_search: "Code search",
   git_bindings: "Git credential bindings",
   genesis_title: "Missing-title directive",
   sdk_capability_instructions: "SDK capability instructions",
   sandbox_preamble: "Sandbox runtime preamble",
   sandbox_filesystem: "Sandbox filesystem",
   sent_system_instructions: "Sent system instructions",
+  identity: "Identity",
 };
 
 export function joinPersistentAgentInstructionLayers(
@@ -118,7 +151,8 @@ export function joinPersistentAgentInstructionLayers(
     const previous = layers[index - 1]!;
     const current = layers[index]!;
     const separator =
-      previous.id === "operational_contract" && current.id === "persona_and_core" ? "\n\n" : " ";
+      current.joinBefore ??
+      (previous.id === "operational_contract" && current.id === "persona_and_core" ? "\n\n" : " ");
     composed = `${composed}${separator}${current.content}`;
   }
   return composed;
@@ -133,6 +167,7 @@ export function countedInstructionLayer(
     content: draft.content,
     utf8Bytes: Buffer.byteLength(draft.content, "utf8"),
     estimatedTokens: estimateTextTokens(draft.content),
+    ...(draft.modules ? { modules: draft.modules.map((module) => ({ ...module })) } : {}),
   };
 }
 

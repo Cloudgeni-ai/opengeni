@@ -1,30 +1,26 @@
-// The rig's change queue: proposed → verifying → merged / rejected. Each change
-// is a literal command (or a full definition edit) that must reproduce from a
-// clean sandbox before it merges. Setup commands auto-merge on green; a verified
-// definition edit waits here for a human to promote it.
-import {
-  ChevronDownIcon,
-  GitBranchIcon,
-  Loader2Icon,
-  RotateCwIcon,
-  TerminalIcon,
-} from "lucide-react";
+// The environment's change queue: proposed → verifying → merged / rejected.
+// Each change is a literal command (or a full definition edit) that must
+// reproduce from a clean sandbox before it merges. Setup commands merge on
+// green; a verified definition edit waits here for a human to promote it.
+import { GitBranchIcon, Loader2Icon, RotateCwIcon, TerminalIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { RigStatusChip } from "@/components/rigs/rig-status-chip";
+import { SetupScript } from "@/components/rigs/rig-versions-timeline";
 import { VerificationLog } from "@/components/rigs/verification-log";
-import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
+import { DetailInline, DetailSection } from "@/components/ui/detail-sheet";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { formatTimestamp } from "@/lib/format";
+import { RelativeTime } from "@/components/ui/relative-time";
 import {
   changeIsPromotable,
   rigActorLabel,
   rigChangeKindLabel,
   rigChangeStatusView,
 } from "@/lib/rig-status";
-import { cn } from "@/lib/utils";
 import type { RigChange } from "@/types";
 
 export function RigChangesQueue({
@@ -43,34 +39,67 @@ export function RigChangesQueue({
   onVerify: (changeId: string) => Promise<RigChange | null>;
   onPromote: (changeId: string) => Promise<unknown>;
 }) {
+  const [open, setOpen] = useState<string | null>(null);
   if (changes.length === 0) {
     return (
       <EmptyState
-        icon={<GitBranchIcon className="size-4" />}
+        variant="page"
+        icon={<GitBranchIcon />}
         title="No changes yet"
-        description="When an agent or teammate proposes a durable change to this machine, it lands here to be verified in a clean sandbox before it merges."
+        description="When an agent or a teammate proposes a change to this environment, it's checked in a clean sandbox here before it merges."
+        className="pt-8 pb-6"
       />
     );
   }
   const ordered = [...changes].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return (
-    <div className="grid gap-2.5">
-      {ordered.map((change) => (
-        <ChangeRow
-          key={change.id}
-          change={change}
-          versionLabel={versionLabel}
-          canManage={canManage}
-          mutating={mutating}
-          onVerify={onVerify}
-          onPromote={onPromote}
-        />
-      ))}
-    </div>
+    <RowList label="Changes" flush>
+      {ordered.map((change) => {
+        const status = rigChangeStatusView(change);
+        const mergedLabel = change.resultVersionId ? versionLabel(change.resultVersionId) : null;
+        return (
+          <ListRow
+            key={change.id}
+            leading={
+              <LogoTile
+                icon={change.kind === "setup_append" ? <TerminalIcon /> : <GitBranchIcon />}
+              />
+            }
+            title={rigChangeKindLabel(change.kind)}
+            titleAddon={
+              <MetaChip dot={status.tone} title={status.description}>
+                {change.status === "merged" && mergedLabel
+                  ? `Merged as ${mergedLabel}`
+                  : status.label}
+              </MetaChip>
+            }
+            meta={[
+              `Proposed by ${rigActorLabel(change.proposedBy)}`,
+              <RelativeTime key="time" date={change.createdAt} />,
+            ]}
+            indicator="expand"
+            expanded={open === change.id}
+            onOpen={() => setOpen((current) => (current === change.id ? null : change.id))}
+            panel={
+              <DetailInline>
+                <ChangeContent
+                  change={change}
+                  versionLabel={versionLabel}
+                  canManage={canManage}
+                  mutating={mutating}
+                  onVerify={onVerify}
+                  onPromote={onPromote}
+                />
+              </DetailInline>
+            }
+          />
+        );
+      })}
+    </RowList>
   );
 }
 
-function ChangeRow({
+function ChangeContent({
   change,
   versionLabel,
   canManage,
@@ -85,118 +114,73 @@ function ChangeRow({
   onVerify: (changeId: string) => Promise<RigChange | null>;
   onPromote: (changeId: string) => Promise<unknown>;
 }) {
-  const [open, setOpen] = useState(false);
   const status = rigChangeStatusView(change);
-  const kindLabel = rigChangeKindLabel(change.kind);
   const promotable = changeIsPromotable(change);
   const canReverify =
     change.status === "proposed" || change.status === "rejected" || change.status === "failed";
   const isVerifying = change.status === "verifying";
-  const mergedLabel = change.resultVersionId ? versionLabel(change.resultVersionId) : null;
-
   return (
-    <article className="rounded-lg border border-border bg-surface/45">
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-start gap-3 px-3.5 py-3 text-left"
-      >
-        <span className="mt-0.5 shrink-0 text-fg-subtle">
-          {change.kind === "setup_append" ? (
-            <TerminalIcon className="size-4" />
-          ) : (
-            <GitBranchIcon className="size-4" />
-          )}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">{kindLabel}</span>
-            <RigStatusChip view={status} />
-            {change.status === "merged" && mergedLabel ? (
-              <MetaChip title="The version this change produced">Merged as {mergedLabel}</MetaChip>
-            ) : null}
-          </span>
-          <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
-            Proposed by {rigActorLabel(change.proposedBy)} · {formatTimestamp(change.createdAt)}
-          </span>
-        </span>
-        <ChevronDownIcon
-          className={cn(
-            "mt-0.5 size-4 shrink-0 text-fg-subtle transition-transform",
-            open ? "rotate-180" : "",
-          )}
-        />
-      </button>
-
-      {open ? (
-        <div className="grid gap-3 border-t border-border/70 px-3.5 py-3">
-          <ChangePayload change={change} versionLabel={versionLabel} />
-
-          <div className="text-xs leading-5 text-fg-muted">{status.description}</div>
-
-          {change.verification ? (
-            <div className="rounded-md border border-border/70 bg-bg/20 p-2.5">
-              <VerificationLog verification={change.verification} />
-            </div>
-          ) : null}
-
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {canReverify ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="h-8"
-                disabled={mutating || isVerifying}
-                onClick={async () => {
-                  const result = await onVerify(change.id);
-                  if (result) {
-                    toast.success("Verification started", {
-                      description: "Replaying the change in a clean sandbox.",
-                    });
-                  }
-                }}
-              >
-                {isVerifying ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <RotateCwIcon className="size-3.5" />
-                )}
-                {change.status === "proposed" ? "Verify" : "Re-verify"}
-              </Button>
-            ) : null}
-            {promotable ? (
-              <Button
-                type="button"
-                size="sm"
-                className="h-8"
-                disabled={mutating || !canManage}
-                title={
-                  canManage
-                    ? "Promote into a new active version"
-                    : "Requires the Sandbox Environments manage permission"
-                }
-                onClick={async () => {
-                  const result = await onPromote(change.id);
-                  if (result) {
-                    toast.success("Change promoted", {
-                      description: "A new active sandbox environment version was minted.",
-                    });
-                  }
-                }}
-              >
-                Promote to new version
-              </Button>
-            ) : null}
-          </div>
+    <div className="px-4 [&>section+section]:border-t [&>section+section]:border-border">
+      <DetailSection title={status.label} description={status.description}>
+        <ChangePayload change={change} versionLabel={versionLabel} />
+      </DetailSection>
+      {change.verification ? (
+        <DetailSection title="Verification">
+          <VerificationLog verification={change.verification} />
+        </DetailSection>
+      ) : null}
+      {canReverify || promotable ? (
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border py-4">
           {promotable && !canManage ? (
-            <p className="text-right text-2xs text-fg-subtle">
-              Promoting needs the Sandbox Environments manage permission.
+            <p className="mr-auto text-xs leading-4.5 text-fg-muted">
+              Someone who can manage sandbox environments can promote it.
             </p>
+          ) : null}
+          {canReverify ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="pointer-coarse:h-11"
+              disabled={mutating || isVerifying}
+              onClick={async () => {
+                const result = await onVerify(change.id);
+                if (result) {
+                  toast.success("Verification started", {
+                    description: "Replaying the change in a clean sandbox.",
+                  });
+                }
+              }}
+            >
+              {isVerifying ? (
+                <Loader2Icon aria-hidden="true" className="animate-spin" />
+              ) : (
+                <RotateCwIcon aria-hidden="true" />
+              )}
+              {change.status === "proposed" ? "Verify" : "Verify again"}
+            </Button>
+          ) : null}
+          {promotable ? (
+            <Button
+              type="button"
+              size="sm"
+              className="pointer-coarse:h-11"
+              disabled={mutating || !canManage}
+              onClick={async () => {
+                const result = await onPromote(change.id);
+                if (result) {
+                  toast.success("Change promoted", {
+                    description: "It's now the environment's active version.",
+                  });
+                }
+              }}
+            >
+              Promote to new version
+            </Button>
           ) : null}
         </div>
       ) : null}
-    </article>
+    </div>
   );
 }
 
@@ -208,53 +192,39 @@ function ChangePayload({
   versionLabel: (versionId: string | null) => string | null;
 }) {
   const baseLabel = versionLabel(change.baseVersionId);
+  const from = baseLabel ? ` Based on ${baseLabel}.` : "";
   if (change.kind === "setup_append") {
     const command = typeof change.payload.command === "string" ? change.payload.command : "";
     const note = typeof change.payload.note === "string" ? change.payload.note : "";
     return (
-      <div className="grid gap-1.5">
-        <PayloadLabel>Command to append{baseLabel ? ` (from ${baseLabel})` : ""}</PayloadLabel>
-        <pre className="overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">
-          {command || "—"}
-        </pre>
-        {note ? <p className="text-xs text-fg-muted">{note}</p> : null}
+      <div className="flex min-w-0 flex-col gap-2">
+        <p className="text-sm leading-5 text-fg-muted">
+          Adds this command to the setup script.{from}
+        </p>
+        <SetupScript script={command || null} />
+        {note ? <p className="text-sm leading-5 text-fg-muted">{note}</p> : null}
       </div>
     );
   }
-  // definition_edit: summarize which fields the next version would change.
+  // definition_edit: which parts of the next version would change.
   const payload = change.payload as Record<string, unknown>;
   const touched: string[] = [];
-  if (typeof payload.image === "string" || payload.image === null)
-    touched.push("legacy base image (ignored)");
   if (typeof payload.setupScript === "string" || payload.setupScript === null)
     touched.push("setup script");
-  if (Array.isArray(payload.checks)) touched.push(`checks (${payload.checks.length})`);
+  if (Array.isArray(payload.checks)) {
+    touched.push(`checks (${payload.checks.length})`);
+  }
   if (Array.isArray(payload.defaultVariableSetIds)) touched.push("default variable sets");
-  if (Array.isArray(payload.credentialHooks)) touched.push("credential hooks");
   const setupScript = typeof payload.setupScript === "string" ? payload.setupScript : null;
+  const changelog = typeof payload.changelog === "string" ? payload.changelog : "";
   return (
-    <div className="grid gap-1.5">
-      <PayloadLabel>Proposed edits{baseLabel ? ` (from ${baseLabel})` : ""}</PayloadLabel>
-      {touched.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
-          {touched.map((field) => (
-            <MetaChip key={field}>{field}</MetaChip>
-          ))}
-        </div>
-      ) : (
-        <p className="text-xs text-fg-subtle">No content fields set.</p>
-      )}
-      {setupScript ? (
-        <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">
-          {setupScript}
-        </pre>
-      ) : null}
+    <div className="flex min-w-0 flex-col gap-2">
+      <p className="text-sm leading-5 text-fg-muted">
+        {touched.length > 0 ? `Changes the ${touched.join(", ")}.` : "Changes nothing."}
+        {from}
+      </p>
+      {changelog ? <p className="text-sm leading-5 text-fg">{changelog}</p> : null}
+      {setupScript ? <SetupScript script={setupScript} /> : null}
     </div>
-  );
-}
-
-function PayloadLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">{children}</div>
   );
 }

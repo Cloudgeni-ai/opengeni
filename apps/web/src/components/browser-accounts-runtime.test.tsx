@@ -114,7 +114,7 @@ describe("signed-out browser account recovery", () => {
 
       expect(container.textContent).toContain("Continue with email");
       expect(container.querySelector("h1")).toBeNull();
-      expect(container.querySelector("h2")?.textContent).toBe("Sign in to OpenGeni");
+      expect(container.querySelector("h2")?.textContent).toBe("Sign in to Opengeni");
       expect(container.querySelector(".max-w-sm")).toBeNull();
       expect(container.textContent).toContain("Create an account");
       expect(container.querySelector('[data-registration="true"]')).toBeNull();
@@ -123,6 +123,54 @@ describe("signed-out browser account recovery", () => {
       );
       expect(createAccount).not.toBeUndefined();
       await act(async () => createAccount!.click());
+      expect(container.querySelector('[data-registration="true"]')).not.toBeNull();
+      expect(container.textContent).toContain("Back to sign in");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a ?mode=signup link opens account creation on an empty account set", async () => {
+    const current = emptyBrokerProjection();
+    const client: BrowserAccountsClientLike = {
+      getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
+      bootstrapSessionSet: async () => current,
+      beginLoginTransaction: async () => {
+        throw new Error("not used");
+      },
+      completeEmailPasswordTransaction: async () => {
+        throw new Error("not used");
+      },
+      cancelLoginTransaction: async () => current,
+      selectLoginSlot: async () => current,
+      logoutLoginSlot: async () => current,
+      logoutSessionSet: async () => ({ generation: "2", actorEpoch: "2", state: "logged_out" }),
+      resolveDeepLink: async () => ({ kind: "unavailable" }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <BrowserAccountsProvider
+            client={client}
+            broadcastChannelName={null}
+            onActorTransition={async () => undefined}
+          >
+            <BrowserAccountsSignedOutPanel
+              presentation="embedded"
+              search="?mode=signup&utm_source=opengeni.ai&utm_medium=website&utm_campaign=hero"
+              emptySetRegistrationPanel={<div data-registration="true">Sign up and resend</div>}
+            />
+          </BrowserAccountsProvider>,
+        ),
+      );
+      await flush();
+
       expect(container.querySelector('[data-registration="true"]')).not.toBeNull();
       expect(container.textContent).toContain("Back to sign in");
     } finally {
@@ -309,11 +357,17 @@ describe("signed-out browser account recovery", () => {
       await flush();
 
       expect(container.querySelector('[data-tenant-surface="true"]')).toBeNull();
-      expect(container.textContent).toContain("Loading browser accounts");
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      // The shared loading indicator is portaled outside the gated tenant tree.
+      expect(
+        document.body.querySelector('[data-page-loading][role="status"][aria-label="Loading"]'),
+      ).not.toBeNull();
 
       await act(async () => releaseSelection());
       await flush();
       expect(container.querySelector('[data-tenant-surface="true"]')).not.toBeNull();
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+      expect(document.body.querySelector("[data-page-loading]")).toBeNull();
     } finally {
       releaseSelection();
       await act(async () => root.unmount());

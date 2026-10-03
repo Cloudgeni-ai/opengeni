@@ -1,6 +1,12 @@
 import { ChevronDownIcon, PlugIcon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { Suspense } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import {
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  type ModelPolicyPickerGroupPresentation,
+  type ModelPolicyPickerProps,
+} from "@opengeni/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,15 +17,46 @@ import {
 import type { McpServerOption } from "@/lib/session-tools";
 import { capabilityGroupSelection, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import { cn } from "@/lib/utils";
+import { openGeniGroupPresentation } from "./billing-class-mark";
 
-export {
-  ModelPolicyPicker as ModelPicker,
-  ModelPolicyPickerMenu as ModelPickerMenu,
-  PickerAnimatedPage,
-  PickerBackHeader,
-  PickerNavRow,
-} from "@opengeni/react";
+export { PickerAnimatedPage, PickerBackHeader, PickerNavRow } from "@opengeni/react";
 export type { ModelPolicyPickerProps as ModelPickerProps, PickerModelRow } from "@opengeni/react";
+
+function firstPartyGroupPresentation(
+  presentation: ModelPolicyPickerGroupPresentation | undefined,
+): ModelPolicyPickerGroupPresentation {
+  return {
+    ...presentation,
+    opengeni_credits: {
+      ...openGeniGroupPresentation.opengeni_credits,
+      ...presentation?.opengeni_credits,
+      label:
+        presentation?.opengeni_credits?.label ?? openGeniGroupPresentation.opengeni_credits?.label,
+      icon:
+        presentation?.opengeni_credits?.icon === undefined
+          ? openGeniGroupPresentation.opengeni_credits?.icon
+          : presentation.opengeni_credits.icon,
+    },
+  };
+}
+
+export function ModelPicker(props: ModelPolicyPickerProps) {
+  return (
+    <ModelPolicyPicker
+      {...props}
+      groupPresentation={firstPartyGroupPresentation(props.groupPresentation)}
+    />
+  );
+}
+
+export function ModelPickerMenu(props: ModelPolicyPickerProps) {
+  return (
+    <ModelPolicyPickerMenu
+      {...props}
+      groupPresentation={firstPartyGroupPresentation(props.groupPresentation)}
+    />
+  );
+}
 
 function pillClass(active: boolean, className?: string): string {
   return cn(
@@ -52,24 +89,30 @@ export function visibleSessionToolSelection(
 }
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
-import { COMPOSER_MENU_PANEL_CLASS, ComposerMenuHeader } from "@/components/ui/composer-menu";
+import {
+  COMPOSER_MENU_PANEL_CLASS,
+  ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
+  lazyComposerPanel,
+} from "@/components/ui/composer-menu";
+import { isComposerConnector } from "@/lib/session-tools";
 
-const LazySessionConnectorsMenuBody = lazy(() =>
-  import("@/components/session-connectors-menu-body").then((module) => ({
-    default: module.SessionConnectorsMenuBody,
-  })),
+const loadSessionConnectorsMenu = () => import("@/components/session-connectors-menu-body");
+
+const LazySessionConnectorsMenuBody = lazyComposerPanel(() =>
+  loadSessionConnectorsMenu().then((module) => module.SessionConnectorsMenuBody),
 );
 
 /** Secondary connector/account controls load only when their menu is opened. */
 export function SessionToolsMenuBody(props: SessionConnectorsMenuProps) {
+  // Same header and one row per known connector, so the menu keeps its size.
+  const rows = Math.min(6, Math.max(1, props.servers.filter(isComposerConnector).length));
   return (
     <Suspense
       fallback={
         <>
           <ComposerMenuHeader title="Connectors" leading={props.leading} />
-          <p role="status" className="px-4 py-4 text-xs text-fg-muted">
-            Loading connectors…
-          </p>
+          <ComposerMenuRowsSkeleton rows={rows} size="tile" label="Loading connectors" />
         </>
       }
     >

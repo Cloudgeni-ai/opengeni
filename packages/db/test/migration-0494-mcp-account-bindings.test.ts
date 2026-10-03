@@ -915,11 +915,14 @@ test("continuation inheritance rejects forged, mismatched and mixed receipt prov
 });
 
 test("non-owner runtime executes resolver but cannot call private validators or claim outbox before provisioning", async () => {
-  await db.exec(`CREATE ROLE mcp_binding_fixture_app NOSUPERUSER NOBYPASSRLS;
-    GRANT USAGE ON SCHEMA public,opengeni_private TO mcp_binding_fixture_app;
-    GRANT EXECUTE ON FUNCTION resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text) TO mcp_binding_fixture_app;
-    SET ROLE mcp_binding_fixture_app;`);
+  // Roles are cluster-wide even though each test file owns its database.
+  // Keep this exact non-owner probe independent across repeated native runs.
+  const fixtureRole = `mcp_binding_fixture_${crypto.randomUUID().replaceAll("-", "")}`;
+  await db.exec(`CREATE ROLE ${fixtureRole} NOSUPERUSER NOBYPASSRLS`);
   try {
+    await db.exec(`GRANT USAGE ON SCHEMA public,opengeni_private TO ${fixtureRole};
+      GRANT EXECUTE ON FUNCTION resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text) TO ${fixtureRole};
+      SET ROLE ${fixtureRole};`);
     expect((await use()).authorization_status).toBe("authorized");
     await expect(validate([binding])).rejects.toThrow("permission denied");
     await expect(
@@ -927,6 +930,7 @@ test("non-owner runtime executes resolver but cannot call private validators or 
     ).rejects.toThrow("permission denied");
   } finally {
     await db.exec("RESET ROLE");
+    await db.exec(`DROP OWNED BY ${fixtureRole}; DROP ROLE ${fixtureRole};`);
   }
 });
 

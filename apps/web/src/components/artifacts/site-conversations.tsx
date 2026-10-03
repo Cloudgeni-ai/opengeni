@@ -1,22 +1,23 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareIcon, RefreshCwIcon } from "lucide-react";
 import type { SessionListResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-  SheetTrigger,
-} from "@/components/ui/sheet";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { Notice } from "@/components/ui/notice";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { sessionStateLabel } from "@/lib/session-rail";
 
-/** Host-owned navigation remains available even when the generated Site is broken. */
+/**
+ * The Site page's Conversations tab. Host-owned, so it works even when the
+ * generated Site is broken.
+ */
 export function SiteConversations(props: { workspaceId: string; siteId: string; title: string }) {
   const { client } = useAppContext();
   return <SiteConversationsPanel {...props} client={client} />;
@@ -33,7 +34,6 @@ export function SiteConversationsPanel({
   siteId: string;
   title: string;
 }) {
-  const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [archivedOnly, setArchivedOnly] = useState(false);
   const [page, setPage] = useState<SessionListResponse | null>(null);
@@ -82,103 +82,94 @@ export function SiteConversationsPanel({
   );
   useEffect(() => {
     setPage(null);
-    if (open) void load();
+    void load();
     return () => request.current?.abort();
-  }, [open, load]);
+  }, [load]);
   const sessions = page
     ? [...new Map([...page.pinned, ...page.sessions].map((s) => [s.id, s])).values()]
     : [];
+  const navigate = useNavigate();
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild>
-        <Button variant="outline" size="sm">
-          <MessageSquareIcon className="mr-2 size-4" />
-          Conversations
-        </Button>
-      </SheetTrigger>
-      <SheetContent className="flex flex-col">
-        <SheetHeader>
-          <SheetTitle>Conversations</SheetTitle>
-          <SheetDescription>
-            Created through {title}, including conversations filed in projects.
-          </SheetDescription>
-        </SheetHeader>
-        <div className="flex gap-1 px-4" aria-label="Conversation visibility">
-          <Button
+    <section aria-label={`Conversations from ${title}`} className="flex min-w-0 flex-col gap-4">
+      <p className="text-sm leading-5 text-fg-muted">
+        Conversations started from {title}, including ones filed in projects.
+      </p>
+      <Toolbar>
+        <ToolbarSearch
+          value={search}
+          onValueChange={setSearch}
+          placeholder="Search conversations"
+          aria-label="Search Site conversations"
+        />
+        <ToolbarGroup align="end">
+          <SegmentedControl<"active" | "archived">
+            aria-label="Conversation visibility"
             size="sm"
-            variant={archivedOnly ? "ghost" : "secondary"}
-            aria-pressed={!archivedOnly}
-            onClick={() => setArchivedOnly(false)}
-          >
-            Active
-          </Button>
-          <Button
-            size="sm"
-            variant={archivedOnly ? "secondary" : "ghost"}
-            aria-pressed={archivedOnly}
-            onClick={() => setArchivedOnly(true)}
-          >
-            Archived
-          </Button>
-        </div>
-        <div className="flex gap-2 px-4">
-          <Input
-            aria-label="Search Site conversations"
-            placeholder="Search conversations…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            options={[
+              { value: "active", label: "Active" },
+              { value: "archived", label: "Archived" },
+            ]}
+            value={archivedOnly ? "archived" : "active"}
+            onValueChange={(value) => setArchivedOnly(value === "archived")}
           />
           <Button
+            type="button"
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             aria-label="Refresh conversations"
             disabled={busy}
             onClick={() => void load()}
+            className="rounded-[10px] text-fg-muted pointer-coarse:size-11"
           >
-            <RefreshCwIcon className="size-4" />
+            <RefreshCwIcon />
           </Button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-          {error ? (
-            <p role="alert" className="py-4 text-sm text-fg-muted">
-              Couldn’t load conversations. Try refreshing.
-            </p>
-          ) : null}
-          {busy && !page ? (
-            <p role="status" className="py-4 text-sm text-fg-muted">
-              Loading conversations…
-            </p>
-          ) : null}
-          {!busy && !error && sessions.length === 0 ? (
-            <p className="py-4 text-sm text-fg-muted">
-              {search ? "No matching conversations." : "No conversations yet."}
-            </p>
-          ) : null}
-          <ul className="space-y-1">
-            {sessions.map((session) => (
-              <li key={session.id}>
-                <a
-                  href={`/workspaces/${workspaceId}/sessions/${session.id}`}
-                  className="flex items-center justify-between gap-3 rounded-lg px-3 py-3 hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent"
-                >
-                  <span className="min-w-0 truncate text-sm">{sessionDisplayTitle(session)}</span>
-                  <span
-                    className="max-w-40 shrink-0 truncate text-xs text-fg-muted"
-                    title={sessionStateLabel(session)}
-                  >
-                    {sessionStateLabel(session)}
-                  </span>
-                </a>
-              </li>
-            ))}
-          </ul>
-          {page?.nextCursor && (
-            <Button variant="ghost" disabled={busy} onClick={() => void load(page.nextCursor!)}>
-              Load older conversations
-            </Button>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
+        </ToolbarGroup>
+      </Toolbar>
+      {error ? (
+        <Notice tone="failed" live="assertive">
+          Couldn’t load conversations. Try refreshing.
+        </Notice>
+      ) : busy && !page ? (
+        <RowList label="Conversations" busy>
+          <ListRowSkeleton count={3} />
+        </RowList>
+      ) : sessions.length === 0 ? (
+        <EmptyState
+          variant="inline"
+          title={search ? "No matching conversations." : "No conversations yet."}
+        />
+      ) : (
+        <RowList label="Conversations" busy={busy}>
+          {sessions.map((session) => (
+            <ListRow
+              key={session.id}
+              leading={<LogoTile icon={<MessageSquareIcon />} name="Conversation" />}
+              title={sessionDisplayTitle(session)}
+              meta={[sessionStateLabel(session)]}
+              href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(session.id)}`}
+              onOpen={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                event.preventDefault();
+                void navigate({
+                  to: "/workspaces/$workspaceId/sessions/$sessionId",
+                  params: { workspaceId, sessionId: session.id },
+                });
+              }}
+            />
+          ))}
+        </RowList>
+      )}
+      {page?.nextCursor && !error ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="self-start pointer-coarse:h-11"
+          disabled={busy}
+          onClick={() => void load(page.nextCursor!)}
+        >
+          Load older conversations
+        </Button>
+      ) : null}
+    </section>
   );
 }

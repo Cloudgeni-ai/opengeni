@@ -17,6 +17,36 @@ FIXTURE = str(BUILD / "fixture")
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_service_reaps_detached_descendants_after_leader_exit(self):
+        for mode in ["leader-first", "double-fork", "clone"]:
+            with self.subTest(mode=mode):
+                result = subprocess.run([BINARY, "service", "--", FIXTURE, mode,
+                                         str(self.marker)], capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 18 if mode == "clone" else 17,
+                                 result.stderr.decode())
+                before = self.marker.read_bytes() if self.marker.exists() else b""
+                time.sleep(0.1)
+                self.assertEqual(self.marker.read_bytes() if self.marker.exists() else b"", before)
+
+    def test_service_forwards_termination_and_leaves_other_service_alive(self):
+        peer = subprocess.Popen([BINARY, "service", "--", "/bin/sleep", "30"])
+        process = subprocess.Popen([BINARY, "service", "--", "/bin/sh", "-c",
+                                    'trap "exit 23" TERM; echo ready; while :; do sleep 1; done'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.children.extend([peer, process])
+        self.assertEqual(process.stdout.readline().strip(), b"ready")
+        process.terminate()
+        self.assertEqual(process.wait(timeout=5), 23)
+        self.assertIsNone(peer.poll())
+        peer.terminate()
+        self.assertEqual(peer.wait(timeout=5), 143)
+
+    def test_service_child_inherits_no_private_descriptors_or_signal_mask(self):
+        for mode, code in [("fd-check", 0), ("signal-check", 19)]:
+            result = subprocess.run([BINARY, "service", "--", FIXTURE, mode,
+                                     str(self.marker)], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, code, result.stderr.decode())
+
     def test_capabilities_checks_kernel_without_launching_children(self):
         result = subprocess.run([BINARY, "capabilities"], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0)

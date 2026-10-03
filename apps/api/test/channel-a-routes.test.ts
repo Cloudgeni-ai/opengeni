@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
+import { ControlRequest, ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
 import {
   SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
@@ -16,6 +17,8 @@ import {
   BrowserControlTransportError,
   RoutingActiveRouteChangedError,
   RoutingWorkspaceRootChangedError,
+  NatsControlRpc,
+  agentErrorToControlError,
 } from "@opengeni/runtime/sandbox";
 import {
   channelAOperationFailureDiagnostic,
@@ -63,6 +66,11 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
+    permission: "files:read",
+    operation: "fs.read",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace",
     permission: "files:read",
     operation: "fs.read",
   },
@@ -171,6 +179,17 @@ describe("P4.4 Channel-A route discipline", () => {
     }
   });
 
+  test("workspace-only read forces confinement after authorization, even if the client opts out", () => {
+    const body = handlerBody(
+      sessionsRoute,
+      "post",
+      "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace",
+    );
+    expect(body).toContain("workspaceOnly: true");
+    expect(body.indexOf("channelAPreamble")).toBeLessThan(body.indexOf("parseChannelABody"));
+    expect(body).toContain("withChannelARead(");
+  });
+
   for (const route of CHANNEL_A_ROUTES) {
     test(`${route.path}: grant (preamble) precedes the Zod parse + carries ${route.permission}`, () => {
       const body = handlerBody(sessionsRoute, "post", route.path);
@@ -236,6 +255,68 @@ describe("P4.4 Channel-A route discipline", () => {
     expect((mapped as HTTPException).message).toBe(
       "Workspace files are temporarily unavailable. Retry.",
     );
+  });
+
+  test("oversized native requests preserve the transport size rejection at the API boundary", async () => {
+    let dispatched = false;
+    const rpc = new NatsControlRpc(async () => ({
+      request: async (_subject, payload) => {
+        if (payload.byteLength > 1024 * 1024) {
+          throw Object.assign(new Error("private transport diagnostic"), {
+            code: "MAX_PAYLOAD_EXCEEDED",
+          });
+        }
+        dispatched = true;
+        throw new Error("unexpected dispatch");
+      },
+    }));
+    const result = await rpc.request(
+      "agent.synthetic.rpc",
+      ControlRequest.fromPartial({
+        requestId: "synthetic-large-write",
+        op: {
+          $case: "fsWrite",
+          fsWrite: {
+            path: "/synthetic/document.txt",
+            content: new Uint8Array(1_118_000),
+          },
+        },
+      }),
+      { timeoutMs: 100 },
+    );
+    expect(dispatched).toBe(false);
+    const error = agentErrorToControlError(result.error!);
+    expect(mapChannelAError(error)).toMatchObject({
+      status: 413,
+      code: "limit_exceeded",
+      retryable: false,
+      details: { code: "machine_transport_payload_too_large", direction: "request" },
+    });
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "request_rejected",
+      status: 413,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
+  });
+
+  test("oversized native replies never imply that replay is safe or expose native diagnostics", () => {
+    const error = agentErrorToControlError({
+      code: AgentErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
+      message: "secret file contents",
+      detail: { encoded_bytes: "secret", max_payload: "secret", path: "/private/file" },
+      retryable: true,
+    });
+    const mapped = mapChannelAError(error) as HTTPException;
+    expect(mapped).toMatchObject({ status: 502, code: "limit_exceeded", retryable: false });
+    expect(mapped.message).toContain("may have completed");
+    expect(mapped.message).not.toContain("not sent");
+    expect(JSON.stringify(mapped)).not.toContain("secret");
+    expect(JSON.stringify(mapped)).not.toContain("/private/file");
+    expect(channelAOperationFailureDiagnostic(error)).toEqual({
+      reason: "provider_unavailable",
+      status: 502,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
   });
 
   test("request aborts map to a distinct 499 cancellation diagnostic", () => {
@@ -663,5 +744,59 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(body).toContain("pty.execSessionId");
     expect(sessionsRoute).toContain("pty retained-process identity is stale; reopen the terminal");
     expect(body).not.toContain("execSessionId === null");
+  });
+});
+
+describe("ephemeral controller callback replay fence", () => {
+  for (const failure of [
+    new BrowserControlTransportError("response lost after controller consumed request"),
+    new ChannelAUnavailableError("provider response lost after callback dispatch"),
+  ]) {
+    test(`never refreshes or replays a consumed callback after ${failure.constructor.name}`, async () => {
+      let callbacks = 0;
+      let refreshes = 0;
+      await expect(
+        runChannelAReadWithFreshHandleRetry(
+          async () => {
+            callbacks += 1;
+            throw failure;
+          },
+          async () => {
+            refreshes += 1;
+          },
+          {
+            allowOperationReplay: false,
+            maxFreshHandleRetries: 2,
+            retryableError: () => true,
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect(callbacks).toBe(1);
+      expect(refreshes).toBe(0);
+    });
+  }
+
+  test("uncached browser placement carries the persisted ephemeral mode into Channel-A", () => {
+    const route = readFileSync(resolve(here, "..", "src", "routes", "browser-sessions.ts"), "utf8");
+    const active = route.slice(
+      route.indexOf("async function withActiveBrowserController"),
+      route.indexOf("async function throwBrowserSourcePlacementChanged"),
+    );
+    const uncached = active.slice(active.indexOf("return await withBrowserPlacement("));
+    expect(uncached).toContain('browserSessionStorageMode(record.session) !== "ephemeral_context"');
+    expect(uncached).toContain(
+      'if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();',
+    );
+    expect(
+      uncached.indexOf(
+        'if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();',
+      ),
+    ).toBeLessThan(uncached.indexOf("withControllerTransportRecovery({"));
+    const placement = route.slice(
+      route.indexOf("async function withBrowserPlacement"),
+      route.indexOf("async function withActiveBrowserController"),
+    );
+    expect(placement).toContain("allowOperationReplay,");
+    expect(channelASeam).toContain("allowOperationReplay: ctx.allowOperationReplay");
   });
 });

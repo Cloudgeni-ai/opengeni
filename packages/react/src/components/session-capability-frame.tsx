@@ -1,4 +1,4 @@
-import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
+import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
@@ -12,7 +12,11 @@ export type SessionCapabilityFrameProps = {
   skill: boolean;
   expanded: boolean;
   complete: boolean;
+  /** Completion copy must reflect the provider's actual scope of access. */
+  completeLabel?: string;
   actionLabel: string;
+  /** Direct navigation actions should not announce a dialog on the card. */
+  opensDialog?: boolean;
   note: string;
   onOpen(): void;
   onClose(): void;
@@ -22,6 +26,13 @@ export type SessionCapabilityFrameProps = {
   children?: ReactNode;
   /** A catalogue row can own the opener while reusing the same details dialog. */
   dialogOnly?: boolean;
+  /**
+   * Replaces the action when the viewer cannot start setup here (the provider
+   * is not configured, or someone else must connect it). Say why and who can.
+   */
+  actionUnavailable?: ReactNode;
+  /** Host-owned content inside the card, under its status or actions. */
+  details?: ReactNode;
 };
 
 function Mark({ src, name }: { src: string | null; name: string }) {
@@ -48,7 +59,9 @@ export function SessionCapabilityFrame({
   skill,
   expanded,
   complete,
+  completeLabel,
   actionLabel,
+  opensDialog = true,
   note,
   onOpen,
   onClose,
@@ -57,6 +70,8 @@ export function SessionCapabilityFrame({
   cardRef,
   children,
   dialogOnly = false,
+  actionUnavailable,
+  details,
 }: SessionCapabilityFrameProps) {
   const localOpener = useRef<HTMLButtonElement>(null);
   const localCard = useRef<HTMLElement>(null);
@@ -90,30 +105,44 @@ export function SessionCapabilityFrame({
         </div>
         {complete ? (
           <p role="status" className="og-session-capability-copy">
-            {skill ? "Installed · Workspace" : "Connected · Available in this conversation"}
+            {completeLabel ??
+              (skill ? "Installed · Workspace" : "Connected · Available in this conversation")}
           </p>
         ) : (
           <>
             <p className="og-session-capability-copy">{description}</p>
-            <div className="og-session-capability-actions">
-              <span>
-                <ShieldCheckIcon size={13} aria-hidden />
-                {skill ? "Guidance only · no account access" : "You choose what to authorize"}
-              </span>
-              <button
-                ref={buttonRef}
-                type="button"
-                onClick={onOpen}
-                aria-haspopup="dialog"
-                aria-expanded={expanded}
-              >
-                {actionLabel}
-              </button>
-            </div>
+            {actionUnavailable ? (
+              <div className="og-session-capability-actions" data-unavailable="">
+                <span role="note">
+                  <InfoIcon size={13} aria-hidden />
+                  {actionUnavailable}
+                </span>
+              </div>
+            ) : (
+              <div className="og-session-capability-actions">
+                <span>
+                  <ShieldCheckIcon size={13} aria-hidden />
+                  {skill ? "Guidance only · no account access" : "You choose what to authorize"}
+                </span>
+                <button
+                  ref={buttonRef}
+                  type="button"
+                  onClick={onOpen}
+                  disabled={busy}
+                  aria-haspopup={opensDialog ? "dialog" : undefined}
+                  aria-expanded={opensDialog ? expanded : undefined}
+                >
+                  {actionLabel}
+                </button>
+              </div>
+            )}
           </>
         )}
+        {details}
       </section>
-      {!complete && !dialogOnly ? <p className="og-session-capability-note">{note}</p> : null}
+      {!complete && !dialogOnly && note ? (
+        <p className="og-session-capability-note">{note}</p>
+      ) : null}
       <Dialog.Root
         open={expanded && !complete}
         onOpenChange={(open) => {

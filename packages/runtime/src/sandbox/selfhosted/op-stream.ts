@@ -389,7 +389,7 @@ export class OpStreamExecClient {
     opId: string,
     yieldMs: number,
     captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
-  ): Promise<OpStreamExecResult> {
+  ): Promise<OpStreamExecResult & { replaySequence: string }> {
     if (this.inFlight.has(opId)) throw protocolError("op-stream read: duplicate concurrent op id");
     const consumer = new OpConsumer(
       this.deps,
@@ -416,9 +416,13 @@ export class OpStreamExecClient {
       if (result.status === "running" && !result.terminal) {
         this.readCheckpoints.set(opId, consumer.readCheckpoint());
       }
+      // Progress/partial UTF-8 frames can advance verified replay without
+      // producing a decoded output chunk. Expose the contiguous protocol
+      // frontier only after capture succeeds, never the provider high watermark.
+      const replaySequence = consumer.readCheckpoint().lastApplied.toString();
       return result.status === "completed"
-        ? { status: "completed", outcome: result.outcome }
-        : result;
+        ? { status: "completed", outcome: result.outcome, replaySequence }
+        : { ...result, replaySequence };
     } finally {
       consumer.teardown();
       this.inFlight.delete(opId);

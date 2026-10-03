@@ -1,0 +1,8 @@
+/* DEV-only utilities for the UI kit at /dev/ui-kit.
+   The app stylesheet skips this folder (`@source not` in src/styles.css), so
+   the kit's page previews and alternatives add nothing to production CSS.
+   Only the lazy, DEV-only kit route imports this file. The reference brings in
+   the app's theme tokens and custom variants without emitting them again. */
+@reference "../../styles.css";
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./";

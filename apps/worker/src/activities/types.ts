@@ -144,6 +144,11 @@ export type ControlActivityServices = SharedActivityServices;
 
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
+  /** Host-owned containment: stop polling and checkpoint peer turns before exit.
+   * Bare activity embedders must provide their own worker lifecycle edge. */
+  requestWorkerDrain: () => void;
+  /** Deterministic test clock for the cleanup-only monitor. */
+  turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
@@ -157,7 +162,7 @@ export type ActivityServices = ControlActivityServices &
 
 export type CodexCapacityWaitRef = {
   /** Absent only for Temporal histories written before provider-tagged waits. */
-  provider?: "codex" | "xai";
+  provider?: "codex" | "xai" | "claude";
   waiterId: string;
   generation: number;
   nextCheckAt: string;
@@ -179,7 +184,7 @@ export type ReconcileCodexCapacityWaitInput = {
   generation: number;
   cause: "timer" | "signal" | "queue" | "recovery";
   /** Absent only for Codex waits and pre-provider-tagged workflow histories. */
-  provider?: "codex" | "xai";
+  provider?: "codex" | "xai" | "claude";
 };
 
 export type ReconcileCodexCapacityWaitResult =
@@ -302,6 +307,10 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerRecoveryCount?: number;
   /** Safe classified provider cause paired with providerRecoveryCount. */
   providerFailureCode?: string;
+  /** Persist the no-replay setup marker, not a new provider/setup attempt. */
+  sandboxSetupOutcomeUnknown?: true;
+  /** Preserve the exhausted budget for a command proven not dispatched. */
+  sandboxSetupRecoveryExhausted?: true;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -395,6 +404,18 @@ export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
 };
 
+export type ExpireScheduledRunHumanWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  runId: string;
+};
+
+export type ExpireScheduledRunHumanWaitResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
 export type MarkSessionIdleInput = {
   workspaceId: string;
   sessionId: string;
@@ -424,6 +445,7 @@ export type DispatchScheduledTaskRunInput = {
       triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
       agentRunUsageIdempotencyKey?: never;
       initiator?: never;
+      credentialRestriction?: never;
     }
   | {
       triggerType: Extract<
@@ -433,6 +455,8 @@ export type DispatchScheduledTaskRunInput = {
       agentRunUsageIdempotencyKey: string;
       /** Exact identity used by the API-side charge for this same trigger. */
       initiator: TurnInitiator;
+      /** Trusted API-side caller ceiling for this occurrence, not the schedule. */
+      credentialRestriction?: "developer_setup";
     }
 );
 
@@ -440,8 +464,13 @@ export type DispatchScheduledTaskRunResult =
   | { action: "deleted" }
   | {
       action: "blocked";
+      runId?: string;
+      diagnostic?: import("@opengeni/contracts").ConnectionAccountSelectionDiagnostic;
+      /** Present when the occurrence was refused as a visible run receipt. */
+      refusal?: import("@opengeni/contracts").ScheduledTaskAdmissionRefusal;
       reason:
         | "insufficient_credits"
+        | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
         | "malformed_manual_trigger"
@@ -450,6 +479,11 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_run_terminal"
         | "scheduled_execution_unrepresentable"
         | "connection_account_unavailable"
+        | "scheduled_authority_unavailable"
+        | "machine_target_unavailable"
+        | "machine_enrollment_inactive"
+        | "variable_set_unavailable"
+        | "rig_version_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "incident_preflight_metadata_missing"
@@ -568,5 +602,5 @@ export type RunAgentTurnResult =
   | ClaimedRunAgentTurnResult
   | {
       status: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };

@@ -33,9 +33,11 @@ import {
   fetchCodexRateLimitResetCredits,
   fetchCodexUsage,
   normalizeCodexUsage,
+  parseIdToken,
   refreshCodexToken,
 } from "@opengeni/codex";
 import { encryptEnvironmentValue } from "./environment-crypto";
+import type { CodexPlanEntitlementExclusion } from "./codex-plan-entitlement";
 import type { Database } from "./database";
 
 export type CodexCredentialTokens = {
@@ -54,6 +56,11 @@ export type CodexCredentialForRun = {
   chatgptAccountId: string | null;
   scopes: string | null;
   planType: string | null;
+  /** Plan before the most recent recorded plan change (see migration 0524). */
+  planPreviousType?: string | null;
+  planChangedAt?: Date | null;
+  /** Models the recorded plan was proven not to include, expired or not. */
+  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   isFedramp: boolean;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
@@ -73,6 +80,12 @@ export type CodexAccountUsageSnapshot = {
   resetCreditAvailableCount?: number | null;
   resetCreditsCheckedAt?: Date | null;
   /**
+   * Provider-reported current ChatGPT plan (`plan_type`). Persisted with
+   * `planCheckedAt`; a changed plan retires any plan entitlement exclusion.
+   */
+  planType?: string | null;
+  planCheckedAt?: Date;
+  /**
    * Clear only a quota cooldown with this exact revision. Set solely after a
    * live provider response proves allowance is open; a concurrent refusal
    * advances the revision and makes this observation stale.
@@ -87,6 +100,8 @@ type CodexCredentialRefreshInput = {
   credentialEncrypted: string;
   expiresAt: Date | null;
   lastRefreshAt: Date;
+  /** `chatgpt_plan_type` from a rotated id_token; omitted when none was returned. */
+  planType?: string | null;
 };
 
 type CodexCredentialStatusTarget = {
@@ -104,6 +119,8 @@ type CodexCredentialStatusTarget = {
 export type CodexCredentialTokenSnapshot = CodexTokenSnapshot & {
   /** Exact credential-row version whose bearer is about to reach the provider. */
   credentialVersion: number;
+  /** Plan recorded for that version (from the id_token of the latest refresh). */
+  planType?: string | null;
 };
 
 const inflight = new Map<string, Promise<CodexCredentialTokenSnapshot>>();
@@ -227,6 +244,16 @@ export type CodexAuthDeps = {
     credentialId: string,
     snapshot: CodexAccountUsageSnapshot,
   ) => Promise<boolean>;
+  /**
+   * A token refresh observed a different plan on a credential that carried a
+   * plan exclusion, which that write retired. Called after the refresh lock is
+   * released so capacity waiters blocked by the exclusion can re-evaluate.
+   */
+  onPlanExclusionRetired?: (
+    db: Database,
+    workspaceId: string,
+    credentialId: string,
+  ) => Promise<void>;
 };
 
 export function buildCodexTokenResolver(
@@ -249,8 +276,12 @@ export function buildCodexTokenResolver(
     chatgptAccountId: cred.chatgptAccountId,
     isFedramp: cred.isFedramp,
     credentialVersion: cred.version,
+    planType: cred.planType,
   });
 
+  // Credentials whose refresh just retired a plan exclusion; drained after the
+  // refresh lock is released (see onPlanExclusionRetired).
+  const planExclusionRetired = new Set<string>();
   const performRefresh = async (
     refreshDb: Database,
     cred: CodexCredentialForRun,
@@ -269,6 +300,9 @@ export function buildCodexTokenResolver(
       if (!key) {
         throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
       }
+      // A rotated id_token carries the account's CURRENT ChatGPT plan. Persist
+      // it with the tokens so a plan change is visible without a reconnect.
+      const refreshedPlanType = next.idToken ? parseIdToken(next.idToken).planType : null;
       // Compare-and-set on the loaded (id, version): if a disconnect→reconnect
       // replaced the row mid-refresh, this writes 0 rows and we must NOT clobber
       // the new credential with our now-defunct rotated tokens.
@@ -279,6 +313,7 @@ export function buildCodexTokenResolver(
         credentialEncrypted: deps.encrypt(key, JSON.stringify(tokens)),
         expiresAt: accessTokenExpiry(tokens.access_token),
         lastRefreshAt: new Date(),
+        ...(refreshedPlanType ? { planType: refreshedPlanType } : {}),
       });
       if (!persisted) {
         // The row changed under us. Our rotated tokens belong to a stale family;
@@ -292,11 +327,19 @@ export function buildCodexTokenResolver(
           "Codex credential changed during token refresh; reconnect required.",
         );
       }
+      if (
+        refreshedPlanType &&
+        cred.planEntitlementExclusion &&
+        (cred.planType ?? "").toLowerCase() !== refreshedPlanType.toLowerCase()
+      ) {
+        planExclusionRetired.add(cred.id);
+      }
       return {
         accessToken: tokens.access_token,
         chatgptAccountId: cred.chatgptAccountId,
         isFedramp: cred.isFedramp,
         credentialVersion: cred.version + 1,
+        planType: refreshedPlanType ?? cred.planType,
       };
     } catch (error) {
       if (error instanceof CodexReloginRequired) {
@@ -343,7 +386,10 @@ export function buildCodexTokenResolver(
           return { ok: false as const, error };
         }
       })
-      .then((outcome) => {
+      .then(async (outcome) => {
+        if (planExclusionRetired.delete(cred.id)) {
+          await deps.onPlanExclusionRetired?.(db, workspaceId, cred.id).catch(() => undefined);
+        }
         if (!outcome.ok) throw outcome.error;
         return outcome.value;
       })
@@ -446,7 +492,11 @@ export async function fetchCodexUsageForAccount(
 
   const parsedQuota =
     normalized.status !== "error" && (normalized.fiveHour != null || normalized.weekly != null);
-  if (parsedQuota || normalized.rateLimitResetCredits) {
+  const observedPlanType =
+    normalized.status !== "error" && typeof normalized.planType === "string"
+      ? normalized.planType.trim() || null
+      : null;
+  if (parsedQuota || normalized.rateLimitResetCredits || observedPlanType) {
     const checkedAt = new Date();
     // Quota windows and reset-summary freshness are independent. A malformed
     // usage body can still carry a syntactically valid count; that count may be
@@ -479,11 +529,101 @@ export async function fetchCodexUsageForAccount(
               resetCreditsCheckedAt: checkedAt,
             }
           : {}),
+        ...(observedPlanType ? { planType: observedPlanType, planCheckedAt: checkedAt } : {}),
       })
       .catch(() => undefined);
   }
 
   return normalized;
+}
+
+export type CodexCredentialPlanRecheck = {
+  /** Plan recorded before this re-check (null when never observed). */
+  previousPlanType: string | null;
+  /** Freshly observed plan, or null when neither provider source reported one. */
+  planType: string | null;
+  source: "usage" | "token_refresh" | null;
+  /** Credential version the observation belongs to (after any refresh). */
+  credentialVersion: number | null;
+  /**
+   * The credential's most recent recorded plan change after this observation
+   * was persisted (including one this re-check itself observed). Ordinary
+   * observers of an unchanged plan never overwrite it.
+   */
+  planChangedFrom: string | null;
+  planChangedAt: Date | null;
+  /** Plan exclusion after this observation, including expired entries. */
+  exclusion: CodexPlanEntitlementExclusion | null;
+};
+
+/**
+ * Re-read one credential's CURRENT ChatGPT plan from the provider and persist
+ * it. /wham/usage `plan_type` is tried first because it rotates no token; when
+ * it reports no plan, one forced token refresh reads `chatgpt_plan_type` from
+ * the new id_token (under the shared refresh lock and version CAS). Provider
+ * failures produce `planType: null`, never an exception, so a caller can fall
+ * back to its existing terminal behavior. The returned change record and
+ * exclusion are read back after the observation is persisted.
+ */
+export async function recheckCodexCredentialPlan(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  deps: CodexAuthDeps,
+  fetchImpl: CodexFetch = fetch,
+): Promise<CodexCredentialPlanRecheck> {
+  const load = () => deps.loadCredential(db, settings, workspaceId, credentialId).catch(() => null);
+  const before = await load();
+  const previousPlanType = before?.planType ?? null;
+  const result = (
+    planType: string | null,
+    source: CodexCredentialPlanRecheck["source"],
+    after: CodexCredentialForRun | null,
+    credentialVersion: number | null,
+  ): CodexCredentialPlanRecheck => {
+    const record = after ?? before;
+    return {
+      previousPlanType,
+      planType,
+      source,
+      credentialVersion,
+      planChangedFrom: record?.planPreviousType ?? null,
+      planChangedAt: record?.planChangedAt ?? null,
+      exclusion: record?.planEntitlementExclusion ?? null,
+    };
+  };
+  const usage = await fetchCodexUsageForAccount(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    deps,
+    fetchImpl,
+  ).catch(() => null);
+  const usagePlan =
+    usage && usage.status !== "error" && typeof usage.planType === "string"
+      ? usage.planType.trim() || null
+      : null;
+  if (usagePlan) {
+    const after = await load();
+    return result(usagePlan, "usage", after, after?.version ?? before?.version ?? null);
+  }
+  try {
+    const refreshed = await buildCodexTokenResolver(
+      db,
+      settings,
+      workspaceId,
+      credentialId,
+      deps,
+    ).refresh();
+    const planType =
+      typeof refreshed.planType === "string" ? refreshed.planType.trim() || null : null;
+    const after = await load();
+    return result(planType, planType ? "token_refresh" : null, after, refreshed.credentialVersion);
+  } catch {
+    return result(null, null, null, before?.version ?? null);
+  }
 }
 
 export type CodexRateLimitResetCreditsAccountResult =

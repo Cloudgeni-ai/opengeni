@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SendMessageInput, SessionEvent } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { startTransition, useState } from "react";
 import { flushSync } from "react-dom";
 
@@ -10,6 +11,157 @@ import { actRun, flush, registerDom, renderComponent, renderHook } from "./rende
 registerDom();
 
 describe("useComposer embedding policy", () => {
+  test("uncertain delivery keeps its bounded support reference across remount without storing diagnostics", async () => {
+    const sessionId = crypto.randomUUID();
+    const error = new OpenGeniApiError(0, "private diagnostic body", {
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      correlationId: "support-reference",
+      displayMessage: "OpenGeni private transport diagnostic",
+    });
+    const client = fakeClient({
+      sendMessage: async () => {
+        throw error;
+      },
+    });
+    const render = () =>
+      renderHook(
+        () =>
+          useComposer(sessionId, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            draftPersistence: "disabled",
+            initialPolicy: {
+              model: "host-default",
+              reasoningEffort: "medium",
+              latencyMode: "standard",
+            },
+          }),
+        undefined,
+      );
+    const initial = await render();
+    await actRun(() => initial.result.current.setValue("Keep this message"));
+    await actRun(() => initial.result.current.send());
+    await flush(40);
+    expect(initial.result.current.optimisticMessages?.[0]).toMatchObject({
+      state: "failed",
+      outcomeUnknown: true,
+      correlationId: "support-reference",
+    });
+    await initial.unmount();
+    const remounted = await render();
+    try {
+      await flush(40);
+      expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
+        "Reference: support-reference.",
+      );
+      expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
+        "Check its status before retrying",
+      );
+      const stored = Array.from({ length: sessionStorage.length }, (_, index) =>
+        sessionStorage.getItem(sessionStorage.key(index)!),
+      ).join("\n");
+      expect(stored).not.toContain("private diagnostic body");
+      expect(stored).not.toContain("OpenGeni private transport diagnostic");
+    } finally {
+      await remounted.unmount();
+    }
+  });
+  test("refused-message Edit preserves attachments and annotations without overwriting a newer draft", async () => {
+    const sessionId = crypto.randomUUID();
+    const resource = { kind: "file" as const, fileId: crypto.randomUUID() };
+    const annotation = {
+      id: crypto.randomUUID(),
+      source: {
+        kind: "user_message" as const,
+        eventId: crypto.randomUUID(),
+        eventType: "user.message" as const,
+        sequence: 2,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 5,
+        contextBefore: "",
+        contextAfter: " world",
+      },
+      quote: "hello",
+      note: "Keep this exact source.",
+    };
+    let attempts = 0;
+    const client = fakeClient({
+      sendMessage: async () => {
+        attempts += 1;
+        throw new OpenGeniApiError(402, "", {
+          code: "payment_required",
+          displayMessage: "Insufficient credits",
+          retryable: false,
+          outcomeUnknown: false,
+        });
+      },
+    });
+    const render = () =>
+      renderHook(
+        () =>
+          useComposer(sessionId, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            draftPersistence: "disabled",
+            initialPolicy: {
+              model: "paid-model",
+              reasoningEffort: "medium",
+              latencyMode: "standard",
+            },
+          }),
+        undefined,
+      );
+    const hook = await render();
+    await actRun(() => {
+      hook.result.current.setValue("read my attachment");
+      hook.result.current.applyDraft({
+        revision: 0,
+        text: "read my attachment",
+        resources: [resource],
+        annotations: [annotation],
+        model: "paid-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    await actRun(() => hook.result.current.send());
+    await flush();
+    const refused = hook.result.current.optimisticMessages![0]!;
+    expect(refused).toMatchObject({ state: "failed", retryable: false, outcomeUnknown: false });
+    const staleEdit = hook.result.current.restoreOptimisticMessage!;
+    await actRun(() => hook.result.current.setValue("newer unsent draft"));
+    expect(hook.result.current.restoreOptimisticMessage).toBeUndefined();
+    await actRun(() => staleEdit(refused.clientEventId));
+    expect(hook.result.current.value).toBe("newer unsent draft");
+    expect(hook.result.current.optimisticMessages).toHaveLength(1);
+    await actRun(() => hook.result.current.setValue(""));
+    await actRun(() => hook.result.current.setModel("another-allowed-model"));
+    await hook.unmount();
+
+    const remounted = await render();
+    expect(remounted.result.current.optimisticMessages![0]).toMatchObject({
+      state: "failed",
+      retryable: false,
+      resources: [resource],
+      annotations: [annotation],
+    });
+    await actRun(() => remounted.result.current.setModel("another-allowed-model"));
+    await actRun(() => remounted.result.current.restoreOptimisticMessage?.(refused.clientEventId));
+    expect(remounted.result.current.value).toBe("read my attachment");
+    expect(remounted.result.current.restoredResources).toEqual([resource]);
+    expect(remounted.result.current.annotations).toEqual([annotation]);
+    expect(remounted.result.current.policy?.model).toBe("another-allowed-model");
+    expect(remounted.result.current.optimisticMessages).toEqual([]);
+    expect(attempts).toBe(1);
+    await remounted.unmount();
+  });
+
   test("a synchronous host render cannot project an older composer state lane", async () => {
     const projectedValues: string[] = [];
     let setComposerValue!: (value: string) => void;

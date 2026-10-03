@@ -1,4 +1,5 @@
 import { Markdown, type MarkdownProps } from "@opengeni/react";
+import { consoleLinkResolver } from "@/lib/session-artifact-navigation";
 import { cn } from "@/lib/utils";
 
 /**
@@ -13,6 +14,7 @@ export function MarkdownText({
   onSandboxFile,
   renderInteractiveBlock,
   renderImage,
+  suppressImages = false,
   searchTarget,
   artifactHref,
 }: {
@@ -20,6 +22,7 @@ export function MarkdownText({
   artifactHref?: MarkdownProps["artifactHref"];
   searchTarget?: MarkdownProps["searchTarget"];
   renderImage?: MarkdownProps["renderImage"];
+  suppressImages?: boolean;
   renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
   compact?: boolean;
   streaming?: boolean;
@@ -28,9 +31,11 @@ export function MarkdownText({
   return (
     <Markdown
       artifactHref={artifactHref}
+      resolveLink={consoleLinkResolver}
       searchTarget={searchTarget}
       streaming={streaming}
       renderImage={renderImage}
+      suppressImages={suppressImages}
       renderInteractiveBlock={renderInteractiveBlock}
       onSandboxFile={onSandboxFile}
       className={cn("markdown-stream", compact && "markdown-stream-compact")}

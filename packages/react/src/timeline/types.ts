@@ -1,4 +1,5 @@
 import type {
+  AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
   MediaGenerationResult,
@@ -56,6 +57,7 @@ export type UserMessageItem = {
         state: "sending" | "queued" | "failed";
         error?: string | undefined;
         onRetry?: (() => void) | undefined;
+        onEdit?: (() => void) | undefined;
         onRemove?: (() => void) | undefined;
       }
     | undefined;
@@ -89,11 +91,21 @@ export type AgentMessageItem = {
   id: string;
   turnId: string | null;
   text: string;
-  /** Provider-declared assistant channel. Absent on legacy and non-Responses events. */
+  /**
+   * Assistant channel: provider-declared, or `commentary` when the model asked
+   * for tool work in the same response. Absent on legacy events and on
+   * undeclared final messages. Known from the first delta for Responses models.
+   */
   phase?: "commentary" | "final_answer" | undefined;
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;
   occurredAt: string;
+  /**
+   * When the first streamed text arrived, kept once completion moves
+   * `occurredAt` to the completion time. Absent for a message that never
+   * streamed.
+   */
+  startedAt?: string | undefined;
   /** Available only after the canonical completed event lands. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
 };
@@ -217,7 +229,11 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
-  blockedReason?: "rotation_in_progress" | undefined;
+  blockedReason?:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | undefined;
   occurredAt: string;
 };
 
@@ -340,6 +356,8 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /** Presentation-only evidence that this historical attention state resumed. */
+  resolvedAt?: string;
   occurredAt: string;
 };
 
@@ -364,11 +382,27 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** Presentation-only evidence that a historical approval wait resumed. */
+  resolvedAt?: string;
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
+  /**
+   * Recorded agent wait only: delegated worker sessions that had not reported
+   * back when the wait began. Best effort from the loaded history; absent when
+   * none are known.
+   */
+  waitingAgents?: number;
+  /** Recorded agent wait only: when later input ended the wait. */
+  waitEndedAt?: string;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
+  /**
+   * A usage ceiling refused further work. `text` keeps the canonical sentence
+   * for plain-text consumers; `MessageTimeline` renders this structured row
+   * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
+   */
+  allowance?: AllowanceExhaustedRefusal;
   occurredAt: string;
 };
 
@@ -434,6 +468,8 @@ export type MachineInputBatchItem = {
   id: string;
   turnId: string | null;
   members: MachineInputMember[];
+  /** Readable-turn presentation keeps machine payload prose inside the disclosure. */
+  compact?: boolean;
   occurredAt: string;
 };
 
@@ -475,6 +511,8 @@ export type AuthNeededItem = {
   authorizationUrl: string | null;
   /** Agent-selected catalog recommendation. The host still owns authorization. */
   capability?: NonNullable<ToolAuthNeededPayload["capability"]> | null | undefined;
+  /** Human-reviewed custom integration proposal. Never treated as catalog authority. */
+  setupRequest?: ToolAuthNeededPayload["setupRequest"] | null | undefined;
   occurredAt: string;
 };
 
@@ -482,6 +520,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** A durable Retry reopened this failed logical turn; its failure is history. */
+  resumedAt?: string;
   /** Keep an existing answer visible when a recorded input wait ends without final output. */
   preserveWaitResponse?: true;
   id: string;
@@ -516,7 +556,10 @@ export type TimelineItem = (
   sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
 };
 
-/** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
+/**
+ * Activity items cluster between chat messages (reasoning, tools, workers,
+ * sandbox, memory). Assistant prose is rendered separately.
+ */
 export type ActivityItem =
   | ReasoningItem
   | ToolCallItem
@@ -525,7 +568,8 @@ export type ActivityItem =
   | StartupPhaseItem
   | MemoryItem
   | KnowledgeItem
-  | FleetDecisionItem;
+  | FleetDecisionItem
+  | AgentMessageItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -535,6 +579,14 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
+      /** One turn's chronological work history, including progress prose after settlement. */
+      work?: {
+        startedAt: string;
+        endedAt?: string;
+        responseStartedAt?: string;
+        waiting?: { label: string; since: string };
+        details: TimelineGroup[];
+      };
     }
   | {
       kind: "turn";

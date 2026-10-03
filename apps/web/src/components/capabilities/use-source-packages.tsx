@@ -20,6 +20,7 @@ import {
   type RefObject,
 } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 import { skillReleaseMessage, skillInstallationMessage } from "./skill-release-message";
 import { pluginRemovalMessage } from "./plugin-removal-result";
 
@@ -79,6 +80,7 @@ const SourcePackageDialogs = lazy(async () => {
 });
 
 export function useSourcePackages({
+  refreshRevision = 0,
   client,
   workspaceId,
   connections,
@@ -96,6 +98,7 @@ export function useSourcePackages({
   restoreFocusRef?: RefObject<HTMLElement | null>;
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   onManageSkills?: () => void;
+  refreshRevision?: number;
 }): SourcePackages {
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
@@ -131,7 +134,7 @@ export function useSourcePackages({
     }
   }, [client, workspaceId]);
 
-  useEffect(() => void load(), [load]);
+  useEffect(() => void load(), [load, refreshRevision]);
 
   function openNew(kind: SourceImportKind) {
     const hasDraft = Boolean(
@@ -172,7 +175,7 @@ export function useSourcePackages({
     } catch (error) {
       dispatchSourceImport({
         type: "error",
-        message: error instanceof Error ? error.message : String(error),
+        message: `Couldn't preview this link. ${userErrorText(error)}`,
       });
     }
   }
@@ -238,7 +241,7 @@ export function useSourcePackages({
       dispatchSourceImport({
         type: "phase",
         phase: "review",
-        error: error instanceof Error ? error.message : String(error),
+        error: `Couldn't install this ${sourceImport.kind}. ${userErrorText(error)}`,
       });
     }
   }
@@ -254,7 +257,7 @@ export function useSourcePackages({
       setRemoveTarget({ kind: "skill", skill, preview });
     } catch (error) {
       toast.error("Couldn't inspect Skill removal", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setBusyKey(null);
@@ -279,7 +282,7 @@ export function useSourcePackages({
       });
     } catch (error) {
       toast.error("Couldn't inspect Plugin removal", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setBusyKey(null);
@@ -375,11 +378,9 @@ export function useSourcePackages({
           return false;
         }
       }
-      setRemoveNotice(
-        error instanceof Error ? error.message : "Removal couldn’t be confirmed. Try again.",
-      );
+      setRemoveNotice(userErrorText(error, "Removal couldn’t be confirmed. Try again."));
       toast.error(`Couldn't remove this ${removeTarget.kind === "skill" ? "Skill" : "Plugin"}`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -444,7 +445,7 @@ export function useSourcePackages({
         (error) =>
           dispatchSourceImport({
             type: "error",
-            message: error instanceof Error ? error.message : String(error),
+            message: `Couldn't preview this link. ${userErrorText(error)}`,
             operationId,
           }),
       );

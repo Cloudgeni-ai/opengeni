@@ -25,6 +25,7 @@ import {
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import {
   InMemoryManagedEmailTransport,
   type CapturedManagedEmail,
@@ -36,6 +37,14 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
+// The model-access step leads with credits the organization already holds, or
+// the included default model when the deployment provides one, otherwise it
+// asks how to power chats.
+const MODEL_ACCESS_HEADING =
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
+const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
 const PASSWORD = "Onboarding-password-1234";
@@ -340,7 +349,7 @@ async function signUpAndVerify(page: Page, input: { name: string; email: string 
   expect(verificationUrl.startsWith(`${publicOrigin}/v1/auth/verify-email?`)).toBe(true);
   await page.goto(verificationUrl, { waitUntil: "domcontentloaded" });
   const authOrOnboarding = page
-    .getByRole("heading", { name: /^(Sign in|Create your organization)$/ })
+    .getByRole("heading", { name: /^(Sign in|How do you want to use Opengeni\?)$/ })
     .first();
   await authOrOnboarding.waitFor();
   if ((await authOrOnboarding.textContent())?.trim() === "Sign in") {
@@ -398,9 +407,14 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    // The local edge below forwards like ingress-nginx: one trusted hop whose
+    // X-Forwarded-For names the client, so per-client limits stay per client.
+    apiTrustedProxyHops: 1,
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
+    // Variable sets carry the developer setup key into the setup chat.
+    environmentsEncryptionKey: Buffer.alloc(32, 23).toString("base64"),
   });
   const api = createApp({
     settings,
@@ -442,10 +456,13 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: Number(new URL(publicOrigin).port),
     idleTimeout: 60,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/v1/") || url.pathname === "/healthz") {
-        return await api.fetch(request);
+        return await api.fetch(
+          request,
+          apiRequestBindingsForTransportPeer(server.requestIP(request)?.address),
+        );
       }
       const safePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       const requested = safePath.includes("..") ? null : Bun.file(`${webDist}/${safePath}`);
@@ -480,6 +497,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const ownerEmail = `onboarding-owner-${RUN_ID}@example.test`;
 
     await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     await page.getByRole("heading", { name: "Create your organization" }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(1);
     expect(await page.getByLabel(/workspace/i).count()).toBe(0);
@@ -492,9 +511,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
-    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
-    await page.getByRole("button", { name: "Skip for now" }).click();
+    await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
@@ -560,19 +579,25 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(privateSession?.visibility).toBe("user_private");
 
     await page.goto(
-      `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=overview`,
+      `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=workspaces`,
       { waitUntil: "domcontentloaded" },
     );
-    await page.getByRole("heading", { name: "Workspaces & access" }).waitFor();
-    await page.getByRole("button", { name: "Create new workspace" }).click();
-    await page.getByLabel("New workspace name").fill("Launch Room");
-    await page.getByRole("button", { name: "Create workspace" }).click();
-    await page.getByText("Launch Room created").waitFor();
-    const launchDetails = page.locator("details", { hasText: "Launch Room" }).first();
-    await launchDetails.locator("summary").click();
-    await page.getByLabel("Workspace name for Launch Room").fill("Launch Operations");
-    await launchDetails.getByRole("button", { name: "Save name" }).click();
-    await page.getByText("Workspace name updated").waitFor();
+    await page.getByRole("heading", { name: "Workspaces", exact: true }).first().waitFor();
+    await page.getByRole("button", { name: "New workspace", exact: true }).first().click();
+    await page.getByRole("heading", { name: "New workspace", exact: true }).waitFor();
+    await page.getByRole("textbox", { name: "Name", exact: true }).fill("Launch Room");
+    await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+    await page.getByText("Created Launch Room. You're its workspace admin.").waitFor();
+    // Creating opens the new workspace's page; Rename is in its menu.
+    await page.getByRole("heading", { name: "Launch Room", exact: true }).waitFor();
+    await page.getByRole("button", { name: "More actions for Launch Room", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+    const renameDialog = page.getByRole("dialog", { name: "Rename workspace" });
+    await renameDialog
+      .getByRole("textbox", { name: "Name", exact: true })
+      .fill("Launch Operations");
+    await renameDialog.getByRole("button", { name: "Rename", exact: true }).click();
+    await page.getByText("Renamed Launch Room to Launch Operations").waitFor();
 
     const overview = await owner.getOrganizationAdministrationOverview(organizationId);
     expect(overview.workspaces).toHaveLength(1);
@@ -585,12 +610,26 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     const peopleUrl = `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`;
     await page.goto(peopleUrl, { waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: "People", exact: true }).waitFor();
-    const soleOwnerRole = page.getByLabel("Organization role for Onboarding Owner (you)");
-    expect(await soleOwnerRole.isDisabled()).toBe(true);
-    expect(await soleOwnerRole.getAttribute("aria-describedby")).toMatch(/^sole-owner-reason-/);
-    await page.getByText(/Assign another active owner/i).waitFor();
-    expect(await page.getByText("Personal content stays personal").count()).toBe(1);
+    const people = page.getByRole("list", { name: "People in Onboarding Greenfield Org" });
+    await people
+      .getByText("Only owner", { exact: true })
+      .filter({ visible: true })
+      .first()
+      .waitFor();
+    // The sole owner's role is locked on their page, with the reason.
+    await people.getByRole("button", { name: "Onboarding Owner", exact: true }).click();
+    await page.getByRole("heading", { name: "Onboarding Owner", exact: true }).waitFor();
+    await page
+      .getByText("You're the only owner. Make someone else an owner first.", { exact: true })
+      .waitFor();
+    const ownerRoles = page.getByRole("radiogroup", { name: "Organization role" });
+    expect(await ownerRoles.getByRole("radio", { name: /^Admin/ }).isDisabled()).toBe(true);
+    // Personal content stays personal: the person's Personal workspace is private to them.
+    await page
+      .getByText("Private to you. Nobody else can open it, including owners and admins.", {
+        exact: true,
+      })
+      .waitFor();
     await expectNoAxeViolations(page, "body");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -628,14 +667,18 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`,
       { waitUntil: "domcontentloaded" },
     );
-    await ownerPage.getByRole("heading", { name: "People & invitations", level: 2 }).waitFor();
-    await ownerPage.getByRole("button", { name: "Invite person", exact: true }).click();
-    await ownerPage.getByLabel("Email address").fill(invitedEmail);
-    await ownerPage.getByLabel("Name", { exact: true }).fill("Onboarding Invited");
-    await ownerPage.getByText("Workspace access", { exact: true }).click();
-    await ownerPage.getByLabel("Launch Operations", { exact: true }).check();
+    await ownerPage.getByRole("heading", { name: "People", exact: true }).first().waitFor();
+    await ownerPage.getByRole("button", { name: "Invite people", exact: true }).first().click();
+    await ownerPage.getByRole("heading", { name: "Invite people", exact: true }).waitFor();
+    const inviteEmail = ownerPage.getByRole("textbox", { name: "Email addresses" });
+    await inviteEmail.fill(invitedEmail);
+    await inviteEmail.press("Enter");
+    const launchAccess = ownerPage.getByRole("checkbox", { name: "Launch Operations" });
+    await launchAccess.focus();
+    await ownerPage.keyboard.press("Space");
+    expect(await launchAccess.isChecked()).toBe(true);
     await ownerPage.getByRole("button", { name: "Send invitation", exact: true }).click();
-    await ownerPage.getByText("Invitation sent", { exact: true }).waitFor();
+    await ownerPage.getByText(`Invited ${invitedEmail}`, { exact: true }).waitFor();
 
     const setupEmail = await takeEmail("organization_user_setup", invitedEmail);
     const token = setupToken(setupEmail);
@@ -1036,7 +1079,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Alternate Owner",
       email: alternateOwnerEmail,
     });
-    await alternatePage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await alternatePage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const alternateOwner = sdk(await cookieHeader(alternateContext));
     const alternateCreated = await alternateOwner.createOrganization({
       name: "Onboarding Alternate Org",
@@ -1065,7 +1108,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Registered",
       email: registeredEmail,
     });
-    await registeredPage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await registeredPage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const registeredInvite = await owner.createOrganizationInvitation(organizationId, {
       email: registeredEmail,
       name: "Onboarding Registered",
@@ -1133,8 +1176,29 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("heading", { name: `This invitation is for ${registeredEmail}` })
       .waitFor();
     await alternatePage.getByText(`You're signed in as ${alternateOwnerEmail}`).waitFor();
+    // Capture the exact credential-mutation dispatch, before React can flush a
+    // batched reset after fetch has already started. The authenticated workspace
+    // tree must be gone before sign-out can revoke its background reads.
+    await alternatePage.evaluate(() => {
+      const checks: boolean[] = [];
+      const checkedWindow = window as Window & { workspaceTreeAtSignOut?: boolean[] };
+      checkedWindow.workspaceTreeAtSignOut = checks;
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (url.pathname === "/v1/auth/sign-out") {
+          checks.push(document.querySelector('a[href^="/workspaces/"]') !== null);
+        }
+        return nativeFetch(input, init);
+      };
+    });
     await alternatePage.getByRole("button", { name: "Switch account" }).click();
     await alternatePage.getByRole("heading", { name: "Sign in" }).waitFor();
+    expect(
+      await alternatePage.evaluate(
+        () => (window as Window & { workspaceTreeAtSignOut?: boolean[] }).workspaceTreeAtSignOut,
+      ),
+    ).toEqual([false]);
     const invitedEmailInput = alternatePage.getByLabel("Email");
     expect(await invitedEmailInput.inputValue()).toBe(registeredEmail);
     expect(await invitedEmailInput.isEditable()).toBe(false);
@@ -1145,7 +1209,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
       .waitFor();
     await settleDocumentAnimations(alternatePage);
-    await expectNoAxeViolations(alternatePage, "body");
+    // Audit the modal invitation dialog, not the new-session page it covers.
+    // That page keeps loading behind the modal: its composer and starter
+    // suggestions stay disabled (and exempt) until the new-session draft
+    // resolves, then fade from 50% to full opacity. axe does not treat a
+    // Radix modal's aria-hidden background as inactive, and it drops fixed
+    // layers such as the 50% backdrop from its contrast stack, so a scan that
+    // overlaps that fade reports covered, unreachable text as low contrast.
+    await expectNoAxeViolations(alternatePage, '[role="dialog"][data-slot="dialog-content"]');
     await alternatePage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
@@ -1234,6 +1305,34 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         })}`,
       );
     }
+    // The post-reset landing is the new-session page. Its starter suggestions
+    // mount disabled while the new-session draft loads and then fade from 50%
+    // to full opacity, so audit the settled page rather than a scan that
+    // overlaps that fade.
+    const postResetStarters = registeredPage.locator(
+      'section[aria-label="Starter suggestions"] button',
+    );
+    let postResetStarterStates: boolean[] = [];
+    await waitFor(
+      async () => {
+        postResetStarterStates = await postResetStarters.evaluateAll((buttons) =>
+          buttons.map((button) => (button as HTMLButtonElement).disabled),
+        );
+        return (
+          postResetStarterStates.length > 0 && postResetStarterStates.every((disabled) => !disabled)
+        );
+      },
+      {
+        timeoutMs: 20_000,
+        intervalMs: 50,
+        describe: () =>
+          JSON.stringify({
+            starterDisabledStates: postResetStarterStates,
+            url: registeredPage.url(),
+          }),
+      },
+    );
+    await settleDocumentAnimations(registeredPage);
     expect(
       await registeredPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
@@ -1336,4 +1435,111 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await registeredContext.close();
   }, 240_000);
+
+  test("adding agents to a product records the choice, creates a scoped setup key, and opens a setup chat without the key in history", async () => {
+    if (!browser || !owned) throw new Error("acceptance harness unavailable");
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 960 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.60" },
+    });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: publicOrigin,
+    });
+    const page = await context.newPage();
+    const problems = observeBrowser(page);
+    const email = `onboarding-embed-${RUN_ID}@example.test`;
+    await signUpAndVerify(page, { name: "Onboarding Builder", email });
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^Add AI agents to my product/ }).click();
+    await page.getByLabel("Organization name").fill("Onboarding Product Org");
+    await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^(Continue|Skip for now)$/ }).click();
+    await page.getByRole("heading", { name: "Add AI agents to your product" }).waitFor();
+    // Shown once in its own copy step; the coding-agent prompt never carries it.
+    const keyField = page.locator("[data-slot=developer-setup-key]");
+    await keyField.waitFor();
+    const token = (await keyField.textContent())?.trim() ?? "";
+    expect(token).toStartWith("ogk_");
+    await page.getByRole("button", { name: "Copy key", exact: true }).click();
+    await page.getByRole("button", { name: "Key copied" }).waitFor();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
+    await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
+    await page.getByRole("button", { name: "Prompt copied" }).waitFor();
+    const prompt = await page.evaluate(() => navigator.clipboard.readText());
+    expect(prompt).not.toContain(token);
+    expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
+    expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
+    await expectNoAxeViolations(page, "body");
+
+    await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions\/[0-9a-f-]{36}$/u, {
+      timeout: 30_000,
+    });
+    const [, workspaceId, sessionId] =
+      /\/workspaces\/([0-9a-f-]{36})\/sessions\/([0-9a-f-]{36})$/u.exec(
+        new URL(page.url()).pathname,
+      )!;
+    await page
+      .getByText("I want to add AI agents to my product. Help me set it up.")
+      .first()
+      .waitFor({
+        timeout: 30_000,
+      });
+
+    const owner = sdk(await cookieHeader(context), "198.51.100.60");
+    const memberships = await owner.listOrganizationMemberships();
+    const organizationId = memberships.memberships[0]!.organizationId;
+    const keys = await owner.listOrganizationApiKeys(organizationId);
+    expect(keys.map((key) => [key.name, key.access, token.startsWith(key.prefix)])).toEqual([
+      ["Developer setup", "developer_setup", true],
+    ]);
+    expect(keys[0]!.expiresAt).not.toBeNull();
+    const workspace = await owner.getWorkspace(workspaceId!);
+    expect([workspace.name, workspace.kind, workspace.accountId]).toEqual([
+      "Opengeni setup",
+      "shared",
+      organizationId,
+    ]);
+    const session = await owner.getSession(workspaceId!, sessionId!);
+    expect(session.id).toBe(sessionId);
+    // The key reaches the setup chat only through its write-only variable set;
+    // the onboarding context (which names where it is) is durable session data.
+    const sessionRows = (pattern: string) => owned!.admin<Array<{ count: number }>>`
+      select (
+        (select count(*) from session_events e where e.session_id = ${sessionId}
+           and row_to_json(e)::text like ${pattern})
+        + (select count(*) from session_history_items h where h.session_id = ${sessionId}
+           and row_to_json(h)::text like ${pattern})
+        + (select count(*) from session_turns t where t.session_id = ${sessionId}
+           and row_to_json(t)::text like ${pattern})
+        + (select count(*) from sessions s where s.id = ${sessionId}
+           and row_to_json(s)::text like ${pattern})
+      )::int as count`;
+    expect((await sessionRows(`%${token}%`))[0]?.count).toBe(0);
+    expect(
+      (await sessionRows("%DEVELOPER_SETUP_API_KEY environment variable%"))[0]?.count,
+    ).toBeGreaterThan(0);
+    const variableSets = await owner.listVariableSets(workspaceId!);
+    expect(
+      variableSets.map((set) => [set.name, set.variables.map((variable) => variable.name)]),
+    ).toEqual([["Opengeni developer setup", ["DEVELOPER_SETUP_API_KEY"]]]);
+    expect(JSON.stringify(variableSets)).not.toContain(token);
+    expect((await sessionRows(`%${variableSets[0]!.id}%`))[0]?.count).toBeGreaterThan(0);
+    expect((await sessionRows("%builtin:opengeni-client%"))[0]?.count).toBeGreaterThan(0);
+    await page.screenshot({
+      path: `${EVIDENCE_DIR}/onboarding-developer-setup-chat-1440.png`,
+      fullPage: true,
+    });
+    // An idle session with no goal and a stubbed workflow answers its goal
+    // and stream reads with 404.
+    expectNoBrowserProblems({
+      ...problems,
+      consoleErrors: problems.consoleErrors.filter(
+        (problem) =>
+          !/status of 404 .*\/sessions\/[0-9a-f-]{36}\/(goal|stream-capabilities)$/u.test(problem),
+      ),
+    });
+    await context.close();
+  }, 180_000);
 });

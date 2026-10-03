@@ -129,6 +129,97 @@ describe("timeline scroll ownership browser regression", () => {
       return tablePage;
     };
 
+    for (const width of [1440, 390]) {
+      for (const mode of ["native", "bare", "stable", "bare-stable"] as const) {
+        test(`table measurement preserves wheel reading position at ${width}px (${mode}, ${consumer})`, async () => {
+          const readingPage = await browser.newPage({ viewport: { width, height: 900 } });
+          observeBrowserErrors(readingPage, browserErrors);
+          try {
+            const query = new URLSearchParams({ reading: "1" });
+            if (compiled) query.set("compiled", "1");
+            if (mode.includes("bare")) query.set("bare", "1");
+            if (mode.includes("stable")) query.set("stable", "1");
+            await readingPage.goto(`${baseUrl}/timeline-table-test.html?${query}`);
+            await readingPage.waitForFunction(() => window.tableHistoryHarness !== undefined);
+            await readingPage.locator("table").first().waitFor();
+            await readingPage.evaluate(() => document.fonts.ready);
+            // Let the lazy table observer and initial tip-follow settle first.
+            await readingPage.waitForTimeout(300);
+            const scroller = readingPage.locator("[data-og-timeline-scroller]");
+            await scroller.hover();
+            await readingPage.mouse.wheel(
+              0,
+              1540 - (await scroller.evaluate((node) => node.scrollTop)),
+            );
+            await readingPage.waitForFunction(
+              () =>
+                Math.abs(document.querySelector("[data-og-timeline-scroller]")!.scrollTop - 1540) <
+                1,
+            );
+            await readingPage.waitForTimeout(150);
+            for (const update of ["rerender", "stream", "approval"] as const) {
+              const trace = await readingPage.evaluate(async (action) => {
+                const readingScroller = document.querySelector("[data-og-timeline-scroller]")!;
+                const bounds = readingScroller.getBoundingClientRect();
+                const anchor = [...readingScroller.querySelectorAll("tr,p,h2")].find((node) => {
+                  const rect = node.getBoundingClientRect();
+                  return (
+                    rect.top >= bounds.top + 20 && rect.bottom <= bounds.top + bounds.height * 0.6
+                  );
+                })!;
+                if (!anchor) throw new Error("Missing visible reading anchor");
+                const before = anchor.getBoundingClientRect().top;
+                const frames: Array<{ delta: number; connected: boolean }> = [];
+                // Bare Markdown remains one changing text value, so tail
+                // streaming remeasures its tables even with stable callbacks.
+                // Native history changes only the normal last-message tail.
+                if (action === "stream") window.tableHistoryHarness!.stream();
+                else window.tableHistoryHarness![action]();
+                for (let i = 0; i < 30; i++) {
+                  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+                  frames.push({
+                    delta: anchor.getBoundingClientRect().top - before,
+                    connected: anchor.isConnected,
+                  });
+                }
+                return {
+                  frames,
+                  rows: readingScroller.querySelectorAll("tr").length,
+                  anchor: anchor.textContent,
+                  top: readingScroller.scrollTop,
+                };
+              }, update);
+              expect(trace.rows).toBe(152);
+              expect(trace.frames.every((frame) => frame.connected)).toBe(true);
+              expect(
+                Math.max(...trace.frames.map((frame) => Math.abs(frame.delta))),
+                JSON.stringify({
+                  update,
+                  anchor: trace.anchor,
+                  top: trace.top,
+                  frames: trace.frames,
+                }),
+              ).toBeLessThanOrEqual(1);
+            }
+            await readingPage.getByRole("textbox", { name: "Draft" }).fill("Keep this draft");
+            await readingPage.evaluate(() => window.tableHistoryHarness!.rerender());
+            expect(await readingPage.getByRole("textbox", { name: "Draft" }).inputValue()).toBe(
+              "Keep this draft",
+            );
+            expect(await scroller.locator("table").count()).toBe(8);
+            if (artifactDir) {
+              await mkdir(artifactDir, { recursive: true });
+              await readingPage.screenshot({
+                path: `${artifactDir}/table-reading-${width}-${mode}-${compiled ? "compiled" : "source"}.png`,
+              });
+            }
+          } finally {
+            await readingPage.close();
+          }
+        }, 20_000);
+      }
+    }
+
     test(`wide tables use panel gutters without widening prose or nested content (${consumer})`, async () => {
       const tablePage = await openTables();
       try {
@@ -388,7 +479,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(duringPrepend.id).toBe(beforePrepend.id);
     expect(duringPrepend.top).toBeCloseTo(beforePrepend.top ?? 0, 0);
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     // wheel() dispatches input without waiting for native scrolling to finish.
     // Capture the reader's new anchor at scrollend, not at an arbitrary timer
@@ -610,7 +701,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     await page.evaluate(() => window.timelineScrollHarness!.prepend());
     await nextFrames(page, 2);
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     await page.mouse.wheel(0, -96);
     await page.waitForTimeout(20);
@@ -629,7 +720,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
     await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.evaluate((node) => {
       node.scrollTop = node.scrollHeight - node.clientHeight - 24;
     });
@@ -646,7 +737,7 @@ describe("timeline scroll ownership browser regression", () => {
     // between the append and the snap.
     await page.waitForFunction(
       () => {
-        const node = document.querySelector("[data-timeline-test] .og-root > div");
+        const node = document.querySelector("[data-timeline-test] [data-og-timeline-scroller]");
         return (
           node instanceof HTMLElement && node.scrollHeight - node.scrollTop - node.clientHeight < 2
         );
@@ -786,7 +877,7 @@ describe("timeline scroll ownership browser regression", () => {
     await target.waitFor({ timeout: 15_000 });
     await target.evaluate(async (node) => {
       const scroller = document.querySelector<HTMLElement>(
-        "[data-timeline-merge-test] .og-root > div",
+        "[data-timeline-merge-test] [data-og-timeline-scroller]",
       );
       if (!scroller) throw new Error("timeline merge scroller is unavailable");
       const settled =
@@ -1789,7 +1880,7 @@ async function nestedVisible(
 ): Promise<{ text: string; top: number; scrollTop: number; overflowAnchor: string }> {
   return await page.evaluate((targetText) => {
     const scroller = document.querySelector<HTMLElement>(
-      "[data-timeline-merge-test] .og-root > div",
+      "[data-timeline-merge-test] [data-og-timeline-scroller]",
     );
     const target = [...document.querySelectorAll<HTMLElement>("span, p")].find(
       (candidate) => candidate.textContent === targetText,

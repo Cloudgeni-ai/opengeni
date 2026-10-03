@@ -1,11 +1,25 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
-import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { AlertTriangleIcon, CopyIcon, InfoIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { toast } from "sonner";
 
+import {
+  apiErrorTechnicalFacts,
+  isPermissionDenied,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
+
+// Startup code: the disclosure lives with the management UI primitives, so it
+// loads only once a load error actually has details to show.
+const TechnicalDetails = lazy(() =>
+  import("@/components/ui/error-message").then((module) => ({
+    default: module.TechnicalDetails,
+  })),
+);
 
 type ConnectionPillMeta = { label: string; dot: string; text: string };
 
@@ -16,13 +30,45 @@ const degradedConnectionStates: Partial<Record<SessionEventsConnectionState, Con
     error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
   };
 
-export function LoadingPanel({ label }: { label: string }) {
+/** One quiet presentation across bootstrap, access, route and history gates.
+ * Named operation panels retain their existing treatment. Gates still own
+ * when content is authorized; this component never retains data.
+ */
+export function LoadingPanel({ label }: { label?: string }) {
+  if (label) {
+    return (
+      <section className="grid flex-1 place-items-center px-4 text-center">
+        <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
+          <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
+          {label}
+        </div>
+      </section>
+    );
+  }
+  const indicator = (
+    <span
+      role="status"
+      aria-label="Loading"
+      className="pointer-events-none fixed left-1/2 top-1/2 inline-flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 text-sm text-fg-muted"
+      data-page-loading=""
+    >
+      <Loader2Icon
+        aria-hidden
+        ref={(node) =>
+          node?.getAnimations?.().forEach((animation) => {
+            // Bootstrap/route boundaries remount this indicator. Share the
+            // document timeline so its rotation does not restart at each one.
+            animation.startTime = 0;
+          })
+        }
+        className="size-4 animate-spin motion-reduce:animate-none"
+      />
+      Loading…
+    </span>
+  );
   return (
-    <section className="grid flex-1 place-items-center px-4 text-center">
-      <div className="max-w-sm rounded-lg border border-border bg-surface p-5 text-sm text-fg-muted">
-        <Loader2Icon className="mx-auto mb-3 size-5 animate-spin text-fg" />
-        {label}
-      </div>
+    <section aria-busy="true" className="min-h-0 flex-1">
+      {typeof document === "undefined" ? indicator : createPortal(indicator, document.body)}
     </section>
   );
 }
@@ -85,7 +131,7 @@ function ConnectionPillContent({ meta }: { meta: ConnectionPillMeta }) {
 export function InspectorSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0 space-y-2">
-      <h3 className="text-xs font-medium uppercase tracking-wider text-fg-subtle">{title}</h3>
+      <h3 className="text-xs font-medium uppercase tracking-wider text-fg">{title}</h3>
       <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-surface/45 p-3">
         {children}
       </div>
@@ -114,9 +160,13 @@ export function CopyableMono({ value }: { value: string }) {
   return (
     <button
       type="button"
-      onClick={() => {
-        void navigator.clipboard.writeText(value);
-        toast.success("Copied");
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          toast.success("Copied");
+        } catch {
+          toast.error("Couldn't copy. Select the text and copy it manually.");
+        }
       }}
       className="flex w-full min-w-0 max-w-full items-center justify-end gap-1 rounded px-1 py-0.5 font-mono text-2xs text-fg-muted hover:bg-surface-2 hover:text-fg"
       title={value}
@@ -142,7 +192,7 @@ export function PageHeader(props: {
         props.className,
       )}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 lg:flex-1">
         <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <span className="text-brand">{props.icon}</span>
           {props.title}
@@ -152,7 +202,7 @@ export function PageHeader(props: {
         ) : null}
       </div>
       {props.actions ? (
-        <div className="flex min-w-0 flex-wrap items-center gap-2">{props.actions}</div>
+        <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">{props.actions}</div>
       ) : null}
     </div>
   );
@@ -169,7 +219,9 @@ export function EmptyState({ children }: { children: ReactNode }) {
 /**
  * Honest failed-load state for list surfaces. Renders the error with a retry
  * affordance instead of letting routes fall through to "No X yet…" copy when
- * the request failed.
+ * the request failed. Says what to do in product words; the raw status and
+ * request reference stay behind Technical details. A permission refusal is
+ * not a failure: it reads calmly, names who can help, and offers no retry.
  */
 export function LoadErrorState({
   title,
@@ -180,27 +232,52 @@ export function LoadErrorState({
   error?: Error | null;
   onRetry: () => void;
 }) {
+  const denied = error ? isPermissionDenied(error) : false;
+  const facts = error ? apiErrorTechnicalFacts(error) : [];
   return (
     <div
-      role="alert"
-      aria-live="assertive"
-      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+      role={denied ? undefined : "alert"}
+      aria-live={denied ? undefined : "assertive"}
+      className={cn(
+        "flex items-start gap-2 rounded-lg border p-3 text-sm text-fg",
+        denied ? "border-border bg-surface/40" : "border-status-failed/40 bg-status-failed/10",
+      )}
     >
-      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
+      {denied ? (
+        <InfoIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-fg-subtle" />
+      ) : (
+        <AlertTriangleIcon
+          aria-hidden="true"
+          className="mt-0.5 size-4 shrink-0 text-status-failed"
+        />
+      )}
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
-        {error?.message ? (
-          <div className="mt-0.5 break-words text-xs leading-4 text-fg-muted">{error.message}</div>
+        {error ? (
+          <div className="mt-0.5 break-words text-xs leading-4.5 text-fg-muted">
+            {denied
+              ? "You don't have access to this. Ask an admin for access."
+              : userErrorTextWithoutReference(error)}
+          </div>
+        ) : null}
+        {!denied && facts.length > 0 ? (
+          <Suspense fallback={null}>
+            <div className="mt-1">
+              <TechnicalDetails facts={facts} />
+            </div>
+          </Suspense>
         ) : null}
       </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
-      >
-        <RefreshCwIcon className="size-3" />
-        Retry
-      </button>
+      {denied ? null : (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
+        >
+          <RefreshCwIcon className="size-3" />
+          Retry
+        </button>
+      )}
     </div>
   );
 }

@@ -231,8 +231,8 @@ export function revealLoadedAnnotationSource(
   element.animate?.(
     [
       {
-        boxShadow: "inset 0 0 0 2px color-mix(in oklch, var(--og-accent) 70%, transparent)",
-        backgroundColor: "color-mix(in oklch, var(--og-accent) 14%, transparent)",
+        boxShadow: "inset 0 0 0 2px color-mix(in oklch, var(--og-color-accent) 70%, transparent)",
+        backgroundColor: "color-mix(in oklch, var(--og-color-accent) 14%, transparent)",
       },
       {
         boxShadow: "inset 0 0 0 2px transparent",

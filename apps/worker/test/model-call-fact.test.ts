@@ -3,11 +3,16 @@ import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { createObservability } from "@opengeni/observability";
 
 import {
   emitModelCallUsage,
   recordAuthoritativeModelCallFact,
   recordModelUsageAndDebitCredits,
+  createCompactionModelUsageEventState,
+  processCompactionModelUsageEvent,
+  createModelResponseEventState,
+  processModelResponseTerminalEvent,
 } from "../src/activities/agent-turn";
 
 const ACCOUNT = "acct-1";
@@ -71,6 +76,201 @@ describe("recordAuthoritativeModelCallFact", () => {
     restores.push(() => spy.mockRestore());
     return { usageEvents, creditDebits, spy };
   }
+
+  test.each([false, true])(
+    "compaction settles its reservation atomically, including duplicate usage (duplicate=%s)",
+    async (duplicate) => {
+      const { usageEvents, creditDebits, spy } = mockAtomicWrites();
+      const settings = billedSettings();
+      const release = {
+        eventType: "model.tokens.reserved",
+        quantity: -2_000,
+        unit: "tokens",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: "reservation-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        idempotencyKey: "reservation-1:release",
+      };
+      const input: Parameters<typeof processCompactionModelUsageEvent>[0] = {
+        usage: {
+          responseId: "compaction-response",
+          usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+        },
+        state: createCompactionModelUsageEventState(
+          new Set(duplicate ? ["compaction-response"] : []),
+        ),
+        dispatchId: "dispatch-1",
+        settings,
+        db,
+        observability: createObservability(settings, { component: "compaction-test" }),
+        publish: null,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "openai",
+        providerApi: "responses",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        reservationReleases: [release],
+      };
+      if (!duplicate) {
+        const failedCommit = new Error("Synthetic billing transaction failure");
+        spy.mockRejectedValueOnce(failedCommit);
+        await expect(processCompactionModelUsageEvent(input)).rejects.toBe(failedCommit);
+        expect(input.state.claimedSourceKeys.has("compaction-response")).toBe(false);
+        expect(input.state.usageCount).toBe(0);
+      }
+      const callsBeforeMalformed = spy.mock.calls.length;
+      const malformed = await processCompactionModelUsageEvent({
+        ...input,
+        usage: {
+          responseId: "compaction-response",
+          usage: { inputTokens: 100, outputTokens: -1, totalTokens: 150 },
+        },
+      });
+      expect(malformed.usageReported).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(callsBeforeMalformed);
+      expect(input.state.claimedSourceKeys.has("compaction-response")).toBe(duplicate);
+      const result = await processCompactionModelUsageEvent(input);
+      expect(result.usageReported).toBe(true);
+      expect(result.status).toBe(duplicate ? "duplicate" : "processed");
+      expect(spy).toHaveBeenCalledTimes(duplicate ? 1 : 2);
+      expect(usageEvents).toContainEqual(release);
+      expect(usageEvents.filter((event) => event.eventType === "model.tokens")).toHaveLength(1);
+      expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+      expect(creditDebits).toHaveLength(1);
+    },
+  );
+
+  test.each([
+    { inputTokens: 100 },
+    { outputTokens: 50 },
+    { inputTokens: 100, outputTokens: 50, inputTokensDetails: { cached_tokens: -1 } },
+  ])(
+    "incomplete or rejected telemetry keeps a hold until complete usage arrives: %j",
+    async (usage) => {
+      const { usageEvents, creditDebits, spy } = mockAtomicWrites();
+      const release = {
+        eventType: "model.tokens.reserved",
+        quantity: -2_000,
+        unit: "tokens",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: "reservation-malformed",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        idempotencyKey: "reservation-malformed:release",
+      };
+      const input: Parameters<typeof recordModelUsageAndDebitCredits>[2] = {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        sourceKey: "malformed-response",
+        usage,
+        reservationReleases: [release],
+      };
+      expect(await recordModelUsageAndDebitCredits(billedSettings(), db, input)).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        ...input,
+        usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(usageEvents).toContainEqual(release);
+      expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+      expect(creditDebits).toHaveLength(1);
+    },
+  );
+
+  test.each([false, true])(
+    "a terminal response with unknown spend keeps its reservation (malformed=%s)",
+    async (malformed) => {
+      const { usageEvents, spy } = mockAtomicWrites();
+      const settings = billedSettings();
+      const input: Parameters<typeof processModelResponseTerminalEvent>[0] = {
+        event: {
+          type: "raw_model_stream_event",
+          data: {
+            type: "response_done",
+            response: {
+              id: "usage-less-response",
+              ...(malformed ? { usage: { inputTokens: 100, outputTokens: -1 } } : {}),
+            },
+          },
+        },
+        state: createModelResponseEventState(),
+        dispatchId: "dispatch-1",
+        settings,
+        db,
+        observability: createObservability(settings, { component: "unknown-spend-test" }),
+        publish: null,
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "openai",
+        metricProvider: "openai",
+        providerApi: "responses",
+        model: "gpt-5.6-sol",
+        externallyBilled: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async () => undefined,
+        reservationReleases: [
+          {
+            eventType: "model.tokens.reserved",
+            quantity: -2_000,
+            unit: "tokens",
+            idempotencyKey: "unknown-spend:release",
+          },
+        ],
+      };
+      const result = await processModelResponseTerminalEvent(input);
+      expect(result).toMatchObject({ status: "processed", usageReported: false });
+      expect(spy).not.toHaveBeenCalled();
+      if (malformed) {
+        expect(input.state.claimedSourceKeys.has("usage-less-response")).toBe(false);
+        const settled = await processModelResponseTerminalEvent({
+          ...input,
+          event: {
+            type: "raw_model_stream_event",
+            data: {
+              type: "response_done",
+              response: {
+                id: "usage-less-response",
+                usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+              },
+            },
+          },
+        });
+        expect(settled).toMatchObject({ status: "processed", usageReported: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
+        expect(
+          usageEvents.find((event) => event.eventType === "model.tokens.reserved")?.quantity,
+        ).toBe(-2_000);
+      }
+    },
+  );
 
   test("soft-fails fact persist without throwing", async () => {
     const sentinel = "SECRET_SENTINEL_123";

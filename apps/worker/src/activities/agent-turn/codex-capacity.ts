@@ -2,6 +2,7 @@ import {
   connectionModelAllowed,
   getSessionGoal,
   acquireCodexCredentialLease,
+  recheckCodexCredentialPlan,
   CodexCredentialLeaseAttemptFencedError,
   CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
@@ -14,7 +15,7 @@ import {
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
-import { CodexReloginRequired } from "@opengeni/codex";
+import { CodexReloginRequired, codexPlanKey } from "@opengeni/codex";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
@@ -43,8 +44,15 @@ import { recordTurnStartupPhase } from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
+import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
 
 import { refreshCappedCodexUsageRows } from "./codex";
+import {
+  CodexPlanEntitlementError,
+  codexAccountDisplayLabel,
+  codexPlanEntitlementAdmissionBlock,
+  codexPlanEntitlementFailurePayload,
+} from "./codex-plan-entitlement";
 import { codexUsageLimitFailurePayload, CODEX_USAGE_LIMIT_MAX_RESUME_MS } from "./errors";
 import type { ClaimTurnOk } from "./claim";
 import type {
@@ -55,6 +63,39 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+
+/** The eligible-pool gauge and `opengeni_codex_pool_low_total` stay per turn;
+ * the warning line is the first observation per workspace pool depth, then at
+ * most one per interval with the count it hid. The public log projection drops
+ * the identifiers and counts, so the closed `reason` keeps the depth visible. */
+export const CODEX_POOL_LOW_WARNING_INTERVAL_MS = 10 * 60_000;
+const codexPoolLowWarningThrottle = createLogThrottle({
+  intervalMs: CODEX_POOL_LOW_WARNING_INTERVAL_MS,
+  maxKeys: 1_024,
+});
+
+export function warnCodexPoolLow(
+  observability: Pick<ActivityServices["observability"], "warn">,
+  input: {
+    workspaceKey: string;
+    workspaceId: string;
+    eligibleCount: number;
+    connectedCount: number;
+    depth: "zero" | "one";
+  },
+  throttle: LogThrottle = codexPoolLowWarningThrottle,
+): void {
+  const admission = throttle.admit(`${input.workspaceKey}:${input.depth}`);
+  if (!admission) return;
+  observability.warn("Codex eligible credential pool is low", {
+    workspaceId: input.workspaceId,
+    eligibleCount: input.eligibleCount,
+    connectedCount: input.connectedCount,
+    depth: input.depth,
+    reason: input.depth === "zero" ? "eligible_pool_zero" : "eligible_pool_one",
+    ...(admission.suppressedCount > 0 ? { suppressedCount: admission.suppressedCount } : {}),
+  });
+}
 
 export type CapacityPhaseDeps = {
   input: RunAgentTurnInput;
@@ -142,7 +183,13 @@ export async function selectCodexTurnCapacity(
         )
           throw new Error("This model is disabled for the pinned Codex subscription");
         return selectCodexCredentialLeaseForTurn({
-          context: { ...context, accounts: allowed },
+          // The accepted product model also scopes proven plan entitlement:
+          // an account whose current plan excludes it is not a candidate.
+          context: {
+            ...context,
+            accounts: allowed,
+            modelId: deps.turnExecutionPolicy.productModelId,
+          },
           sessionId: input.sessionId,
           sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
           sessionPinSource: lockedSessionCodexState.pinSource,
@@ -203,6 +250,99 @@ export async function selectCodexTurnCapacity(
           },
           selectForTurn,
         );
+      }
+      // No account can serve the model because the only candidates' CURRENT
+      // plans were proven not to include it. Re-read those plans once (an
+      // upgrade may not have been observed yet), then either select again or
+      // fail with typed copy instead of an indefinite capacity wait.
+      const productModelId = deps.turnExecutionPolicy.productModelId;
+      const planBlock = (current: typeof leased) =>
+        codexPlanEntitlementAdmissionBlock({
+          accounts: current.accounts,
+          modelId: productModelId,
+          credentialId: current.credentialId,
+          rotationEnabled: current.rotationEnabled,
+          activeCredentialId: current.activeCredentialId,
+          pinnedCredentialId: current.sessionCodexState.pinnedCredentialId,
+          pinSource: current.sessionCodexState.pinSource,
+          now: new Date(),
+        });
+      const blocked = planBlock(leased);
+      if (blocked) {
+        const rechecks = await Promise.all(
+          blocked.slice(0, 4).map((account) =>
+            recheckCodexCredentialPlan(db, settings, input.workspaceId, account.id, {
+              turnId,
+              purpose: "capacity_refresh",
+            }).catch(() => null),
+          ),
+        );
+        const planMoved = rechecks.some(
+          (recheck) =>
+            recheck?.planType != null &&
+            codexPlanKey(recheck.planType) !== codexPlanKey(recheck.previousPlanType),
+        );
+        if (planMoved) {
+          leaseAcquisitionStartedAtMs = performance.now();
+          leased = await acquireCodexCredentialLease(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              workflowId: input.workflowId,
+              workflowRunId: input.workflowRunId,
+              dispatchId,
+              expectedRedispatches: attempt.redispatchesAtDispatch,
+              holderId,
+              advanceActivePointer: true,
+            },
+            selectForTurn,
+          );
+        }
+        const stillBlocked = planMoved ? planBlock(leased) : blocked;
+        if (stillBlocked) {
+          const account = stillBlocked[0]!;
+          // Name the plan only when this admission just observed it.
+          const observedPlan =
+            rechecks[blocked.findIndex((candidate) => candidate.id === account.id)]?.planType ??
+            null;
+          const payload = codexPlanEntitlementFailurePayload({
+            accountLabel: stillBlocked.length === 1 ? codexAccountDisplayLabel(account) : null,
+            planType: observedPlan,
+            planChanged: false,
+            modelId: productModelId,
+          });
+          if (turn.source === "compaction") {
+            if (
+              !(await eventing.settle!({
+                events: [
+                  {
+                    type: "turn.cancelled",
+                    payload: {
+                      maintenance: "context_compaction",
+                      reason: payload.code,
+                      requestPreserved: true,
+                    },
+                  },
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "cancelled",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return { exit: claimedResult({ status: "cancelled" }) };
+            }
+            control.turnMetricOutcome = "cancelled";
+            control.activityStatus = "idle";
+            return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
+          }
+          throw new CodexPlanEntitlementError(payload);
+        }
       }
       const lockedSessionCodexState = leased.sessionCodexState;
       providerTurn.codexPolicySnapshot = leased.codexPolicySnapshot;
@@ -283,6 +423,7 @@ export async function selectCodexTurnCapacity(
       }
       providerTurn.effectiveCodexCredentialId = leased.credentialId;
       providerTurn.codexCredentialFailoverLimit = leased.failoverLimit;
+      providerTurn.codexProductModelId = deps.turnExecutionPolicy.productModelId;
       leases.codex.generation = leased.generation;
       leases.codex.confirmedUntilMs =
         leased.leasedUntil && leaseAcquisitionStartedAtMs !== null
@@ -402,11 +543,12 @@ export async function selectCodexTurnCapacity(
           help: "Alert signal emitted when the eligible Codex pool is zero or one.",
           labels: { workspace_key: codexWorkspaceKey, depth: poolDepth },
         });
-        observability.warn("Codex eligible credential pool is low", {
+        warnCodexPoolLow(observability, {
+          workspaceKey: codexWorkspaceKey,
           workspaceId: input.workspaceId,
           eligibleCount,
           connectedCount: leased.accounts.length,
-          depth: poolDepth,
+          depth: poolDepth === "zero" ? "zero" : "one",
         });
       }
 

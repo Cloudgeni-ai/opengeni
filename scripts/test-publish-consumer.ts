@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { proveConversationConsumer } from "./conversation-consumer-proof";
 import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
 import type { PackageJson } from "./publishable-workspaces";
@@ -163,6 +164,7 @@ try {
   const minimalSpreadsheetRoot = join(tempRoot, "minimal-spreadsheet-artifact-consumer");
   const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
   const minimalRealtimeRoot = join(tempRoot, "minimal-realtime-consumer");
+  const conversationRoot = join(tempRoot, "conversation-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
@@ -400,6 +402,7 @@ try {
       "packages/config",
       "packages/contracts",
       "packages/network",
+      "packages/observability",
       "packages/tool-gateway",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
@@ -654,6 +657,7 @@ try {
         'import type { PresentationEditorProps as PresentationOnlyProps } from "@opengeni/react/artifacts/presentation";',
         'import type { SpreadsheetGridProps as SpreadsheetOnlyProps } from "@opengeni/react/artifacts/spreadsheet";',
         'import type { BrowserViewerProps, ComputerViewerProps } from "@opengeni/react/interaction";',
+        'import type { BrowserAccountsProviderProps } from "@opengeni/react/accounts";',
         'import type { BrowserSessionResource, ComputerSessionResource } from "@opengeni/sdk/interaction";',
         'import type { CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode } from "@opengeni/codemode";',
         'import type * as ReactRoot from "@opengeni/react";',
@@ -662,7 +666,7 @@ try {
         'import type { installBrowserArtifactWorkerEntry } from "@opengeni/sdk/editable-artifacts/worker";',
         "type Assert<T extends true> = T;",
         'type RootOmitsInteraction = Assert<"BrowserViewer" extends keyof typeof ReactRoot ? false : "ComputerViewer" extends keyof typeof ReactRoot ? false : true>;',
-        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserViewerProps, ComputerViewerProps, BrowserSessionResource, ComputerSessionResource, CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
+        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserViewerProps, ComputerViewerProps, BrowserAccountsProviderProps, BrowserSessionResource, ComputerSessionResource, CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
         "",
       ].join("\n"),
     ),
@@ -1311,6 +1315,21 @@ try {
   await run(["bun", "run", "typecheck"], minimalRealtimeRoot);
   await run(["bun", "run", "build"], minimalRealtimeRoot);
   await run(["bun", "run", "ssr"], minimalRealtimeRoot);
+  process.stdout.write(
+    "[publish-consumer] building a Next.js + Vite conversation consumer without optional peers\n",
+  );
+  await mkdir(conversationRoot, { recursive: true });
+  await proveConversationConsumer({
+    root: conversationRoot,
+    tarballs: {
+      contracts: contracts.tarball,
+      connect: connect.tarball,
+      sdk: sdk.tarball,
+      react: react.tarball,
+    },
+    reactManifest: reactSource,
+    run: async (command, cwd) => await run(command, cwd),
+  });
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),

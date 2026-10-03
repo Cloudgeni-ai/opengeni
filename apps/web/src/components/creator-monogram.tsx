@@ -31,7 +31,7 @@ export function CreatorMonogram({
         "flex size-4 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90",
         className,
       )}
-      style={{ background: `oklch(0.45 0.11 ${creatorHue(createdBy.subjectId)})` }}
+      style={{ background: `oklch(0.45 0.06 ${creatorHue(createdBy.subjectId)})` }}
     >
       {initials}
     </span>

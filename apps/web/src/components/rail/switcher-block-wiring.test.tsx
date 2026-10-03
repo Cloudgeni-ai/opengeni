@@ -33,6 +33,7 @@ mock.module("@/context", () => ({
         {
           accountId,
           subjectId: `user:${managedUserId}`,
+          role: "owner",
           permissions: ["workspace:create"],
           metadata: { accountName: "CloudGeni" },
         },
@@ -78,7 +79,24 @@ mock.module("@/components/rail/create-organization-dialog", () => ({
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { SwitcherBlock } = await import("./switcher-block");
+const { SwitcherBlock, useNewOrganizationMenuItem } = await import("./switcher-block");
+const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
+  await import("@/components/ui/dropdown-menu");
+
+function AccountMenuProbe() {
+  const newOrganization = useNewOrganizationMenuItem();
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button type="button">Account</button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent>{newOrganization.item}</DropdownMenuContent>
+      </DropdownMenu>
+      {newOrganization.dialog}
+    </>
+  );
+}
 
 afterAll(() => {
   mock.restore();
@@ -129,37 +147,54 @@ function menuItem(label: string): HTMLElement | null {
 }
 
 describe("SwitcherBlock production workspace menu wiring", () => {
-  test("opens organization creation through the real menu for an eligible user", async () => {
+  test("the picker only lists workspaces: no organization actions, even for an eligible user", async () => {
     const rendered = await render(<SwitcherBlock />);
     try {
       const trigger = workspaceMenuTrigger(rendered.container);
       expect(trigger.getAttribute("aria-label")).toContain("Personal workspace");
       await openMenu(trigger);
+      expect(
+        menuItem("Personal workspace, your Personal workspace, private to you"),
+      ).not.toBeNull();
+      expect(menuItem("New organization")).toBeNull();
+      expect(menuItem("Organization settings")).toBeNull();
+      expect(
+        Array.from(document.body.querySelectorAll('[role="menuitem"]')).map((item) =>
+          item.textContent?.trim(),
+        ),
+      ).not.toContain("New workspace in CloudGeni");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
 
-      const createOrganization = menuItem("New organization…");
+describe("account menu New organization", () => {
+  test("opens organization creation for an eligible user", async () => {
+    const rendered = await render(<AccountMenuProbe />);
+    try {
+      await openMenu(workspaceMenuTrigger(rendered.container));
+      const createOrganization = menuItem("New organization");
       expect(createOrganization).not.toBeNull();
-
       await act(async () => {
         createOrganization?.click();
         await Promise.resolve();
       });
       expect(
-        rendered.container.querySelector('[data-testid="create-organization-dialog"]'),
+        document.body.querySelector('[data-testid="create-organization-dialog"]'),
       ).not.toBeNull();
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("omits organization creation when the managed identity is ineligible", async () => {
+  test("is omitted when the managed identity is ineligible", async () => {
     emailVerified = false;
-    const rendered = await render(<SwitcherBlock />);
+    const rendered = await render(<AccountMenuProbe />);
     try {
       await openMenu(workspaceMenuTrigger(rendered.container));
-      expect(menuItem("New organization…")).toBeNull();
-      expect(
-        rendered.container.querySelector('[data-testid="create-organization-dialog"]'),
-      ).toBeNull();
+      expect(menuItem("New organization")).toBeNull();
+      expect(document.body.querySelector('[data-testid="create-organization-dialog"]')).toBeNull();
     } finally {
       await rendered.unmount();
     }

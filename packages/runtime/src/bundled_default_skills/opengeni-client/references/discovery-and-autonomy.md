@@ -29,6 +29,18 @@ verify that the agent can actually inspect the target before claiming access.
 Use the returned setup action rather than guessing UI controls or requesting a
 personal token in chat. Access does not authorize deployment or broader data use.
 
+Inside an OpenGeni session, connecting the GitHub App gives the running session
+no clone, push or pull request access: Git credentials and the pull request
+tools come only with a `repository` resource attached to a session, and a
+session cannot attach one to itself. After GitHub is connected, call
+`github_repositories_list`, ask the user which repository with one single-select
+`request_human_input` question (skip it when only one is listed), then start a
+worker with `session_create` whose `resources` holds that repository's returned
+`resource` object, and do the implementation there. Give the worker the full
+task, then report its pull request link. If you cannot start a worker, ask the
+user to attach the repository with the composer's repository picker on their
+next message.
+
 Infer the OpenGeni origin and organization from authorized session/access metadata
 when possible. Verify the chosen target deployment, privacy capability, model and
 billing path before relying on them. Explain missing authority or configuration
@@ -37,20 +49,66 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-Ask when an unresolved choice would materially change privacy, authority, user
-experience, cost, irreversible data, or the delivery boundary. First use facts
-already available from the product, repository, live service, or prior direction.
-For reversible preferences, offer a fitting recommendation and continue independent
-work while the user responds. Require an answer before dependent work only when
-the missing decision is necessary for correctness or authorization.
+The user-owned choices (who shares what, whether the agent may change data,
+and, only for background or scheduled work, when it runs and where its results
+should appear) are never defaulted silently: if the request or repository does
+not settle a relevant one, send a single short question in plain product terms
+before building the parts that depend on it, and continue only independent
+discovery while waiting. A chat assistant's replies appear in the chat; that is
+not a question to ask. Skip this only when the user explicitly
+said not to ask; then state the defaults you chose in the handoff. For other
+choices, first use facts already available from the product, repository, live
+service, or prior direction, and use a reversible recommendation instead of a
+question.
 
 Good questions ask for a product decision, such as who may read another person's chats, whether the agent may write data, which actions need confirmation, whether users should see tool activity, or whether a named environment may be deployed.
 
 Poor questions ask the customer to restate their framework, API routes, auth library, CI command, or deployment topology when those are already visible. Do not make the customer choose OpenGeni internals they do not care about; translate their requirement into the appropriate contract.
 
-Group tightly related unresolved decisions when that makes them easier to answer. Do not impose a fixed question count. Do not repeat a question whose answer was already given. If the user explicitly asks the agent to determine the answer, investigate and make a reasoned choice instead of returning the decision to them.
+Asking zero questions is a failure when a user-owned choice below is unresolved and not inferable; asking about inferable facts is the opposite failure. Do not repeat an answered question. If the user explicitly asks the agent to decide, investigate and make a reasoned choice.
 
-For a missing privacy answer, default provisionally to the smaller sharing boundary and explain the operational cost. Do not silently weaken isolation to reduce workspace count.
+When the user explicitly declines to answer the sharing question, default provisionally to the smaller sharing boundary and explain the operational cost. Do not silently weaken isolation to reduce workspace count.
+
+### Keep product choices lightweight
+
+When meaningful choices remain, group them into one short question interaction
+using the host's existing structured human-input UI when available, or a concise
+chat question otherwise. Recommend the setup that fits the product and let the
+user accept it or adjust individual choices. Do not build a new questionnaire or
+ask every integration the same questions. A suggested answer is not consent to
+send data, share private content, or perform an external action.
+
+Write every question the way the end user talks about their own product. Never
+use internal terms such as "on-demand", "learning across chats", "shape",
+"capabilities" or "visibility". Only ask about what applies:
+
+- **Who can see a chat:** only the person who started it (`chats: "private"`)
+  or their whole team (`"shared"`). Offer only these two. Choosing
+  `"isolated"` or any other workspace mapping is your decision from the actual
+  sharing boundary, never a question; private chats alone do not require a
+  workspace per person.
+- **What the agent may do:** only look things up (read-only), or also make
+  changes. Name the actual things ("read your analytics", "can't change
+  websites or users"). Confirm writes separately, only when they are part of
+  the requested product.
+- **What data it uses:** only what's on the current page, or it can look up
+  more on its own. State the meaningful limitation of the recommendation.
+- **Only when the requested feature is itself scheduled or runs in the
+  background** (for example "email me a weekly report"): the missing details
+  (when it runs, "every Monday at 9:00, Oslo time", and where results should
+  appear) with one sentence on why. Never ask about this up front, and never
+  for a chat assistant: long sessions work without any user decision.
+- **Memory:** don't ask by default. Use no lasting memory between chats unless
+  the product clearly needs the assistant to remember things ("remember my
+  preferences"). If it does, ask in those words. Chat history is kept either way.
+
+For example, for a simple dashboard assistant, propose
+“Only you can see your chats; it uses what's on the current page and can't change anything” with a short
+explanation that the agent cannot fetch another report on its own. Do not reuse
+that default for a team assistant whose requirements already imply shared work.
+Continue independent discovery while awaiting an answer; ask again only when new
+information introduces a material decision. Summarize any provisional choices in
+the handoff so they do not become invisible product decisions.
 
 ## Follow the wanted autonomy
 

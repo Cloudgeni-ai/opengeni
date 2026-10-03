@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
@@ -22,11 +23,10 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import type { GitHubAppInfo } from "@/types";
 
 export const GITHUB_APP_DESCRIPTION =
-  "Use the workspace App for automation, or your identity for reviews and merges.";
-// GitHub is the workspace App binding, not a catalog item, so there is no
-// catalogAssetUrl logo path for it; like the other integration marks this is a
-// provider-hosted logo with the monogram as the offline fallback.
-export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon.svg";
+  "Work on repositories, issues, and pull requests. Automation uses the workspace GitHub App; reviews and merges can use your own GitHub identity.";
+// Use the same bundled mark as the conversation card. The workspace App row
+// does not have a registry logo path, and a remote favicon is not reliable.
+export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
   id: GitHubActionPolicyGroup;
@@ -167,7 +167,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     } catch (error) {
       if (actionPolicyRequest.current !== request) return;
       toast.error("Could not update GitHub action approvals", {
-        description: error instanceof Error ? error.message : "Try again.",
+        description: userErrorText(error),
       });
     } finally {
       if (actionPolicyMutation.current === request) {
@@ -193,7 +193,10 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     status.setupMode === "operator" &&
     !status.configured
   ) {
-    facts.push({ label: "GitHub App", value: "Not registered for this deployment" });
+    facts.push({
+      label: "GitHub App",
+      value: "Not set up on this server yet. Connecting creates it first.",
+    });
   }
   if (personalConnection) {
     facts.push({
@@ -426,7 +429,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         ? {
             notice: {
               tone: "muted" as const,
-              title: "GitHub is temporarily unavailable for this OpenGeni deployment.",
+              title: "GitHub is temporarily unavailable for this Opengeni deployment.",
             },
           }
         : {}),
@@ -472,7 +475,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}
         title="Disconnect your GitHub identity?"
-        description="OpenGeni will stop acting as you. The workspace GitHub App is unaffected."
+        description="Opengeni will stop acting as you. The workspace GitHub App is unaffected."
         confirmLabel="Disconnect"
         cancelAutoFocus
         onConfirm={async () => {
@@ -512,7 +515,7 @@ export function githubChip(
 function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installations"]): string {
   return installations.some((installation) => installation.repositoryScope === "all")
     ? "This installation shares every repository it can see."
-    : "No repositories are shared with OpenGeni yet. Change repositories on GitHub to allow some.";
+    : "No repositories are shared with Opengeni yet. Change repositories on GitHub to allow some.";
 }
 
 function githubActionPolicyOptionId(

@@ -165,3 +165,28 @@ function fixtureNodes(): CdpAxNode[] {
     },
   ];
 }
+
+test("focused document does not replace the focused descendant select", () => {
+  const snapshot = normalizeCdpAccessibilityTree({
+    controllerGeneration: "controller",
+    targetId: "target",
+    documentGeneration: "document",
+    nodes: [
+      {
+        nodeId: "root",
+        role: { value: "RootWebArea" },
+        properties: [{ name: "focused", value: { value: true } }],
+        childIds: ["select"],
+        backendDOMNodeId: 1,
+      },
+      {
+        nodeId: "select",
+        parentId: "root",
+        role: { value: "combobox" },
+        properties: [{ name: "focused", value: { value: true } }],
+        backendDOMNodeId: 2,
+      },
+    ],
+  });
+  expect(snapshot.entriesByRef.get(snapshot.focusedRef!)?.backendDOMNodeId).toBe(2);
+});

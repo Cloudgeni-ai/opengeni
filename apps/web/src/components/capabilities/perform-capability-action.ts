@@ -8,12 +8,78 @@ import {
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
 } from "@/lib/capabilities";
+import {
+  beginIntegrationConnect,
+  integrationClassFromDomain,
+  integrationConnectErrorOutcome,
+  type IntegrationClass,
+  type IntegrationConnectMethod,
+} from "@/lib/integration-connect-analytics";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { toast } from "sonner";
 
+type PerformCapabilityActionOptions = Parameters<typeof performCapabilityActionUntracked>[0];
+
+const CONNECT_JOURNEY_METHODS: Partial<Record<ConnectAction["type"], IntegrationConnectMethod>> = {
+  oauth: "oauth",
+  reconnect_oauth: "oauth",
+  social_oauth: "oauth",
+  fiken_oauth: "oauth",
+  api_key: "api_key",
+  reconnect_api_key: "api_key",
+  fiken_api_token: "api_key",
+};
+
+/** The closed provider class of a catalog connect, never its domain or id. */
+function connectJourneyClass(item: CapabilityCatalogItem, action: ConnectAction): IntegrationClass {
+  if (action.type === "social_oauth") return action.provider === "x" ? "x" : "other";
+  if (action.type === "fiken_oauth" || action.type === "fiken_api_token") return "other";
+  const plan = capabilityConnectPlan(item);
+  return integrationClassFromDomain(
+    ("providerDomain" in plan ? plan.providerDomain : null) ||
+      item.connectionRef?.providerDomain ||
+      item.mcpUrl ||
+      item.endpointUrl,
+  );
+}
+
+/**
+ * One connection lifecycle for catalog sheets and conversation cards, with
+ * the consent-gated connect journey around every credential or OAuth action.
+ */
+export async function performCapabilityAction(
+  options: PerformCapabilityActionOptions,
+  action: ConnectAction,
+): Promise<void> {
+  const method = CONNECT_JOURNEY_METHODS[action.type];
+  if (!method) return await performCapabilityActionUntracked(options, action);
+  const journey = beginIntegrationConnect(connectJourneyClass(options.item, action), method);
+  let redirected = false;
+  try {
+    await performCapabilityActionUntracked(
+      {
+        ...options,
+        redirect: (url) => {
+          redirected = true;
+          // An exact-return Connect redirect comes back without outcome parameters.
+          journey.redirecting({
+            returnsWithOutcome: !(action.type === "social_oauth" && options.connectReturnUrl),
+          });
+          options.redirect(url);
+        },
+      },
+      action,
+    );
+    if (!redirected) journey.finish("connected");
+  } catch (error) {
+    journey.finish(integrationConnectErrorOutcome(error));
+    throw error;
+  }
+}
+
 /** One connection lifecycle for catalog sheets and conversation cards. The caller
  * resolves the live item and owns busy/error state; credentials never enter chat. */
-export async function performCapabilityAction(
+async function performCapabilityActionUntracked(
   {
     client,
     workspaceId,

@@ -346,6 +346,9 @@ describe("editable artifact MCP surface", () => {
       server,
       deps: {
         editableArtifactAgent: {
+          describeExportFormats() {
+            return "Supported exports: document → docx; spreadsheet → xlsx.";
+          },
           async startExport(input: Record<string, unknown>) {
             starts.push(input);
             return {
@@ -392,6 +395,11 @@ describe("editable artifact MCP surface", () => {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
+      const description = (await client.listTools()).tools.find(
+        (tool) => tool.name === "editable_artifact_export",
+      )!.description!;
+      expect(description).toContain("document → docx");
+      expect(description).toContain("spreadsheet → xlsx");
       const started = await client.callTool({
         name: "editable_artifact_export",
         arguments: { artifactId, format: "xlsx" },

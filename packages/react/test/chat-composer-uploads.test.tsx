@@ -734,6 +734,82 @@ describe("ChatComposer attachments", () => {
     expect(added[0]!.map((f) => f.name)).toEqual(["doc.pdf"]);
   });
 
+  test("disabled composer rejects file drops without letting the browser open the file", async () => {
+    const added: File[][] = [];
+    const attachments = makeAttachments({ addFiles: (files) => added.push([...files]) });
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({ sending: true })}
+        attachments={attachments}
+        disabled
+      />,
+    );
+    const field = fieldWrapper(container);
+    const pdf = new File(["%PDF"], "later.pdf", { type: "application/pdf" });
+    await act(async () => {
+      fireDrag(field, "dragover", { files: [pdf] });
+      const dropped = fireDrag(field, "drop", { files: [pdf] });
+      expect(dropped.defaultPrevented).toBe(true);
+    });
+    expect(added).toHaveLength(0);
+    expect(container.textContent ?? "").not.toContain("Drop files to attach");
+    expect(container.querySelector("textarea")?.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Attach files"]')?.hasAttribute("disabled")).toBe(
+      true,
+    );
+  });
+
+  test("ready attachments cannot be removed while a new-session send is pending", async () => {
+    const attachment = readyChip("sent.png");
+    const removed: string[] = [];
+    let completeCreate!: () => void;
+    const createPending = new Promise<void>((resolve) => {
+      completeCreate = resolve;
+    });
+    function Harness() {
+      const [creating, setCreating] = useState(false);
+      return (
+        <ChatComposer
+          composer={makeComposer({
+            sending: creating,
+            send: async () => {
+              setCreating(true);
+              await createPending;
+              setCreating(false);
+              return true;
+            },
+          })}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            remove: (id) => removed.push(id),
+          })}
+          disabled={creating}
+        />
+      );
+    }
+    const container = await mount(<Harness />);
+    const remove = container.querySelector<HTMLButtonElement>('[aria-label="Remove sent.png"]');
+    expect(remove?.disabled).toBe(false);
+    await act(async () => {
+      sendButton(container)?.click();
+      await Promise.resolve();
+    });
+    expect(remove?.disabled).toBe(true);
+    await act(async () => {
+      remove?.click();
+    });
+    expect(removed).toEqual([]);
+    await act(async () => {
+      completeCreate();
+      await createPending;
+    });
+    expect(remove?.disabled).toBe(false);
+    await act(async () => {
+      remove?.click();
+    });
+    expect(removed).toEqual([attachment.id]);
+  });
+
   test("a drag that carries no files is ignored (does not enqueue or show the overlay)", async () => {
     let addCalls = 0;
     const attachments = makeAttachments({

@@ -1,11 +1,16 @@
+import { isAnalyticsAction, type AnalyticsAction } from "./analytics-actions";
+
 /** Content-free product facts. Never derive a label from user text or request bodies. */
 export type JourneyProperties = Record<string, string | number | boolean>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Workspace pages: the first path segment after `/workspaces/<id>/`. Keep this in
+// step with the workspace routes in App.tsx (a drift test enforces it).
 const PAGES = new Set([
   "sessions",
   "priority",
   "plugins",
+  "capabilities",
   "documents",
   "state",
   "memory",
@@ -16,12 +21,31 @@ const PAGES = new Set([
   "insights",
   "machines",
   "files",
+  "agents",
+  "variable-sets",
+  "environments",
+  "rigs",
 ]);
+// Top-level routes outside a workspace, by exact path shape. A concrete id in
+// the path is never reported for these; everything unlisted is "other".
+const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^\/$/, "home"],
+  [/^\/sessions\/[^/]+$/, "session-link"],
+  [/^\/identity-links\/[^/]+$/, "identity-link"],
+  [/^\/billing$/, "checkout-return"],
+  [/^\/integrations$/, "integration-return"],
+  [/^\/device$/, "device"],
+  [/^\/reset-password$/, "reset-password"],
+  [/^\/setup-account$/, "setup-account"],
+  [/^\/account-auth$/, "account-auth"],
+  [/^\/settings\/security$/, "personal-security"],
+];
 const SECTIONS = new Set([
   "general",
   "models",
   "members",
   "billing",
+  "insights",
   "usage",
   "security",
   "integrations",
@@ -37,16 +61,34 @@ const SECTIONS = new Set([
   "api-keys",
   "variables",
   "knowledge",
+  "learning",
+  "plugins",
+  "danger",
+  "overview",
+  "people",
+  "recovery",
+  "developer",
+  "files",
+  "access",
+  "identity",
+  "capabilities",
 ]);
+
+/** Every `page` value `journeyPage` can report. */
+export function journeyPageLabels(): ReadonlySet<string> {
+  return new Set([...PAGES, ...TOP_LEVEL_PAGES.map(([, page]) => page), "other"]);
+}
 
 export function journeyPage(pathname: string, search = ""): JourneyProperties {
   const parts = pathname.split("/").filter(Boolean);
   const workspace = parts[0] === "workspaces" && UUID.test(parts[1] ?? "");
-  const page = workspace ? (parts[2] ?? "sessions") : "other";
+  const page = workspace
+    ? (parts[2] ?? "sessions")
+    : (TOP_LEVEL_PAGES.find(([pattern]) => pattern.test(pathname))?.[1] ?? "other");
   const query = new URLSearchParams(search);
   const section = query.get("section") ?? query.get("view");
   return {
-    page: PAGES.has(page) ? page : "other",
+    page: !workspace || PAGES.has(page) ? page : "other",
     ...(workspace ? { workspace_id: parts[1]! } : {}),
     ...(page === "sessions" && UUID.test(parts[3] ?? "") ? { session_id: parts[3]! } : {}),
     ...(section && SECTIONS.has(section) ? { section } : {}),
@@ -57,6 +99,20 @@ export type JourneyOperation = {
   operation: "session_create" | "session_command" | "model_connection";
   properties: JourneyProperties;
 };
+
+/**
+ * Accepted requests that complete a sign-up funnel step. Exact product routes
+ * only; request and response bodies are never inspected.
+ */
+export function journeyMilestone(
+  pathname: string,
+  method: string,
+): "checkout_started" | "organization_setup_completed" | null {
+  if (method.toUpperCase() !== "POST") return null;
+  if (pathname === "/v1/billing/checkout") return "checkout_started";
+  if (pathname === "/v1/auth/organization-onboarding") return "organization_setup_completed";
+  return null;
+}
 
 /** Only classify our finite mutation routes, never fetch URLs, payloads or credentials. */
 export function journeyOperation(pathname: string, method: string): JourneyOperation | null {
@@ -120,12 +176,6 @@ export function journeyOutcome(status: number): string {
   return status >= 500 ? "server_error" : "rejected";
 }
 
-const ACTIONS = new Set([
-  "connect_codex",
-  "connect_supergrok",
-  "connect_ai_gateway",
-  "connect_openrouter",
-]);
-export function journeyAction(value: string | null): string | null {
-  return value && ACTIONS.has(value) ? value : null;
+export function journeyAction(value: string | null): AnalyticsAction | null {
+  return isAnalyticsAction(value) ? value : null;
 }

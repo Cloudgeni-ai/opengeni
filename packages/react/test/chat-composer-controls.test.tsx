@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 
 import { ChatComposer } from "../src/components/chat-composer";
 import * as Composer from "../src/composer";
@@ -161,6 +161,8 @@ describe("ChatComposer delivery and lifecycle controls", () => {
       'button[aria-label="Pause this workstream"]',
     );
     expect(pause).not.toBeNull();
+    // A stable, content-free label hosts may read for product analytics.
+    expect(pause?.getAttribute("data-analytics-action")).toBe("pause");
     expect(
       mounted.container.querySelectorAll('button[aria-label="Pause this workstream"]'),
     ).toHaveLength(1);
@@ -258,6 +260,7 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     // Tips are Radix tooltips (not native `title`); tip copy is on data-og-tip.
     expect(send?.getAttribute("data-og-tip")).toContain("Queue message");
     expect(send?.getAttribute("data-og-tip")).toContain("Cmd/Ctrl+Enter");
+    expect(send?.getAttribute("data-analytics-action")).toBe("send");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
   });
@@ -317,6 +320,87 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(reviewRequests).toBe(1);
     expect(mounted.container.textContent).toContain("Add a note to each quote before sending.");
   });
+
+  test.each([false, true])(
+    "annotation Enter returns to the composer with custom footer: %s",
+    async (customFooter) => {
+      await import("../src/components/timeline-annotations-dialog");
+      const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+      function Harness() {
+        const [note, setNote] = useState("");
+        return (
+          <ChatComposer
+            footer={
+              customFooter ? (
+                <Composer.Footer>
+                  <Composer.SendButton />
+                </Composer.Footer>
+              ) : undefined
+            }
+            composer={{
+              ...composer(spy),
+              annotations: [
+                {
+                  id: "00000000-0000-4000-8000-000000000701",
+                  quote: "beta",
+                  note,
+                  source: {
+                    kind: "assistant_message",
+                    eventId: "00000000-0000-4000-8000-000000000702",
+                    eventType: "agent.message.completed",
+                    sequence: 4,
+                    turnId: "00000000-0000-4000-8000-000000000703",
+                    startOffset: 0,
+                    endOffset: 4,
+                    contextBefore: "",
+                    contextAfter: "",
+                  },
+                },
+              ],
+              annotationReviewTargetId: "00000000-0000-4000-8000-000000000701",
+              updateAnnotation: (_id, next) => setNote(next),
+              removeAnnotation: () => {},
+            }}
+          />
+        );
+      }
+      mounted = await renderComponent(<Harness />);
+      const input = mounted.container.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Message the agent"]',
+      )!;
+      const note = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="Note"]')!;
+      expect(note).not.toBeNull();
+      // Empty notes, multiline input and IME confirmation must not complete review.
+      await press(note, {});
+      expect(document.activeElement).toBe(note);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+          note,
+          "Keep this constraint.",
+        );
+        note.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+      await press(note, { shiftKey: true });
+      expect(document.activeElement).toBe(note);
+      await press(note, { isComposing: true });
+      expect(document.activeElement).toBe(note);
+      await press(note, {});
+      expect(document.body.querySelector("[data-og-annotation-review]")).toBeNull();
+      expect(document.activeElement).toBe(input);
+      expect(input.value).toBe("next prompt");
+      expect(spy.sends).toEqual([]);
+
+      const trigger = mounted.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Review 1 annotation"]',
+      )!;
+      await act(async () => trigger.click());
+      await act(async () =>
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+      );
+      expect(document.body.querySelector("[data-og-annotation-review]")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    },
+  );
 
   test("a disabled send button can explain the exact route-level blocker", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };

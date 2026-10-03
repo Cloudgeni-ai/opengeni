@@ -52,7 +52,10 @@ foreground reads, reconciliation, late callbacks, and old writers must all meet
 the same database gate before releasing the process, parent admission, or holder.
 Immutable supervision identity cannot be stripped to select legacy settlement.
 Legacy idle containment excludes every active supervision-key-bearing command,
-including malformed metadata. Enrollment, capture claims/replacement, publication
+including malformed metadata, and the containment inventory skips any lease that
+holds one. Idle containment records no supervised cancellation intent: the
+intent reasons stay `provider_deadline` and `explicit_stop`, and an idle
+supervised command keeps its box until one of those paths settles it with proof. Enrollment, capture claims/replacement, publication
 and already-published teardown retries recheck this boundary. The database lease
 guard also fences older control writers; readiness requires that guard before
 new launches. Only normal authenticated terminal settlement or exact typed

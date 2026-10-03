@@ -5,7 +5,7 @@ import {
   type EffectiveControlResumeOption,
   type EffectiveSessionControl,
   type LatencyMode,
-  type OpenGeniApiError,
+  OpenGeniApiError,
   type ReasoningEffort,
   type ResourceRef,
   type SaveComposerDraftRequest,
@@ -15,6 +15,15 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  ComposerReconciliationRequiredError,
+  ComposerStateError,
+  ComposerWorkspaceControlUnavailableError,
+  composerSubmissionCanRetry,
+  composerSubmissionErrorMessage,
+} from "../lib/format";
+import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -97,6 +106,10 @@ export type ComposerOptimisticMessage = {
   triggerEventId?: string | null | undefined;
   appliedQueueVersion?: number | null | undefined;
   error?: string | undefined;
+  /** Bounded support reference retained independently of display copy across remounts. */
+  correlationId?: string | undefined;
+  /** False for a definitive refusal that requires changing payment or allowance settings. */
+  retryable?: boolean | undefined;
   outcomeUnknown?: boolean | undefined;
 };
 
@@ -182,13 +195,41 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
       operation.state === "sending" || operation.state === "queued"
         ? true
         : operation.outcomeUnknown,
-    error:
-      operation.state === "sending"
-        ? "Delivery was interrupted; retry to reconcile this message."
-        : operation.error,
+    correlationId: restoredCorrelationId(operation.correlationId),
+    error: restoredErrorReference(
+      operation.correlationId,
+      hasMcpCredentialUpdates && (operation.state === "sending" || operation.outcomeUnknown)
+        ? composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())
+        : operation.state === "sending"
+          ? "Delivery was interrupted; retry to reconcile this message."
+          : operation.outcomeUnknown
+            ? "The request could not be confirmed. Check its status before retrying."
+            : operation.error
+              ? composerSubmissionErrorMessage(new Error(operation.error))
+              : undefined,
+    ),
+    retryable:
+      operation.state === "sending" || operation.outcomeUnknown
+        ? true
+        : (operation.retryable ??
+          (operation.error ? composerSubmissionCanRetry(new Error(operation.error)) : true)),
     input: operation.input,
     canRetry: !hasMcpCredentialUpdates,
   }));
+}
+
+function restoredCorrelationId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[\w.:-]{1,128}$/u.test(value) ? value : undefined;
+}
+
+function restoredErrorReference(
+  reference: unknown,
+  message: string | undefined,
+): string | undefined {
+  const correlationId = restoredCorrelationId(reference);
+  return message && correlationId && message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE
+    ? `${message} Reference: ${correlationId}.`
+    : message;
 }
 
 function rememberOptimisticSendOperations(
@@ -433,6 +474,8 @@ export type ComposerState = {
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
   optimisticMessages?: ComposerOptimisticMessage[] | undefined;
   retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
+  /** Move a definitively refused message into an empty composer without resending it. */
+  restoreOptimisticMessage?: ((clientEventId: string) => void) | undefined;
   removeOptimisticMessage?: ((clientEventId: string) => void) | undefined;
   /** Supersede current direction with the draft. */
   steer: (text?: string) => Promise<boolean>;
@@ -639,6 +682,7 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerControllerState {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
+  const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
   if (!durableDrafts && !options.initialPolicy) {
     throw new Error("useComposer requires initialPolicy when draft persistence is disabled");
@@ -1059,7 +1103,9 @@ export function useComposer(
           const problem = asError(cause);
           const timedOut = problem.name === "TimeoutError";
           setDraftReadError(
-            timedOut ? new Error("Draft sync timed out. Retrying…", { cause }) : problem,
+            timedOut
+              ? new ComposerStateError("Draft sync timed out. Retrying…", { cause })
+              : problem,
           );
           if (
             timedOut ||
@@ -1366,21 +1412,34 @@ export function useComposer(
     optimisticProcessorBusyRef.current = true;
     void (async () => {
       let mutationFailureObserved = false;
-      const markFailed = (problem: Error, outcomeUnknown: boolean): void => {
+      const markFailed = (cause: unknown, outcomeUnknown: boolean): void => {
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
         ) {
           return;
         }
+        const problem = asError(cause);
         replaceOptimisticSends((current) =>
           current.map((candidate) =>
             candidate.clientEventId === operation.clientEventId
               ? {
                   ...candidate,
                   state: "failed",
-                  error: problem.message,
+                  error: formatError(
+                    cause,
+                    outcomeUnknown &&
+                      !isOutcomeUnknownError(problem) &&
+                      !(problem instanceof ComposerReconciliationRequiredError)
+                      ? `The request could not be confirmed. Check its status before retrying.${problem instanceof OpenGeniApiError && problem.correlationId ? ` Reference: ${problem.correlationId}.` : ""}`
+                      : composerSubmissionErrorMessage(problem),
+                  ),
+                  retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
+                  correlationId:
+                    problem instanceof OpenGeniApiError
+                      ? problem.correlationId
+                      : candidate.correlationId,
                 }
               : candidate,
           ),
@@ -1407,7 +1466,7 @@ export function useComposer(
             // This read cannot settle the prior mutation in either direction.
             // Preserve its exact key and uncertain status until reconciliation
             // succeeds or that same mutation is actually replayed.
-            markFailed(asError(cause), true);
+            markFailed(cause, true);
             return;
           }
           const reconciled = reconcileOptimisticSendFromEvents(operation, events);
@@ -1431,15 +1490,13 @@ export function useComposer(
             return;
           }
           if (!operation.canRetry) {
-            throw new Error(
-              "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
-            );
+            throw new ComposerReconciliationRequiredError();
           }
         }
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
           if (!(await persistPayload(operation.draftPayload))) {
-            throw new Error("The message draft could not be saved before delivery.");
+            throw new ComposerStateError("The message draft could not be saved before delivery.");
           }
           expectedDraftRevision = draftRef.current?.revision;
         }
@@ -1457,7 +1514,7 @@ export function useComposer(
         let acceptedEvent: SessionEvent | null = null;
         if (durableDrafts) {
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new Error("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
           }
           const result = await client
             .submitComposerDraft(workspaceId, sessionId, {
@@ -1555,7 +1612,7 @@ export function useComposer(
           operation.outcomeUnknown && !mutationFailureObserved
             ? true
             : isOutcomeUnknownError(cause);
-        markFailed(problem, outcomeUnknown);
+        markFailed(cause, outcomeUnknown);
       } finally {
         optimisticProcessorBusyRef.current = false;
         if (targetKeyRef.current === ownedTargetKey) {
@@ -1567,6 +1624,7 @@ export function useComposer(
     adoptDraftBase,
     client,
     durableDrafts,
+    formatError,
     markOptimisticAccepted,
     loadDraft,
     onSent,
@@ -1735,7 +1793,7 @@ export function useComposer(
             input.reasoningEffort === undefined ||
             input.latencyMode === undefined
           ) {
-            throw new Error("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
           }
           const result = await client.submitComposerDraft(workspaceId, sessionId, {
             text: input.text,
@@ -1840,11 +1898,7 @@ export function useComposer(
             return true;
           }
           if (!pending.canRetry) {
-            setError(
-              new Error(
-                "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
-              ),
-            );
+            setError(new ComposerReconciliationRequiredError());
             return false;
           }
           try {
@@ -2138,6 +2192,7 @@ export function useComposer(
           if (operation.outcomeUnknown) {
             return { ...operation, state: "sending", error: undefined };
           }
+          if (operation.retryable === false) return operation;
           const nextClientEventId = generateClientEventId();
           const currentPersonalResourceAttachment = resolveSendExtras(
             sendExtrasRef.current,
@@ -2167,6 +2222,7 @@ export function useComposer(
             occurredAt: new Date().toISOString(),
             state: "sending",
             error: undefined,
+            retryable: undefined,
             outcomeUnknown: false,
             canRetry: true,
           };
@@ -2237,7 +2293,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
         }
       } finally {
         if (
@@ -2281,7 +2337,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
         }
       } finally {
         if (
@@ -2308,9 +2364,7 @@ export function useComposer(
             (blocker) => blocker.kind === "workspace",
           );
           if (!client.setWorkspaceInferenceState) {
-            throw new Error(
-              "@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.",
-            );
+            throw new ComposerWorkspaceControlUnavailableError();
           }
           const clientEventId = generateClientEventId();
           await replayOutcomeUnknown(() =>
@@ -2440,7 +2494,7 @@ export function useComposer(
   const addAnnotation = useCallback(
     (annotation: DraftTimelineAnnotation) => {
       if (annotationsRef.current.length >= 12) {
-        setError(new Error("A message can include at most 12 timeline annotations."));
+        setError(new ComposerStateError("A message can include at most 12 timeline annotations."));
         return;
       }
       const next = [...annotationsRef.current, annotation];
@@ -2573,6 +2627,42 @@ export function useComposer(
     );
   }, []);
 
+  const restoreOptimisticMessage = useCallback(
+    (clientEventId: string): void => {
+      if (
+        targetKeyRef.current !== targetKey ||
+        draftLoading ||
+        pendingOperationRef.current ||
+        hasDraftContent()
+      )
+        return;
+      const operation = optimisticSendsRef.current.find(
+        (candidate) => candidate.clientEventId === clientEventId,
+      );
+      if (!operation || operation.state !== "failed" || operation.outcomeUnknown) return;
+      // Restoring is a new draft edit, not a retry. Keep the user's current model
+      // selection and never copy credentials from the old rejected request.
+      localEditRevision.current += 1;
+      valueRef.current = operation.text;
+      restoredResourcesRef.current = [...operation.resources];
+      annotationsRef.current = cloneAnnotations(operation.annotations);
+      setValue(operation.text);
+      setRestoredResources(restoredResourcesRef.current);
+      setAnnotations(annotationsRef.current);
+      setError(null);
+      setOptimisticDraftShadow({
+        text: operation.text,
+        resources: restoredResourcesRef.current,
+        annotations: annotationsRef.current,
+        policy: policyRef.current ?? undefined,
+      });
+      replaceOptimisticSends((current) =>
+        current.filter((candidate) => candidate.clientEventId !== clientEventId),
+      );
+    },
+    [draftLoading, hasDraftContent, replaceOptimisticSends, setOptimisticDraftShadow, targetKey],
+  );
+
   const resolveDraftConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
       const ownedTargetKey = targetKey;
@@ -2676,6 +2766,10 @@ export function useComposer(
     send,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
+    restoreOptimisticMessage:
+      !draftLoading && !pendingOperationRef.current && !hasDraftContent()
+        ? restoreOptimisticMessage
+        : undefined,
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,
@@ -2797,7 +2891,7 @@ async function replayOutcomeUnknown<T>(command: () => Promise<T>): Promise<T> {
 }
 
 function asError(cause: unknown): Error {
-  return cause instanceof Error ? cause : new Error(String(cause));
+  return normalizeError(cause);
 }
 
 function promptRoutingFromAcceptedEvent(

@@ -48,6 +48,7 @@ import {
 } from "../src/knowledge-entries";
 import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -62,6 +63,15 @@ const forwardMigrations = [
   "0501_session_sharing_execution.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  "0515_autonomous_learning_defaults.sql",
+  // Compile against Knowledge only after this fixture's real 0461 cutover.
+  ...allowanceMigrationTail,
+  // Extends the attachment helper from withheld 0499; replay after it.
+  "0560_archived_session_imports.sql",
+  // Patches the scheduled producer fence after its withheld prerequisites.
+  "0561_scheduled_session_agent_identity.sql",
+  // Replaces the private instruction helper created by withheld 0466.
+  "0584_agent_instruction_size_parity.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -392,6 +402,14 @@ beforeAll(async () => {
     await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
     await owner`INSERT INTO schema_migrations(name) SELECT unnest(${[migration, ...forwardMigrations]}::text[])`;
     await migrate(owned.ownerUrl);
+    // Current session adapters select these nullable reader fields. Do not
+    // activate the import lifecycle before its withheld 0499 prerequisite.
+    await owner`ALTER TABLE sessions
+      ADD COLUMN imported_archive_import_id text,
+      ADD COLUMN imported_archive_imported_at timestamptz,
+      ADD COLUMN imported_archive_request_hash text,
+      ADD COLUMN imported_archive_subject_id text,
+      ADD COLUMN imported_archive_next_offset integer`;
     await owned.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Acme migration')`;
     await owned.admin`INSERT INTO workspaces(id,account_id,name,settings)
       VALUES(${workspaceId},${accountId},'Migration workspace','{"memoryEnabled":false}')`;
@@ -605,6 +623,14 @@ beforeAll(async () => {
     } finally {
       await legacy.close();
     }
+    // Remove the reader-only columns so the real migration installs and
+    // validates its full constraints/triggers through the canonical runner.
+    await owner`ALTER TABLE sessions
+      DROP COLUMN imported_archive_import_id,
+      DROP COLUMN imported_archive_imported_at,
+      DROP COLUMN imported_archive_request_hash,
+      DROP COLUMN imported_archive_subject_id,
+      DROP COLUMN imported_archive_next_offset`;
     await owner`DELETE FROM schema_migrations WHERE name=ANY(${[migration, ...forwardMigrations]}::text[])`;
   } finally {
     await owner.end({ timeout: 5 });

@@ -15,6 +15,7 @@ import {
   CreateBillingPortalResponse as ContractCreateBillingPortalResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  ClaudeSubscriptionUsage as ContractClaudeSubscriptionUsage,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse as ContractCodexRealtimeWebrtcResponse,
   CodexRealtimeVoice as ContractCodexRealtimeVoice,
@@ -166,6 +167,7 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  ClaudeSubscriptionUsage,
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
   CodexRealtimeVoice,
@@ -948,6 +950,8 @@ describe("SDK / contracts parity", () => {
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
     const humanInputPolicy: UpdateWorkspaceSettingsRequest = { agentHumanInputEnabled: false };
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(humanInputPolicy).success).toBe(true);
+    const codeSearchPolicy: UpdateWorkspaceSettingsRequest = { codeSearchEnabled: true };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(codeSearchPolicy).success).toBe(true);
     const slackReactionSummon: UpdateWorkspaceSettingsRequest = {
       slackReactionSummon: {
         enabled: true,
@@ -1345,6 +1349,35 @@ describe("SDK / contracts parity", () => {
   });
 
   test("workspace Gateway custom-model requests and projections match contracts", () => {
+    const acceptClaudeUsage = (
+      value: z.infer<typeof ContractClaudeSubscriptionUsage>,
+    ): ClaudeSubscriptionUsage => value;
+    const acceptContractUsage = (
+      value: ClaudeSubscriptionUsage,
+    ): z.infer<typeof ContractClaudeSubscriptionUsage> => value;
+    const usage: ClaudeSubscriptionUsage = {
+      connected: true,
+      credentialVersion: 1,
+      windows: [],
+      observedAt: null,
+      source: null,
+      refreshStatus: "scope_required",
+      refreshCheckedAt: null,
+      requestStatus: {
+        status: "rejected",
+        resetsAt: "2030-01-01T01:00:00Z",
+        representativeClaim: "five_hour",
+        overageStatus: null,
+        overageResetsAt: null,
+        upstreamModelId: "claude-opus-5-5",
+        observedAt: "2030-01-01T00:00:00Z",
+        source: "response_headers",
+      },
+      requestRestrictions: [],
+    };
+    expect(
+      acceptClaudeUsage(ContractClaudeSubscriptionUsage.parse(acceptContractUsage(usage))),
+    ).toEqual(usage);
     const acceptModel = (
       value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
     ): WorkspaceGatewayCustomModel => value;

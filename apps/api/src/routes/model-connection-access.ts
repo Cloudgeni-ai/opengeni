@@ -1,3 +1,4 @@
+import { claudeProviderId, withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   configuredModels,
   withCodexCatalogProvider,
@@ -16,9 +17,9 @@ import {
   updateModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
+  getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
-  getWorkspaceVercelAiGatewayConnectionMetadata,
-  getWorkspaceOpenRouterConnectionMetadata,
+  getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -26,9 +27,25 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
 import { managedCookieHuman, requireScopeMutation } from "./supergrok";
+import {
+  requirePrivateSubscriptionHuman,
+  requireSubscriptionScopeMutation,
+} from "./subscription-pool-access";
 
-const Kind = z.enum(["codex", "supergrok", "vercel_gateway", "openrouter"]);
+const Kind = z.enum([
+  "codex",
+  "supergrok",
+  "vercel_gateway",
+  "openrouter",
+  "anthropic",
+  "claude_subscription",
+]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "anthropic" || target.kind === "claude_subscription")
+    return (
+      claudeProviderId(target.kind, target.workspaceId === null ? "organization" : "workspace") +
+      "/"
+    );
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
   return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : "openrouter"}/`;
 }
@@ -38,9 +55,11 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     const path = `/v1/${scope}/:scopeId/model-connections/:kind/:connectionId/access`;
     async function target(c: Context, mutate: boolean): Promise<ModelConnectionTarget> {
       const kind = Kind.parse(c.req.param("kind"));
+      if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
+        throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
       const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
       let connectionId = c.req.param("connectionId")!;
-      if (kind === "codex" || kind === "supergrok")
+      if (kind === "codex" || kind === "supergrok" || kind === "claude_subscription")
         connectionId = z.string().uuid().parse(connectionId);
       if (scope === "organizations") {
         if (mutate) requireSameOriginBrowserMutation(c, deps);
@@ -69,13 +88,25 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             });
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
+      } else if (kind === "claude_subscription") {
+        const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
+          workspaceId: scopeId,
+          subjectId: grant.subjectId,
+          credentialId: connectionId,
+        });
+        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
+        if (snapshot.scope === "user") {
+          const human = await requirePrivateSubscriptionHuman(c, deps, scopeId, "Claude");
+          if (human.subjectId !== grant.subjectId)
+            throw new HTTPException(403, { message: "Subscription owner required" });
+        }
+        if (mutate) {
+          if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
+          await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
+        }
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
-      if (kind === "vercel_gateway" || kind === "openrouter") {
-        const metadata = await (
-          kind === "vercel_gateway"
-            ? getWorkspaceVercelAiGatewayConnectionMetadata
-            : getWorkspaceOpenRouterConnectionMetadata
-        )(deps.db, scopeId);
+      if (kind === "vercel_gateway" || kind === "openrouter" || kind === "anthropic") {
+        const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(deps.db, scopeId, kind);
         if (!metadata || (connectionId !== "current" && metadata.connectionId !== connectionId))
           throw new HTTPException(404, { message: "Connection not found" });
         connectionId = metadata.connectionId;
@@ -112,6 +143,16 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         workspaces = (await getOrganizationAdministrationOverview(deps.db, actor)).workspaces.map(
           ({ id, name }) => ({ id, name }),
         );
+        if (connection.kind === "anthropic" || connection.kind === "claude_subscription") {
+          const customModels = await listOrganizationModelProviderCustomModels(deps.db, {
+            organizationId: connection.accountId,
+            actorSubjectId: connection.subjectId,
+            providerKind: connection.kind,
+          });
+          settings = withClaudeConnectionCatalog(settings, {
+            [connection.kind]: { models: customModels },
+          });
+        }
         if (connection.kind === "vercel_gateway" || connection.kind === "openrouter") {
           const models = await listOrganizationModelProviderCustomModels(deps.db, {
             ...actor,
@@ -132,7 +173,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             .map(({ id, label }) => ({ id, label })),
           personalWorkspacesSupported:
             connection.workspaceId === null &&
-            (connection.kind === "codex" || connection.kind === "supergrok"),
+            (connection.kind === "codex" ||
+              connection.kind === "supergrok" ||
+              connection.kind === "claude_subscription"),
         }),
       );
     });

@@ -142,6 +142,135 @@ async function waitForBlockedBackend(pid: number) {
 }
 
 describe("atomic standalone credential rotation (real PostgreSQL)", () => {
+  test("native replacement cannot skip CAS, destination or resolver authorization", async () => {
+    if (!available) return;
+    for (const variant of ["version", "destination", "resolver"] as const) {
+      const input = await fixture();
+      let resolutions = 0;
+      const replacement: RotationInput = {
+        ...input,
+        updates: [
+          {
+            id: "external",
+            expectedCredentialVersion: variant === "version" ? 9 : 1,
+            expectedServerUrl:
+              variant === "destination" ? "https://wrong.example.test/mcp" : serverUrl,
+            nativeConnectionId: crypto.randomUUID(),
+          },
+        ],
+        resolveNativeConnection: async () => {
+          resolutions++;
+          throw new Error("native account revoked");
+        },
+      };
+      await expect(rotate(first.db, replacement)).rejects.toThrow(
+        variant === "version"
+          ? "version_conflict"
+          : variant === "destination"
+            ? "destination_conflict"
+            : "native account revoked",
+      );
+      expect(resolutions).toBe(variant === "resolver" ? 1 : 0);
+      expect((await state(input)).credential_version).toBe(1);
+      expect(
+        await admin`select id from session_command_receipts where target_session_id = ${input.sessionId}`,
+      ).toHaveLength(0);
+    }
+  });
+
+  test("native replacement refuses pending work before resolving any account", async () => {
+    if (!available) return;
+    const input = await fixture();
+    await database.initializeSessionStartAtomically(first.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    let resolved = false;
+    await expect(
+      rotate(first.db, {
+        ...input,
+        updates: [
+          {
+            id: "external",
+            expectedCredentialVersion: 1,
+            expectedServerUrl: serverUrl,
+            nativeConnectionId: crypto.randomUUID(),
+          },
+        ],
+        resolveNativeConnection: async () => {
+          resolved = true;
+          throw new Error("must not resolve");
+        },
+      }),
+    ).rejects.toThrow("not_quiescent");
+    expect(resolved).toBe(false);
+    expect((await state(input)).credential_version).toBe(1);
+  });
+
+  test("native replacement retains the session and its policy with an exact replay receipt", async () => {
+    if (!available) return;
+    const input = await fixture();
+    const oldRef = {
+      authoritySource: "host",
+      connectionId: "legacy",
+      providerDomain: "tools.example.test",
+      kind: "delegated",
+    };
+    await admin`update session_mcp_servers set connection_ref = ${admin.json(oldRef)},
+      require_approval = ${admin.json(["write_record"])}
+      where session_id = ${input.sessionId}`;
+    const connectionId = crypto.randomUUID();
+    const newRef = {
+      connectionId,
+      providerDomain: "tools.example.test",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    let resolutions = 0;
+    const replacement: RotationInput = {
+      ...input,
+      updates: [
+        {
+          id: "external",
+          expectedCredentialVersion: 1,
+          expectedServerUrl: serverUrl,
+          nativeConnectionId: connectionId,
+          replacementServerUrl: `${serverUrl}/organizations/example`,
+        },
+      ],
+      resolveNativeConnection: async (
+        _tx: Database,
+        server: { connectionRef: unknown; url: string },
+        id: string,
+        replacementServerUrl?: string,
+      ) => {
+        expect(server.connectionRef).toEqual(oldRef);
+        expect(id).toBe(connectionId);
+        expect(server.url).toBe(serverUrl);
+        expect(replacementServerUrl).toBe(`${serverUrl}/organizations/example`);
+        resolutions++;
+        return newRef;
+      },
+    };
+    const receipt = await rotate(first.db, replacement);
+    expect(await rotate(second.db, replacement)).toEqual(receipt);
+    expect(resolutions).toBe(1);
+    const [row] =
+      await admin`select connection_ref, headers_encrypted, credential_version, require_approval, url
+      from session_mcp_servers where session_id = ${input.sessionId}`;
+    expect(row!.connection_ref).toEqual(newRef);
+    expect(row!.headers_encrypted).toEqual({});
+    expect(row!.credential_version).toBe(2);
+    expect(row!.require_approval).toEqual(["write_record"]);
+    expect(row!.url).toBe(`${serverUrl}/organizations/example`);
+    expect(
+      await admin`select id from session_turns where session_id = ${input.sessionId}`,
+    ).toHaveLength(0);
+  });
+
   test("exact replay retains the original receipt and performs no second write", async () => {
     if (!available) return;
     const input = await fixture();

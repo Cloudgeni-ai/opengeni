@@ -12,9 +12,11 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - Azure Database for PostgreSQL Flexible Server when `postgres.mode = "managed"`.
 - `pgcrypto`, `pgvector`, and `btree_gin` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema.
 - Optional PostgreSQL firewall rules through `postgres.allow_azure_services` or `postgres.firewall_rules`.
+- Optional managed PostgreSQL high availability, custom maintenance window, pinned `max_connections`, and CPU/connection saturation alerts (see the Managed PostgreSQL sections below).
 - Azure Storage account and private Blob container when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.
 - ACR pull role assignment for AKS kubelet identity.
 - Optional AKS Microsoft Defender attachment to an existing Log Analytics workspace.
+- Optional namespace-scoped AKS Container Insights log collection into the observability Log Analytics workspace, with a mandatory daily ingestion cap.
 
 Connected Machines (`OPENGENI_SANDBOX_BACKEND=selfhosted`) add one more deployed
 component, the `opengeni-relay` stream relay. Its image is pushed to the same
@@ -235,6 +237,69 @@ target utilization, disruption margin, regional vCPU quota, and the test's hard
 cost ceiling. A lightweight 500-sandbox result is not evidence for 500
 desktop-class rigs.
 
+## Container Logs (Container Insights)
+
+Kubernetes keeps container stdout/stderr only for the lifetime of each pod.
+`aks_container_insights` retains it in the observability Log Analytics
+workspace, so it requires `observability.enabled = true`:
+
+```hcl
+aks_container_insights = {
+  enabled                  = true
+  namespaces               = ["opengeni", "opengeni-platform"]
+  workspace_daily_quota_gb = 5
+}
+```
+
+When enabled, Terraform:
+
+- Enables the AKS monitoring addon (`oms_agent`) with managed-identity
+  ingestion (`msi_auth_for_monitoring_enabled = true`).
+- Creates one data collection rule, `MSCI-<location>-<cluster>`, and associates
+  it to the cluster as `ContainerInsightsExtension`, the exact name Container
+  Insights looks up.
+- Collects only the listed namespaces (`namespaceFilteringMode = "Include"`).
+  The default streams are the logs-and-events preset: `ContainerLogV2`,
+  `KubeEvents`, and `KubePodInventory`. `data_collection_interval` (default
+  `5m`) governs inventory sampling, not log latency.
+- Sets `daily_quota_gb` on the workspace. The cap is required: a log loop must
+  not produce an unbounded bill. When it is reached, the workspace stops
+  ingesting until its daily reset, including Application Insights data that
+  shares the workspace, so set it well above normal ingestion.
+- Creates the `<name_prefix>-logs-daily-cap` scheduled query alert. It reads
+  `_LogOperation`, which is not subject to the cap, and notifies the
+  observability action group when ingestion stops for the day. It evaluates
+  every 15 minutes over a one-hour window, so a late-arriving `OverQuota`
+  record is still counted, and mutes repeat notifications for six hours.
+- Creates the `<name_prefix>-logs-collection-stopped` scheduled query alert.
+  It fires when no `ContainerLogV2` line from the listed namespaces arrived in
+  the last 30 minutes (a deleted association, an agent that cannot
+  authenticate, or the addon removed out of band) and resolves when collection
+  resumes. List at least one namespace that always logs.
+- Optionally applies `container_log_transform_kql`, an ingestion-time
+  [transformation](https://learn.microsoft.com/azure/azure-monitor/containers/container-insights-transformations)
+  that runs only on `ContainerLogV2`, in its own data flow into the standard
+  table. Use it to redact values that must not be retained, such as request
+  query strings in ingress access logs. It must start with `source` and may use
+  only the KQL that transformations support; Azure validates it when the rule
+  is created or updated.
+
+Retention is the workspace's 30 days. Query retained pod output with KQL, for
+example:
+
+```kusto
+ContainerLogV2
+| where PodNamespace == "opengeni" and PodName startswith "opengeni-api-"
+| where TimeGenerated > ago(1h)
+| project TimeGenerated, PodName, ContainerName, LogSource, LogMessage
+```
+
+The addon runs a DaemonSet and one ReplicaSet in `kube-system` with CPU and
+memory requests on every node. Check node request headroom before enabling it
+on a saturated pool. Disabling the object removes the addon, the rule, the
+association, and the cap; data already ingested remains until retention
+expires.
+
 ## Managed PostgreSQL Capacity
 
 Keep non-secret production capacity separate from the credential-bearing `postgres`
@@ -254,6 +319,80 @@ When set, this policy is authoritative for managed PostgreSQL compute and
 storage. When omitted, the existing `postgres.sku_name` and
 `postgres.storage_mb` behavior is unchanged and provider defaults apply to
 storage tier and autogrow.
+
+`max_connections` is optional. Azure computes the default from the memory of
+the SKU the server was created with and does not change it when compute is
+scaled later, so a server created small keeps a small connection limit after a
+scale-up. When set, Terraform manages the static `max_connections` parameter.
+The azurerm provider restarts the server whenever it first adopts or changes
+that value, so change it only inside a planned maintenance step. When the
+server has read replicas, raise the replica's `max_connections` (and compute)
+first: Azure requires replicas to be at least as large as the primary for
+`max_connections`, `max_worker_processes`, and related parameters.
+
+## Managed PostgreSQL Availability
+
+`managed_postgres_availability` adds a high-availability standby and a custom
+planned-maintenance window without touching the credential-bearing `postgres`
+object:
+
+```hcl
+managed_postgres_availability = {
+  high_availability = {
+    mode = "ZoneRedundant" # or "SameZone"
+  }
+  maintenance_window = {
+    day_of_week  = 3 # 0 = Sunday, UTC
+    start_hour   = 2
+    start_minute = 0
+  }
+  update_timeout = "120m" # Terraform update timeout for the server
+}
+```
+
+Null (the default) keeps high availability disabled and lets Azure choose the
+maintenance window. Enabling HA on an existing server is an online operation,
+but it provisions and seeds a standby, so do it while write activity is low.
+Zone-redundant HA needs a General Purpose or Memory Optimized SKU in a region
+with availability zones.
+
+Seeding the standby can outlast the provider's 60-minute update timeout. Set
+`update_timeout` (a whole number of minutes or hours) so Terraform keeps
+polling instead of failing the apply while Azure is still working, and give the
+automation that runs the apply a longer bound than this value. Azure changes a
+custom maintenance window only from the next monthly cycle; a maintenance that
+was already notified keeps its scheduled time.
+
+With HA enabled, Azure fails over to the standby for planned maintenance and
+for unplanned outages, which swaps the primary and standby zones. The server
+resource therefore ignores later changes to `zone` and
+`high_availability[0].standby_availability_zone`, so a plan never tries to fail
+back or rejects a zone Azure moved. Use a planned failover when the primary
+should return to a preferred zone. For the same reason
+`standby_availability_zone` is used only when HA is first enabled; to move the
+standby later, use a planned failover or disable and re-enable HA.
+
+## Managed PostgreSQL Alerts
+
+`managed_postgres_alerts` creates Azure Monitor metric alerts on the managed
+server and routes them to the `observability` action group, so it requires
+`postgres.mode = "managed"` and `observability.enabled = true`:
+
+```hcl
+managed_postgres_alerts = {
+  max_connections     = 429 # the server's effective max_connections
+  cpu_percent         = 80
+  connections_percent = 80
+  severity            = 2
+}
+```
+
+- CPU: average `cpu_percent` above `cpu_percent` for 15 minutes.
+- Connections: maximum `active_connections` above
+  `floor(max_connections * connections_percent / 100)` over 5 minutes. Azure
+  exposes connections only as an absolute count, so `max_connections` must
+  match the live parameter. It defaults to
+  `managed_postgres_capacity.max_connections` when that is pinned.
 
 ## Resource Records
 
@@ -285,7 +424,7 @@ tfvars.
 - Object storage defaults to managed Azure Blob for Azure reference deployments with private container access, nested public blob access disabled, blob versioning enabled, and seven-day blob/container delete retention. The sensitive connection string is exposed only as a sensitive Terraform output and should be written to Key Vault or a Kubernetes Secret, not source control.
 - Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the OpenGeni app chart.
 - For temporary AKS/Flexible Server smoke tests, `postgres.allow_azure_services = true` can unblock Azure-internal access. Prefer private networking or tightly scoped `postgres.firewall_rules` for long-lived deployments.
-- If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Set `postgres.zone` explicitly after creation if Azure reports a provider drift from an assigned zone.
+- If a failed Azure PostgreSQL create reserves a server name without leaving an importable resource, set `postgres.name` to a new cleanup-friendly name and rerun the private-state plan. Terraform ignores later `zone` changes on the managed server (Azure assigns a zone at create time and HA failover can move it), so `postgres.zone` only affects server creation.
 
 If Terraform cannot create role assignments, ask an operator with sufficient Azure RBAC permissions to run:
 

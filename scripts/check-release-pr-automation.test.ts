@@ -4160,7 +4160,8 @@ describe("workflow contracts", () => {
             [
               "bun scripts/run-browser-e2e.ts \\",
               "  ./test/e2e/timeline-scroll.browser.e2e.ts \\",
-              "  ./test/e2e/timeline-tip-follow.browser.e2e.ts",
+              "  ./test/e2e/timeline-tip-follow.browser.e2e.ts \\",
+              "  ./test/e2e/timeline-exchange-fold.browser.e2e.ts",
             ].join("\n") + "\n",
         },
       ],
@@ -4368,6 +4369,8 @@ describe("workflow contracts", () => {
           "/tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png",
           "/tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png",
           "/tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png",
+          "/tmp/opengeni-onboarding-evidence/contrast-failure.json",
+          "/tmp/opengeni-onboarding-evidence/contrast-failure.png",
         ],
       },
     } as const;

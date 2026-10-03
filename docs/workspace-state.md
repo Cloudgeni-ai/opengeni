@@ -2,7 +2,7 @@
 
 > **After migration 0461:** Workspace State now projects bounded published Knowledge metadata from `knowledge_entries`. Old document/base/Memory aggregate fields and the old overview UI are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
 
-The user-facing **Agent Knowledge** page is a small map of what agents can follow
+The user-facing **Knowledge** page is a small map of what agents can follow
 or find in the current workspace. The Workspace State projection supplies its
 status counts, but the page does not expose the projection's diagnostic model.
 It contains exactly two groups:
@@ -28,10 +28,10 @@ raw inventories, structural gaps, proposal queues, portable export, and the
 historical Knowledge inspector are not presented on the default product page.
 
 The small always-on organization identity and mission are administered from
-**Organization settings → Knowledge**. Products, customers, goals, constraints,
+**Organization settings → Organization identity**. Products, customers, goals, constraints,
 and other company facts live in company-scoped Documents on that same surface
-and are retrieved when relevant. Learning mode is administered from **Workspace
-settings → General → Workspace instruction & Skill autonomy**. Neither is a workspace instruction
+and are retrieved when relevant. Learning mode is administered from **Knowledge →
+Learning**. Neither is a workspace instruction
 or Skill.
 
 ## Authority boundaries
@@ -66,7 +66,7 @@ be inactive, provenance-linked drafts until an authorized policy operation
 explicitly activates them.
 
 The account-scoped company profile remains a separate organization authority.
-Its agent-assisted product entry point is Organization settings → Knowledge;
+Its agent-assisted product entry point is Organization settings → Organization identity;
 Workspace State does not own or duplicate it. See
 [`company-profile.md`](company-profile.md).
 
@@ -284,7 +284,7 @@ changes. Gaps are not persisted and cannot activate policy.
 
 ## Console surface
 
-`/workspaces/:workspaceId/state` is labeled **Agent Knowledge** in the console.
+`/workspaces/:workspaceId/state` is labeled **Knowledge** in the console.
 The default route renders only the four destinations above. Documents summarize
 indexing health, Memory summarizes the newest authorized sample, and both link
 to their dedicated pages. Workspace instructions and Skills link to focused
@@ -296,7 +296,7 @@ projection used by tests, administrative integrations, and future purpose-built
 governance clients. The detailed policy inventory, structured-preference
 lifecycle panel, Knowledge inspector, proposal queues, accepted-attempt drift,
 and OKF export remain separate technical capabilities, not elements of the
-default Agent Knowledge experience. Simplifying the product page does not
+default Knowledge experience. Simplifying the product page does not
 weaken their tenancy, compare-and-swap, immutable-history, or permission
 boundaries.
 

@@ -7,7 +7,9 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, type KeyboardEvent, type RefObject } from "react";
+import { MarkdownText } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import { SearchMarkdown } from "./search-markdown-highlight";
 import { SearchText } from "./search-text";
 import { cn } from "@/lib/utils";
 
@@ -206,6 +208,9 @@ export type SearchPreviewMessage = {
   role: "user" | "assistant";
   text: string;
   selected: boolean;
+  formatted?: boolean;
+  snippet?: string;
+  offset?: number;
 };
 
 export function SearchPreviewView(props: {
@@ -235,7 +240,7 @@ export function SearchPreviewView(props: {
     props.query,
   );
   return (
-    <section aria-label="Conversation preview" className="flex min-h-0 flex-col">
+    <section aria-label="Conversation preview" className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
         <Button
           variant="ghost"
@@ -258,10 +263,11 @@ export function SearchPreviewView(props: {
       </header>
       <div
         ref={body}
+        data-search-preview-scroll=""
         onScroll={(event) => {
           saveScroll(event.currentTarget);
         }}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4"
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4"
       >
         {props.error ? (
           <div className="flex items-center gap-2 text-sm" role="alert">
@@ -282,7 +288,7 @@ export function SearchPreviewView(props: {
             <article
               key={message.key}
               className={cn(
-                "mb-5 border-l-2 pl-3",
+                "mb-5 min-w-0 border-l-2 pl-3",
                 message.selected ? "border-brand" : "border-transparent",
               )}
             >
@@ -290,9 +296,24 @@ export function SearchPreviewView(props: {
                 {message.role === "user" ? "User" : "Assistant"}
                 {message.selected ? " · Matching passage" : ""}
               </p>
-              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-fg">
-                <SearchText text={message.text} query={props.query} />
-              </p>
+              {message.formatted ? (
+                <div className="min-w-0 text-sm leading-6 text-fg">
+                  {message.selected ? (
+                    <SearchMarkdown
+                      text={message.text}
+                      query={props.query}
+                      snippet={message.snippet ?? message.text}
+                      offset={message.offset}
+                    />
+                  ) : (
+                    <MarkdownText text={message.text} compact suppressImages />
+                  )}
+                </div>
+              ) : (
+                <p className="whitespace-pre-wrap break-words text-sm leading-6 text-fg">
+                  <SearchText text={message.text} query={props.query} />
+                </p>
+              )}
             </article>
           ))
         )}

@@ -58,7 +58,7 @@ Then open the smallest source files that answer the question:
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
@@ -134,6 +134,7 @@ Keep these boundaries explicit:
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
+- Customer OpenAI/Azure model keys use encrypted shared workspace Connections, with model identity bound to the exact connection and version. Discover the contract in `packages/contracts/src/direct-model-provider.ts` and execution loader in `packages/db/src/index.ts`; never fall back to deployment keys. See `docs/model-providers.md`.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
 
@@ -145,10 +146,17 @@ Keep these concepts straight while working:
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
 - **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many OpenGeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
-- **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
+- **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
 - **Sandbox rotation wait**: a recovering turn fenced by an active managed-sandbox rotation parks on its exact sandbox group and lease epoch. Every authoritative rotation-ending or epoch-advancing transaction durably wakes that waiter; the workflow does not repeatedly reserve turn-worker slots while the same transition remains pending.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
+  Continuation is generated input, not new authority: resume established work
+  against the current applied turn-frozen objective. Reuse only relevant,
+  still-valid authoritative evidence; retain requested comprehensive audits and
+  the full completion audit. Distinguish recoverable failures, definitive human
+  blockers, and work in flight without fixed retry quotas or preliminary wait
+  rituals. `docs/goals.md` owns the guidance scenarios; these instructions do not
+  change runtime wake timing, child-result selection, or approval authority.
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
@@ -274,6 +282,21 @@ every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
+Modal command-start transport safety spans the native router and the pinned SDK
+patch, including internal setup, path/filesystem and archive helpers. Only local
+pre-dispatch proof permits finite same-turn recovery; preserve typed causes
+through SDK wrappers and never replay an uncertain Start. See `docs/run-lifecycle.md`.
+Published runtime consumers use unpatched Modal: do not import patch-added error
+exports. Keep native errors runtime-owned and recognize genuine patched SDK
+boundaries by their own non-enumerable Symbol marker, never names or RPC text.
+
+Lease-owned Modal creation is fenced at `modal-create-boundary.ts`, before the
+physical RPC, and attributed through `modal-create-session.ts` before setup.
+Unknown outcomes retain their epoch/checkpoint. Historical positive discovery
+must match the same provider namespace; absence never permits replay. The
+maintenance activity attributes receipts; ordinary draining owns termination.
+See `docs/run-lifecycle.md` before changing this boundary.
+
 For sandbox pluggability or adding a backend:
 
 1. Find the current `SandboxBackend` contract.
@@ -314,6 +337,13 @@ For tools and MCP work, distinguish:
 - Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
+Configured agents receive capability-gated prompt modules under
+`packages/runtime/src/agent-instructions/`; media guidance belongs to the media
+module, while deferred discovery mechanics remain always on. Inspect the
+runtime's current authorized tool catalog before concluding a tool is absent.
+Integration catalogs and sandbox CLI inventories do not enumerate runtime
+media adapters. Literal-prefix recovery hints never load schemas or grant access.
+
 Managed Codemode clients are release-owned, not image-version-owned. Inspect
 `packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
 scripts for the bundled CLI/ESM asset. Warm managed boxes receive verified,
@@ -324,6 +354,10 @@ Do not repair stale clients by weakening catalog integrity or choosing npm lates
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
+
+The stock Schedules chat shortcut sends the request and time zone. Its setup
+procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:
 

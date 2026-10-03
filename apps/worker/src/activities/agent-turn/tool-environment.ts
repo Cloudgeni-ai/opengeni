@@ -1,6 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
+  resolveInitiatingHuman,
+  buildSlackApiRateLimiter,
   beginConnectorActionExecution,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
@@ -8,30 +9,25 @@ import {
   listSkillDescriptors,
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
-  getWorkspaceModelPolicy,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
+  recordUsageEvent,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
-  workspaceCodexSubscriptionActive,
-  workspaceVercelAiGatewayConnectionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
+  type RunMcpCredentials,
+  selectedSessionRemoteMcpTargets,
   type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
+  toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import {
   createGoogleDrivePublicationAttemptTool,
@@ -63,28 +59,33 @@ import {
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
+  loadWorkspaceModelSelectionInput,
   withFrozenPersonalConnectionDelegations,
-  resolveSessionToolPolicy,
+  resolveTurnToolPolicy,
+  scheduledTurnMcpServerIds,
   hasPermission,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import { recordToolPreparationPhase, recordTurnStartupPhase } from "../../observability-metrics";
+import {
+  recordSkillCheckout,
+  recordSkillRead,
+  recordToolPreparationPhase,
+  recordTurnStartupPhase,
+} from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  resolveAgentToolFamilies,
+  type ResourceRef,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
-import {
-  rollingSafeToolAuthNeededPayload,
-  shouldPublishToolAuthNeededForTurn,
-  xaiCatalogReadinessAuthority,
-} from "./admission";
+import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -96,19 +97,24 @@ import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type {
   AttemptIdentityState,
   EventingState,
+  RenewalState,
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
 import {
   createSessionTitleAttemptToolDefinition,
+  routeAllowsSessionTitleRequests,
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
+import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
+import { turnCredentialRestriction } from "./credential-restriction";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -152,6 +158,7 @@ export type PrepareTurnToolRuntimeDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
+  resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
@@ -163,8 +170,18 @@ export type PrepareTurnToolRuntimeDeps = {
   credentialSubjectId: ClaimTurnOk["credentialSubjectId"];
   interactionInterventionResume: ClaimTurnOk["interactionInterventionResume"];
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
+  /** Deployment and workspace allow the Jev-backed code_search tool. */
+  codeSearchEnabled: boolean;
+  /**
+   * False for an optional repository that sits this turn out after losing
+   * access (dropUnavailableOptionalRepositories), so no tool surface offers it.
+   */
+  retainsOptionalRepository?: (resource: ResourceRef) => boolean;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
+  /** Present when this turn resolves host-managed run credentials. */
+  runCredentialRenewals?: RenewalState | undefined;
+  runMcpCredentials?: RunMcpCredentials;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -197,38 +214,36 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   // sessions follow the current configured MCP set,
   // while explicit, inherited-fixed, and legacy sessions remain narrowed
   // to their stored materialized allow-list.
-  const scheduledEffectiveMcpServerIds = (() => {
-    const value =
-      turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
-        ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
-        : null;
-    return Array.isArray(value) && value.every((id) => typeof id === "string")
-      ? [...new Set(value)].sort()
-      : null;
-  })();
-  const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
-  const resolvedToolPolicy = resolveSessionToolPolicy({
+  const resolvedToolPolicy = resolveTurnToolPolicy({
     toolPolicy: session.toolPolicy,
-    sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
-    availableMcpServerIds: scheduledEffectiveMcpServerIds
-      ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
-      : [...currentMcpServerIds],
+    session,
+    turn,
+    availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
     defaultMcpServerIds:
-      scheduledEffectiveMcpServerIds ??
-      (session.toolPolicy.mode === "workspace_default"
+      scheduledTurnMcpServerIds(turn) === null && session.toolPolicy.mode === "workspace_default"
         ? await workspaceSessionToolPolicyDefaultServerIds(
             db,
             input.workspaceId,
             capabilitySettings,
             fileAuthoritySubjectId ?? undefined,
           )
-        : []),
+        : [],
   });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
     droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
   });
-  const effectivePolicyTools = resolvedToolPolicy.toolRefs;
+  const families = resolveAgentToolFamilies(session.agent, {
+    productServerIds: new Set([
+      ...session.mcpServers.map((server) => server.id),
+      ...(session.toolPolicy.mode !== "workspace_default"
+        ? session.tools.map((tool) => tool.id)
+        : []),
+    ]),
+  });
+  const effectivePolicyTools = resolvedToolPolicy.toolRefs.filter(
+    (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
+  );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
   // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
@@ -371,6 +386,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
+    resolvedModel,
     lazyToolTransport,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
@@ -381,6 +397,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
+    codeSearchEnabled,
+    retainsOptionalRepository,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
   } = deps;
@@ -392,6 +410,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
@@ -512,7 +531,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sessionId: input.sessionId,
     attemptId: input.attemptId,
     turn,
-    resources: mergeResourceRefs(session.resources, turn.resources),
+    resources: mergeResourceRefs(session.resources, turn.resources).filter(
+      (resource) => retainsOptionalRepository?.(resource) ?? true,
+    ),
     tools: turnTools,
     resolveCredential,
   });
@@ -559,20 +580,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         (permission) => hasPermission(linkedAuthority.permissions, permission),
       )
     : session.firstPartyMcpPermissions;
-  const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
-    runSettings,
-    session.firstPartyMcpTools,
+  const toolFamilies = resolveAgentToolFamilies(session.agent);
+  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
+    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
   const titleToolPlan = sessionTitleToolPlan({
+    agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
     shouldRequestTitle: shouldRequestMissingSessionTitle({
+      agentConfig: session.agent,
       title: session.title,
       titleSource: session.titleSource,
       firstPartyMcpTools: selectedFirstPartyMcpTools,
       firstPartyMcpPermissions: effectiveFirstPartyPermissions,
     }),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
+    routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
@@ -637,20 +661,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     workspaceId: input.workspaceId,
     ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
   });
-  const skillCatalog = [
-    ...sharedSkillDescriptors
-      .filter((entry) => entry.activationMode === "workspace_managed")
-      .map((entry) => ({
-        id: entry.id,
-        name: entry.title,
-        description: entry.description,
-      })),
-    ...selectedSkills.map((entry) => ({
-      id: entry.id,
-      name: entry.artifact.name,
-      description: entry.artifact.description || entry.artifact.name,
-    })),
-  ];
+  const skillCatalog =
+    toolFamilies.skills === false
+      ? []
+      : [
+          ...sharedSkillDescriptors
+            .filter((entry) => entry.activationMode === "workspace_managed")
+            .map((entry) => ({
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+            })),
+          ...selectedSkills.map((entry) => ({
+            id: entry.id,
+            name: entry.artifact.name,
+            description: entry.artifact.description || entry.artifact.name,
+          })),
+        ];
   const skillTools = createWorkspaceSkillTools({
     db,
     settings: runSettings,
@@ -665,6 +692,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       executionGeneration: attempt.executionGeneration,
     },
     selected: selectedSkills,
+    modelToolOutputTruncationTokens: () =>
+      eventing.modelRunSettings.modelToolOutputTruncationTokens,
+    onSkillReadHistoryLookupFailed: () =>
+      observability.warn("skill_read history lookup failed; returning the full Skill text", {
+        errorCode: "skill_read_history_lookup_failed",
+        origin: "worker",
+      }),
+    skillReadTelemetry: {
+      // Set once agent build freezes this turn's model-visible Skill index.
+      indexedSkillIds: () => eventing.modelVisibleSkillIds,
+      observe: (observation) => recordSkillRead(observability, observation),
+    },
+    observeSkillCheckout: (observation) => recordSkillCheckout(observability, observation),
     filesystem: async () => {
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
@@ -762,6 +802,63 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
+  const codeSearchTools = codeSearchToolDefinitions({
+    enabled: codeSearchEnabled,
+    settings: runSettings,
+    backend: activeSandboxBackend ?? groupBoxBackend,
+    machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
+    observability,
+    // OpenGeni's Jev key pays for these calls whatever model billing the
+    // workspace uses; record them per workspace so the cost stays visible.
+    recordUsage: async (usage) => {
+      const shared = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceResourceType: "code_search",
+        sourceResourceId: usage.operationId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        turnAttemptId: input.attemptId,
+      };
+      await recordUsageEvent(db, {
+        ...shared,
+        eventType: "code_search.jev_input_tokens",
+        quantity: usage.jevInputTokens,
+        unit: "tokens",
+        idempotencyKey: `usage:code_search.jev_input_tokens:${input.attemptId}:${usage.operationId}`,
+      });
+      await recordUsageEvent(db, {
+        ...shared,
+        eventType: "code_search.jev_cost",
+        quantity: Math.round(usage.jevCostUsd * 1_000_000),
+        unit: "usd_micros",
+        idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
+      });
+    },
+    workspace: async () => {
+      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
+      const access = await resolveTurnSandboxAccess(
+        sandboxState,
+        media.sdkOwnedSandboxSession,
+        "code_search requires a sandbox or Connected Machine.",
+      );
+      const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+      const runAs = sandboxRunAs(runSettings);
+      return codeSearchWorkspaceFromChannel(
+        new SandboxChannelAService({
+          session: access.session,
+          workspaceRoot: machineRoot ?? "/workspace",
+          ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+          leaseEpoch: access.leaseEpoch,
+          ...(runAs ? { runAs } : {}),
+        }),
+      );
+    },
+  });
+  const attemptToolFamilies = resolveAgentToolFamilies(session.agent, {
+    hasSkills: skillCatalog.length > 0,
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -776,87 +873,34 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...skillTools,
     ...sourceTools,
+    ...(deps.runCredentialRenewals
+      ? [
+          createRefreshCredentialsAttemptToolDefinition({
+            refresh: async () => {
+              const renewals = deps.runCredentialRenewals!;
+              const controller = renewals.runCredentialRenewal;
+              if (!controller) return "not_provisioned";
+              renewals.runCredentialRenewalOutcome = null;
+              await controller.refreshNow();
+              return renewals.runCredentialRenewalOutcome ?? "completed";
+            },
+          }),
+        ]
+      : []),
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
         const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
         const currentSettings = currentCatalog.settings;
-        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
-        const [
-          connectionModelRestrictions,
-          policy,
-          codexSubscriptionActive,
-          xaiSubscriptionActive,
-          workspaceGatewayConnectionActive,
-          workspaceGatewayCustomModels,
-          openRouterConnectionActive,
-          workspaceOpenRouterCustomModels,
-          organizationGatewayConnectionActive,
-          organizationGatewayCustomModels,
-          organizationOpenRouterConnectionActive,
-          organizationOpenRouterCustomModels,
-        ] = await Promise.all([
-          getWorkspaceConnectionModelRestrictions(
-            db,
-            input.workspaceId,
-            xaiReadinessAuthority?.subjectId ?? credentialSubjectId ?? "worker:model-access",
-            xaiReadinessAuthority?.authoritySnapshot,
-          ),
-          getWorkspaceModelPolicy(db, input.workspaceId),
-          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
-          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
-            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
-                workspaceId: input.workspaceId,
-                ...xaiReadinessAuthority,
-              })
-            : false,
-          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
-          listWorkspaceGatewayCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          workspaceOpenRouterConnectionActive(db, input.workspaceId),
-          listWorkspaceOpenRouterCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-        ]);
+        const selectionInput = await loadWorkspaceModelSelectionInput(db, currentSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? "worker:model-access",
+          xaiAuthoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+          claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
+        });
         return {
-          selections: resolveWorkspaceModelSelection({
-            connectionModelRestrictions,
-            settings: currentSettings,
-            policy,
-            codexSubscriptionActive,
-            xaiSubscriptionActive,
-            workspaceGatewayConnectionActive,
-            workspaceGatewayCustomModels,
-            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-            workspaceOpenRouterCustomModels,
-            organizationGatewayConnectionActive,
-            organizationGatewayCustomModels,
-            organizationOpenRouterConnectionActive,
-            organizationOpenRouterCustomModels,
-          }),
+          selections: resolveWorkspaceModelSelection(selectionInput),
           modelNotes: currentCatalog.modelNotes,
         };
       },
@@ -884,6 +928,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
       scope: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -903,7 +948,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...(googleDrivePublicationTool && googleDrivePublicationAllowed
       ? [googleDrivePublicationTool]
       : []),
-  ];
+    ...codeSearchTools,
+  ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -965,9 +1011,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       },
     });
   };
+  const initiatingHuman = await waitForTurnOperation(
+    resolveInitiatingHuman(
+      db,
+      deps.connectionScope,
+      turn.initiatingHumanSubjectId ?? null,
+      turn.id,
+    ),
+    cancellationSignal,
+    undefined,
+  );
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -981,8 +1038,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+        initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,
+        sessionAttachedRemoteMcpTargets: selectedSessionRemoteMcpTargets(
+          githubRestMcp.settings,
+          session.mcpServers ?? [],
+          githubRestMcp.tools,
+          localMcpServers,
+        ),
+        ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        slackRateLimit: buildSlackApiRateLimiter(db, githubRestMcp.settings),
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
         ...(linkedAuthority
           ? {
@@ -1099,6 +1166,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       undefined,
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
+      (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
     );
     eventing.codemodeDispatcher.start();
   };
@@ -1124,6 +1192,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...titleToolPlan.preparationIndependentToolNames,
       "skill_read",
     ],
+    codeSearchAvailable: codeSearchTools.length > 0,
     skillCatalog,
   };
 }

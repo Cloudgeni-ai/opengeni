@@ -7,6 +7,7 @@ import {
   WorkflowIdReusePolicy,
 } from "@temporalio/workflow";
 import type { TurnInitiator } from "@opengeni/contracts";
+import type { DispatchScheduledTaskRunInput } from "../activities/types";
 import { scheduledTaskActivity } from "./activities";
 import {
   knowledgeSourceSyncWake,
@@ -26,13 +27,37 @@ export type ScheduledTaskFireWorkflowInput = ScheduledTaskFireWorkflowBase &
         triggerType: "scheduled";
         agentRunUsageIdempotencyKey?: never;
         initiator?: never;
+        credentialRestriction?: never;
       }
     | {
         triggerType: "manual" | "initial" | "provider_event" | "retry" | "repair";
         agentRunUsageIdempotencyKey: string;
         initiator: TurnInitiator;
+        credentialRestriction?: "developer_setup";
       }
   );
+
+export function scheduledTaskDispatchInput(
+  input: ScheduledTaskFireWorkflowInput,
+  producerKey: string,
+): DispatchScheduledTaskRunInput {
+  const base = {
+    workspaceId: input.workspaceId,
+    taskId: input.taskId,
+    producerKey,
+  };
+  return input.triggerType !== "scheduled"
+    ? {
+        ...base,
+        triggerType: input.triggerType,
+        agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
+        initiator: input.initiator,
+        ...(input.credentialRestriction === "developer_setup"
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
+      }
+    : { ...base, triggerType: "scheduled" };
+}
 
 export async function scheduledTaskFireWorkflow(
   input: ScheduledTaskFireWorkflowInput,
@@ -47,20 +72,8 @@ export async function scheduledTaskFireWorkflow(
   ) {
     return;
   }
-  const base = {
-    workspaceId: input.workspaceId,
-    taskId: input.taskId,
-    producerKey: workflowInfo().workflowId,
-  };
   const result = await scheduledTaskActivity.dispatchScheduledTaskRun(
-    input.triggerType !== "scheduled"
-      ? {
-          ...base,
-          triggerType: input.triggerType,
-          agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
-          initiator: input.initiator,
-        }
-      : { ...base, triggerType: "scheduled" },
+    scheduledTaskDispatchInput(input, workflowInfo().workflowId),
   );
   if (result.action !== "knowledge_source_sync") return;
 
