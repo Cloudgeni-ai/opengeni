@@ -55,6 +55,9 @@ import {
   type NativeHumanInputDraft,
 } from './view-model'
 
+const NO_COMPOSER_INSETS = { bottom: 0, left: 0, right: 0 } as const
+const NO_RESTORED_RESOURCES: readonly unknown[] = []
+
 export type NativeToolRenderer = (
   item: ToolCallItem,
   context: { theme: OpenGeniNativeTheme; labels: OpenGeniNativeLabels; compact: boolean }
@@ -143,7 +146,7 @@ export function OpenGeniNativeSessionView({
   labels: labelOverrides,
   header,
   composerAccessory,
-  composerSafeAreaInsets = { bottom: 0, left: 0, right: 0 },
+  composerSafeAreaInsets = NO_COMPOSER_INSETS,
   renderComposer,
   renderComposerActions,
   renderComposerSurface,
@@ -1632,7 +1635,7 @@ export function OpenGeniNativeAttachmentStrip({
   attachments,
   labels,
   onRemoveRestoredResource,
-  restoredResources = [],
+  restoredResources = NO_RESTORED_RESOURCES,
   theme,
 }: {
   attachments: NativeFileAttachmentsResult
@@ -1717,6 +1720,7 @@ export function OpenGeniNativeAttachmentStrip({
       ))}
       {restoredResources.map((_resource, index) => (
         <View
+          // oxlint-disable-next-line react/no-array-index-key -- restored refs are opaque and positional
           key={`restored-${index}`}
           style={[
             styles.attachmentChip,
