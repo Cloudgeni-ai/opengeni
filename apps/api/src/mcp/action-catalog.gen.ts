@@ -2197,6 +2197,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getComputerInputPosture",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/input-posture",
+    "request": [],
+    "response": [
+      "ComputerSessionInputPosture"
+    ]
+  },
+  {
     "id": "getComputerSession",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId",
