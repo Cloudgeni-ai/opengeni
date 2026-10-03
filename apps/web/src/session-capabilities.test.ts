@@ -4,14 +4,22 @@ import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-
 import { firstPartySessionToolOptions } from "@/lib/session-tools";
 
 describe("session capability product groups", () => {
-  test("represents every exact first-party tool in one understandable group", () => {
+  test("represents every current first-party tool once and omits retired native Atlassian tools", () => {
+    const retiredNativeToolIds = new Set([
+      "atlassian_sources_list",
+      "atlassian_search",
+      "atlassian_get",
+    ]);
+    const expectedToolIds = firstPartySessionToolOptions
+      .map((option) => option.id)
+      .filter((id) => !retiredNativeToolIds.has(id));
     const groups = sessionCapabilityGroupsFor(firstPartySessionToolOptions);
     const groupedIds = groups.flatMap((group) => group.toolIds);
 
-    expect(new Set(groupedIds)).toEqual(
-      new Set(firstPartySessionToolOptions.map((option) => option.id)),
-    );
-    expect(groupedIds).toHaveLength(firstPartySessionToolOptions.length);
+    expect(new Set(groupedIds)).toEqual(new Set(expectedToolIds));
+    expect(groupedIds).toHaveLength(expectedToolIds.length);
+    for (const id of retiredNativeToolIds) expect(groupedIds).not.toContain(id);
+    expect(groups.some((group) => group.id === "atlassian")).toBe(false);
     expect(groups.some((group) => group.id === "other")).toBe(false);
     expect(groups.find((group) => group.id === "workspace")?.toolIds).toContain(
       "custom_mcp_setup_request",
