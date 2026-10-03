@@ -20,12 +20,12 @@ export const DEVELOPER_SETUP_KEY_VARIABLE = "DEVELOPER_SETUP_API_KEY";
  */
 export const DEVELOPER_SETUP_KEY_LIFETIME_DAYS = 30;
 
-/** The organization key onboarding creates: the scoped Developer setup tier, valid for 30 days. */
+/** The organization key onboarding creates: full access, valid for 30 days, so setup needs no UI. */
 export function developerSetupKeyRequest(now: Date = new Date()) {
   return {
-    name: "Developer setup",
-    description: "Created at signup to add Opengeni agents to your product.",
-    access: "developer_setup",
+    name: "Setup (full access)",
+    description: "Created at signup so an agent can set up Opengeni in your product end to end.",
+    access: "full",
     expiresAt: new Date(
       now.getTime() + DEVELOPER_SETUP_KEY_LIFETIME_DAYS * 24 * 60 * 60 * 1000,
     ).toISOString(),
@@ -70,7 +70,7 @@ Then follow the build-with-opengeni skill and its opengeni-client guide.
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- My Developer setup API key (expires in 30 days, can't create other keys) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
+- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
 
 Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE}, and set OPENGENI_API_BASE_URL and OPENGENI_ORGANIZATION_ID beside it in that .env (git-ignored, file mode 0600). Never print, log or commit the key, and never put it in browser code. When the integration needs a long-lived key, ask me to create one in Opengeni under Organization settings > Developer.
 
@@ -85,7 +85,7 @@ export function developerSetupModelContext(
   facts: DeveloperSetupFacts & { keyInSandbox: boolean },
 ): string {
   const key = facts.keyInSandbox
-    ? `- A Developer setup organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 30 days and can't create other keys.`
+    ? `- A full-access organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 30 days; you may use it to set up and test everything, including creating test users and a long-lived key for production.`
     : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer; never ask me to paste it into this chat.";
   return `Signup onboarding choices:
 - Goal: add AI agents to my product (embed Opengeni). I chose to let Opengeni implement it.
