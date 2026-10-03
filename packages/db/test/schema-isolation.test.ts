@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
-import { createDb, createSession } from "../src/index";
+import {
+  createDb,
+  createSession,
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+  provisionRoles,
+} from "../src/index";
 import { migrate, runMigrations } from "../src/migrate";
 
 // Schema-isolation reconfirmation. Proves the embedded dedicated-schema path through the REAL
@@ -20,121 +26,76 @@ import { migrate, runMigrations } from "../src/migrate";
 //      `public` — byte-for-byte today's behavior, run on a SECOND fresh db so
 //      the two paths don't interfere.
 //
-// One throwaway pgvector container, torn down with the test (NEVER a persistent
-// default-port stack). Non-default port. Most assertions run as superuser; the
-// embedded leg also pre-creates opengeni_app so the migration grant blocks run
-// and a non-owner insert can prove dedicated-schema app-role privileges.
-
-// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
-// the container name binds the listener contract across worktrees.
-const PORT = 61442;
-const CONTAINER = `ogbuild-pg-schema-iso-${PORT}`;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg17";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", "-v", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`, { cause: err });
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
-let available = true;
+// Two pristine databases from the shared real-PostgreSQL harness. An explicit
+// OPENGENI_TEST_PG_URL selects native PostgreSQL without Docker or skip/pass.
+// Canonical provisioning prepares the non-owner role and converges the exact
+// current grants after migration; never manufacture fixture-only privileges.
+let dedicated: BlankTestDatabase | undefined;
+let standalone: BlankTestDatabase | undefined;
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker([
-      "run",
-      "--rm",
-      "-d",
-      "-e",
-      `POSTGRES_PASSWORD=${PASSWORD}`,
-      "-p",
-      `${PORT}:5432`,
-      "--name",
-      CONTAINER,
-      IMAGE,
-    ]);
-  } catch (err) {
-    available = false;
-    // eslint-disable-next-line no-console
-    console.warn(`[schema-isolation] docker unavailable, skipping: ${String(err)}`);
-    return;
-  }
-  await waitForReady();
-  // A second logical database for the standalone (public) leg so it can't
-  // interfere with the dedicated-schema leg's "0 tables in public" assertion.
-  const admin = postgres(ADMIN_URL, { max: 1 });
-  try {
-    await admin.unsafe(`CREATE DATABASE standalone_public`);
-    await admin.unsafe(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-          CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-        END IF;
-      END $$;
-    `);
-  } finally {
-    await admin.end();
-  }
+  const acquiredDedicated = await acquireBlankTestDatabase("schema-isolation-dedicated");
+  if (!acquiredDedicated) throw new Error("Dedicated-schema PostgreSQL fixture unavailable");
+  dedicated = acquiredDedicated;
+  const acquiredStandalone = await acquireBlankTestDatabase("schema-isolation-public");
+  if (!acquiredStandalone) throw new Error("Standalone PostgreSQL fixture unavailable");
+  standalone = acquiredStandalone;
 }, 120_000);
 
-afterAll(() => {
-  removeContainer();
-});
+afterAll(async () => {
+  await Promise.all([dedicated?.release(), standalone?.release()]);
+}, 120_000);
 
-function publicUrl(database: string): string {
-  return `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/${database}`;
+function applicationUrl(database: BlankTestDatabase): string {
+  if (!database.appPassword) throw new Error("PostgreSQL fixture app password unavailable");
+  const url = new URL(database.databaseUrl);
+  url.username = "opengeni_app";
+  url.password = database.appPassword;
+  return url.toString();
 }
 
 describe("embedded dedicated-schema isolation", () => {
   test("migrate(url, 'opengeni') isolates all tables + policies into the dedicated schema, idempotently; standalone stays in public", async () => {
-    if (!available) {
-      // eslint-disable-next-line no-console
-      console.warn("[schema-isolation] skipped (docker not available)");
-      return;
-    }
+    if (!dedicated || !standalone) throw new Error("PostgreSQL schema fixtures unavailable");
+    const appUrl = applicationUrl(dedicated);
+    const roles = {
+      appRole: "opengeni_app",
+      appPassword: new URL(appUrl).password,
+      targetSchema: "opengeni",
+      rlsStrategy: "force" as const,
+    };
+    await provisionRoles(dedicated.databaseUrl, roles);
 
     // --- EMBEDDED leg: dedicated schema via the SDK entry point.
     // Run TWICE to prove idempotency under the current_schema() guards.
-    await migrate(ADMIN_URL, "opengeni", {
+    await migrate(dedicated.databaseUrl, "opengeni", {
       applicationDatabaseRoles: ["opengeni_app"],
     });
-    await runMigrations(ADMIN_URL, "opengeni"); // second pass via the named SDK alias — must be a clean no-op.
+    await runMigrations(dedicated.databaseUrl, "opengeni"); // second pass via the named SDK alias — must be a clean no-op.
 
-    const sql = postgres(ADMIN_URL, { max: 1 });
+    const sql = postgres(dedicated.databaseUrl, { max: 1 });
     try {
+      // 0598 revokes PUBLIC on the generated CHECK validator. Migration alone
+      // does not provision its app EXECUTE; reproduce the exact missing seam.
+      const unprovisionedApp = postgres(appUrl, { max: 1 });
+      try {
+        await expect(
+          Promise.resolve(
+            unprovisionedApp`select opengeni.claude_provider_account_authority_snapshot_v1_valid(
+            '{"version":1,"scope":"workspace"}'::jsonb)`,
+          ),
+        ).rejects.toMatchObject({ code: "42501" });
+      } finally {
+        await unprovisionedApp.end();
+      }
+      await provisionRoles(dedicated.databaseUrl, roles);
+      const [validator] = await sql<Array<{ execute: boolean; publicExecute: boolean }>>`
+        select has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as execute,
+          exists(select 1 from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as "publicExecute"
+        from pg_proc procedure
+        where procedure.oid = 'opengeni.claude_provider_account_authority_snapshot_v1_valid(jsonb)'::regprocedure`;
+      expect(validator).toEqual({ execute: true, publicExecute: false });
       const tablesInOpengeni = await sql<{ count: number }[]>`
         SELECT count(*)::int AS count FROM information_schema.tables
         WHERE table_schema = 'opengeni'`;
@@ -185,13 +146,27 @@ describe("embedded dedicated-schema isolation", () => {
       await sql`
         INSERT INTO opengeni.workspace_inference_controls (workspace_id, account_id)
         VALUES (${workspace!.id}, ${account!.id})`;
-      const sessionClient = createDb(APP_URL, {
+      const sessionClient = createDb(appUrl, {
         max: 1,
         searchPath: "opengeni,opengeni_private,public",
         rlsStrategy: "force",
       });
       let sessionId: string;
       try {
+        const postureOptions = {
+          expectedRole: "opengeni_app",
+          targetSchema: "opengeni",
+          rlsStrategy: "force" as const,
+          organizationTenancyCanonicalActivationEnabled: true,
+        };
+        const posture = await inspectRuntimeDatabasePosture(sessionClient.db, postureOptions);
+        expect(evaluateRuntimeDatabasePosture(posture, postureOptions)).toEqual([]);
+        expect(posture.identity).toMatchObject({
+          currentUser: "opengeni_app",
+          sessionUser: "opengeni_app",
+          superuser: false,
+          bypassRls: false,
+        });
         sessionId = (
           await createSession(sessionClient.db, {
             accountId: account!.id,
@@ -215,9 +190,13 @@ describe("embedded dedicated-schema isolation", () => {
         )
       `);
 
-      const app = postgres(APP_URL, { max: 1 });
+      const app = postgres(appUrl, { max: 1 });
       try {
         await app.unsafe(`SET search_path = "opengeni", "opengeni_private", "public"`);
+        const [snapshots] = await app<Array<{ valid: boolean; invalid: boolean }>>`
+          select claude_provider_account_authority_snapshot_v1_valid('{"version":1,"scope":"workspace"}'::jsonb) as valid,
+            claude_provider_account_authority_snapshot_v1_valid('{"version":2,"scope":"workspace"}'::jsonb) as invalid`;
+        expect(snapshots).toEqual({ valid: true, invalid: false });
         await app.begin(async (tx) => {
           await tx`SELECT set_config('opengeni.account_id', ${account!.id}, true)`;
           await tx`SELECT set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
@@ -232,12 +211,55 @@ describe("embedded dedicated-schema isolation", () => {
             )
             RETURNING id`;
           expect(inserted).toHaveLength(1);
-          const defaultGrantInserted = await tx<{ id: string }[]>`
-            INSERT INTO default_privilege_probe (note)
-            VALUES ('default grants include sequences')
-            RETURNING id`;
-          expect(defaultGrantInserted).toHaveLength(1);
+          const visible = await tx<Array<{ id: string }>>`
+            select id from sessions where id = ${sessionId}`;
+          expect(visible.map((row) => row.id)).toEqual([sessionId]);
         });
+        // Canonical defaults grant sequence use, not DML on unknown future
+        // tables. Keep both halves of that least-privilege contract observable.
+        const [defaults] = await app<
+          Array<{ sequenceUsage: boolean; sequenceSelect: boolean; insert: boolean }>
+        >`
+          select has_sequence_privilege(current_user, 'opengeni.default_privilege_probe_id_seq', 'USAGE') as "sequenceUsage",
+            has_sequence_privilege(current_user, 'opengeni.default_privilege_probe_id_seq', 'SELECT') as "sequenceSelect",
+            has_table_privilege(current_user, 'opengeni.default_privilege_probe', 'INSERT') as insert`;
+        expect(defaults).toEqual({ sequenceUsage: true, sequenceSelect: true, insert: false });
+        expect(
+          await app`select nextval('opengeni.default_privilege_probe_id_seq') as id`,
+        ).toHaveLength(1);
+        await expect(
+          Promise.resolve(app`insert into default_privilege_probe(note) values('must be denied')`),
+        ).rejects.toMatchObject({ code: "42501" });
+        await app.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${crypto.randomUUID()}, true)`;
+          await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+          expect(await tx`select id from sessions where id = ${sessionId}`).toHaveLength(0);
+        });
+        await expect(
+          app.begin(async (tx) => {
+            await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+            await tx`select set_config('opengeni.workspace_id', ${crypto.randomUUID()}, true)`;
+            await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+            await tx`insert into session_mcp_servers(account_id,workspace_id,session_id,server_id,name,url,headers_encrypted)
+            values(${account!.id},${workspace!.id},${sessionId},'wrong-scope','Denied','https://mcp.example.test','{}'::jsonb)`;
+          }),
+        ).rejects.toMatchObject({ code: "42501" });
+        const [privateGrants] = await app<Array<{ insert: boolean }>>`
+          select has_table_privilege(current_user, 'opengeni_private.claude_subscription_runtime_capabilities', 'INSERT') as insert`;
+        expect(privateGrants?.insert).toBe(false);
+        await expect(
+          Promise.resolve(
+            app`insert into opengeni_private.claude_subscription_runtime_capabilities default values`,
+          ),
+        ).rejects.toMatchObject({ code: "42501" });
+        const [effects] = await sql<
+          Array<{ capabilities: number; probeRows: number; deniedMcpRows: number }>
+        >`
+          select (select count(*)::int from opengeni_private.claude_subscription_runtime_capabilities) as capabilities,
+            (select count(*)::int from opengeni.default_privilege_probe) as "probeRows",
+            (select count(*)::int from opengeni.session_mcp_servers where server_id = 'wrong-scope') as "deniedMcpRows"`;
+        expect(effects).toEqual({ capabilities: 0, probeRows: 0, deniedMcpRows: 0 });
       } finally {
         await app.end();
       }
@@ -246,8 +268,15 @@ describe("embedded dedicated-schema isolation", () => {
     }
 
     // --- STANDALONE leg: no schema → public, byte-for-byte today's behavior.
-    await migrate(publicUrl("standalone_public"));
-    const pub = postgres(publicUrl("standalone_public"), { max: 1 });
+    await migrate(standalone.databaseUrl);
+    await runMigrations(standalone.databaseUrl);
+    await provisionRoles(standalone.databaseUrl, {
+      appRole: "opengeni_app",
+      appPassword: new URL(applicationUrl(standalone)).password,
+      targetSchema: "public",
+      rlsStrategy: "force",
+    });
+    const pub = postgres(standalone.databaseUrl, { max: 1 });
     try {
       const tablesInPublic = (
         await pub<{ count: number }[]>`
