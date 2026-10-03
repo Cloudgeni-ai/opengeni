@@ -37,12 +37,13 @@ const UtcDay = z
     return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value;
   }, "Expected a real UTC calendar date (YYYY-MM-DD)");
 const DAY_MS = 86_400_000;
+const CUSTOM_MAX_DAYS = 370;
 
 function customWindow(from: string, to: string) {
   if (!UtcDay.safeParse(from).success || !UtcDay.safeParse(to).success) return undefined;
   const start = Date.parse(`${from}T00:00:00Z`);
   const end = Date.parse(`${to}T00:00:00Z`) + DAY_MS;
-  if (start >= end) return undefined;
+  if (start >= end || end - start > CUSTOM_MAX_DAYS * DAY_MS) return undefined;
   const priorStart = start - (end - start);
   const windows = {
     windowStart: new Date(start).toISOString(),
@@ -61,10 +62,10 @@ const CustomDates = z
   .strict()
   .refine(
     (value) => customWindow(value.from, value.to) !== undefined,
-    "Custom days must be ordered and their current/prior windows representable",
+    "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
   );
 
-/** Inclusive UTC calendar days; exclusive end and equally long immediate prior. */
+/** At most 370 inclusive UTC days; exclusive end and equally long immediate prior. */
 export function resolveInsightsUsageCustomWindow(dates: { from: string; to: string }) {
   const parsed = CustomDates.parse(dates);
   return customWindow(parsed.from, parsed.to)!;
@@ -85,7 +86,8 @@ function validateWindowQuery(
       context.addIssue({
         code: "custom",
         path: ["to"],
-        message: "Custom days must be ordered and their current/prior windows representable",
+        message:
+          "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
       });
     }
   } else if (value.from !== undefined || value.to !== undefined) {
@@ -543,6 +545,7 @@ export const InsightsUsageResponse = z
     if (value.range === "custom") {
       if (
         windowStart === windowEnd ||
+        windowEnd - windowStart > CUSTOM_MAX_DAYS * DAY_MS ||
         windowStart % DAY_MS !== 0 ||
         windowEnd % DAY_MS !== 0 ||
         priorWindowStart !== windowStart - (windowEnd - windowStart) ||
@@ -552,7 +555,7 @@ export const InsightsUsageResponse = z
           code: "custom",
           path: ["windowEnd"],
           message:
-            "Custom windows must span complete UTC days with an immediate equal-duration prior",
+            "Custom windows must span at most 370 complete UTC days with an immediate equal-duration prior",
         });
       }
     }
