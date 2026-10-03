@@ -27,6 +27,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
+import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
   withDeveloperSetupCredentialRestriction,
@@ -910,6 +911,8 @@ export async function createAndStartSessionWithOutcome(input: {
    * counts once, and its initial user message once unless deferred.
    */
   metrics?: ProductUsageMetricsSink | null;
+  /** Optional content-free child spans; never a lifecycle dependency. */
+  startupObservability?: SessionStartObservability | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -1392,6 +1395,7 @@ async function finishStartSession(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    startupObservability?: SessionStartObservability | null;
     initialMessage: string;
     captureInitialTurnAuthority?: (
       tx: Database,
@@ -1480,72 +1484,92 @@ async function finishStartSession(
       });
     }
   }
-  const started = await initializeSessionStartAtomically(input.db, {
-    accountId: session.accountId,
-    workspaceId: session.workspaceId,
-    sessionId: session.id,
-    ...(input.captureInitialTurnAuthority
-      ? {
-          captureInitialTurnAuthority: (tx: Database, turnId: string) =>
-            input.captureInitialTurnAuthority!(tx, session.id, turnId),
-        }
-      : {}),
-    ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-    reasoningEffortFallback: input.reasoningEffort,
-    turnExecutionPolicy: input.turnExecutionPolicy,
-    surface: input.surface ?? null,
-    createdEventPayload: {
-      toolPolicy: input.toolPolicy,
-      ...(input.variableSets?.length
-        ? {
-            variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-            variableSets: input.variableSets,
-            // Legacy highest-precedence aliases.
-            variableSetId: input.variableSets.at(-1)!.id,
-            variableSetName: input.variableSets.at(-1)!.name,
-          }
-        : {}),
-      ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
-    },
-    goal: input.goal
-      ? {
-          text: input.goal.text,
-          ...(input.goal.successCriteria !== undefined
-            ? { successCriteria: input.goal.successCriteria }
-            : {}),
-          ...(input.goal.rootConstraints !== undefined
-            ? { rootConstraints: input.goal.rootConstraints }
-            : {}),
-          ...(input.goal.reportRequirements !== undefined
-            ? { reportRequirements: input.goal.reportRequirements }
-            : {}),
-          ...(input.goal.maxAutoContinuations !== undefined
-            ? { maxAutoContinuations: input.goal.maxAutoContinuations }
-            : {}),
-          ...(input.goal.mutationPolicy !== undefined
-            ? { mutationPolicy: input.goal.mutationPolicy }
-            : {}),
-        }
-      : null,
-    initialAutomaticTitle: initialAutomaticTitleForSessionStart(
-      session,
-      input.initialAutomaticTitle,
-    ),
-    consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
-    rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
-    deferInitialTurn: input.deferInitialTurn === true,
-  });
-  await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
-  if (started.workflowWakeRevision !== null) {
-    await input.workflowClient.wakeSessionWorkflow({
+  const started = await measureSessionStartPhase(input.startupObservability, "initialize", () =>
+    initializeSessionStartAtomically(input.db, {
       accountId: session.accountId,
       workspaceId: session.workspaceId,
       sessionId: session.id,
-      workflowId: started.temporalWorkflowId,
-      wakeRevision: started.workflowWakeRevision,
-    });
-  }
-  const persisted = await requireSession(input.db, session.workspaceId, session.id);
+      ...(input.captureInitialTurnAuthority
+        ? {
+            captureInitialTurnAuthority: (tx: Database, turnId: string) =>
+              input.captureInitialTurnAuthority!(tx, session.id, turnId),
+          }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      reasoningEffortFallback: input.reasoningEffort,
+      turnExecutionPolicy: input.turnExecutionPolicy,
+      surface: input.surface ?? null,
+      createdEventPayload: {
+        toolPolicy: input.toolPolicy,
+        ...(input.variableSets?.length
+          ? {
+              variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
+              variableSets: input.variableSets,
+              // Legacy highest-precedence aliases.
+              variableSetId: input.variableSets.at(-1)!.id,
+              variableSetName: input.variableSets.at(-1)!.name,
+            }
+          : {}),
+        ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
+      },
+      goal: input.goal
+        ? {
+            text: input.goal.text,
+            ...(input.goal.successCriteria !== undefined
+              ? { successCriteria: input.goal.successCriteria }
+              : {}),
+            ...(input.goal.rootConstraints !== undefined
+              ? { rootConstraints: input.goal.rootConstraints }
+              : {}),
+            ...(input.goal.reportRequirements !== undefined
+              ? { reportRequirements: input.goal.reportRequirements }
+              : {}),
+            ...(input.goal.maxAutoContinuations !== undefined
+              ? { maxAutoContinuations: input.goal.maxAutoContinuations }
+              : {}),
+            ...(input.goal.mutationPolicy !== undefined
+              ? { mutationPolicy: input.goal.mutationPolicy }
+              : {}),
+          }
+        : null,
+      initialAutomaticTitle: initialAutomaticTitleForSessionStart(
+        session,
+        input.initialAutomaticTitle,
+      ),
+      consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
+      rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
+      deferInitialTurn: input.deferInitialTurn === true,
+    }),
+  );
+  // Initialization committed the initial turn, events and wake outbox together.
+  // Live fanout is not workflow authority: signal from the durable revision
+  // without waiting for NATS, but retain and fully join both notifications.
+  const wakeRevision = started.workflowWakeRevision;
+  const [fanout, wake] = await Promise.allSettled([
+    measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
+      publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
+    ),
+    wakeRevision === null
+      ? Promise.resolve()
+      : measureSessionStartPhase(input.startupObservability, "workflow_wake", () =>
+          input.workflowClient.wakeSessionWorkflow({
+            accountId: session.accountId,
+            workspaceId: session.workspaceId,
+            sessionId: session.id,
+            workflowId: started.temporalWorkflowId,
+            wakeRevision,
+          }),
+        ),
+  ]);
+  // Keep the prior serial error priority without detaching attempt work. Normal
+  // transport failure remains best-effort inside publishDurableSessionEvents.
+  if (fanout.status === "rejected") throw fanout.reason;
+  if (wake.status === "rejected") throw wake.reason;
+  const persisted = await measureSessionStartPhase(
+    input.startupObservability,
+    "session_reload",
+    () => requireSession(input.db, session.workspaceId, session.id),
+  );
   const initialTurnId =
     started.turn?.id ??
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
@@ -3627,6 +3651,9 @@ async function createSessionForRequestInFileScope(
       initialMessage: payload.initialMessage ?? "",
       surface,
       metrics: unresolvedDeps.observability ?? null,
+      ...(unresolvedDeps.observability
+        ? { startupObservability: unresolvedDeps.observability }
+        : {}),
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       resources,
