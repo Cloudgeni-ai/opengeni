@@ -11,6 +11,8 @@ import {
   lockSessionEventWriteRows,
   nestedPostgresSqlState,
   addSessionSystemUpdate,
+  appendSessionEvents,
+  type AppendEventInput,
   evaluateSessionControl,
   listOutstandingSessionSystemUpdates,
   claimPendingSessionWorkflowWakes,
@@ -142,6 +144,265 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test.each([
+    "client-only",
+    "unrelated-producer",
+    "wrong-sequence",
+    "wrong-type",
+    "wrong-attempt",
+    "invalid-timeout",
+    "missing-attempt",
+    "extra-payload",
+    "client-associated",
+    "turn-associated",
+  ] as const)("%s event is not server dispatch-expiry authority", async (variant) => {
+    const ctx = await fixture();
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const attemptId = crypto.randomUUID();
+    const accepted = await send(ctx, "unrelated receipts cannot cancel accepted work");
+    const receipt: AppendEventInput = {
+      type: "turn.dispatch.expired",
+      producerId: `opengeni:dispatch-retired:${attemptId}`,
+      producerSeq: 1,
+      payload: { attemptId, timeoutType: "HEARTBEAT" },
+    };
+    switch (variant) {
+      case "client-only":
+        delete receipt.producerId;
+        delete receipt.producerSeq;
+        receipt.clientEventId = `opengeni:dispatch-expired:${attemptId}`;
+        break;
+      case "unrelated-producer":
+        receipt.producerId = `caller:${attemptId}`;
+        break;
+      case "wrong-sequence":
+        receipt.producerSeq = 2;
+        break;
+      case "wrong-type":
+        receipt.type = "turn.recovery.requested";
+        break;
+      case "wrong-attempt":
+        receipt.payload = { attemptId: crypto.randomUUID(), timeoutType: "HEARTBEAT" };
+        break;
+      case "invalid-timeout":
+        receipt.payload = { attemptId, timeoutType: "START_TO_CLOSE" };
+        break;
+      case "missing-attempt":
+        receipt.payload = { timeoutType: "HEARTBEAT" };
+        break;
+      case "extra-payload":
+        receipt.payload = {
+          attemptId,
+          timeoutType: "HEARTBEAT",
+          anotherAttempt: crypto.randomUUID(),
+        };
+        break;
+      case "client-associated":
+        receipt.clientEventId = crypto.randomUUID();
+        break;
+      case "turn-associated":
+        receipt.turnId = accepted.turn.id;
+        receipt.turnAssociation = "current";
+        break;
+    }
+    await appendSessionEvents(client.db, workspaceId, sessionId, [receipt]);
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`${variant} incorrectly fenced accepted work`);
+    expect(claim.turn.id).toBe(accepted.turn.id);
+  });
+
+  test.each(["session", "workspace"] as const)(
+    "expiry in another %s cannot fence this claim",
+    async (scope) => {
+      const ctx = await fixture();
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const attemptId = crypto.randomUUID();
+      const accepted = await send(ctx, "another scope does not own this dispatch");
+      const other =
+        scope === "workspace"
+          ? await fixture()
+          : {
+              grant: ctx.grant,
+              session: await createSession(client.db, {
+                accountId: ctx.grant.accountId,
+                workspaceId,
+                initialMessage: "other",
+                resources: [],
+                metadata: {},
+                model: "scripted-model",
+                reasoningEffort: "medium",
+                latencyMode: "standard",
+                sandboxBackend: "none",
+              }),
+            };
+      await appendSessionEvents(client.db, other.grant.workspaceId!, other.session.id, [
+        {
+          type: "turn.dispatch.expired",
+          producerId: `opengeni:dispatch-retired:${attemptId}`,
+          producerSeq: 1,
+          payload: { attemptId, timeoutType: "HEARTBEAT" },
+        },
+      ]);
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId: `session-${sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed")
+        throw new Error("another scope incorrectly fenced this dispatch");
+      expect(claim.turn.id).toBe(accepted.turn.id);
+    },
+  );
+
+  test("a conflicting server producer tuple cannot masquerade as an idempotent expiry", async () => {
+    const ctx = await fixture();
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const attemptId = crypto.randomUUID();
+    await send(ctx, "preserve accepted work on a malformed server receipt");
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      {
+        type: "turn.dispatch.expired",
+        producerId: `opengeni:dispatch-retired:${attemptId}`,
+        producerSeq: 1,
+        payload: { attemptId: crypto.randomUUID(), timeoutType: "HEARTBEAT" },
+      },
+    ]);
+    const events = await listSessionEvents(client.db, workspaceId, sessionId);
+    const turns = await listSessionTurns(client.db, workspaceId, sessionId);
+    await expect(
+      recoverSessionDispatch(client.db, workspaceId, {
+        sessionId,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).rejects.toThrow("Conflicting session dispatch expiry receipt");
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(events);
+    expect(await listSessionTurns(client.db, workspaceId, sessionId)).toEqual(turns);
+  });
+
+  test("concurrent repeated timeout recovery writes one server receipt without advancing its cursor twice", async () => {
+    const ctx = await fixture();
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const attemptId = crypto.randomUUID();
+    await send(ctx, "duplicate timeout recovery preserves accepted input");
+    const recover = () =>
+      recoverSessionDispatch(client.db, workspaceId, {
+        sessionId,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+    await Promise.all(Array.from({ length: 6 }, recover));
+    const events = await listSessionEvents(client.db, workspaceId, sessionId);
+    expect(events.filter((event) => event.type === "turn.dispatch.expired")).toHaveLength(1);
+    const cursor = (await getSession(client.db, workspaceId, sessionId))!.lastSequence;
+    await recover();
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(events);
+    expect((await getSession(client.db, workspaceId, sessionId))!.lastSequence).toBe(cursor);
+  });
+
+  test("caller-controlled event keys cannot collide with a server dispatch expiry receipt", async () => {
+    const ctx = await fixture();
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const attemptId = crypto.randomUUID();
+    const accepted = await send(
+      ctx,
+      "caller occupies the old key",
+      "send",
+      `opengeni:dispatch-expired:${attemptId}`,
+    );
+    await send(
+      ctx,
+      "caller occupies the new producer spelling",
+      "send",
+      `opengeni:dispatch-retired:${attemptId}`,
+    );
+    await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "preserve immediate input during expiry",
+      payload: {
+        type: "agent_message",
+        text: "preserve immediate input during expiry",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    const turnsBefore = await listSessionTurns(client.db, workspaceId, sessionId);
+    const updatesBefore = await listOutstandingSessionSystemUpdates(
+      client.db,
+      workspaceId,
+      sessionId,
+    );
+    const recover = (timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" = "HEARTBEAT") =>
+      recoverSessionDispatch(client.db, workspaceId, {
+        sessionId,
+        attemptId,
+        timeoutType,
+        maxRedispatches: 3,
+      });
+    await recover();
+    const receipts = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, sessionId),
+            eq(schema.sessionEvents.producerId, `opengeni:dispatch-retired:${attemptId}`),
+            eq(schema.sessionEvents.producerSeq, 1),
+          ),
+        ),
+    );
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      type: "turn.dispatch.expired",
+      clientEventId: null,
+      payload: { attemptId, timeoutType: "HEARTBEAT" },
+    });
+    const eventsBefore = await listSessionEvents(client.db, workspaceId, sessionId);
+    await recover("SCHEDULE_TO_START");
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(eventsBefore);
+    const claim = (id: string) =>
+      claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId: `session-${sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: id,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+    expect(await claim(attemptId)).toEqual({ action: "unclaimed", reason: "dispatch-expired" });
+    expect(await listSessionTurns(client.db, workspaceId, sessionId)).toEqual(turnsBefore);
+    expect(await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId)).toEqual(
+      updatesBefore,
+    );
+    const successor = await claim(crypto.randomUUID());
+    if (successor.action !== "claimed") throw new Error("the caller's accepted work was stranded");
+    expect(successor.turn.id).toBe(accepted.turn.id);
+  });
+
   test.each(["HEARTBEAT", "SCHEDULE_TO_START"] as const)(
     "a %s timeout before durable claim fences the late dispatch without consuming input",
     async (timeoutType) => {
