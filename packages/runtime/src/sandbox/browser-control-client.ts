@@ -273,6 +273,8 @@ export type CreatePlacementBrowserSessionInput = PlacementBrowserSessionReferenc
   viewToken: string;
   headed: boolean;
   initialUrl?: string;
+  /** Private same-runtime recovery intent; never restores a saved revision. */
+  recoverExistingWorkingDirectory?: true;
   restore?: RestorePlacementBrowserStateInput;
   transport?: PlacementBrowserTransport;
   linkedComputer?: PlacementComputerSessionReference;
@@ -568,6 +570,16 @@ export class BrowserControlClient {
 
   async createSession(input: CreatePlacementBrowserSessionInput): Promise<PlacementBrowserSession> {
     const reference = parseReference(input);
+    if (
+      input.recoverExistingWorkingDirectory !== undefined &&
+      (input.recoverExistingWorkingDirectory !== true ||
+        input.restore ||
+        input.initialUrl !== undefined)
+    ) {
+      throw new BrowserControlProtocolError(
+        "working directory recovery cannot restore or navigate",
+      );
+    }
     const restore = input.restore ? browserStateRestoreRequest(input.restore) : null;
     let data: unknown;
     try {
@@ -581,6 +593,9 @@ export class BrowserControlClient {
           controlToken: requireToken(input.controlToken, "browser control token"),
           viewToken: requireToken(input.viewToken, "browser view token"),
           headed: input.headed,
+          ...(input.recoverExistingWorkingDirectory
+            ? { recoverExistingWorkingDirectory: true }
+            : {}),
           ...(input.initialUrl === undefined ? {} : { initialUrl: boundedUrl(input.initialUrl) }),
           ...(input.transport ? { transport: placementBrowserTransport(input.transport) } : {}),
           ...(input.linkedComputer

@@ -22,6 +22,7 @@ import {
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
 import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
+import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -763,6 +764,15 @@ export class BrowserControlServer {
           browserSessionId: body.browserSessionId,
           controllerGeneration: body.controllerGeneration,
           headed: body.headed,
+          ...(body.recoverExistingWorkingDirectory
+            ? { recoverExistingWorkingDirectory: true }
+            : {}),
+          workingRuntimeAuthority: {
+            tokenGeneration: body.tokenGeneration,
+            placementDigest: this.adminDigest.toString("hex"),
+            controlDigest: controlDigest.toString("hex"),
+            viewDigest: viewDigest.toString("hex"),
+          },
           ...(body.initialUrl ? { initialUrl: body.initialUrl } : {}),
           ...(body.restore ? { restore: body.restore } : {}),
           ...(body.transport ? { transport: body.transport } : {}),
@@ -1690,6 +1700,9 @@ async function browserReadResponse(
 }
 
 function protocolResponse(error: unknown): Response {
+  if (error instanceof BrowserWorkingRuntimeUnavailableError) {
+    return failure("resource_unavailable", error.message, false, 409);
+  }
   if (error instanceof ProtocolError)
     return failure(error.code, error.message, error.retryable, error.status);
   if (error instanceof InteractionControllerError) {
@@ -1850,6 +1863,7 @@ function parseCreateSession(value: Record<string, unknown>): {
   viewToken: string;
   headed: boolean;
   initialUrl?: string;
+  recoverExistingWorkingDirectory?: true;
   transport?: NonNullable<BrowserSupervisorSessionOptions["transport"]>;
   networkRoute?: NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
@@ -1867,7 +1881,20 @@ function parseCreateSession(value: Record<string, unknown>): {
     "networkRoute",
     "linkedComputer",
     "restore",
+    "recoverExistingWorkingDirectory",
   ]);
+  if (
+    value.recoverExistingWorkingDirectory !== undefined &&
+    (value.recoverExistingWorkingDirectory !== true ||
+      value.restore !== undefined ||
+      value.initialUrl !== undefined)
+  ) {
+    throw new ProtocolError(
+      "invalid_action",
+      "working directory recovery cannot restore or navigate",
+      400,
+    );
+  }
   return {
     browserSessionId: requireUuid(value.browserSessionId, "browserSessionId"),
     controllerGeneration: requireGeneration(value.controllerGeneration),
@@ -1880,6 +1907,9 @@ function parseCreateSession(value: Record<string, unknown>): {
     controlToken: requireToken(value.controlToken, "controlToken"),
     viewToken: requireToken(value.viewToken, "viewToken"),
     headed: requireBoolean(value.headed, "headed"),
+    ...(value.recoverExistingWorkingDirectory
+      ? { recoverExistingWorkingDirectory: true as const }
+      : {}),
     ...(value.initialUrl === undefined
       ? {}
       : { initialUrl: requireString(value.initialUrl, "initialUrl", 16_384) }),

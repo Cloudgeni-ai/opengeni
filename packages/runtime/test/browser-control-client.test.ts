@@ -2175,3 +2175,39 @@ function failure(status: number, code: string, message: string): Response {
     { status },
   );
 }
+
+test("serializes only explicit internal directory recovery and refuses navigation/restore combinations before I/O", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-recovery" };
+  const target = browserTarget(reference.browserSessionId, reference.controllerGeneration);
+  const requests: Record<string, unknown>[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      requests.push(await request.json());
+      return success({ ...reference, observation: browserObservation(target) });
+    },
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: false };
+  try {
+    await client.createSession(input);
+    await client.createSession({ ...input, recoverExistingWorkingDirectory: true });
+    expect(requests[0]?.recoverExistingWorkingDirectory).toBeUndefined();
+    expect(requests[1]?.recoverExistingWorkingDirectory).toBe(true);
+    expect(requests[1]?.restore).toBeUndefined();
+    expect(requests[1]?.initialUrl).toBeUndefined();
+    for (const extra of [{ initialUrl: "https://example.test/" }, { restore: {} }]) {
+      await expect(
+        client.createSession({
+          ...input,
+          recoverExistingWorkingDirectory: true,
+          ...extra,
+        } as Parameters<BrowserControlClient["createSession"]>[0]),
+      ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+    }
+    expect(requests.length).toBe(2);
+  } finally {
+    await server.stop(true);
+  }
+});
