@@ -8997,7 +8997,7 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
-    const resolved: ResolveConnectionCredentialInput[] = [];
+    const resolved: Array<ResolveConnectionCredentialInput & { submittedToolCalls: number }> = [];
     let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
@@ -9020,7 +9020,12 @@ describe("runtime event normalization", () => {
       {
         workspaceId: "45454545-4545-4545-8545-454545454545",
         resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
-          resolved.push(input);
+          resolved.push({
+            ...input,
+            submittedToolCalls: mcp.requests.filter(
+              (request) => request.jsonRpcMethod === "tools/call",
+            ).length,
+          });
           return {
             status: "ok",
             connectionId,
@@ -9050,26 +9055,38 @@ describe("runtime event normalization", () => {
       expect(result.structuredContent).toEqual({
         error: {
           code: "tool_outcome_unknown",
-          message:
-            "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+          message: expect.stringMatching(/outcome uncertain/i),
           retryable: false,
           outcomeUnknown: true,
         },
       });
-      const text = JSON.stringify(result);
-      expect(text).toMatch(/outcome uncertain/i);
-      expect(text).toMatch(/did not replay/i);
-      expect(text).toMatch(/do not retry automatically/i);
-      expect(text).toMatch(/verify provider state/i);
-      expect(text).toContain("unauthorized");
-      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
-        1,
-      );
+      // Check actionable guidance on the structured error itself, not unrelated
+      // provider text or a particular prose description of the transport failure.
+      const outcome = result.structuredContent?.error;
+      const warning =
+        outcome && typeof outcome === "object" && "message" in outcome
+          ? outcome.message
+          : undefined;
+      expect(warning).toMatch(/did not replay this call/i);
+      expect(warning).toMatch(/do not retry automatically/i);
+      expect(warning).toMatch(/verify provider state before any new attempt/i);
+      expect(result.content).toContainEqual({ type: "text", text: warning });
+      expect(JSON.stringify(result)).toContain("unauthorized");
+      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toEqual([
+        { httpMethod: "POST", jsonRpcMethod: "tools/call" },
+      ]);
       expect(mcp.calls).toHaveLength(0);
       expect(providerAuthorizations - setupAuthorizations).toBe(1);
+      // A post-401 refresh prepares future requests; it must not authorize or
+      // submit this ambiguous invocation again, even with valid fresh credentials.
       expect(
-        resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
-      ).toBe(true);
+        resolved
+          .filter((input) => input.toolName === "search_documents")
+          .map(({ forceRefresh, submittedToolCalls }) => ({ forceRefresh, submittedToolCalls })),
+      ).toEqual([
+        { forceRefresh: false, submittedToolCalls: 0 },
+        { forceRefresh: true, submittedToolCalls: 1 },
+      ]);
     } finally {
       await prepared.close();
       mcp.close();
