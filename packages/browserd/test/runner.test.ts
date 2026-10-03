@@ -519,7 +519,7 @@ test("Linux directory relaunch requires complete absence of verified and unverif
 });
 
 test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
-  "owned generated process attestation rejects PID/birth/executable/profile/CDP mismatch; reattachment never launches a daemon",
+  "owned generated process attestation rejects identity mismatches and unproved daemon lineage",
   async () => {
     const directory = await mkdtemp("/tmp/og-owned-process-");
     const profileDirectory = join(directory, "profile");
@@ -570,17 +570,10 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       await expect(
         inspectOwnedManagedBrowserProcess({ ...receipt!, profileDirectory: differentProfile }),
       ).rejects.toThrow();
-      const reattached = await AgentBrowserJsonRunner.create({
-        ...options,
-        recoverOwnedProcess: receipt!,
-      });
-      expect(reattached.reattachedOwnedProcess?.pid === child.pid).toBe(true);
-      expect(
-        (await reattached.run<{ cdpUrl: string }>(["get", "cdp-url"])).cdpUrl === cdpEndpoint,
-      ).toBe(true);
-      await expect(reattached.run(["open", "https://example.test/"])).rejects.toThrow(
-        "only its CDP transport",
-      );
+      await expect(
+        AgentBrowserJsonRunner.create({ ...options, recoverOwnedProcess: receipt! }),
+      ).rejects.toThrow();
+      expect(() => process.kill(child.pid, 0)).not.toThrow();
       const content = await readFile(portPath);
       await rm(portPath);
       await writeFile(join(directory, "port-copy"), content);
@@ -591,13 +584,16 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       await rm(portPath);
       await writeFile(portPath, content);
       // Explicit bound cleanup targets only this generated Bun fixture PID.
-      await reattached.terminate();
+      await runner.terminate();
       await child.exited;
       if (process.platform === "linux") {
         expect(await inspectOwnedManagedBrowserProcess(receipt!)).toBe("exited");
         await expect(
           AgentBrowserJsonRunner.create({ ...options, recoverOwnedProcess: receipt! }),
         ).rejects.toThrow("outcome is unknown");
+        await mkdir(join(options.socketDirectory, "namespaces", options.namespace, "run"), {
+          recursive: true,
+        });
         const permitted = await AgentBrowserJsonRunner.create({
           ...options,
           recoverOwnedProcess: receipt!,

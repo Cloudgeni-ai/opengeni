@@ -1,6 +1,61 @@
 import { expect, test } from "bun:test";
 import { AgentBrowserDriver, type BrowserCdpConnection } from "../src";
 
+test("fresh managed attestation needs one stable CDP browser PID across the OS witness", async () => {
+  const process = {
+    pid: 2001,
+    birth: "synthetic-birth",
+    executablePath: "/synthetic/chromium",
+    profileDirectory: "/synthetic/profile",
+    cdpEndpoint: "ws://127.0.0.1:12345/devtools/browser/11111111-1111-4111-8111-111111111111",
+  };
+  let calls = 0;
+  let witnessed = 0;
+  let info: unknown = undefined;
+  let changedDuringWitness = false;
+  const connection: BrowserCdpConnection = {
+    async send<T>(method: string): Promise<T> {
+      expect(method).toBe("SystemInfo.getProcessInfo");
+      calls++;
+      return { processInfo: info } as T;
+    },
+    on: () => () => {},
+    waitForEvent: async () => {
+      throw new Error("unused");
+    },
+    close() {},
+  };
+  const driver = new AgentBrowserDriver({
+    browserSessionId: crypto.randomUUID(),
+    controllerGeneration: "synthetic-initial-attestation",
+    runner: {
+      run: async <T>() => ({}) as T,
+      async ownedProcessIdentity(endpoint, pid) {
+        witnessed++;
+        expect(endpoint).toBe(process.cdpEndpoint);
+        expect(pid).toBe(process.pid);
+        if (changedDuringWitness) info = [{ type: "browser", id: 2002 }];
+        return process;
+      },
+    },
+  });
+  Object.assign(driver, { connection, connectionEndpoint: process.cdpEndpoint });
+  await expect(driver.ownedProcessIdentity()).rejects.toThrow("identity");
+  expect(witnessed).toBe(0);
+  info = [{ type: "browser", id: 2001 }];
+  expect(await driver.ownedProcessIdentity()).toEqual(process);
+  expect(witnessed).toBe(1);
+  info = [{ type: "browser", id: 0 }];
+  await expect(driver.ownedProcessIdentity()).rejects.toThrow("exact owned");
+  expect(witnessed).toBe(1);
+  changedDuringWitness = true;
+  info = [{ type: "browser", id: 2001 }];
+  await expect(driver.ownedProcessIdentity()).rejects.toThrow("exact owned");
+  expect(witnessed).toBe(2);
+  expect(calls).toBe(6);
+  await driver.detach();
+});
+
 test.each([undefined, "", "missing-target"])(
   "startup cannot borrow an existing tab when created target is %j",
   async (createdTargetId) => {

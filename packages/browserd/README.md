@@ -35,6 +35,12 @@ proven live process, or launches only after complete proof that the old process
 and other profile writers are absent. Unsettled launch receipts prevent another
 launch. Attached browsers, ephemeral contexts, and unattested directories do not
 enter this path. Accepted interaction commands remain replay-only receipts.
+Live reattachment additionally requires a headless browser's direct lineage to
+the pinned daemon in its exact private socket namespace. Initial headless macOS
+attestation cross-checks the profile lock and CDP browser PID with that lineage,
+process birth and executable. Missing, helper or conflicting daemon lineage is
+refused. Retirement closes both proven processes; uncertain predecessor cleanup
+retains the directory and holder for retry, including after a proved browser stop.
 Explicit close records retirement before process cleanup. If retirement
 settlement fails, other stores close while the exact directory and cleanup
 holder remain available for retry; removal requires completed retirement and

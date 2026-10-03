@@ -139,7 +139,10 @@ export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
   daemonPid?: () => Promise<number | null>;
   terminate?: (expectedPid?: number | null) => Promise<void>;
-  ownedProcessIdentity?: (cdpEndpoint: string) => Promise<OwnedManagedBrowserProcess | null>;
+  ownedProcessIdentity?: (
+    cdpEndpoint: string,
+    cdpBrowserPid?: number,
+  ) => Promise<OwnedManagedBrowserProcess | null>;
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   externalAuth?: (
     command: BrowserExternalAuthCommand,
@@ -507,7 +510,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async ownedProcessIdentity(): Promise<OwnedManagedBrowserProcess | null> {
     if (!this.connection || !this.connectionEndpoint || !this.runner.ownedProcessIdentity)
       return null;
-    const process = await this.runner.ownedProcessIdentity(this.connectionEndpoint);
+    const pid = await ownedCdpProcessId(this.connection);
+    const process = await this.runner.ownedProcessIdentity(this.connectionEndpoint, pid);
     if (!process) return null;
     await assertOwnedCdpProcess(this.connection, process);
     return process;
@@ -4883,6 +4887,11 @@ async function assertOwnedCdpProcess(
   connection: BrowserCdpConnection,
   process: OwnedManagedBrowserProcess,
 ) {
+  if ((await ownedCdpProcessId(connection)) !== process.pid)
+    throw new Error("CDP endpoint does not identify the exact owned browser process");
+}
+
+async function ownedCdpProcessId(connection: BrowserCdpConnection): Promise<number> {
   const result = await connection.send<{ processInfo?: unknown }>(
     "SystemInfo.getProcessInfo",
     {},
@@ -4896,7 +4905,15 @@ async function assertOwnedCdpProcess(
       value !== null &&
       (value as { type?: unknown }).type === "browser",
   );
-  if (browsers.length !== 1 || browsers[0]?.id !== process.pid) {
+  const pid = browsers[0]?.id;
+  if (
+    browsers.length !== 1 ||
+    !Number.isSafeInteger(pid) ||
+    pid === undefined ||
+    pid < 2 ||
+    pid > 2_147_483_647
+  ) {
     throw new Error("CDP endpoint does not identify the exact owned browser process");
   }
+  return pid;
 }
