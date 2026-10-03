@@ -689,6 +689,13 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 8. Worker events commit before best-effort live publication; API SSE replays
    and gap-fills from Postgres.
 
+Unexpected first-party orchestration failures retain bounded, content-free
+diagnostic facts in the failed-tool receipt, independent of the optional
+protected diagnostic export. The API binds correlation to the signed caller
+attempt, never a tool-supplied target. Source:
+`apps/api/src/mcp/orchestration-failure-diagnostic.ts`; contract:
+[`mcp-surfaces.md`](mcp-surfaces.md#tool-argument-errors).
+
 ### 4.2 Control path versus data path
 
 API, Postgres, Temporal, and workers own durable control; NATS session fanout projects it.

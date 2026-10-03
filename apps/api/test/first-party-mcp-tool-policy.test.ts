@@ -947,6 +947,13 @@ describe("first-party MCP tool visibility policy", () => {
       },
     });
     expect(JSON.stringify(unknown)).not.toContain("private-");
+    expect(unknown.structuredContent?.error?.diagnostic).toMatchObject({
+      schema: "opengeni.failure-diagnostic.v1",
+      code: "mcp_orchestration_failed",
+      stage: "mcp.session_create",
+      causes: [{ kind: "Error", frames: expect.any(Array) }],
+    });
+    expect(unknown.structuredContent?.error?.diagnosticExport).toBe("disabled");
 
     routeDeps.db = new Proxy(
       {},
@@ -1122,6 +1129,7 @@ describe("first-party MCP tool visibility policy", () => {
     });
     expect(create.isError).toBe(true);
     expect(create.structuredContent?.error?.code).toBe("session_create_rejected");
+    expect(create.structuredContent?.error?.diagnostic).toBeUndefined();
     expect(create.structuredContent?.error?.message).not.toContain("\u0000");
     expect(create.structuredContent?.error?.message).not.toContain("�");
     expect(
@@ -1154,6 +1162,54 @@ describe("first-party MCP tool visibility policy", () => {
         },
       },
     });
+    expect(message.structuredContent?.error?.diagnostic).toBeUndefined();
+  });
+
+  test("all orchestration catches retain evidence bound to the caller, never request target", async () => {
+    const targetSessionId = crypto.randomUUID();
+    for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+      let databaseTouches = 0;
+      const routeDeps = deps();
+      routeDeps.db = new Proxy(
+        {},
+        {
+          get() {
+            databaseTouches += 1;
+            throw Object.assign(new Error("private-database-message"), {
+              name: "PostgresError",
+              code: "42501",
+            });
+          },
+        },
+      ) as ApiRouteDeps["db"];
+      const server = buildOpenGeniMcpServer(
+        routeDeps,
+        grant(["sessions:create", "sessions:control"], [tool]),
+      );
+      const args =
+        tool === "session_create"
+          ? { initialMessage: "private-task" }
+          : {
+              sessionId: targetSessionId,
+              ...(tool === "session_steer"
+                ? { instruction: "private-steer" }
+                : { text: "private-message" }),
+              idempotencyKey: crypto.randomUUID(),
+            };
+      const result = await callRegisteredTool(server, tool, args);
+      expect(databaseTouches).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error).toMatchObject({
+        code: `${tool}_failed`,
+        message: "OpenGeni could not complete the request.",
+        diagnosticExport: "disabled",
+        diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
+      });
+      expect(JSON.stringify(result)).not.toContain(targetSessionId);
+      expect(JSON.stringify(result)).not.toContain("private-");
+      expect(result.structuredContent?.error).not.toHaveProperty("outcomeUnknown", false);
+      expect(result.structuredContent?.error).not.toHaveProperty("retryable", true);
+    }
   });
 
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {

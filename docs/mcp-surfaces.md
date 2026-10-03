@@ -177,6 +177,23 @@ branch's requirements as cumulative. Additional native contract refinements
 retain their preflight messages so cross-field failures explain the required
 relationship. Downstream provider and storage exceptions are separate failures.
 
+Unexpected failures in `session_create`, `session_send_message`, and
+`session_steer` retain a bounded `error.diagnostic` in the ordinary failed-tool
+receipt. It contains cause classes, reviewed source locations or location
+fingerprints, line/column, a typed PostgreSQL SQLSTATE when available, and exact
+caller-attempt identity from the signed grant. It never contains raw messages,
+SQL, parameters, tool arguments/results, host paths, or a request-derived target
+identity. Existing authorization/refusal classifications remain unchanged.
+
+The same diagnostic ID correlates an optional protected diagnostics export.
+`diagnosticExport` is `disabled`, `queued`, or `unavailable`; `queued` is not a
+delivery receipt. The self-contained diagnostic remains useful without that
+sink. An observer failure never changes the original outcome or retries a
+mutation. These facts identify the failing boundary, not whether an uncertain
+mutation committed. Canonical implementations:
+`apps/api/src/mcp/orchestration-failure-diagnostic.ts` and
+`packages/observability/src/failure-diagnostic.ts`.
+
 The native Connected Machine Codemode client sends its compiled API contract
 acknowledgement for compatibility with older deployments whose Codemode routes
 were protected by the product mutation fence. Current deployments scope

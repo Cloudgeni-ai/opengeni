@@ -14,6 +14,7 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 export {
   withMcpTelemetry,
