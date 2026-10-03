@@ -15,7 +15,12 @@ import type { OpenGeniNativeSessionController } from "../use-native-session";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
 import { Button } from "./controls";
-import { ApprovalStrip, HumanInputCard } from "./decisions";
+import {
+  ApprovalStrip,
+  HumanInputCard,
+  type ApprovalStripProps,
+  type HumanInputCardProps,
+} from "./decisions";
 import { QueueDock } from "./queue-dock";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -49,6 +54,10 @@ export interface NativeSessionScreenProps extends Omit<
   keyboardBottomOffset?: number | undefined;
   /** Reply feedback (thumbs beside Copy), as the web timeline offers it. */
   feedback?: TurnFeedbackTarget | undefined;
+  /** Translations for the question card (the shared human-input catalog). */
+  humanInputMessages?: HumanInputCardProps["messages"];
+  /** Translations for the approval strip. */
+  approvalMessages?: ApprovalStripProps["messages"];
 }
 
 export function NativeSessionScreen({
@@ -59,6 +68,8 @@ export function NativeSessionScreen({
   bottomInset,
   keyboardBottomOffset,
   feedback,
+  humanInputMessages,
+  approvalMessages,
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
@@ -130,6 +141,7 @@ export function NativeSessionScreen({
                 requests={humanInput.requests}
                 respondingRequestId={humanInput.respondingRequestId}
                 error={humanInput.mutationError?.message}
+                messages={humanInputMessages}
                 onSubmit={(requestId, response) =>
                   humanInput.respond(requestId, response).then(() => undefined)
                 }
@@ -182,6 +194,7 @@ export function NativeSessionScreen({
             {approvals.length > 0 && status === "requires_action" ? (
               <ApprovalStrip
                 approvals={approvals}
+                messages={approvalMessages}
                 onDecide={(id, decision) =>
                   (decision === "approve" ? control.approve(id) : control.reject(id)).then(
                     () => undefined,

@@ -12,8 +12,9 @@ import {
   initialDrafts,
   isActionableHumanInputRequest,
   type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
 } from "@opengeni/react/timeline-model";
-import { useMemo, useRef, useState } from "react";
+import { createContext, useContext, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
@@ -44,7 +45,13 @@ export interface HumanInputCardProps {
   onSubmit: (requestId: string, response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   respondingRequestId?: string | null | undefined;
   error?: string | null | undefined;
+  /** The shared question-form catalog; hosts translate by overriding entries. */
+  messages?: Partial<HumanInputFormMessages> | undefined;
 }
+
+const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
+  defaultHumanInputFormMessages,
+);
 
 /** One decision shell for pending requests, oldest first, "N of M" when stepping. */
 export function HumanInputCard({
@@ -52,7 +59,9 @@ export function HumanInputCard({
   onSubmit,
   respondingRequestId = null,
   error,
+  messages,
 }: HumanInputCardProps) {
+  const merged = useMemo(() => ({ ...defaultHumanInputFormMessages, ...messages }), [messages]);
   const batchTotal = useRef(0);
   const ordered = useMemo(() => {
     const now = Date.now();
@@ -72,14 +81,16 @@ export function HumanInputCard({
   const active = ordered[0]!;
   const position = batchTotal.current - ordered.length + 1;
   return (
-    <HumanInputForm
-      key={active.id}
-      request={active}
-      progressLabel={batchTotal.current > 1 ? `${position} of ${batchTotal.current}` : null}
-      submitting={respondingRequestId !== null}
-      error={error ?? null}
-      onSubmit={(response) => onSubmit(active.id, response)}
-    />
+    <HumanInputMessagesContext.Provider value={merged}>
+      <HumanInputForm
+        key={active.id}
+        request={active}
+        progressLabel={batchTotal.current > 1 ? `${position} of ${batchTotal.current}` : null}
+        submitting={respondingRequestId !== null}
+        error={error ?? null}
+        onSubmit={(response) => onSubmit(active.id, response)}
+      />
+    </HumanInputMessagesContext.Provider>
   );
 }
 
@@ -99,7 +110,7 @@ function HumanInputForm({
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;
-  const messages = defaultHumanInputFormMessages;
+  const messages = useContext(HumanInputMessagesContext);
   const heading = humanInputHeading(request.questions, messages);
   const single = request.questions.length === 1;
   const required = single && request.questions[0]!.required;
@@ -305,7 +316,7 @@ function QuestionControls({
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const messages = defaultHumanInputFormMessages;
+  const messages = useContext(HumanInputMessagesContext);
   const multi = question.kind === "multi_select";
   const label = { ...fontStyle(theme, 500), fontSize: theme.size.sm, lineHeight: 18, color: c.fg };
   const input = {
@@ -505,13 +516,32 @@ function Selector({ multi, selected }: { multi: boolean; selected: boolean }) {
   );
 }
 
+export interface ApprovalStripMessages {
+  approve: string;
+  reject: string;
+  approved: string;
+  rejected: string;
+  /** The tool's display name; the web live strip shows the raw name. */
+  formatToolName: (name: string) => string;
+}
+
+export const defaultApprovalStripMessages: ApprovalStripMessages = {
+  approve: "Approve",
+  reject: "Reject",
+  approved: "Approved",
+  rejected: "Rejected",
+  formatToolName: (name) => name,
+};
+
 export interface ApprovalStripProps {
   approvals: PendingApproval[];
   onDecide: (approvalId: string, decision: "approve" | "reject") => void | Promise<void>;
+  messages?: Partial<ApprovalStripMessages> | undefined;
 }
 
 /** The web live decision strip: one waiting Notice per pending tool approval. */
-export function ApprovalStrip({ approvals, onDecide }: ApprovalStripProps) {
+export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
+  const messages = { ...defaultApprovalStripMessages, ...overrides };
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;
@@ -561,7 +591,7 @@ export function ApprovalStrip({ approvals, onDecide }: ApprovalStripProps) {
                 style={{ ...fontStyle(theme, 500), fontSize: 14, lineHeight: 20, color: c.fg }}
                 numberOfLines={2}
               >
-                {approval.name}
+                {messages.formatToolName(approval.name)}
               </Text>
               <ScrollView
                 style={{
@@ -593,7 +623,7 @@ export function ApprovalStrip({ approvals, onDecide }: ApprovalStripProps) {
                 <Button
                   icon="check"
                   variant="primary"
-                  label={settled[approval.id] === "approve" ? "Approved" : "Approve"}
+                  label={settled[approval.id] === "approve" ? messages.approved : messages.approve}
                   busy={pending[approval.id] === "approve"}
                   disabled={busy}
                   onPress={() => void decide(approval.id, "approve")}
@@ -601,7 +631,7 @@ export function ApprovalStrip({ approvals, onDecide }: ApprovalStripProps) {
                 <Button
                   icon="x"
                   variant="destructive"
-                  label={settled[approval.id] === "reject" ? "Rejected" : "Reject"}
+                  label={settled[approval.id] === "reject" ? messages.rejected : messages.reject}
                   busy={pending[approval.id] === "reject"}
                   disabled={busy}
                   onPress={() => void decide(approval.id, "reject")}
