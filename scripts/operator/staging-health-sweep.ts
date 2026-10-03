@@ -6,6 +6,9 @@ export interface SweepOptions {
   windowMinutes: number;
   baselineMinutes: number;
   timeoutSeconds: number;
+  queueOffset: number;
+  recoveryOffset: number;
+  inventoryOffset: number;
   databaseSecret?: string;
   databaseSecretKey: string;
   dbPod: string;
@@ -38,6 +41,9 @@ export function parseArgs(args: string[]): SweepOptions {
     windowMinutes: 30,
     baselineMinutes: 120,
     timeoutSeconds: 20,
+    queueOffset: 0,
+    recoveryOffset: 0,
+    inventoryOffset: 0,
     databaseSecretKey: "OPENGENI_MIGRATIONS_DATABASE_URL",
     dbPod: "deployment/opengeni-api",
     prometheusNamespace: "observability",
@@ -50,6 +56,9 @@ export function parseArgs(args: string[]): SweepOptions {
     "--window-minutes": "windowMinutes",
     "--baseline-minutes": "baselineMinutes",
     "--timeout-seconds": "timeoutSeconds",
+    "--queue-offset": "queueOffset",
+    "--recovery-offset": "recoveryOffset",
+    "--inventory-offset": "inventoryOffset",
     "--database-secret": "databaseSecret",
     "--database-secret-key": "databaseSecretKey",
     "--db-pod": "dbPod",
@@ -61,7 +70,9 @@ export function parseArgs(args: string[]): SweepOptions {
     const key = keys[args[i]!];
     const value = args[++i];
     if (!key || !value) throw new Error("invalid arguments");
-    if (["windowMinutes", "baselineMinutes", "timeoutSeconds"].includes(key)) {
+    if (["queueOffset", "recoveryOffset", "inventoryOffset"].includes(key)) {
+      Object.assign(out, { [key]: pageOffset(Number(value)) });
+    } else if (["windowMinutes", "baselineMinutes", "timeoutSeconds"].includes(key)) {
       const n = Number(value);
       if (!Number.isSafeInteger(n) || n < 1 || n > (key === "timeoutSeconds" ? 60 : 1440))
         throw new Error("invalid bounds");
@@ -138,7 +149,21 @@ export function safeDatabaseErrorCode(error: unknown): string {
   return "unavailable";
 }
 
-export function databaseQueries(): Record<string, string> {
+export const OWNER_PAGE_SIZE = 20;
+export const LATENCY_TAIL_LIMIT = 10;
+
+function pageOffset(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 1000000)
+    throw new Error("invalid page offset");
+  return value;
+}
+
+export function databaseQueries(
+  pages: Partial<Pick<SweepOptions, "queueOffset" | "recoveryOffset" | "inventoryOffset">> = {},
+): Record<string, string> {
+  const queueOffset = pageOffset(pages.queueOffset ?? 0);
+  const recoveryOffset = pageOffset(pages.recoveryOffset ?? 0);
+  const inventoryOffset = pageOffset(pages.inventoryOffset ?? 0);
   return {
     queued: `${controlCte(
       false,
@@ -166,18 +191,21 @@ export function databaseQueries(): Record<string, string> {
     ) SELECT jsonb_build_object('total',count(*) FILTER(WHERE queued_at IS NOT NULL),
       'unknownAgeCandidates',count(*) FILTER(WHERE queued_at IS NULL),'runnable',count(*) FILTER(WHERE reason='runnable'),
       'controlUnknown',count(*) FILTER(WHERE reason='control_unknown'),
+      'pageOffset',${queueOffset},
       'excluded',coalesce((SELECT jsonb_object_agg(reason,n) FROM (SELECT reason,count(*) n FROM overdue WHERE reason!='runnable' GROUP BY reason) x),'{}'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,queued_at,age_source,reason FROM overdue
-        ORDER BY CASE WHEN reason IN ('runnable','behind_active_turn') THEN 0 ELSE 1 END,queued_at LIMIT 100) x),'[]')) facts FROM overdue`,
+        WHERE reason IN ('runnable','behind_active_turn') ORDER BY workspace_id,session_id
+        LIMIT ${OWNER_PAGE_SIZE} OFFSET ${queueOffset}) x),'[]')) facts FROM overdue`,
     queuedInventory: `WITH RECURSIVE unknown_age AS MATERIALIZED (
       SELECT s.id session_id,s.workspace_id,NULL::timestamptz queued_at,'unknown' age_source,'unknown_age' reason
       FROM sessions s WHERE s.status='queued'
         AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.workspace_id=s.workspace_id AND t.session_id=s.id
           AND t.status='queued' AND t.source IN ('user','api'))
         AND NOT EXISTS (SELECT 1 FROM session_system_updates u WHERE u.workspace_id=s.workspace_id AND u.session_id=s.id AND u.state='pending')
-    ) SELECT jsonb_build_object('total',count(*),'checkedAt',$1::timestamptz,
-      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM unknown_age ORDER BY session_id LIMIT 100) x),'[]')) facts FROM unknown_age`,
-    recovering: `${controlCte(false, false)}, recoveries AS (
+    ) SELECT jsonb_build_object('total',count(*),'checkedAt',$1::timestamptz,'pageOffset',${inventoryOffset},
+      'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM unknown_age ORDER BY workspace_id,session_id
+        LIMIT ${OWNER_PAGE_SIZE} OFFSET ${inventoryOffset}) x),'[]')) facts FROM unknown_age`,
+    recovering: `${controlCte(false, false, "SELECT id,workspace_id FROM sessions WHERE status='recovering'")}, recoveries AS (
       SELECT s.id session_id,s.workspace_id,r.since,c.paused,c.valid FROM candidates s
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
       LEFT JOIN LATERAL (SELECT e.created_at since FROM session_events e WHERE e.session_id=s.id AND e.workspace_id=s.workspace_id
@@ -186,8 +214,10 @@ export function databaseQueries(): Record<string, string> {
     ) SELECT jsonb_build_object('total',count(*) FILTER(WHERE since<$1::timestamptz-interval '5 minutes' AND NOT paused),
       'missingStatusTimestamp',count(*) FILTER(WHERE since IS NULL),'controlUnknown',count(*) FILTER(WHERE NOT valid),
       'pausedExcluded',count(*) FILTER(WHERE paused),
+      'pageOffset',${recoveryOffset},
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT session_id,workspace_id,since FROM recoveries
-        WHERE since<$1::timestamptz-interval '5 minutes' AND NOT paused ORDER BY since LIMIT 100) x),'[]')) facts FROM recoveries`,
+        WHERE since<$1::timestamptz-interval '5 minutes' AND NOT paused ORDER BY workspace_id,session_id
+        LIMIT ${OWNER_PAGE_SIZE} OFFSET ${recoveryOffset}) x),'[]')) facts FROM recoveries`,
     empty: `${CONTROL_CTE}, completed_turns AS MATERIALIZED (
       SELECT id,workspace_id,session_id,source,finished_at FROM session_turns WHERE finished_at>=$1::timestamptz-($2::int*interval '1 minute')
         AND finished_at<=$1::timestamptz AND status='completed'
@@ -223,14 +253,30 @@ export function databaseQueries(): Record<string, string> {
       'classifications',coalesce((SELECT jsonb_object_agg(classification,n) FROM (SELECT classification,count(*) n FROM completions GROUP BY classification) x),'{}'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM repeated ORDER BY empty_turns DESC LIMIT 100) x),'[]')) facts FROM completions`,
     latency: `WITH recent AS MATERIALIZED (
-      SELECT id,workspace_id,session_id,created_at FROM session_turns
+      SELECT id,workspace_id,session_id,source,trigger_event_id,created_at,started_at latest_started_at FROM session_turns
       WHERE started_at >= $1::timestamptz-($2::int*interval '1 minute') AND started_at<=$1::timestamptz
-    ), observations AS (
-      SELECT t.created_at,first.first_started_at FROM recent t LEFT JOIN LATERAL (
+    ), observations AS MATERIALIZED (
+      SELECT t.*,first.first_started_at FROM recent t LEFT JOIN LATERAL (
         SELECT min(e.created_at) first_started_at FROM session_events e
         WHERE e.workspace_id=t.workspace_id AND e.session_id=t.session_id AND e.turn_id=t.id
           AND e.type='turn.started' AND e.duplicate_of_event_id IS NULL
       ) first ON true
+    ), slowest AS MATERIALIZED (
+      SELECT * FROM observations WHERE first_started_at>=$1::timestamptz-($2::int*interval '1 minute')
+        AND first_started_at<=$1::timestamptz AND first_started_at>=created_at
+      ORDER BY first_started_at-created_at DESC,workspace_id,session_id,id LIMIT ${LATENCY_TAIL_LIMIT}
+    ), tail AS MATERIALIZED (
+      SELECT t.id turn_id,t.workspace_id,t.session_id,
+        CASE WHEN t.source ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN t.source END source,
+        t.trigger_event_id,
+        CASE WHEN trigger_event.type ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN trigger_event.type END trigger_kind,
+        t.created_at accepted_at,t.first_started_at,t.latest_started_at,
+        extract(epoch FROM t.first_started_at-t.created_at) latency_seconds
+      FROM slowest t LEFT JOIN LATERAL (
+        SELECT e.type FROM session_events e WHERE e.id=t.trigger_event_id
+          AND e.workspace_id=t.workspace_id AND e.session_id=t.session_id
+          AND e.duplicate_of_event_id IS NULL LIMIT 1
+      ) trigger_event ON true
     ) SELECT jsonb_build_object(
       'sample',count(*) FILTER(WHERE first_started_at >= $1::timestamptz-($2::int*interval '1 minute') AND first_started_at<=$1::timestamptz),
       'p50Seconds',percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM first_started_at-created_at))
@@ -242,8 +288,47 @@ export function databaseQueries(): Record<string, string> {
       'missingFirstStartEvents',count(*) FILTER(WHERE first_started_at IS NULL),
       'futureFirstStartEvents',count(*) FILTER(WHERE first_started_at>$1::timestamptz),
       'invalidNegativeSamples',count(*) FILTER(WHERE first_started_at<created_at),
+      'validTailSamples',count(*) FILTER(WHERE first_started_at>=$1::timestamptz-($2::int*interval '1 minute')
+        AND first_started_at<=$1::timestamptz AND first_started_at>=created_at),
+      'tailLimit',${LATENCY_TAIL_LIMIT},'tailReturned',(SELECT count(*) FROM tail),
+      'missingTailTriggerEvidence',(SELECT count(*) FROM tail WHERE source IS NULL OR trigger_kind IS NULL),
+      'tail',coalesce((SELECT jsonb_agg(t ORDER BY latency_seconds DESC,workspace_id,session_id,turn_id) FROM tail t),'[]'),
+      'tailDefinition','slowest valid in-window logical first starts; trigger_kind is exact trigger event.type, not coalesced update member contents',
       'startTimestampSource','earliest_nonduplicate_turn.started_created_at') facts FROM observations`,
   };
+}
+
+export function validLatencyTail(facts: any): boolean {
+  if (
+    !Array.isArray(facts?.tail) ||
+    facts.tailLimit !== LATENCY_TAIL_LIMIT ||
+    !Number.isSafeInteger(facts.validTailSamples) ||
+    facts.validTailSamples < 0 ||
+    facts.validTailSamples > facts.sample ||
+    facts.tailReturned !== facts.tail.length ||
+    facts.tail.length !== Math.min(LATENCY_TAIL_LIMIT, facts.validTailSamples)
+  )
+    return false;
+  const identifier = (value: unknown) =>
+    typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+  let missing = 0;
+  for (const row of facts.tail) {
+    if (!row || typeof row !== "object") return false;
+    const accepted = Date.parse(row.accepted_at);
+    const first = Date.parse(row.first_started_at);
+    if (
+      ![row.turn_id, row.session_id, row.workspace_id, row.trigger_event_id].every(identifier) ||
+      ![accepted, first, Date.parse(row.latest_started_at)].every(Number.isFinite) ||
+      first < accepted ||
+      !Number.isFinite(row.latency_seconds) ||
+      row.latency_seconds < 0 ||
+      Math.abs((first - accepted) / 1000 - row.latency_seconds) > 0.002 ||
+      ![row.source, row.trigger_kind].every((value) => value === null || identifier(value))
+    )
+      return false;
+    if (row.source === null || row.trigger_kind === null) missing++;
+  }
+  return facts.missingTailTriggerEvidence === missing;
 }
 
 // Code and credential are sent via stdin, not process argv, files, or logs.
@@ -418,22 +503,43 @@ export function applyOwnership(
         : {}),
     };
   });
-  // A capped SQL list cannot certify candidates outside its sample.
-  const omitted =
+  // Other pages remain unknown in THIS snapshot; do not accumulate cross-tick claims.
+  const population =
     recovering || unknownInventory
-      ? Math.max(0, facts.total - rows.length)
-      : Math.max(0, facts.runnable - rows.filter((row: any) => row.reason === "runnable").length) +
-        Math.max(
-          0,
-          (facts.excluded?.behind_active_turn ?? 0) -
-            rows.filter((row: any) => row.reason === "behind_active_turn").length,
-        );
+      ? facts.total
+      : facts.runnable + (facts.excluded?.behind_active_turn ?? 0);
+  const omitted = Math.max(0, population - targets.length);
+  const offset = facts.pageOffset ?? 0;
+  const validOffset = Number.isSafeInteger(offset) && offset >= 0 && offset <= 1000000;
+  const expected = validOffset ? Math.min(OWNER_PAGE_SIZE, Math.max(0, population - offset)) : -1;
+  const nextOffset = offset + targets.length;
+  const flag = recovering
+    ? "--recovery-offset"
+    : unknownInventory
+      ? "--inventory-offset"
+      : "--queue-offset";
   const { runnable, ...otherFacts } = facts;
   return {
     ...otherFacts,
     ...(recovering || unknownInventory ? {} : { sqlRunnableCandidates: runnable }),
     actionable,
     ownerUnknown: ownerUnknown + omitted,
+    incompleteOwnerPage: targets.length !== expected ? 1 : 0,
+    canonicalPage: {
+      offset,
+      limit: OWNER_PAGE_SIZE,
+      population,
+      returned: targets.length,
+      observed: targets.length - ownerUnknown,
+      nextOffset: validOffset && targets.length > 0 && nextOffset < population ? nextOffset : null,
+      continuationArgs:
+        validOffset && targets.length > 0 && nextOffset < population
+          ? [flag, String(nextOffset)]
+          : [],
+      order: "workspace_id,session_id",
+      coverage:
+        "single_non_atomic_page; rerun from offset 0 after changes; no cross-page health claim",
+    },
     ...(recovering ? {} : { unknownQueueAge }),
     ownershipClassifications: classifications,
     ownership,
@@ -627,13 +733,13 @@ export async function sweep(
   const database = async () => {
     const definitions: Record<string, string> = {
       queued:
-        "Known accepted pending human/API turns and system updates aged >120s across all session projections, using earliest pending-work created_at, never session creation. Indexed target enumeration and per-ID revision-aware controls are isolated from global orphan inventory; queued-inventory must also be covered for complete queue health. First 100 triage-prioritized rows listed; shared cap of 20 canonical observations.",
+        "Known accepted pending human/API turns and system updates aged >120s across all session projections, using earliest pending-work created_at, never session creation. Indexed targeting is isolated from global orphan inventory. Uncapped SQL totals; independent 20-target canonical page ordered by workspace/session with explicit --queue-offset continuation. Other pages remain gaps, never global zero-actionable evidence.",
       "queued-inventory":
-        "Separate global inventory of durable queued sessions without an accepted pending human/API turn or system-update timestamp. Historical internal rows are not timestamp authority. Canonical control/owner observation classifies age-unknown work; runnable unknown age and omitted/failed observations are gaps. Independent read snapshot from known-aged source; source timeout never discards known-aged counts.",
+        "Separate global inventory of durable queued sessions without an accepted pending human/API turn or system-update timestamp. Historical internal rows are not timestamp authority. Independent 20-target canonical page with --inventory-offset continuation; runnable unknown age and omitted/failed observations are gaps. Independent read snapshot from known-aged source; source timeout never discards known-aged counts.",
       recovering:
-        "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Missing transition or ownership evidence is a gap, not proof of physical quiescence.",
+        "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Independent 20-target page observed BEFORE queue/inventory; --recovery-offset continues larger cohorts. Missing transition, omitted page, or failed ownership evidence is a gap, not proof of physical quiescence.",
       empty: `All completed turns in ${options.windowMinutes}m retain denominator coverage; missing usable turn.completed evidence is a gap. At least two distinct suspect turns flag repeated empty replies; explicit emptyFinalReply or no reply/tools, excluding effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
-      latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start events are a gap. Database exact percentiles, not TTFT.`,
+      latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start or tail trigger evidence is a gap. Ten slowest valid samples include exact IDs, source, trigger event.type and accepted/first/latest boundaries, reusing one materialized observation population with bounded trigger-ID lookups. Database exact percentiles, not TTFT.`,
     };
     let data: any;
     let url = process.env.OPENGENI_HEALTH_DATABASE_URL;
@@ -655,7 +761,7 @@ export async function sweep(
         url = Buffer.from(s.data[options.databaseSecretKey], "base64").toString();
       }
       if (!url) throw new Error("no database source");
-      const queries = databaseQueries();
+      const queries = databaseQueries(options);
       const { queued, ...secondaryQueries } = queries;
       const collect = async (querySet: Record<string, string>) => {
         try {
@@ -704,16 +810,19 @@ export async function sweep(
     const inventoryRows = Array.isArray(data.queuedInventory?.sessions)
       ? data.queuedInventory.sessions
       : [];
-    const targets = [
-      ...new Map(
-        [...queueRows, ...recoveryRows, ...inventoryRows].map((row: any) => [
-          `${row.workspace_id}:${row.session_id}`,
-          row,
-        ]),
-      ).values(),
-    ].slice(0, 20);
-    let observations: OwnerObservation[] = [];
-    if (url && targets.length) {
+    const observations: Record<string, OwnerObservation[]> = {};
+    // Separate phases reserve recovery coverage even when a queue page fails.
+    // Sequential execution preserves the existing maximum of two DB connections.
+    for (const [name, rows] of [
+      ["recovering", recoveryRows],
+      ["queued", queueRows],
+      ["queuedInventory", inventoryRows],
+    ] as const) {
+      observations[name] = [];
+      const targets = [
+        ...new Map(rows.map((row: any) => [`${row.workspace_id}:${row.session_id}`, row])).values(),
+      ].slice(0, OWNER_PAGE_SIZE);
+      if (!url || !targets.length) continue;
       try {
         const value = JSON.parse(
           await run(
@@ -733,16 +842,22 @@ export async function sweep(
           ),
         );
         if (!Array.isArray(value)) throw new Error("invalid canonical observations");
-        observations = value;
+        observations[name] = value;
       } catch {
         /* Missing ownership evidence remains an explicit gap below. */
       }
     }
-    if (data.queued && !data.queued.gap) data.queued = applyOwnership(data.queued, observations);
+    if (data.queued && !data.queued.gap)
+      data.queued = applyOwnership(data.queued, observations.queued ?? []);
     if (data.recovering && !data.recovering.gap)
-      data.recovering = applyOwnership(data.recovering, observations, true);
+      data.recovering = applyOwnership(data.recovering, observations.recovering ?? [], true);
     if (data.queuedInventory && !data.queuedInventory.gap)
-      data.queuedInventory = applyOwnership(data.queuedInventory, observations, false, true);
+      data.queuedInventory = applyOwnership(
+        data.queuedInventory,
+        observations.queuedInventory ?? [],
+        false,
+        true,
+      );
     for (const [name, definition] of Object.entries(definitions)) {
       const facts = data[name === "queued-inventory" ? "queuedInventory" : name];
       const required =
@@ -765,18 +880,25 @@ export async function sweep(
                     "invalidNegativeSamples",
                     "missingFirstStartEvents",
                     "futureFirstStartEvents",
+                    "validTailSamples",
+                    "tailReturned",
+                    "missingTailTriggerEvidence",
                   ];
       const invalid =
-        !facts || required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0);
+        !facts ||
+        required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0) ||
+        (name === "latency" && !validLatencyTail(facts));
       const gap =
         invalid ||
         facts.gap ||
         facts.controlUnknown > 0 ||
         facts.ownerUnknown > 0 ||
+        facts.incompleteOwnerPage > 0 ||
         facts.unknownQueueAge > 0 ||
         facts.missingCompletionEvidence > 0 ||
         facts.missingStatusTimestamp > 0 ||
         facts.missingFirstStartEvents > 0 ||
+        facts.missingTailTriggerEvidence > 0 ||
         facts.futureFirstStartEvents > 0 ||
         facts.invalidNegativeSamples > 0;
       checks.push({
@@ -883,6 +1005,8 @@ export function textResult(result: SweepResult): string {
                   "coverage",
                   "ownership",
                   "ownershipDefinition",
+                  "tail",
+                  "tailDefinition",
                 ].includes(key),
             ),
           )

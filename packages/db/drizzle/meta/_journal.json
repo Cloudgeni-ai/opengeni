@@ -167,7 +167,14 @@
       "idx": 23,
       "version": "7",
       "when": 1791028800000,
-      "tag": "0602_insights_raw_usage_api",
+      "tag": "0603_insights_raw_usage_api",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791057900000,
+      "tag": "0604_insights_model_debit_period_index",
       "breakpoints": true
     }
   ]

@@ -4,6 +4,7 @@
  * deployment doesn't serve the route at all.
  */
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
 import {
   legacyRange,
@@ -11,13 +12,14 @@ import {
   organizationUsageFromModelUsage,
   workspaceUsageFromSnapshot,
 } from "./usage-adapter";
-import type {
-  UsageCall,
-  UsageFilterField,
-  UsageFilters,
-  UsageQuery,
-  UsageResponse,
-  UsageScope,
+import {
+  usageResponseForGrouping,
+  type UsageCall,
+  type UsageFilterField,
+  type UsageFilters,
+  type UsageQuery,
+  type UsageResponse,
+  type UsageScope,
 } from "./usage-contract";
 
 export type UsageLoad = {
@@ -140,7 +142,7 @@ export async function loadUsage(
   if ((legacyUntil.get(memo) ?? 0) <= Date.now()) {
     try {
       const usage = await client.requestJson<
-        Omit<UsageResponse, "capabilities"> & { capabilities?: UsageResponse["capabilities"] }
+        InsightsUsageResponse & { capabilities?: UsageResponse["capabilities"] }
       >("GET", `${basePath(scope)}/usage`, undefined, queryParams(query), { signal });
       // The source dimension and custom ranges arrived together; a server that
       // lists no source facet answers neither (its query schema is strict).
@@ -152,7 +154,7 @@ export async function loadUsage(
         ranges: ALL_CAPABILITIES.ranges.filter((range) => extended || range !== "custom"),
       };
       return {
-        usage: { ...usage, capabilities },
+        usage: usageResponseForGrouping(usage, query.groupBy, capabilities),
         calls: null,
         source: "usage",
         ignoredFilters: ignored(query, capabilities.filters),

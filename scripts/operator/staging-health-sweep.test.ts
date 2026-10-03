@@ -14,9 +14,40 @@ import {
   ownerClassification,
   safeDatabaseErrorCode,
   boundedRun,
+  OWNER_PAGE_SIZE,
+  LATENCY_TAIL_LIMIT,
+  validLatencyTail,
   type OwnerObservation,
   type Run,
 } from "./staging-health-sweep";
+
+function latencyFixture() {
+  const tail = [2, 1, 1].map((latency_seconds, index) => ({
+    turn_id: `tail${index}`,
+    session_id: `session${index}`,
+    workspace_id: "w",
+    source: "user",
+    trigger_event_id: `trigger${index}`,
+    trigger_kind: "user.message",
+    accepted_at: "2026-10-03T10:59:57Z",
+    first_started_at: `2026-10-03T10:59:${57 + latency_seconds}Z`,
+    latest_started_at: "2026-10-03T10:59:59Z",
+    latency_seconds,
+  }));
+  return {
+    sample: 3,
+    p50Seconds: 1,
+    p95Seconds: 2,
+    invalidNegativeSamples: 0,
+    missingFirstStartEvents: 0,
+    futureFirstStartEvents: 0,
+    validTailSamples: 3,
+    tailLimit: LATENCY_TAIL_LIMIT,
+    tailReturned: tail.length,
+    missingTailTriggerEvidence: 0,
+    tail,
+  };
+}
 
 function healthyRun(
   overrides: {
@@ -49,14 +80,7 @@ function healthyRun(
           controlUnknown: 0,
           missingCompletionEvidence: 0,
         },
-        latency: {
-          sample: 3,
-          p50Seconds: 1,
-          p95Seconds: 2,
-          invalidNegativeSamples: 0,
-          missingFirstStartEvents: 0,
-          futureFirstStartEvents: 0,
-        },
+        latency: latencyFixture(),
         ...overrides.database,
       });
     if (args.includes("pods"))
@@ -105,8 +129,13 @@ describe("staging health sweep", () => {
       ["--window-minutes", "0"],
       ["--timeout-seconds", "61"],
       ["--format", "yaml"],
+      ["--queue-offset", "-1"],
+      ["--recovery-offset", "1.5"],
+      ["--inventory-offset", "1000001"],
     ])
       expect(() => parseArgs(args)).toThrow();
+    expect(parseArgs(["--queue-offset", "20", "--recovery-offset", "0"]).queueOffset).toBe(20);
+    expect(() => databaseQueries({ queueOffset: NaN })).toThrow();
   });
   test("parses Kubernetes memory quantities", () => {
     expect(memoryBytes("2Gi")).toBe(2 * 1024 ** 3);
@@ -173,6 +202,10 @@ describe("staging health sweep", () => {
     expect(q.recovering).toContain("missingStatusTimestamp");
     expect(q.queued).not.toContain("OR finished_at");
     expect(q.recovering).not.toContain("OR finished_at");
+    expect(q.recovering).not.toContain("status IN ('queued','recovering')");
+    expect(q.recovering).toContain(
+      "SELECT id,workspace_id FROM sessions WHERE status='recovering'",
+    );
   });
   test("unavailable sources remain explicit gaps without leaking errors", async () => {
     const result = await sweep(parseArgs([]), async () => {
@@ -219,14 +252,7 @@ describe("staging health sweep", () => {
             controlUnknown: 0,
             missingCompletionEvidence: 0,
           },
-          latency: {
-            sample: 3,
-            p50Seconds: 1,
-            p95Seconds: 2,
-            invalidNegativeSamples: 0,
-            missingFirstStartEvents: 0,
-            futureFirstStartEvents: 0,
-          },
+          latency: latencyFixture(),
         });
       }
       if (args.includes("pods"))
@@ -415,12 +441,8 @@ describe("staging health sweep", () => {
       if (args.includes("exec"))
         return JSON.stringify({
           latency: {
-            sample: 3,
-            p50Seconds: 1,
-            p95Seconds: 2,
-            invalidNegativeSamples: 0,
+            ...latencyFixture(),
             missingFirstStartEvents: 1,
-            futureFirstStartEvents: 0,
           },
         });
       return "{}";
@@ -446,6 +468,54 @@ describe("staging health sweep", () => {
       expect(memory.status).toBe("gap");
       expect(memory).not.toHaveProperty("facts");
     }
+  });
+  test("latency tails are bounded, identified and preserve accepted-to-first boundaries", () => {
+    const facts = latencyFixture();
+    expect(validLatencyTail(facts)).toBe(true);
+    expect(validLatencyTail({ ...facts, tailReturned: 4 })).toBe(false);
+    expect(validLatencyTail({ ...facts, tailLimit: 100 })).toBe(false);
+    expect(
+      validLatencyTail({
+        ...facts,
+        validTailSamples: 100,
+        tail: Array(11).fill(facts.tail[0]),
+        tailReturned: 11,
+      }),
+    ).toBe(false);
+    for (const patch of [
+      { turn_id: "" },
+      { accepted_at: "bad" },
+      { latency_seconds: -1 },
+      { latency_seconds: 999 },
+      { first_started_at: "2026-10-03T10:59:56Z" },
+    ]) {
+      expect(
+        validLatencyTail({
+          ...facts,
+          tail: [{ ...facts.tail[0], ...patch }, ...facts.tail.slice(1)],
+        }),
+      ).toBe(false);
+    }
+  });
+  test("missing tail trigger evidence is an explicit gap retaining IDs and percentiles", async () => {
+    const facts = latencyFixture();
+    const latency = {
+      ...facts,
+      missingTailTriggerEvidence: 1,
+      tail: [{ ...facts.tail[0], trigger_kind: null }, ...facts.tail.slice(1)],
+    };
+    expect(validLatencyTail(latency)).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { latency } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "latency")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.p95Seconds).toBe(2);
+    expect(check.facts?.tail).toEqual(latency.tail);
+    expect(result.exitCode).toBe(2);
+    expect(textResult(result)).not.toContain("trigger0");
   });
   test("missing traffic comparison is an explicit gap with numerator/denominator facts", async () => {
     for (const counts of [
@@ -644,6 +714,104 @@ describe("staging health sweep", () => {
     expect(inventory.facts?.actionable).toBe(0);
     expect(inventory.facts).not.toHaveProperty("sqlRunnableCandidates");
   });
+  test("recovery and inventory have independent coverage even when a full queue page fails", async () => {
+    const queue = Array.from({ length: OWNER_PAGE_SIZE }, (_, index) => ({
+      session_id: `q${index}`,
+      workspace_id: "w",
+      reason: "runnable",
+      queued_at: "2026-10-03T10:00:00Z",
+    }));
+    const recoveries = ["r1", "r2"].map((session_id) => ({ session_id, workspace_id: "w" }));
+    const inventory = [{ session_id: "i1", workspace_id: "w", queued_at: null }];
+    const healthy = healthyRun({
+      database: {
+        queued: {
+          total: 65,
+          runnable: 60,
+          excluded: { behind_active_turn: 5 },
+          controlUnknown: 0,
+          sessions: queue,
+        },
+        recovering: {
+          total: 2,
+          controlUnknown: 0,
+          missingStatusTimestamp: 0,
+          sessions: recoveries,
+        },
+        queuedInventory: { total: 1, sessions: inventory },
+      },
+    });
+    const phases: string[][] = [];
+    const run: Run = async (args, stdin) => {
+      if (args.at(-1) !== CANONICAL_RUNNER) return healthy(args, stdin);
+      const { targets } = JSON.parse(stdin!);
+      phases.push(targets.map((target: any) => target.session_id));
+      expect(targets.length).toBeLessThanOrEqual(OWNER_PAGE_SIZE);
+      if (targets[0].session_id.startsWith("q")) throw new Error("secret failed queue source");
+      return JSON.stringify(
+        targets.map((target: any) => ({ ...target, state: "active", kind: "idle" })),
+      );
+    };
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      run,
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    expect(phases.map((phase) => phase[0])).toEqual(["r1", "q0", "i1"]);
+    const recovery = result.checks.find((check) => check.id === "recovering")!;
+    expect(recovery.status).toBe("ok");
+    expect(recovery.facts?.ownerUnknown).toBe(0);
+    expect((recovery.facts!.canonicalPage as any).observed).toBe(2);
+    const known = result.checks.find((check) => check.id === "queued")!;
+    expect(known.status).toBe("gap");
+    expect(known.facts?.ownerUnknown).toBe(65);
+    expect((known.facts!.canonicalPage as any).continuationArgs).toEqual(["--queue-offset", "20"]);
+    expect(result.checks.find((check) => check.id === "queued-inventory")!.status).toBe("ok");
+    expect(result.exitCode).toBe(2);
+    expect(JSON.stringify(result)).not.toContain("secret failed");
+  });
+  test("explicit canonical pages cover disjoint queue candidates without claiming global health", () => {
+    const all = Array.from({ length: 45 }, (_, index) => ({
+      session_id: `s${String(index).padStart(2, "0")}`,
+      workspace_id: "w",
+      reason: "runnable",
+      queued_at: "2026-10-03T10:00:00Z",
+    }));
+    const visited: string[] = [];
+    for (const offset of [0, 20, 40]) {
+      const sessions = all.slice(offset, offset + OWNER_PAGE_SIZE);
+      visited.push(...sessions.map((row) => row.session_id));
+      const observed: OwnerObservation[] = sessions.map((row) => ({
+        ...row,
+        state: "active",
+        settlement: null,
+        kind: "runnable",
+      }));
+      const facts = applyOwnership(
+        { total: 45, runnable: 45, excluded: {}, pageOffset: offset, sessions },
+        observed,
+      );
+      expect(facts.sqlRunnableCandidates).toBe(45);
+      expect(facts.actionable).toBe(sessions.length);
+      expect(facts.ownerUnknown).toBe(45 - sessions.length);
+      expect(facts.incompleteOwnerPage).toBe(0);
+      expect(facts.canonicalPage.nextOffset).toBe(offset === 40 ? null : offset + 20);
+      expect(facts.canonicalPage.observed).toBe(sessions.length);
+      expect(facts.canonicalPage.coverage).toContain("no cross-page health claim");
+    }
+    expect(new Set(visited).size).toBe(45);
+    expect(visited).toEqual(all.map((row) => row.session_id));
+    const recovered = applyOwnership(
+      { total: 45, pageOffset: 20, sessions: all.slice(20, 40) },
+      [],
+      true,
+    );
+    expect(recovered.canonicalPage.continuationArgs).toEqual(["--recovery-offset", "40"]);
+    expect(recovered.ownerUnknown).toBe(45);
+    const missing = applyOwnership({ total: 1, runnable: 1, sessions: [] }, []);
+    expect(missing.incompleteOwnerPage).toBe(1);
+    expect(missing.canonicalPage.nextOffset).toBeNull();
+  });
   test.skipIf(process.env.OPENGENI_HEALTH_SWEEP_LIVE_TESTS !== "1")(
     "read-only SQL fixtures retain missing completions and pending work across session projections",
     async () => {
@@ -671,13 +839,17 @@ describe("staging health sweep", () => {
         "workspace_id text,workspace_state text,workspace_pause_revision bigint",
         [{ workspace_id: "w", workspace_state: "active" }],
       );
-      const query = (name: "queued" | "queuedInventory" | "empty", fixtures: string[]) => {
-        const productionQuery = databaseQueries()[name]!;
+      const query = (
+        name: "queued" | "queuedInventory" | "recovering" | "empty" | "latency",
+        fixtures: string[],
+        pages: Parameters<typeof databaseQueries>[0] = {},
+      ) => {
+        const productionQuery = databaseQueries(pages)[name]!;
         return (
           "WITH RECURSIVE " +
           fixtures.join(",") +
           "," +
-          productionQuery.replace(/^WITH RECURSIVE /, "")
+          productionQuery.replace(/^WITH(?: RECURSIVE)? /, "")
         );
       };
       const queueTables = [
@@ -741,6 +913,127 @@ describe("staging health sweep", () => {
       ];
       const queued = query("queued", queueTables);
       const queuedInventory = query("queuedInventory", queueTables);
+      const pageIds = Array.from(
+        { length: 45 },
+        (_, index) => `page${String(index).padStart(2, "0")}`,
+      );
+      const pagedTables = (status: string, pendingTurns: boolean) => [
+        sessions(pageIds.map((id) => ({ id, status }))),
+        control,
+        table(
+          "session_turns",
+          "id text,workspace_id text,session_id text,status text,source text,created_at timestamptz",
+          pendingTurns
+            ? pageIds.map((session_id) => ({
+                id: `turn-${session_id}`,
+                workspace_id: "w",
+                session_id,
+                status: "queued",
+                source: "api",
+                created_at: "2026-10-03T12:50:00Z",
+              }))
+            : [],
+        ),
+        table(
+          "session_system_updates",
+          "workspace_id text,session_id text,state text,created_at timestamptz",
+          [],
+        ),
+        table(
+          "session_events",
+          "workspace_id text,session_id text,type text,created_at timestamptz,payload jsonb,sequence int",
+          pageIds.map((session_id) => ({
+            workspace_id: "w",
+            session_id,
+            type: "session.status.changed",
+            created_at: "2026-10-03T12:50:00Z",
+            payload: { status: "recovering" },
+            sequence: 1,
+          })),
+        ),
+      ];
+      const pageQueries = {
+        queueFirst: query("queued", pagedTables("recovering", true)),
+        queueNext: query("queued", pagedTables("recovering", true), { queueOffset: 20 }),
+        queueLast: query("queued", pagedTables("recovering", true), { queueOffset: 40 }),
+        recoveryNext: query("recovering", pagedTables("recovering", true), { recoveryOffset: 20 }),
+        inventoryNext: query("queuedInventory", pagedTables("queued", false), {
+          inventoryOffset: 20,
+        }),
+      };
+      const normalTurns = Array.from({ length: 15 }, (_, index) => ({
+        id: `lat${String(index).padStart(2, "0")}`,
+        workspace_id: "w",
+        session_id: "latency-session",
+        source: index % 2 ? "api" : "user",
+        trigger_event_id: `trigger-lat${String(index).padStart(2, "0")}`,
+        created_at: "2026-10-03T12:50:00Z",
+        started_at: "2026-10-03T12:59:00Z",
+      }));
+      const latencyTurns = [
+        ...normalTurns,
+        ...["old-resume", "missing-start", "duplicate-only", "negative", "future"].map((id) => ({
+          id,
+          workspace_id: "w",
+          session_id: "latency-session",
+          source: "system",
+          trigger_event_id: `trigger-${id}`,
+          created_at:
+            id === "old-resume"
+              ? "2026-10-03T12:00:00Z"
+              : id === "negative"
+                ? "2026-10-03T12:55:00Z"
+                : "2026-10-03T12:50:00Z",
+          started_at: "2026-10-03T12:59:00Z",
+        })),
+      ];
+      const event = (
+        id: string,
+        turn_id: string,
+        created_at: string,
+        duplicate_of_event_id: string | null = null,
+      ) => ({
+        id,
+        workspace_id: "w",
+        session_id: "latency-session",
+        turn_id,
+        type: "turn.started",
+        created_at,
+        duplicate_of_event_id,
+      });
+      const latencyEvents = [
+        ...latencyTurns
+          .filter((turn) => turn.id !== "lat14")
+          .map((turn) => ({
+            ...event(turn.trigger_event_id, turn.id, turn.created_at),
+            type: "user.message",
+            payload: { prompt: "never emit fixture prompt", token: "never emit fixture token" },
+          })),
+        ...normalTurns.flatMap((turn, index) => [
+          event(`first-${turn.id}`, turn.id, `2026-10-03T12:50:${String(index).padStart(2, "0")}Z`),
+          event(`resume-${turn.id}`, turn.id, "2026-10-03T12:59:00Z"),
+          event(`duplicate-${turn.id}`, turn.id, "2026-10-03T12:40:00Z", `first-${turn.id}`),
+        ]),
+        event("old-first", "old-resume", "2026-10-03T12:20:00Z"),
+        event("old-latest", "old-resume", "2026-10-03T12:59:00Z"),
+        event("only-duplicate", "duplicate-only", "2026-10-03T12:51:00Z", "original"),
+        event("negative-first", "negative", "2026-10-03T12:54:00Z"),
+        event("future-first", "future", "2026-10-03T13:01:00Z"),
+        { ...event("foreign-workspace", "lat13", "2026-10-03T12:49:00Z"), workspace_id: "other" },
+        { ...event("foreign-session", "lat12", "2026-10-03T12:49:00Z"), session_id: "other" },
+      ];
+      const latency = query("latency", [
+        table(
+          "session_turns",
+          "id text,workspace_id text,session_id text,source text,trigger_event_id text,created_at timestamptz,started_at timestamptz",
+          latencyTurns,
+        ),
+        table(
+          "session_events",
+          "id text,workspace_id text,session_id text,turn_id text,type text,created_at timestamptz,duplicate_of_event_id text,payload jsonb",
+          latencyEvents,
+        ),
+      ]);
       const empty = query("empty", [
         sessions([{ id: "completed", status: "idle" }]),
         control,
@@ -801,13 +1094,35 @@ describe("staging health sweep", () => {
             url,
             now: "2026-10-03T13:00:00Z",
             windowMinutes: 30,
-            queries: { queued, queuedInventory, empty },
+            queries: { queued, queuedInventory, empty, latency, ...pageQueries },
           }),
         ),
       );
       expect(result.queued).not.toHaveProperty("gap");
       expect(result.queued.total).toBe(3);
       expect(result.queued.unknownAgeCandidates).toBe(0);
+      for (const [name, offset] of [
+        ["queueFirst", 0],
+        ["queueNext", 20],
+        ["queueLast", 40],
+        ["recoveryNext", 20],
+        ["inventoryNext", 20],
+      ] as const) {
+        const page = result[name];
+        expect(page).not.toHaveProperty("gap");
+        expect(page.total).toBe(45);
+        expect(page.pageOffset).toBe(offset);
+        expect(page.sessions.map((row: any) => row.session_id)).toEqual(
+          pageIds.slice(offset, offset + OWNER_PAGE_SIZE),
+        );
+      }
+      expect(
+        new Set(
+          [result.queueFirst, result.queueNext, result.queueLast].flatMap((page: any) =>
+            page.sessions.map((row: any) => row.session_id),
+          ),
+        ).size,
+      ).toBe(45);
       expect(result.queued.sessions.map((row: any) => row.session_id).sort()).toEqual([
         "api-running",
         "human-idle",
@@ -844,6 +1159,29 @@ describe("staging health sweep", () => {
       expect(result.empty.sample).toBe(3);
       expect(result.empty.missingCompletionEvidence).toBe(2);
       expect(result.empty.repeatedSessions).toBe(0);
+      expect(result.latency.code).toBeUndefined();
+      expect(result.latency).not.toHaveProperty("gap");
+      expect(result.latency.sample).toBe(16);
+      expect(result.latency.p50Seconds).toBeCloseTo(6.5);
+      expect(result.latency.p95Seconds).toBeCloseTo(13.25);
+      expect(result.latency.validTailSamples).toBe(15);
+      expect(result.latency.tailReturned).toBe(LATENCY_TAIL_LIMIT);
+      expect(result.latency.tail.map((row: any) => row.turn_id)).toEqual(
+        Array.from({ length: 10 }, (_, index) => `lat${String(14 - index).padStart(2, "0")}`),
+      );
+      expect(result.latency.tail[0].accepted_at).toStartWith("2026-10-03T12:50:00");
+      expect(result.latency.tail[0].first_started_at).toStartWith("2026-10-03T12:50:14");
+      expect(result.latency.tail[0].latest_started_at).toStartWith("2026-10-03T12:59:00");
+      expect(result.latency.tail[0].latency_seconds).toBe(14);
+      expect(result.latency.tail[0].trigger_kind).toBeNull();
+      expect(result.latency.missingTailTriggerEvidence).toBe(1);
+      expect(result.latency.resumedFromBeforeWindow).toBe(1);
+      expect(result.latency.missingFirstStartEvents).toBe(2);
+      expect(result.latency.futureFirstStartEvents).toBe(1);
+      expect(result.latency.invalidNegativeSamples).toBe(1);
+      expect(validLatencyTail(result.latency)).toBe(true);
+      expect(JSON.stringify(result.latency)).not.toContain("never emit");
     },
+    30000,
   );
 });

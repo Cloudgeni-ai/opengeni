@@ -15,6 +15,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  isVerifiedDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import {
   decodeSessionListCursor,
@@ -303,7 +304,9 @@ async function listWorkspaceSessionPage(
           ? { scopeSubjectId: input.query.scopeSubjectId }
           : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException:
+          authorization.canonicalManagedHumanSession ||
+          isVerifiedDelegatedHumanAuthorization(authorization),
       });
     const withStatus = (rows: Session[]) =>
       input.query.status ? rows.filter((session) => session.status === input.query.status) : rows;

@@ -1778,7 +1778,29 @@ PID/PGID command line contains the same token. The wrapper publishes its marker
 before checking the tombstone, so a late accepted start cannot execute user code;
 the fence still waits for both exact process-group absence and the original
 provider promise to settle. Timeout, missing marker, and transport failure remain
-non-proof. The queue/chrome projection renders this period as stopping previous
+non-proof. If that original start instead registers a process on its exact
+retained route, pending-start cleanup hands off to the retained process's
+physical cancellation and settlement fence. It must not retry a new ordinary
+mutation after that handoff, since Steer may already fence ordinary admission.
+A rejected or rendered transport error, or an unretained numeric session id,
+does not authorize this handoff. An already-issued proof helper has its own
+physical fence, independent of the original start's registration: a running
+receipt or typed retained-outcome-unknown fault is joined through empty control
+reads on that helper's exact retained route, or exact durable terminal proof.
+The helper is never relaunched or cancelled with the original command's marker.
+Generic rejection, rendered errors, and unretained helper locators remain
+outcome-unknown and keep quiescence closed; only typed non-dispatch/rejection
+or call-scoped proof from routing's pre-provider admission-refusal boundary
+permits retrying the tombstone helper. Routing preserves the original refusal
+error and reports proof separately for that invocation only; an error name,
+message, or the same error thrown after provider dispatch is never proof. A
+run-credential or Codemode-token command decorator preserves trailing invocation
+options unchanged, including that callback, through the production session chain.
+Routing consumes the callback at admission and never passes it to the provider. A
+refused helper releases only its own join, not the original retained process's
+physical/durable settlement fence, and later trusted registration stops its
+ordinary-helper retries. The queue/chrome projection renders this
+period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
@@ -3512,7 +3534,46 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. The historical `model_sdk_serialization` phase is Codex-only:
+critical path. Initial session creation adds content-free
+`api.session_create.authorization|body_read|site_origin|core_create|response_projection`
+child spans within the existing HTTP span. Authorization still precedes body
+handling and creation; response policy projection remains outside the create
+rejection envelope, after committed creation. Core children
+`workspace_read|model_catalog_initial|default_model|model_catalog_effective|capability_settings|initiator_freeze|allowance|shell_insert`
+attribute existing pre-initialization reads and admission work, including both
+keyed and unkeyed shell insertion. Conditional work emits a child only when it
+runs: an explicit model omits default resolution, while Site origin without
+headers does no persistence work. These boundaries do not cover every internal
+selection check; gaps and parent/child spans must not be added as sequential costs.
+The existing
+`core.session_start.initialize|event_fanout|workflow_wake|session_reload`
+children still cover atomic initialization, post-commit fanout,
+immediate workflow signal plus wake-ledger acknowledgement, and response reload.
+The initial turn, authority, event log and wake outbox still commit atomically
+before either notification. Initial live fanout and the immediate durable-revision
+workflow wake then overlap; both settle before response reload or error propagation.
+Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
+transport failures remain best-effort. Durable SSE replay handles later committed
+events arriving ahead of initial live fanout. Worker child phases
+`services_initialization`, `claim_catalog_read`, `claim_atomic`,
+`claim_session_read`, and `claim_capability_settings` separate startup work
+before durable `turn.started`; provider/backend labels remain `unresolved`
+until the existing reads establish them. `learning_policy_freeze` and
+`attachment_authority_projection` cover the existing work after that start but
+before the historical worker-preparation timer. Service initialization precedes
+the execution root and claim timer; its completed span is backdated beneath
+the root, not evidence that it ran after the claim. These observations add no
+database reads or event publications, do not join telemetry exports, and leave
+historical metric boundaries intact. Missing observations are not zero durations.
+After successful exact claim ownership, session reload and capability settings
+overlap as fresh reads in separate root-pool RLS transactions; neither uses the
+other's result. Both results still precede credential selection, accepted-policy
+installation, allowance checks and durable turn start. This read join is fail-fast:
+the first observed error can replace the prior serial diagnostic priority, and a
+read-only sibling may retain its pooled connection/shared tenancy lock until it
+finishes, but cannot start tools, publish events or continue downstream authority.
+Neither overlap establishes a measured latency saving without matched live spans.
+The historical `model_sdk_serialization` phase is Codex-only:
 it runs from the worker checkpoint immediately before `runtime.runStream` to
 the Codex `transport_entry` callback. It includes SDK runner/tool/input
 preparation, not just JSON serialization CPU time. When reported,
@@ -3520,6 +3581,20 @@ preparation, not just JSON serialization CPU time. When reported,
 the beginning of its first MCP tools snapshot; waiting for deferred catalog
 preparation inside tool resolution therefore appears in this runner gap.
 These spans overlap model-request preparation and must not be added to it.
+For generic fallback request events, including credits-billed Azure, the optional
+`initialWireDispatchedAt` field on the existing first-byte or terminal event is
+the first underlying fetch-entry clock of this worker attempt, after required
+admission/audit and request-capture setup. It is observed synchronously, immutable
+across retries and later tool/model requests, and matched to the event's provider,
+dispatch, attempt and execution identity. It is not the time bytes leave the
+kernel or reach the provider. The historical `provider_dispatch` milestone
+remains the durable started-audit checkpoint, not this post-audit fetch clock;
+no old phase or duration boundary changes. The field adds no awaited work or
+event publication. Native Codex/Xai request events and transports bypassing
+`instrumentedModelFetch` do not publish it: their separate physical request
+identities are not inferred from this generic observer. Absence is unsupported
+or unobserved, never evidence of a zero startup duration. Comparing its worker
+wall clock with database event times still requires accounting for clock skew.
 A definite path miss answering a read-only first routed sandbox
 operation (usually repository skill discovery listing an absent
 `.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as

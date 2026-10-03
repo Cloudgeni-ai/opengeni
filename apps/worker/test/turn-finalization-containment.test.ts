@@ -43,6 +43,7 @@ describe("completed turn physical finalization", () => {
         result.stdout.indexOf("host_exit_backstop"),
       );
       expect(result.stdout).not.toContain("finalizer_returned");
+      expect(result.stdout).not.toContain("worker_activity");
     }, 30_000);
   }
   test("completed cleanup returns and disarms containment", async () => {
@@ -50,6 +51,9 @@ describe("completed turn physical finalization", () => {
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("finalizer_returned false");
+    expect(result.stdout).toContain('"finalizationStage":"sandbox_release"');
+    expect(result.stdout).toContain('worker_activity {"activity":"runAgentTurn","status":"idle"');
+    expect(result.stdout).not.toContain('"status":"cleanup_failed"');
     expect(result.stdout).not.toContain('"outcome":"containment"');
     expect(result.stdout).not.toContain("graceful_drain_requested");
     expect(result.stdout).not.toContain("host_exit_backstop");

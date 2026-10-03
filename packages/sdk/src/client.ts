@@ -142,6 +142,7 @@ import {
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
   type ComputerSessionHeartbeatResponse,
+  type ComputerSessionInputPosture,
   type ComputerSessionLifecycleRequest,
   type ComputerSessionListResponse,
   type ComputerSessionMutationResponse,
@@ -290,7 +291,6 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
-  UpdateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
   OrganizationMcpConnectionList,
   UpdateOrganizationMcpConnectionRequest,
@@ -4516,6 +4516,20 @@ export class OpenGeniClient {
     );
   }
 
+  async getComputerInputPosture(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionInputPosture> {
+    return await this.requestJson<ComputerSessionInputPosture>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/input-posture`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
   async createComputerSession(
     workspaceId: string,
     request: CreateComputerSessionRequest,
@@ -8551,14 +8565,6 @@ export class OpenGeniClient {
     return response.apiKeys;
   }
 
-  /** Read organization-key metadata and policy; never returns the secret token. */
-  async getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "GET",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-    );
-  }
-
   /** The returned `token` is shown once; only its prefix is stored. */
   async createOrganizationApiKey(
     organizationId: string,
@@ -8567,19 +8573,6 @@ export class OpenGeniClient {
     return await this.requestJson<CreateApiKeyResponse>(
       "POST",
       `/v1/organizations/${organizationId}/api-keys`,
-      request,
-    );
-  }
-
-  /** Update metadata or replace the policy. Policy narrowing applies on the next request. */
-  async updateOrganizationApiKey(
-    organizationId: string,
-    apiKeyId: string,
-    request: UpdateOrganizationApiKeyRequest,
-  ): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
       request,
     );
   }

@@ -4,6 +4,7 @@ import {
   InsightsCall,
   InsightsCallsResponse,
   InsightsUsageMeasures,
+  InsightsUsageSource,
   InsightsUsageResponse,
   InsightsUsageSeriesPoint,
   InsightsUsageTokens,
@@ -11,6 +12,7 @@ import {
   OrganizationInsightsUsageQuery,
   WorkspaceInsightsCallsQuery,
   WorkspaceInsightsUsageQuery,
+  resolveInsightsUsageCustomWindow,
 } from "@opengeni/contracts/insights-usage";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -96,6 +98,8 @@ function response(): InsightsUsageResponse {
       providers: [],
       models: [],
       payers: [],
+      plans: [],
+      sources: [],
       projects: [],
       people: [],
       schedules: [],
@@ -123,7 +127,7 @@ function call(): InsightsCall {
 }
 
 describe("Insights query contracts", () => {
-  test("defaults and all ranges, with organization-only workspace grouping/filtering", () => {
+  test("defaults and all presets, with workspace grouping/filtering in both scopes", () => {
     expect(WorkspaceInsightsUsageQuery.parse({})).toEqual({
       range: "week",
       groupBy: "model",
@@ -135,8 +139,9 @@ describe("Insights query contracts", () => {
     expect(
       OrganizationInsightsUsageQuery.parse({ groupBy: "workspace", workspaceId: id }).workspaceId,
     ).toEqual([id]);
-    expect(WorkspaceInsightsUsageQuery.safeParse({ groupBy: "workspace" }).success).toBe(false);
-    expect(WorkspaceInsightsUsageQuery.safeParse({ workspaceId: id }).success).toBe(false);
+    expect(
+      WorkspaceInsightsUsageQuery.parse({ groupBy: "workspace", workspaceId: id }),
+    ).toMatchObject({ groupBy: "workspace", workspaceId: [id] });
   });
 
   test("normalizes single/repeated filters while preserving model slashes", () => {
@@ -145,6 +150,8 @@ describe("Insights query contracts", () => {
       provider: ["openrouter", "anthropic"],
       model: ["openrouter/vendor/model/name", "anthropic/claude"],
       payer: ["opengeni_credits", "subscription", "own_key"],
+      plan: ["recorded-plan-key", "unknown"],
+      source: ["web", "api", "slack", "schedule", "agent", "other"],
       projectId: [id, "unfiled"],
       person: "opaque:member:key",
       rootSessionId: [id, secondId],
@@ -168,6 +175,7 @@ describe("Insights query contracts", () => {
       payer: ["opengeni_credits", "subscription", "own_key"],
       projectId: [id, "unfiled"],
       person: ["opaque:one", "opaque:two"],
+      sessionId: [id, secondId],
       rootSessionId: [id, secondId],
       scheduleId: [id, secondId],
     };
@@ -191,8 +199,11 @@ describe("Insights query contracts", () => {
       "provider",
       "model",
       "payer",
+      "plan",
+      "source",
       "projectId",
       "person",
+      "sessionId",
       "rootSessionId",
       "scheduleId",
     ]) {
@@ -266,12 +277,7 @@ describe("Insights query contracts", () => {
       cursor: "a+/=?",
       limit: 50,
     });
-    for (const options of [
-      { workspaceId: id },
-      { groupBy: "model" },
-      { seriesGroups: true },
-      { cursor: "" },
-    ]) {
+    for (const options of [{ groupBy: "model" }, { seriesGroups: true }, { cursor: "" }]) {
       expect(WorkspaceInsightsCallsQuery.safeParse(options).success).toBe(false);
     }
   });
@@ -280,6 +286,7 @@ describe("Insights query contracts", () => {
     for (const query of [
       { projectId: "not-a-uuid" },
       { rootSessionId: "not-a-uuid" },
+      { sessionId: "not-a-uuid" },
       { scheduleId: "not-a-uuid" },
       { workspaceId: "not-a-uuid" },
       { provider: [] },
@@ -289,11 +296,217 @@ describe("Insights query contracts", () => {
       { model: "provider/" },
       { model: "provider/model name" },
       { payer: "external" },
+      { source: "unknown" },
+      { source: "sdk" },
       { range: "year" },
       { person: "" },
       { bucket: "hour" },
     ]) {
       expect(OrganizationInsightsUsageQuery.safeParse(query).success).toBe(false);
+    }
+  });
+
+  test("every requested dimension is accepted in both usage scopes and filters in both calls scopes", () => {
+    for (const groupBy of [
+      "person",
+      "workspace",
+      "model",
+      "provider",
+      "payer",
+      "plan",
+      "project",
+      "session",
+      "rootSession",
+      "schedule",
+      "source",
+    ] as const) {
+      for (const schema of [WorkspaceInsightsUsageQuery, OrganizationInsightsUsageQuery]) {
+        expect(schema.parse({ groupBy }).groupBy).toBe(groupBy);
+      }
+    }
+    for (const schema of [
+      WorkspaceInsightsUsageQuery,
+      OrganizationInsightsUsageQuery,
+      WorkspaceInsightsCallsQuery,
+      OrganizationInsightsCallsQuery,
+    ]) {
+      expect(
+        schema.parse({
+          workspaceId: id,
+          sessionId: id,
+          rootSessionId: secondId,
+          person: "member:opaque",
+          source: ["web,api", "other"],
+          plan: "recorded,unknown",
+        }),
+      ).toMatchObject({
+        workspaceId: [id],
+        sessionId: [id],
+        rootSessionId: [secondId],
+        person: ["member:opaque"],
+        source: ["web", "api", "other"],
+        plan: ["recorded", "unknown"],
+      });
+    }
+    expect(InsightsUsageSource.options).toEqual([
+      "web",
+      "api",
+      "slack",
+      "schedule",
+      "agent",
+      "other",
+    ]);
+  });
+
+  test("custom inclusive UTC dates resolve exclusive end and immediate equal-length prior", () => {
+    const dates = { from: "2026-10-01", to: "2026-10-02" };
+    for (const schema of [
+      WorkspaceInsightsUsageQuery,
+      OrganizationInsightsUsageQuery,
+      WorkspaceInsightsCallsQuery,
+      OrganizationInsightsCallsQuery,
+    ]) {
+      expect(schema.parse({ range: "custom", ...dates })).toMatchObject({
+        range: "custom",
+        ...dates,
+      });
+    }
+    expect(resolveInsightsUsageCustomWindow(dates)).toEqual({
+      windowStart: "2026-10-01T00:00:00.000Z",
+      windowEnd: "2026-10-03T00:00:00.000Z",
+      priorWindowStart: "2026-09-29T00:00:00.000Z",
+      priorWindowEnd: "2026-10-01T00:00:00.000Z",
+      bucket: "hour",
+    });
+    for (const [from, to, days, bucket] of [
+      ["2026-10-01", "2026-10-01", 1, "hour"],
+      ["2026-10-01", "2026-10-03", 3, "day"],
+      ["2024-02-28", "2024-02-29", 2, "hour"],
+      ["2026-03-07", "2026-03-09", 3, "day"],
+      ["2026-12-31", "2027-01-01", 2, "hour"],
+      ["0099-12-31", "0100-01-01", 2, "hour"],
+    ] as const) {
+      const window = resolveInsightsUsageCustomWindow({ from, to });
+      expect(Date.parse(window.windowEnd) - Date.parse(window.windowStart)).toBe(days * 86_400_000);
+      expect(Date.parse(window.priorWindowEnd) - Date.parse(window.priorWindowStart)).toBe(
+        days * 86_400_000,
+      );
+      expect(window.priorWindowEnd).toBe(window.windowStart);
+      expect(window.bucket).toBe(bucket);
+    }
+  });
+
+  test("custom dates and resolved priors require representable AD years, including lower/upper edges", () => {
+    for (const dates of [
+      { from: "0000-01-02", to: "0000-01-02" },
+      { from: "0000-12-31", to: "0001-01-01" },
+      { from: "0001-01-01", to: "0001-01-01" },
+      { from: "0001-01-02", to: "0001-01-03" },
+      { from: "-0001-01-02", to: "-0001-01-02" },
+      { from: "9999-12-31", to: "9999-12-31" },
+    ]) {
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ]) {
+        expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(false);
+      }
+      expect(() => resolveInsightsUsageCustomWindow(dates)).toThrow();
+    }
+    for (const dates of [
+      { from: "0001-01-02", to: "0001-01-02" },
+      { from: "0001-01-03", to: "0001-01-04" },
+      { from: "9999-12-30", to: "9999-12-30" },
+    ]) {
+      const window = resolveInsightsUsageCustomWindow(dates);
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ]) {
+        expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(true);
+      }
+      expect(
+        InsightsUsageResponse.safeParse({ ...response(), range: "custom", ...window }).success,
+      ).toBe(true);
+      expect(
+        Object.values(window)
+          .filter((value) => value !== "hour" && value !== "day")
+          .every((value) => !value.startsWith("0000-")),
+      ).toBe(true);
+    }
+    expect(
+      resolveInsightsUsageCustomWindow({ from: "0001-01-02", to: "0001-01-02" }).priorWindowStart,
+    ).toBe("0001-01-01T00:00:00.000Z");
+    const yearZeroPrior = {
+      ...response(),
+      range: "custom",
+      bucket: "hour",
+      windowStart: "0001-01-01T00:00:00Z",
+      windowEnd: "0001-01-02T00:00:00Z",
+      priorWindowStart: "0000-12-31T00:00:00Z",
+      priorWindowEnd: "0001-01-01T00:00:00Z",
+    };
+    expect(InsightsUsageResponse.safeParse(yearZeroPrior).success).toBe(false);
+  });
+
+  test("custom dates accept exactly 370 days and reject 371 in both query scopes and responses", () => {
+    const dates = { from: "2026-01-01", to: "2027-01-05" };
+    const window = resolveInsightsUsageCustomWindow(dates);
+    expect(Date.parse(window.windowEnd) - Date.parse(window.windowStart)).toBe(370 * 86_400_000);
+    expect(window.bucket).toBe("day");
+    for (const schema of [
+      WorkspaceInsightsUsageQuery,
+      OrganizationInsightsUsageQuery,
+      WorkspaceInsightsCallsQuery,
+      OrganizationInsightsCallsQuery,
+    ]) {
+      expect(schema.safeParse({ range: "custom", ...dates }).success).toBe(true);
+      expect(schema.safeParse({ range: "custom", ...dates, to: "2027-01-06" }).success).toBe(false);
+    }
+    expect(() => resolveInsightsUsageCustomWindow({ ...dates, to: "2027-01-06" })).toThrow();
+    expect(
+      InsightsUsageResponse.safeParse({ ...response(), range: "custom", ...window }).success,
+    ).toBe(true);
+    const duration = 371 * 86_400_000;
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...response(),
+        range: "custom",
+        ...window,
+        windowEnd: new Date(Date.parse(window.windowStart) + duration).toISOString(),
+        priorWindowStart: new Date(Date.parse(window.windowStart) - duration).toISOString(),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("custom dates reject incomplete, reversed, unreal, instant, array and unrepresentable windows", () => {
+    for (const query of [
+      { range: "custom" },
+      { range: "custom", from: "2026-10-01" },
+      { range: "custom", to: "2026-10-01" },
+      { range: "custom", from: "2026-10-02", to: "2026-10-01" },
+      { range: "custom", from: "2026-02-29", to: "2026-03-01" },
+      { range: "custom", from: "2026-02-30", to: "2026-03-01" },
+      { range: "custom", from: "2026-13-01", to: "2026-13-01" },
+      { range: "custom", from: "2026-10-01T00:00:00Z", to: "2026-10-01" },
+      { range: "custom", from: ["2026-10-01"], to: "2026-10-01" },
+      { range: "custom", from: "0000-01-01", to: "0000-01-01" },
+      { range: "custom", from: "9999-12-31", to: "9999-12-31" },
+      { range: "today", from: "2026-10-01", to: "2026-10-01" },
+      { from: "2026-10-01", to: "2026-10-01" },
+    ]) {
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ]) {
+        expect(schema.safeParse(query).success).toBe(false);
+      }
     }
   });
 });
@@ -461,7 +674,7 @@ describe("Insights response contracts", () => {
         .success,
     ).toBe(false);
     expect(InsightsUsageResponse.safeParse({ ...response(), groupBy: "workspace" }).success).toBe(
-      false,
+      true,
     );
     expect(
       InsightsUsageResponse.safeParse({
@@ -496,6 +709,135 @@ describe("Insights response contracts", () => {
         listByClassMicros: null,
         listByClassApprox: false,
       });
+    }
+  });
+
+  test("custom response preserves money and enforces complete UTC days, prior adjacency and bucket", () => {
+    const custom = {
+      ...response(),
+      range: "custom" as const,
+      ...resolveInsightsUsageCustomWindow({ from: "2026-10-01", to: "2026-10-02" }),
+      prior: ledgerOnlyMeasures(7, 0),
+    };
+    expect(InsightsUsageResponse.parse(custom)).toEqual(custom);
+    for (const fields of [
+      { windowEnd: custom.windowStart },
+      { windowStart: "2026-10-01T01:00:00Z" },
+      { windowEnd: "2026-10-03T01:00:00Z" },
+      { priorWindowEnd: "2026-09-30T00:00:00Z" },
+      { priorWindowStart: "2026-09-28T00:00:00Z" },
+      { bucket: "day" },
+    ])
+      expect(InsightsUsageResponse.safeParse({ ...custom, ...fields }).success).toBe(false);
+    const longer = {
+      ...custom,
+      ...resolveInsightsUsageCustomWindow({ from: "2026-10-01", to: "2026-10-03" }),
+    };
+    expect(InsightsUsageResponse.parse(longer).bucket).toBe("day");
+    expect(InsightsUsageResponse.safeParse({ ...longer, bucket: "hour" }).success).toBe(false);
+  });
+
+  test("source other category and folded remainder do not collide, and facets remain backward compatible", () => {
+    const { calls, tokens, chargedMicros, listMicros, byPayer } = measures();
+    const mini = { calls, tokens, chargedMicros, listMicros, byPayer };
+    const groups = InsightsUsageSource.options.map((key) => ({
+      key,
+      kind: "item" as const,
+      label: key,
+      measures: measures(),
+    }));
+    const source = {
+      ...response(),
+      groupBy: "source" as const,
+      groups: [
+        ...groups,
+        {
+          key: "other:folded",
+          kind: "other" as const,
+          label: "Other groups",
+          measures: measures(),
+        },
+      ],
+      groupCount: 7,
+      series: [
+        {
+          start: response().windowStart,
+          measures: measures(),
+          groups: Object.fromEntries(
+            [...InsightsUsageSource.options, "other:folded"].map((key) => [key, mini]),
+          ),
+        },
+      ],
+      facets: { ...response().facets, sources: ["web", "api", "other"] },
+    };
+    expect(InsightsUsageResponse.parse(source).series[0]?.groups?.other).toEqual(mini);
+    expect(InsightsUsageResponse.parse(source).series[0]?.groups?.["other:folded"]).toEqual(mini);
+    expect(
+      InsightsUsageResponse.safeParse({ ...source, groups: [{ ...groups[0]!, key: "item:web" }] })
+        .success,
+    ).toBe(false);
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...source,
+        groups: [{ key: "other", kind: "other", label: "folded", measures: measures() }],
+      }).success,
+    ).toBe(false);
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...source,
+        series: [{ ...source.series[0]!, groups: { ...source.series[0]!.groups, seventh: mini } }],
+      }).success,
+    ).toBe(false);
+    const { sources: _sources, plans: _plans, ...legacy } = response().facets;
+    expect(InsightsUsageResponse.parse({ ...response(), facets: legacy }).facets).toMatchObject({
+      sources: [],
+      plans: [],
+    });
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...source,
+        facets: { ...source.facets, sources: ["unknown"] },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("private project/root groups carry only the authorized owner facet key, not hidden metadata", () => {
+    const personKey = "member:opaque";
+    const privateGroup = {
+      key: "private:opaque",
+      kind: "private" as const,
+      label: "Member",
+      personKey,
+      measures: ledgerOnlyMeasures(7, 0),
+    };
+    for (const groupBy of ["project", "rootSession"] as const) {
+      expect(
+        InsightsUsageResponse.parse({
+          ...response(),
+          groupBy,
+          groups: [privateGroup],
+          facets: { ...response().facets, people: [{ key: personKey, name: null, you: false }] },
+        }).groups[0]?.personKey,
+      ).toBe(personKey);
+      expect(
+        InsightsUsageResponse.safeParse({ ...response(), groupBy, groups: [privateGroup] }).success,
+      ).toBe(false);
+      for (const field of [
+        "sessionId",
+        "sessionTitle",
+        "projectId",
+        "rootSessionId",
+        "scheduleId",
+        "initiatingHumanSubjectId",
+      ]) {
+        expect(
+          InsightsUsageResponse.safeParse({
+            ...response(),
+            groupBy,
+            groups: [{ ...privateGroup, [field]: id }],
+          }).success,
+        ).toBe(false);
+      }
     }
   });
 

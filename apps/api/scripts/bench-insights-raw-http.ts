@@ -28,6 +28,9 @@ import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 
 const base = new URL(process.env.OPENGENI_TEST_PG_URL ?? "");
+const measuredStartHead = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stdout: "pipe" })
+  .stdout.toString()
+  .trim();
 if (!["127.0.0.1", "localhost", "::1"].includes(base.hostname))
   throw new Error("Loopback test PostgreSQL required");
 const out = process.env.INSIGHTS_BENCH_OUT ?? "/workspace/insights-raw-http-evidence.json";
@@ -339,7 +342,9 @@ try {
           scope,
           range,
           firstRequest: first,
-          coldLabel: "fresh HTTP/auth connection; seeded DB and OS caches are not flushed",
+          firstRequestLabel:
+            "first sample in this case; shared Hono server/pool; DB/OS caches not flushed, not a cold-cache measurement",
+          firstRequestSamples: 1,
           warmSamples: timings.length,
           p50Ms: timings.length ? percentile(timings, 0.5) : null,
           p95Ms: timings.length ? percentile(timings, 0.95) : null,
@@ -365,6 +370,10 @@ try {
     .trim();
   const evidence = {
     head,
+    measuredStartHead,
+    codeHeadChangedDuringRun: head !== measuredStartHead,
+    harness:
+      "standalone Hono with production Insights routes, real key authentication, actor wrapper, Core/DB and JSON over loopback HTTP; not full App middleware/startup",
     synthetic: true,
     localOnly: true,
     actualHttp: true,

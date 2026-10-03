@@ -119,11 +119,7 @@ const configuration = JSON.parse(
   await command([...claude, "plugin", "configure", "opengeni@opengeni", "--json"], claudeEnv),
 );
 assert.deepEqual(configuration.configured, []);
-assert.deepEqual(configuration.unconfigured.sort(), ["base_url", "workspace_id"]);
-assert.equal(configuration.schema.base_url.required, true);
-assert.equal(configuration.schema.workspace_id.required, true);
-assert.equal(configuration.inputs.base_url, "");
-assert.equal(configuration.inputs.workspace_id, "");
+assert.deepEqual(configuration.unconfigured ?? [], []);
 
 const codexEnv = { CODEX_HOME: codexConfig };
 const marketplace = JSON.parse(
@@ -144,8 +140,12 @@ assert.deepEqual(nativePlugin.hooks, []);
 
 // Empirical counterexample: the same package under the legacy manifest recursively registers the guide.
 const legacyRoot = join(scratch, "legacy-marketplace");
-await cp(join(root, ".agents/plugins"), join(legacyRoot, ".agents/plugins"), { recursive: true });
-await cp(join(root, "plugins/opengeni"), join(legacyRoot, "plugins/opengeni"), { recursive: true });
+await cp(join(root, ".agents/plugins"), join(legacyRoot, ".agents/plugins"), {
+  recursive: true,
+});
+await cp(join(root, "plugins/opengeni"), join(legacyRoot, "plugins/opengeni"), {
+  recursive: true,
+});
 await rm(join(legacyRoot, "plugins/opengeni/plugin.json"));
 const legacyConfig = join(scratch, "codex-legacy");
 await mkdir(legacyConfig, { mode: 0o700 });
@@ -181,7 +181,10 @@ await command(
 
 const receipt = {
   checkedAt: new Date().toISOString(),
-  gitHead: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+  gitHead: execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim(),
   dirtyFiles: execFileSync("git", ["status", "--porcelain"], {
     cwd: root,
     encoding: "utf8",
@@ -195,7 +198,9 @@ const receipt = {
     mcpServers: nativePlugin.mcpServers,
     hooks: nativePlugin.hooks,
   },
-  legacyComparison: { skills: legacy.skills.map((skill: { name: string }) => skill.name).sort() },
+  legacyComparison: {
+    skills: legacy.skills.map((skill: { name: string }) => skill.name).sort(),
+  },
   schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   isolatedConfiguration: scratch,
 };

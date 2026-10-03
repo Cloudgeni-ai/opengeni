@@ -4,7 +4,7 @@
 
 ## Navigation
 
-Read §2–4 and §6. Subsystems: §13; updates: §14.
+Overview: §2–4/§6; subsystems: §13; updates: §14.
 
 ---
 
@@ -18,11 +18,8 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-Postgres persists state, Temporal coordinates execution, NATS transports events.
-The API authorizes; workers execute.
-
-External users require live membership and `asUser()`. Visibility and `agentAccess`
-differ; Personal Knowledge follows the verified active-turn user. Links never merge users.
+External users require live membership/`asUser()`. Visibility differs from `agentAccess`;
+Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
@@ -55,32 +52,27 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
-`session_event_cursors` verifies appends transactionally and owns monotonic
-per-session sequencing/public `lastSequence`. Semantic writers lock sessions
-for atomic state/event commits; `sessions.last_sequence` is compatibility-only.
-Raw exact-attempt batches retain turn/attempt fences, hold session `FOR KEY SHARE`,
-serialize on cursors, and never update sessions. Legacy SQL writers rebase at
-the database boundary; late raw events roll back and retry semantic admission
+`session_event_cursors` transactionally verifies appends/monotonic sequencing/public
+`lastSequence`; `sessions.last_sequence` is compatibility-only. Semantic writers
+lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,
+hold session `FOR KEY SHARE`, serialize cursors, never update sessions. Legacy
+SQL rebases at the DB boundary; late raw events roll back/retry semantic admission
 before rejected audit persistence.
 
-Unread/tree attention share the indexed meaningful frontier in
-`packages/db/src/session-meaningful-events.ts`, excluding bookkeeping. Claimed
-lifecycle content and exact parent reads acknowledge only the frozen human's
-direct-child content. Complete finals cover earlier activity, never newer answers;
-filtered reads cannot skip unseen content. Manual unread survives old replay;
-newer consumed activity or explicit mark-read supersedes it.
+Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
+non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
+the frozen human's direct-child content. Finals cover earlier activity, not newer
+answers; filtered reads cannot skip unseen content. Manual unread survives replay
+until newer consumed activity or explicit mark-read.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
-SSE replays events, subscribes to fanout and backfills Postgres gaps. Reads select
-byte-bounded prefixes before payload transfer. Oversized events travel intact,
-alone; short pages never prove EOF. NATS restarts affect delivery/reachability,
-never history or queued obligations.
+SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
+before transfer; oversized events travel intact/alone. Short pages never prove
+EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
 
 Raw-isolation rollback:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
-
-Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
@@ -100,14 +92,14 @@ Conversation/goals/queues/usage/provider/tool transcripts never enter workflow h
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Stalled turn finalization requests host-owned graceful shutdown, so peer turns
-checkpoint and hand off before the existing shutdown ceiling contains a stuck
-writer. Cleanup may consume an independently committed exact retained-process
-terminal proof; it never manufactures quiescence or replays an unknown command.
+Stalled finalization requests host-owned graceful shutdown: peers checkpoint
+before the shutdown ceiling contains stuck writers. Cleanup can consume exact,
+independently committed retained-process terminal proof, never manufacture
+quiescence or replay unknown commands.
 
-Control observation is not settlement: unavailable reads/owned attempts keep
-bounded, interruptible waits without marking idle, revoking writers or dispatching
-successors; Temporal metadata never proves writer quiescence.
+Unavailable control reads/owned attempts retain bounded, interruptible waits,
+not idle/settlement, writer revocation or successor dispatch. Temporal metadata
+never proves writer quiescence.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
@@ -483,6 +475,11 @@ Home-compute selection proves establishment authority; invalid pointers reconcil
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Pending cancellation accepts non-dispatch only from call-scoped routing admission
+proof or typed provider rejection. Credential command decorators preserve these
+invocation options up to routing, which never forwards proof callbacks to the
+provider. Issued helpers retain independent physical joins after original retained
+registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
@@ -663,45 +660,38 @@ flowchart LR
   Relay <--> Machine
 ```
 
-Artifact materializer and outbox sidecars have role-specific configuration in
-`packages/config`: the materializer consumes storage configuration; the outbox
-consumes broker configuration. Both retain telemetry and dedicated database
-posture without inheriting API authentication or agent sandbox credentials.
-Their startup adapters are `apps/worker/src/editable-artifact-materializer-service.ts`
+Materializer/outbox sidecars use `packages/config` storage/broker settings,
+telemetry and dedicated DB posture, never API/sandbox credentials. Adapters:
+`apps/worker/src/editable-artifact-materializer-service.ts`
 and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.1 Request and event path
 
-1. `apps/api` middleware establishes deployment perimeter, observability context,
-   authentication, workspace, and permissioned grant.
-2. HTTP routes adapt requests into `@opengeni/core` domain operations.
-3. Domain operations validate and commit authoritative rows, events, queue/control state,
-   audit facts, and workflow-wake intent in Postgres.
-4. The API returns committed projections; NATS fanout and immediate Temporal
-   wakes are replayable follow-ups. Temporal acceptance acknowledges no durable
-   wake while accepted human/API turns remain queued or Agent Steer remains
-   pending; only attempt-fenced Postgres claims prove admission.
-5. Session workflows observe durable obligations and dispatch turn activities.
-6. Workers claim logical turns, register exact attempts, freeze execution and authority
-   snapshots, then invoke `@opengeni/runtime`.
-7. Runtime builds model/tools and lazily establishes selected provisioned
-   sandboxes or Connected Machines when operations need compute.
-8. Worker events commit before best-effort live publication; API SSE replays
-   and gap-fills from Postgres.
+1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
+   intent commit in Postgres.
+3. Child spans time creation; fanout/wake overlap post-commit;
+   both settle before response reload. Notifications never prove admission:
+   queued turns/pending Agent Steer cannot acknowledge durable wakes without
+   attempt-fenced Postgres claims.
+4. Workflows dispatch durable obligations. Workers claim turns/register attempts
+   and freeze execution/authority before runtime.
+5. Post-claim session/capability reads overlap with unchanged scopes before
+   credential/policy gates. Runtime builds model/tools and lazily establishes
+   sandboxes or Connected Machines for compute.
+6. Events commit before best-effort fanout; SSE replays/backfills Postgres.
 
-Unexpected first-party orchestration failures retain bounded, content-free
-diagnostic facts in the failed-tool receipt, independent of the optional
-protected diagnostic export. The API binds correlation to the signed caller
-attempt, never a tool-supplied target. Source:
+Orchestration failure receipts retain bounded, content-free diagnostics regardless
+of protected export; correlation binds signed caller attempts, never tool targets.
+Source:
 `apps/api/src/mcp/orchestration-failure-diagnostic.ts`; contract:
 [`mcp-surfaces.md`](mcp-surfaces.md#tool-argument-errors).
 
 ### 4.2 Control path versus data path
 
-API, Postgres, Temporal, and workers own durable control; NATS session fanout projects it.
-Connected Machine commands cross NATS after authorization and durable ownership
-decisions. Direct browser data planes use only short-lived API-authorized grants;
-they never establish independent session, tenant, or provider authority.
+API/Postgres/Temporal/workers own control. NATS projects it/transports authorized,
+owned Connected Machine commands. Browser data uses short-lived API grants,
+never independent session/tenant/provider authority.
 
 Large or high-frequency bytes take separate paths:
 
@@ -1378,14 +1368,29 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
-Managed Linux RFB input requires a server-enforced view grant bound to the exact
-screen target and generation, native keyboard/pointer support, and source-session
-control authority. Session view tokens remain pixel-only. The controller parses
-client packets and rechecks authority before forwarding; clipboard, power and
-display changes do not gain authority through RFB. Older controllers use the
-canonical server-only frame stream through an encrypted API proxy, with human
-input retaining the existing ComputerSession action path. This transport fence
-does not complete the legacy desktop-seat and producer migration.
+ComputerSession attachments use canonical frame streams, including relay kind 4,
+for screens and windows. The viewer paints those exact authenticated pixels and
+uses the painted frame ID, target generation and geometry for human `/actions`;
+it never labels a separate native capture as authority for RFB pixels. Attachment
+`inputAllowed` reflects the issuing source decision and human sandbox policy,
+while every action independently reauthorizes the live source and enforces that
+policy. Native pointer and keyboard availability remain independent; agent tools
+retain their separate session-control authority. Older frame responses may omit
+the viewer posture without changing canonical action authorization.
+
+App-only viewers read `/computer-sessions/:id/input-posture` without starting
+native actions, frame streams or view grants. Mutations require explicit permission
+for the current resource and controller generation. Pending, unavailable, denied
+or stale posture remains view-only; Refresh performs a fresh bounded read.
+The evaluator includes current source control, human sandbox policy and physical
+machine screen-control consent. Each action still rechecks its live authority.
+
+The API never mints an RFB input grant for this default path. Older strict-key
+controllers keep their upstream view bearer inside an encrypted frame proxy.
+Transitional direct RFB compatibility still requires an exact screen/generation
+scope; session view tokens remain pixel-only, and controller packet parsing denies
+ungranted input, clipboard, power and display changes. Default frame/action
+convergence does not complete the legacy desktop-seat and producer migration.
 
 Connected Machine canaries [embed matching helpers](../scripts/bake-agent.sh).
 The install API refuses partial baked targets. Embedded helpers precede adjacent
@@ -1726,7 +1731,7 @@ Host ports/in-process composition: [`embedding.md`](embedding.md).
 
 ## 13. If you are changing X, read Y first
 
-Subsystem routing; complete topic map: [`README.md`](README.md).
+Topics: [`README.md`](README.md).
 
 ### Runtime and orchestration
 
@@ -1821,7 +1826,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 Update ownership, invariants, flows, lifecycles and sources.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
-Goal resume/pause semantics: [goals](goals.md).
+Goals: [semantics](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 

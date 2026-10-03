@@ -29,18 +29,32 @@ workspace, or selected ones). The connection then acts as that person:
   connection's access setting. Losing access or a narrower setting applies to
   the next call; disconnecting refuses every token at once.
 - `opengeni_actions_search`, `opengeni_action_describe` and
-  `opengeni_action_call` cover every public route, generated from
-  `scripts/public-api/surface.gen.json` (`scripts/public-api/action-catalog.ts`;
-  a test fails when the catalog drifts). The only exemptions are the browser
-  boundary: Opengeni sign-in itself, approving an agent sign-in and managing
-  connected agents, so an agent can never approve or widen its own access.
+  `opengeni_action_call` cover every route the API registers, named from
+  `scripts/public-api/surface.gen.json` where the SDK has a method
+  (`scripts/public-api/action-catalog.ts`; a test fails when a registered route
+  is neither in the catalog nor exempt). Exempt, each with its reason in that
+  file: Opengeni sign-in, sign-in methods and account recovery, approving an
+  agent sign-in and managing connected agents (an agent can never approve or
+  widen its own access), provider redirects back to Opengeni, signed calls
+  from other services, git protocol, machine enrollment, browser telemetry and
+  static files.
 - A call runs the route in process with a request-local proof of the person
   (`stampDelegatedHumanAuthorization` in `@opengeni/core`). Nothing a client
   sends can create it, and the route's own permission checks decide.
+- Organization routes that otherwise read the person's browser cookie accept
+  the proof too (`apps/api/src/http/acting-person.ts`): only in the
+  connection's organization (another one reads as not found), only with the
+  permission the route needs in the connection's access setting
+  (`account:read` to read settings, `account:admin` to change them,
+  `members:manage` for people and invitations), and the database still checks
+  the person's own role. Same-origin checks don't apply: no browser credentials
+  ride along.
 - Read only connections are refused any change before it runs.
-- Some routes still require the person in a browser; calls return a hint to
-  finish there. Organization API keys may call the same server and act as the
-  organization.
+- Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
+  steps, and integration OAuth starts) and actions outside the connected
+  organization (creating another organization, accepting an invitation) stay
+  with the person in the browser; calls return a hint to finish there.
+  Organization API keys may call the same server and act as the organization.
 
 Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (browser only; SDK

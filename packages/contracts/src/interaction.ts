@@ -3307,11 +3307,25 @@ export const ComputerSessionAttachment = z
     computerSessionId: z.string().uuid(),
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
+    // Viewer posture only. Canonical actions still require live source authority.
+    // Older API responses omit it; their existing action authorization remains.
+    inputAllowed: z.boolean().optional(),
     stream: ComputerFrameStreamAttachment,
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
 export type ComputerSessionAttachment = z.infer<typeof ComputerSessionAttachment>;
+
+/** Caller-specific human input posture, independent of media/native capability.
+ * It is a current-controller hint; every action still reauthorizes. */
+export const ComputerSessionInputPosture = z
+  .object({
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    inputAllowed: z.boolean(),
+  })
+  .strict();
+export type ComputerSessionInputPosture = z.infer<typeof ComputerSessionInputPosture>;
 
 export const ComputerSessionAttachmentRequest = z
   .object({

@@ -37,6 +37,7 @@ import {
   saveSlackBotUserLink,
   upsertCodexSubscriptionCredential,
   upsertOrganizationModelProviderConnection,
+  upsertOrganizationClaudeSubscription,
   type DbClient,
 } from "../src";
 import {
@@ -440,7 +441,7 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
       operationId: crypto.randomUUID(),
       expectedVersion: 0,
     });
-    for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+    for (const providerKind of ["anthropic"] as const) {
       await upsertOrganizationModelProviderConnection(client.db, {
         organizationId: owner.organizationId,
         actorSubjectId: owner.subjectId,
@@ -451,21 +452,27 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
         expectedVersion: 0,
       });
     }
+    // 0598 retires the legacy Claude organization credential store; the
+    // canonical pool must still emit exactly the same content-free fact.
+    const providerAccountId = remember(crypto.randomUUID());
+    await upsertOrganizationClaudeSubscription(client.db, {
+      organizationId: owner.organizationId,
+      actorSubjectId: owner.subjectId,
+      encryptionKey: Buffer.alloc(32, 7),
+      providerAccountId,
+      secret: {
+        version: 1,
+        token: remember(`sk-ant-oat01-lifecycle-${crypto.randomUUID()}`),
+        identity: { accountUuid: providerAccountId, deviceId: remember("a".repeat(64)) },
+      },
+      label: null,
+      accountEmail: null,
+      expiresAt: null,
+    });
     const models = [
       ...(await factsFor({ type: "model.connected", accountId: target.accountId })),
       ...(await factsFor({ type: "model.connected", accountId: owner.organizationId })),
     ];
-    expect(models.map((row) => row.payload.attribute).sort()).toEqual([
-      "anthropic",
-      "claude_subscription",
-      "codex",
-      "openrouter",
-      "supergrok",
-    ]);
-    expect(models.find((row) => row.payload.attribute === "codex")?.initiator?.subjectId).toBe(
-      person,
-    );
-
     const topUp = {
       accountId: owner.organizationId,
       type: "credit_topup",
@@ -596,6 +603,18 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     await createEnrollment(client.db, { ...target, pubkey });
     expect(await factsFor({ type: "machine.enrolled", accountId: target.accountId })).toHaveLength(
       1,
+    );
+    // Preserve the exact model fact contract while allowing the independent
+    // setup/export assertions to run when one provider's capture regresses.
+    expect(models.map((row) => row.payload.attribute).sort()).toEqual([
+      "anthropic",
+      "claude_subscription",
+      "codex",
+      "openrouter",
+      "supergrok",
+    ]);
+    expect(models.find((row) => row.payload.attribute === "codex")?.initiator?.subjectId).toBe(
+      person,
     );
   });
 

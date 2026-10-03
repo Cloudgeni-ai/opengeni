@@ -187,6 +187,7 @@ type SessionClientMethods = Pick<
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
       | "cancelSessionBackgroundCommand"
+      | "getComputerInputPosture"
     >
   >;
 
@@ -345,7 +346,8 @@ export type EmbeddedComputerInteractionClientLike = Pick<
   | "heartbeatComputerSession"
   | "endComputerSession"
 > &
-  EmbeddedInterventionClientLike;
+  EmbeddedInterventionClientLike &
+  Partial<Pick<OpenGeniClient, "getComputerInputPosture">>;
 
 /** Complete public Browser + Computer interaction surface. */
 export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &

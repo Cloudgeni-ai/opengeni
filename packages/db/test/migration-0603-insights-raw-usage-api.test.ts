@@ -46,9 +46,9 @@ let accountId: string,
   privateId: string,
   deletedId: string,
   subjectId: string;
-const migrationName = "0602_insights_raw_usage_api.sql";
+const migrationName = "0603_insights_raw_usage_api.sql";
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
-const preMigrationRevision = "3cc26b5b3d316cde28ba51fd8b266395f6108f5e";
+const preMigrationRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
 const postureOptions = {
   expectedRole: "opengeni_app",
   rlsStrategy: "force" as const,
@@ -262,7 +262,7 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   ).toBe(false);
 });
 
-test("frozen pre-0602 passes; serving staging retains exact existing full-catalog readiness blockers", async () => {
+test("frozen pre-0603 passes; serving staging retains exact existing full-catalog readiness blockers", async () => {
   for (const revision of [stagingRevision, preMigrationRevision]) {
     const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
     await frozenRuntime(revision, async (old, oldProvision) => {

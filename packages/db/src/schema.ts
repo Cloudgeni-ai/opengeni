@@ -12523,6 +12523,11 @@ export const creditLedgerEntries = pgTable(
   },
   (table) => ({
     idempotency: uniqueIndex("credit_ledger_entries_idempotency_idx").on(table.idempotencyKey),
+    modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
+      .on(table.accountId, table.occurredAt, table.workspaceId)
+      .where(
+        sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
+      ),
     accountCreated: index("credit_ledger_entries_account_created_idx").on(
       table.accountId,
       table.createdAt,
