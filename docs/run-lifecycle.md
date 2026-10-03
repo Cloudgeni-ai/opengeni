@@ -587,6 +587,17 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
+During an executing turn, structured PostgreSQL connection outages (driver
+transport codes, connection SQLSTATEs, or server restart/failover) use the same
+exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
+mandatory-history wrappers. The activity exits without `turn.failed`, without
+retrying a possibly committed delta/tool-ledger write, and without manufacturing
+writer settlement. Cleanup and the durable physical/inference gates still hold
+successors; once connectivity returns, recovery preserves the accepted turn,
+trigger and frozen authority with bounded, signal-interruptible backoff. Query
+text, generic provider socket errors, permanent DB rejections and unknown tool
+outcomes do not grant this recovery authority.
+
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
 evidence of deletion, completion, or permission to resume. An unavailable

@@ -273,6 +273,32 @@ function acceptedCodexPolicySnapshot(
 }
 
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
+  try {
+    return await settleTurnFailureInAttempt(deps);
+  } catch (error) {
+    // Connectivity can disappear while settling an unrelated run error too.
+    // Do not overwrite a possibly committed settlement; the control lane
+    // re-reads exact ownership and becomes a stale no-op if it already closed.
+    if (deps.attempt.turnId && deps.attempt.triggerEventId) {
+      const recovery = postClaimDatabaseRecoveryFailure({
+        error,
+        turnId: deps.attempt.turnId,
+        triggerEventId: deps.attempt.triggerEventId,
+        executionGeneration: deps.attempt.executionGeneration,
+        requireDatabaseProvenance: true,
+      });
+      if (recovery) {
+        deps.control.activityStatus = "recovering";
+        deps.control.turnMetricOutcome = "recovering";
+        deps.control.activityError = error;
+        throw recovery;
+      }
+    }
+    throw error;
+  }
+}
+
+async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
   if (deps.settings.environment === "local" && deps.error instanceof Error) {
     // Keep local startup failures diagnosable without logging error messages,
     // absolute host paths, prompts, credentials, or provider response bodies.
@@ -652,6 +678,27 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     // competing cancellation or mutate the turn/session on its own.
     control.turnMetricOutcome = "cancelled";
     throw cancellationFailure;
+  }
+  if (attempt.turnId && attempt.triggerEventId && attempt.executionGeneration > 0) {
+    const recoveryFailure = postClaimDatabaseRecoveryFailure({
+      error,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      executionGeneration: attempt.executionGeneration,
+      requireDatabaseProvenance: eventing.turnStartedPublished || attempt.modelRequestStarted,
+    });
+    if (recoveryFailure) {
+      // Stop this non-retryable activity without terminal logical settlement.
+      // Do not retry a delta/tool-ledger mutation with an unknown commit, nor
+      // claim that DB-down cleanup proved writer exit. Finally still drains
+      // the physical writers; the existing DB-only workflow lane closes this
+      // exact owner after connectivity returns and admission waits for its
+      // ordinary durable quiescence/writer fences.
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      throw recoveryFailure;
+    }
   }
   // The SDK's per-segment turn cap is a pacing valve, not a failure: end
   // the turn gracefully and idle the session so an active goal continues
@@ -2079,26 +2126,6 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         throw postClaimRecovery;
       }
       throw recoveryError;
-    }
-  }
-  if (
-    attempt.turnId &&
-    attempt.triggerEventId &&
-    attempt.executionGeneration > 0 &&
-    !eventing.turnStartedPublished &&
-    !attempt.modelRequestStarted
-  ) {
-    const recoveryFailure = postClaimDatabaseRecoveryFailure({
-      error,
-      turnId: attempt.turnId,
-      triggerEventId: attempt.triggerEventId,
-      executionGeneration: attempt.executionGeneration,
-    });
-    if (recoveryFailure) {
-      control.activityStatus = "recovering";
-      control.turnMetricOutcome = "recovering";
-      control.activityError = error;
-      throw recoveryFailure;
     }
   }
   control.activityStatus = "failed";

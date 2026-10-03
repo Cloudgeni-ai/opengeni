@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
+import { ToolCallError } from "@openai/agents";
+import { SessionEventPersistenceError } from "@opengeni/db";
+import { RoutingMutationOutcomeUnknownError } from "@opengeni/runtime";
 import { MandatoryHistoryPersistenceError } from "../src/activities/agent-turn/quiescence";
 import {
   agentRunFailurePayload,
@@ -102,6 +105,92 @@ const identity = {
   triggerEventId: "10000000-0000-4000-8000-000000000002",
   executionGeneration: 2,
 };
+
+test("running-turn outages use structured database causes through SDK and history wrappers", () => {
+  for (const code of [
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "CONNECT_TIMEOUT",
+    "CONNECTION_CLOSED",
+    "ETIMEDOUT",
+    "57P01",
+    "57P02",
+    "57P03",
+    "08006",
+    "08001",
+  ]) {
+    const driver = Object.assign(new Error("private driver detail"), {
+      code,
+      ...(code.length === 5 ? { name: "PostgresError" } : {}),
+    });
+    const orm = new DrizzleQueryError("select account_id from workspaces", ["private"], driver);
+    const persistence = new SessionEventPersistenceError(
+      {
+        code: "db_failure",
+        sqlState: code.length === 5 ? code : null,
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.reasoning.delta"],
+        correlationId: "test-db-outage",
+        attempts: 1,
+        retryOutcome: "not_retryable",
+        database: {},
+      },
+      orm,
+    );
+    for (const error of [
+      orm,
+      persistence,
+      new ToolCallError("Failed to run function tools", orm),
+      new ToolCallError("Failed to run function tools", persistence),
+      new MandatoryHistoryPersistenceError("history_append", persistence),
+    ]) {
+      const failure = postClaimDatabaseRecoveryFailure({
+        error,
+        ...identity,
+        requireDatabaseProvenance: true,
+      });
+      expect(failure).toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [{ ...identity, code: "db_failure" }],
+      });
+      expect(JSON.stringify(failure)).not.toContain("private");
+      expect(JSON.stringify(failure)).not.toContain("select account_id");
+    }
+  }
+});
+
+test("running-turn recovery rejects permanent errors, provider sockets and message lookalikes", () => {
+  const uncertain = new RoutingMutationOutcomeUnknownError("execCommand", "outcome unknown", {
+    cause: rawDatabaseFailure("57P01"),
+  });
+  for (const error of [
+    uncertain,
+    new ToolCallError("Failed to run function tools", uncertain),
+    new AggregateError([rawDatabaseFailure("57P01"), uncertain], "parallel tool failure"),
+    ...["23505", "42501", "42601", "40003", "40P01", "40001"].map(
+      (code) => new ToolCallError("Failed to run function tools", rawDatabaseFailure(code)),
+    ),
+    new ToolCallError("Failed query select account_id from workspaces CONNECT_TIMEOUT", "57P01"),
+    Object.assign(new Error("provider socket reset"), { code: "ECONNRESET" }),
+    new Error("write CONNECT_TIMEOUT SQLSTATE 08006"),
+    Object.assign(new Error("application rejection"), { code: "57P03" }),
+    new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: null,
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes: ["agent.reasoning.delta"],
+      correlationId: "unknown-db-cause",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    }),
+  ]) {
+    expect(
+      postClaimDatabaseRecoveryFailure({ error, ...identity, requireDatabaseProvenance: true }),
+    ).toBeNull();
+  }
+});
 
 test("raw PostgreSQL rollback failures recover only the exact claimed attempt", () => {
   for (const [sqlState, code] of [

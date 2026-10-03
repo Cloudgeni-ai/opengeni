@@ -1,4 +1,5 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
@@ -364,25 +365,69 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
 
 function retryableDatabaseFailureCode(
   error: unknown,
+  requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
-  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  if (!persistenceFailure) {
-    const driver = findPostgresDriverError(error);
-    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
-    if (isRetryablePersistenceSqlState(driverSqlState)) {
-      return databaseFailureCode(driverSqlState);
+  // SDK function-tool and mandatory-history wrappers retain the original
+  // structured cause. Never recover from query/message text, and never turn
+  // an ambiguous provider operation into permission to replay it.
+  let databaseProvenance = false;
+  let evidence: { sqlState: string | null; typed: boolean; source: unknown } | undefined;
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < queue.length && index < 64; index += 1) {
+    const current = queue[index];
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (isRoutingMutationOutcomeUnknownError(current)) return null;
+    if (!evidence && isSessionEventPersistenceError(current))
+      evidence = { sqlState: current.details.sqlState, typed: true, source: current };
+    if (current instanceof DrizzleQueryError) databaseProvenance = true;
+    const record = current as Record<string, unknown>;
+    if (!evidence && record.name === "PostgresError")
+      evidence = {
+        sqlState: typeof record.code === "string" ? record.code : null,
+        typed: false,
+        source: current,
+      };
+    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
+      const nested = record[key];
+      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
+      else if (nested !== undefined) queue.push(nested);
     }
   }
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
-    return "db_failure";
+  // The nearest database boundary owns classification. A permanent/unknown
+  // SQLSTATE is never overridden by a deeper reset or rollback cause. Scan the
+  // complete bounded graph first so parallel-tool outcome uncertainty wins too.
+  if (evidence) {
+    const { sqlState } = evidence;
+    const connectionOutage =
+      sqlState?.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState ?? "");
+    if (evidence.typed) {
+      if (
+        requireDatabaseProvenance &&
+        !connectionOutage &&
+        !(sqlState === null && isRetryableDatabaseTransportFailure(evidence.source))
+      )
+        return null;
+      return retryablePersistenceFailureCode(sqlState);
+    }
+    return connectionOutage || isRetryablePersistenceSqlState(sqlState)
+      ? databaseFailureCode(sqlState)
+      : null;
   }
+  if (requireDatabaseProvenance && !databaseProvenance) return null;
+  if (isRetryableDatabaseTransportFailure(error)) return "db_failure";
+  return null;
+}
+
+function retryablePersistenceFailureCode(
+  sqlState: string | null,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
   if (
-    !persistenceFailure ||
     !(
       sqlState === null ||
       sqlState.startsWith("08") ||
-      sqlState.startsWith("40") ||
+      isRetryablePersistenceSqlState(sqlState) ||
       sqlState.startsWith("53") ||
       sqlState === "55P03" ||
       sqlState === "57014" ||
@@ -394,11 +439,11 @@ function retryableDatabaseFailureCode(
   ) {
     return null;
   }
-  return persistenceFailure.details.code;
+  return databaseFailureCode(sqlState);
 }
 
 /**
- * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
+ * Carry one exact claimed attempt into the workflow's DB-only
  * recovery lane. Permanent database/state failures remain terminal; only the
  * same operational outage classes that are safe before claim are admitted.
  */
@@ -407,6 +452,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  /** After execution starts, a provider socket failure is not DB provenance. */
+  requireDatabaseProvenance?: boolean;
   sandboxSetupOutcomeUnknown?: true;
   sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
@@ -414,8 +461,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
     providerRecoveryCount: number;
   };
 }): ApplicationFailure | null {
-  const code = retryableDatabaseFailureCode(input.error);
-  if (!code || input.executionGeneration < 1) return null;
+  const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
+  if (
+    !code ||
+    input.executionGeneration < 1 ||
+    (input.requireDatabaseProvenance && code !== "db_failure")
+  )
+    return null;
   if (
     (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
     ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
