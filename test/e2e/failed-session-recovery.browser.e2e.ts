@@ -488,8 +488,49 @@ async function installApi(
     if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
     if (path === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });
-    if (path.endsWith("/sessions"))
-      return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
+    if (path.endsWith("/sessions")) {
+      const params = new URL(request.url()).searchParams;
+      const archived = params.get("archiveStatus") === "archived";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      return json({
+        sessions:
+          pinsOnly ||
+          archived ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
+            ? []
+            : [session],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus: params.get("archiveStatus") ?? "active",
+        ...(params.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: archived && !pinsOnly ? 0 : 1,
+                groups:
+                  archived && !pinsOnly
+                    ? []
+                    : [
+                        {
+                          channelId: null,
+                          total: 1,
+                          attention: 0,
+                          attentionSince: null,
+                          failed: 0,
+                          active: 0,
+                          queued: 0,
+                          unread: 0,
+                          activeWork: 0,
+                        },
+                      ],
+              },
+            }
+          : {}),
+      });
+    }
     if (path.endsWith(`/sessions/${sessionId}`)) return json(session);
     if (
       request.method() === "GET" &&
