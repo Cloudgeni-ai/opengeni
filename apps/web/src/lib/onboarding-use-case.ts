@@ -14,12 +14,23 @@ export const DEVELOPER_SETUP_VARIABLE_SET_NAME = "Opengeni developer setup";
  * the platform, so the agent maps this to `OPENGENI_API_KEY` itself.
  */
 export const DEVELOPER_SETUP_KEY_VARIABLE = "DEVELOPER_SETUP_API_KEY";
-/** The organization key onboarding creates: the scoped Developer setup tier. */
-export const DEVELOPER_SETUP_KEY_REQUEST = {
-  name: "Developer setup",
-  description: "Created at signup to add Opengeni agents to your product.",
-  access: "developer_setup",
-} as const;
+/**
+ * How long the signup key lasts. Longer than the preset's 24-hour default so a
+ * new owner has time to build and test the integration before replacing it.
+ */
+export const DEVELOPER_SETUP_KEY_LIFETIME_DAYS = 30;
+
+/** The organization key onboarding creates: the scoped Developer setup tier, valid for 30 days. */
+export function developerSetupKeyRequest(now: Date = new Date()) {
+  return {
+    name: "Developer setup",
+    description: "Created at signup to add Opengeni agents to your product.",
+    access: "developer_setup",
+    expiresAt: new Date(
+      now.getTime() + DEVELOPER_SETUP_KEY_LIFETIME_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+  } as const;
+}
 
 /** The visible first message of the setup chat. */
 export const DEVELOPER_SETUP_INITIAL_MESSAGE =
@@ -59,7 +70,7 @@ Then follow the build-with-opengeni skill and its opengeni-client guide.
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- My Developer setup API key (expires in 24 hours, can't create other keys) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
+- My Developer setup API key (expires in 30 days, can't create other keys) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
 
 Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE}, and set OPENGENI_API_BASE_URL and OPENGENI_ORGANIZATION_ID beside it in that .env (git-ignored, file mode 0600). Never print, log or commit the key, and never put it in browser code. When the integration needs a long-lived key, ask me to create one in Opengeni under Organization settings > Developer.
 
@@ -74,7 +85,7 @@ export function developerSetupModelContext(
   facts: DeveloperSetupFacts & { keyInSandbox: boolean },
 ): string {
   const key = facts.keyInSandbox
-    ? `- A Developer setup organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 24 hours and can't create other keys.`
+    ? `- A Developer setup organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 30 days and can't create other keys.`
     : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer; never ask me to paste it into this chat.";
   return `Signup onboarding choices:
 - Goal: add AI agents to my product (embed Opengeni). I chose to let Opengeni implement it.
@@ -85,7 +96,8 @@ How to help me:
 1. Read the bundled builtin:opengeni-client Skill with skill_read and follow its flow.
 2. In one short message, ask for the link to my product (or its repository) and what I want AI agents to do for my users. If I don't have a product yet, offer two or three simple ideas.
 3. Suggest connecting GitHub first so you can work in my repository. Show me the GitHub Connect card in this chat: find "GitHub App" (capability ID api:github-app) with capability_catalog_search, then call capability_authorization_request for it. Don't just tell me to look for it. If GitHub is already connected, use it.
-4. Work on a branch and open a pull request. Don't push to my default branch, merge or deploy without asking.`;
+4. Connecting GitHub does not give this chat a clone of my repository or push and pull request access: those come only with a repository attached to a session. Once GitHub is connected, call github_repositories_list, then ask me which repository to use with request_human_input (one single-select question listing those repositories; skip it when there is exactly one). Then start a worker with session_create, passing that repository's returned resource object in resources and the full task (what to build, my answers so far, the API and organization above), and do the implementation there. When this chat has the "${DEVELOPER_SETUP_VARIABLE_SET_NAME}" variable set, attach it to the worker too (variableSetIds) so it can test with the key. When the worker finishes, give me its pull request link.
+5. Work on a branch and open a pull request. Don't push to my default branch, merge or deploy without asking.`;
 }
 
 /** The deployment's public API origin, for prompts and agent context. */

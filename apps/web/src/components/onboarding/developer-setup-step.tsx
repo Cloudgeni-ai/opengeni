@@ -14,13 +14,13 @@ import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   DEVELOPER_SETUP_INITIAL_MESSAGE,
-  DEVELOPER_SETUP_KEY_REQUEST,
   DEVELOPER_SETUP_KEY_VARIABLE,
   DEVELOPER_SETUP_VARIABLE_SET_NAME,
   DEVELOPER_SETUP_WORKSPACE_NAME,
   CODING_AGENT_KEY_VARIABLE,
   codingAgentSetupPrompt,
   deploymentApiOrigin,
+  developerSetupKeyRequest,
   developerSetupModelContext,
 } from "@/lib/onboarding-use-case";
 
@@ -92,7 +92,7 @@ export function DeveloperSetupStep({
     setKey({ status: "creating" });
     let request = keyRequests.current.get(attempt);
     if (!request) {
-      request = client.createOrganizationApiKey(organizationId, { ...DEVELOPER_SETUP_KEY_REQUEST });
+      request = client.createOrganizationApiKey(organizationId, developerSetupKeyRequest());
       keyRequests.current.set(attempt, request);
     }
     request.then(
@@ -284,7 +284,7 @@ export function DeveloperSetupStep({
                   <code translate="no" className="font-mono text-fg">
                     {CODING_AGENT_KEY_VARIABLE}
                   </code>
-                  . Shown only here. It expires in 24 hours and can't create other keys.
+                  . Shown only here. It expires in 30 days and can't create other keys.
                 </p>
               </li>
               <li className="grid gap-2">
