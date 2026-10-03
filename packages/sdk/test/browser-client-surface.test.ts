@@ -34,6 +34,10 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // The separately owned Insights UI switches to these agreed shared endpoints
+  // after this bounded contract/SDK PR lands; keep UI edits out of this PR.
+  "getWorkspaceInsightsUsage",
+  "getOrganizationInsightsUsage",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",

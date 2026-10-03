@@ -33,6 +33,7 @@ export default defineConfig({
     "src/session-history-import.ts",
     "src/session-list-entries.ts",
     "src/usage-allowances.ts",
+    "src/insights-usage.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
