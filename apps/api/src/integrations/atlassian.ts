@@ -9,7 +9,6 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 import {
   claimOAuthAcquisition,
-  finishOAuthAcquisition,
   integrationSourceSelectionRequiresAcquisition,
 } from "./oauth-client";
 import {
@@ -85,6 +84,10 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  ATLASSIAN_NATIVE_RETIRED_REASON,
+} from "@opengeni/contracts/atlassian-native-retirement";
+import {
   personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
@@ -147,6 +150,7 @@ export async function startAtlassianOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<AtlassianOAuthStartResponse> {
+  assertNativeAtlassianAvailable();
   await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
   const oauth = requireAtlassianSettings(deps.settings);
   const existing = input.payload.connectionId
@@ -234,7 +238,8 @@ export async function completeAtlassianOAuthCallback(
             requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
         },
         "atlassian",
-        Boolean(input.code && !input.error),
+        // Retirement only settles this attempt; it acquires no integration.
+        false,
       );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
@@ -269,6 +274,29 @@ export async function completeAtlassianOAuthCallback(
     }
     if (input.error) throw new AtlassianCallbackError("provider_denied");
     if (!input.code) throw new AtlassianCallbackError("missing_code");
+    // An authorization started on an older release must not exchange or save
+    // a native grant after retirement. Preserve exact Connect navigation and
+    // settle the pending attempt so it does not remain stuck authorizing.
+    if (operation) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: ATLASSIAN_NATIVE_RETIRED_REASON,
+            message: ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    assertNativeAtlassianAvailable();
     await withOrganizationIntegrationAcquisition(deps.db, state, ["atlassian"], async () => {});
 
     const oauth = requireAtlassianSettings(deps.settings);
@@ -382,38 +410,6 @@ export async function completeAtlassianOAuthCallback(
             createdBySubjectId: state.subjectId,
           });
     };
-    if (operation) {
-      await finishOAuthAcquisition(
-        deps.db,
-        acceptedState,
-        {
-          ...operation,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-          commit: async (tx, current) => {
-            const connection = await persist(tx);
-            if (!connection) throw new AtlassianCallbackError("connection_conflict");
-            return {
-              ...current,
-              revision: current.revision + 1,
-              state: "complete",
-              credentialsCommitted: true,
-              nextAction: { type: "none" },
-              account: {
-                id: connection.id,
-                version: connection.version,
-                providerId: "atlassian",
-                label: profile.displayName ?? "Atlassian",
-                ownership: "personal",
-                status: "connected",
-              },
-            };
-          },
-        },
-        "atlassian",
-      );
-      return { redirectTo: exactReturnUrl!, exactReturn: true };
-    }
     const connection = await withOrganizationIntegrationAcquisition(
       deps.db,
       acceptedState,
@@ -451,6 +447,7 @@ export async function browseAtlassianSources(
     connectionId: string;
   },
 ) {
+  assertNativeAtlassianAvailable();
   const connection = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -499,6 +496,7 @@ export async function searchAtlassianLive(
     limit: number;
   },
 ) {
+  assertNativeAtlassianAvailable();
   const connection = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -601,6 +599,7 @@ export async function getAtlassianLiveItem(
     id: string;
   },
 ) {
+  assertNativeAtlassianAvailable();
   const connection = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -714,6 +713,7 @@ export async function saveAtlassianSources(
     canManagePersonalDestination: boolean;
   },
 ) {
+  assertNativeAtlassianAvailable();
   const parsed = SaveAtlassianSourcesRequest.safeParse(input.payload);
   if (!parsed.success) {
     throw new HTTPException(400, { message: "invalid Atlassian source selection" });
@@ -835,6 +835,7 @@ export async function transitionAtlassianLifecycle(
     payload: AtlassianLifecycleActionRequest;
   },
 ) {
+  if (input.payload.action === "resume") assertNativeAtlassianAvailable();
   const connection = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -1432,6 +1433,7 @@ async function atlassianApiRequest(
     label: string;
   },
 ): Promise<unknown> {
+  assertNativeAtlassianAvailable();
   const current = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -1809,9 +1811,15 @@ function returnUrl(base: string, path: string, status: "connected" | "error", va
 }
 
 function errorReason(error: unknown): string {
+  if (error instanceof HTTPException && error.status === 410)
+    return ATLASSIAN_NATIVE_RETIRED_REASON;
   if (error instanceof AtlassianCallbackError) return error.reason;
   if (error instanceof HTTPException) return `http_${error.status}`;
   return "connection_failed";
+}
+
+function assertNativeAtlassianAvailable(): void {
+  throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
 }
 
 class AtlassianCallbackError extends Error {

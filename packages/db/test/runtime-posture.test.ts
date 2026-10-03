@@ -1269,7 +1269,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          1 + // 0599 organization key workspace scope join.
+          1 + // 0600 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1278,7 +1278,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          1 + // 0599 organization key workspace scope join.
+          1 + // 0600 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +

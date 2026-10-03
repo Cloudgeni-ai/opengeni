@@ -1,7 +1,7 @@
 -- deployment-mode: maintenance
 -- Stop every old/new API, control worker and turn worker; provide the exact
 -- application login list for drain detection. Provision runtime roles after
--- commit and start only this release. Never restart pre-0599 binaries: their
+-- commit and start only this release. Never restart pre-0600 binaries: their
 -- live key fences ignore selected workspace scope and explicit permissions.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';

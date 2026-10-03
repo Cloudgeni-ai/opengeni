@@ -1,4 +1,5 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
 import {
   directModelConnectionSpec,
   BillingMode,
@@ -3986,7 +3987,7 @@ export function resolveFirstPartyMcpToolPolicy(
 ): FirstPartyMcpToolPolicy {
   const allowed = currentAgentLearningToolSelection(
     settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
-  );
+  ).filter((tool) => !isRetiredNativeAtlassianTool(tool));
   const allowedSet = new Set(allowed);
   const defaults = currentAgentLearningToolSelection(
     settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],

@@ -2575,16 +2575,20 @@ the selected operations. Personal installations require a personal connection.
 The source is immutable once previewed. Each setup gets an independent named
 installation unless the host deliberately supplies an observed instance target.
 
-`atlassian`, `google-drive-knowledge` and `google-drive-publish` preserve the
-first-party connectors rather than substituting curated API definitions.
-They require personal ownership; completion means the credential was committed,
-not that all projects, spaces or folders were selected or synchronized.
-Atlassian source selection uses `browseAtlassianSources`, `saveAtlassianSources`
-and `setAtlassianLifecycle`, retaining explicit destination, cadence and read
-policy. Google Drive publishing requires an existing knowledge connection in
-`reconnectAccountId`, additional provider consent and an explicitly picked writable
-folder. Publication writes retain the existing default `ask` policy. Native
-Atlassian and Drive connect buttons consume the same durable setup surface.
+`google-drive-knowledge` and `google-drive-publish` preserve the first-party
+Drive connector rather than substituting curated API definitions. They require
+personal ownership; completion means the credential was committed, not that all
+folders were selected or synchronized. Publishing requires an existing knowledge
+connection in `reconnectAccountId`, additional provider consent and an explicitly
+picked writable folder. Publication writes retain the existing default `ask`
+policy. Native Drive connect buttons consume the same durable setup surface.
+
+Atlassian agent tools use the hosted MCP connector through `mcp-oauth`. The old
+native `atlassian` Connect provider, live API tools and Jira/Confluence Knowledge
+sync are retired. Existing SDK methods remain compatible for historical readers;
+new native setup, browse, source selection, resume and Run now return `410`.
+Previous connections can still be disconnected and schedules removed; imported
+Documents and history are retained.
 
 `examples/embedded-product` is a runnable loopback host reference with explicit
 authentication/CSRF seams, shared Connect/Site UI, and Edit-with-Geni into ordinary

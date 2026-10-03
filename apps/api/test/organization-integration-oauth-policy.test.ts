@@ -143,7 +143,6 @@ test("all OAuth starts and Fiken token preparation deny before provider discover
   const api = deps();
   const input = { ...scope, requestUrl: "https://api.example.test/start", payload: {} };
   const starts = [
-    () => startAtlassianOAuth(api, input),
     () => startGoogleDriveOAuth(api, { ...input, payload: { capability: "source_read" } }),
     () => startFikenOAuth(api, input),
     () =>
@@ -194,23 +193,16 @@ test("curated-looking MCP URLs are still custom without a trusted adapter identi
       }),
     ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
   }
-  await expect(
-    startAtlassianOAuth(deps(), {
-      ...scope,
-      requestUrl: "https://api.example.test/start",
-      payload: {},
-    }),
-  ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
-  await allow(["atlassian"]);
-  expect(
-    (
-      await startAtlassianOAuth(deps(), {
+  for (const keys of [[], ["atlassian"]]) {
+    await allow(keys);
+    await expect(
+      startAtlassianOAuth(deps(), {
         ...scope,
         requestUrl: "https://api.example.test/start",
         payload: {},
-      })
-    ).authorizationUrl,
-  ).toStartWith("https://auth.atlassian.com/");
+      }),
+    ).rejects.toMatchObject({ status: 410 });
+  }
 });
 
 async function begin(providerId = "atlassian", actorScope = scope) {
@@ -559,6 +551,15 @@ test("provider resume gates paused acquisition, preserving already-active conver
       connectionId: connection.id,
       payload: { action: "resume" as const, expectedVersion: connection.version },
     };
+    if (provider === "atlassian") {
+      await expect(transition(api, input)).rejects.toMatchObject({ status: 410 });
+      const paused = await transition(api, {
+        ...input,
+        payload: { action: "pause", expectedVersion: connection.version },
+      });
+      expect(paused.metadata.lifecycle).toMatchObject({ state: "paused" });
+      continue;
+    }
     await allow([]);
     await expect(transition(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
     await allow([provider]);
@@ -623,6 +624,13 @@ test("legacy provider source additions deny before provider use while empty sele
         readPolicy: "allow",
       },
     };
+    if (provider === "atlassian") {
+      await expect(save(api, input)).rejects.toMatchObject({ status: 410 });
+      await expect(
+        save(api, { ...input, payload: { ...input.payload, sources: [] } }),
+      ).rejects.toMatchObject({ status: 410 });
+      continue;
+    }
     await expect(save(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
     const cleared = await save(api, { ...input, payload: { ...input.payload, sources: [] } });
     expect(cleared.metadata.selectedSources).toEqual([]);

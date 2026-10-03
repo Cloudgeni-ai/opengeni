@@ -94,6 +94,36 @@ describe("integrations.sh catalog import normalization", () => {
     expect(changedSemantics.snapshotRef).not.toBe(first.snapshotRef);
   });
 
+  test("quarantines Figma remote access while allowing other reviewed servers", () => {
+    const normalized = normalizeCatalogSnapshot({
+      importRows: [
+        {
+          domain: "figma.com",
+          name: "Figma",
+          mcpUrl: "https://mcp.figma.com/mcp",
+          transport: "streamable-http",
+          authKind: "oauth2",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        },
+        {
+          domain: "example.com",
+          name: "Available server",
+          mcpUrl: "https://example.com/mcp",
+          transport: "streamable-http",
+          authKind: "none",
+          probe: { status: "real", reason: "mcp_json_rpc", httpStatus: 200 },
+        },
+      ],
+    });
+    expect(normalized.rows.map((row) => row.domain)).toEqual(["example.com"]);
+    expect(normalized.quarantined).toEqual([
+      expect.objectContaining({
+        row: expect.objectContaining({ domain: "figma.com" }),
+        reason: expect.stringContaining("approved MCP client"),
+      }),
+    ]);
+  });
+
   test("normalizes the committed sample fixture and quarantines flagged suspicious URLs", async () => {
     const snapshot = await readSnapshotFile(fixtureUrl.pathname);
     const normalized = normalizeCatalogSnapshot(snapshot);
@@ -226,7 +256,7 @@ describe("integrations.sh catalog import normalization", () => {
     });
   });
 
-  test("promotes Google's official Gmail MCP contract with its reviewed tool scopes", () => {
+  test("promotes the reviewed Gmail REST bridge contract with its exact tool scopes", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-08-10T00:00:00.000Z",
       importRows: [
@@ -250,7 +280,7 @@ describe("integrations.sh catalog import normalization", () => {
         "Search and read Gmail, draft and send mail, and organize messages through OpenGeni's reviewed Gmail bridge.",
       mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
       tier: "verified",
-      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      provenance: "first-party:opengeni-gmail-rest",
       authKind: "oauth2",
       scopesHint: [
         "https://www.googleapis.com/auth/gmail.readonly",
@@ -282,7 +312,7 @@ describe("integrations.sh catalog import normalization", () => {
       ],
       defaultConnectionOwnership: "personal",
       logoSourceUrl: null,
-      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      installUrl: "https://developers.google.com/identity/protocols/oauth2/web-server",
     });
     expect(
       catalogRowToDbInput(normalized.rows[0]!, {

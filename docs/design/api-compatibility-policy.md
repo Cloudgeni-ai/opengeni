@@ -234,4 +234,4 @@ impact.
 
 | Date | Change | Reason | Minimum SDK | Integrators notified |
 | --- | --- | --- | --- | --- |
-| — | — | — | — | — |
+| 2026-10-03 | Native Atlassian browse/source-save/resume and source-sync execution return retirement refusals; hosted MCP remains supported. | Operator explicitly requested immediate retirement of the native Jira/Confluence integration in favor of hosted MCP (OPE-656). This is a user-directed semantic compatibility exception to the usual announcement/90-day/new-major sequence, not a security exception. Routes, SDK methods, wire types, historical data and cleanup remain. See [migration guidance](../atlassian.md). | Unchanged; no SDK revision refusal is introduced. | Requested by the managed-service operator; no outbound integrator notification was sent. |

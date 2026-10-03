@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { NativeConnectCatalog } from "./native-connect-readiness";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
 import { userErrorText } from "@/lib/api-error";
@@ -15,6 +16,9 @@ import type {
 } from "@/types";
 
 export type CapabilitiesCatalog = {
+  /** Setup readiness for this exact verified actor and workspace. */
+  nativeConnectCatalog: NativeConnectCatalog;
+  authorityKey: string;
   items: CapabilityCatalogItem[];
   setItems: (items: CapabilityCatalogItem[]) => void;
   /**
@@ -55,6 +59,7 @@ type CatalogState = {
   workspaceId: string;
   epoch: number;
   items: CapabilityCatalogItem[];
+  nativeConnectCatalog: NativeConnectCatalog;
   connections: ConnectionMetadata[] | null;
   connectionsLoadFailed: boolean;
   connectionsAccessDenied: boolean;
@@ -80,6 +85,7 @@ function emptyCatalogState(
     workspaceId,
     epoch,
     items: [],
+    nativeConnectCatalog: { status: "loading", providers: [] },
     connections: null,
     connectionsLoadFailed: readAccess === false,
     connectionsAccessDenied: readAccess === false,
@@ -110,15 +116,25 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       ? null
       : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
 
-  const scopeRef = useRef({ client, workspaceId, readAccess, epoch: 0 });
+  // Setup availability also depends on actor ownership and write permissions,
+  // even when the same client retains connections:read in this workspace.
+  const authorityKey = JSON.stringify(context.accessContext);
+  const scopeRef = useRef({ client, workspaceId, readAccess, authorityKey, epoch: 0 });
   // Distinguish A -> B -> A from uninterrupted A: an old A request or cached
   // row cannot regain authority merely because its client/workspace match again.
   if (
     scopeRef.current.client !== client ||
     scopeRef.current.workspaceId !== workspaceId ||
-    scopeRef.current.readAccess !== readAccess
+    scopeRef.current.readAccess !== readAccess ||
+    scopeRef.current.authorityKey !== authorityKey
   ) {
-    scopeRef.current = { client, workspaceId, readAccess, epoch: scopeRef.current.epoch + 1 };
+    scopeRef.current = {
+      client,
+      workspaceId,
+      readAccess,
+      authorityKey,
+      epoch: scopeRef.current.epoch + 1,
+    };
   }
   const epoch = scopeRef.current.epoch;
   const [state, setState] = useState(() =>
@@ -207,7 +223,30 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     if (!workspaceId) return;
     const request = ++refreshRevision.current;
     const live = () => isCurrentScope() && refreshRevision.current === request;
-    update((current) => ({ ...current, loading: true }));
+    update((current) => ({
+      ...current,
+      loading: true,
+      nativeConnectCatalog: { status: "loading", providers: [] },
+    }));
+    // Settle readiness independently: a failed capability list must not hide a
+    // completed setup check or leave it pending indefinitely.
+    const nativeCatalog = (async () => {
+      if (context.accessContext === null) return;
+      try {
+        const providers = await client.connectTransport().catalog(workspaceId);
+        if (live())
+          update((current) => ({
+            ...current,
+            nativeConnectCatalog: { status: "ready", providers },
+          }));
+      } catch {
+        if (live())
+          update((current) => ({
+            ...current,
+            nativeConnectCatalog: { status: "error", providers: [] },
+          }));
+      }
+    })();
     try {
       const [catalog, , socials, slackBindings, apiDefinitions, apiInstances] = await Promise.all([
         client.listCapabilities(workspaceId),
@@ -217,6 +256,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         client.listSlackInstallationBindings(workspaceId).catch(() => null),
         client.listIntegrationDefinitions(workspaceId).catch(() => null),
         client.listApiIntegrations(workspaceId).catch(() => null),
+        nativeCatalog,
       ]);
       if (!live()) return;
       update((current) => ({
@@ -244,6 +284,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
   }
 
   return {
+    authorityKey,
+    nativeConnectCatalog: visible.nativeConnectCatalog,
     items: visible.items,
     setItems: (items) => update((current) => ({ ...current, items })),
     connections: visible.connections,

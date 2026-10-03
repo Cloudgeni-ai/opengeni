@@ -302,6 +302,15 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
+    if (
+      item.endpointUrl?.replace(/\/+$/u, "") === "https://gmailmcp.googleapis.com/mcp/v1" &&
+      (input.payload.connectionRef?.subjectScope !== "subject" ||
+        Object.keys(input.payload.headers ?? {}).length > 0)
+    ) {
+      throw new HTTPException(422, {
+        message: "Gmail requires a personal-owned connection reference",
+      });
+    }
     // This generic, potentially workspace-authored catalog is not proof of a
     // curated provider identity. Dedicated Connect adapters classify separately.
     const unchanged = await withOrganizationIntegrationPolicyFence(

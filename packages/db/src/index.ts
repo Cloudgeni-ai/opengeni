@@ -54451,7 +54451,7 @@ export type CommandContainmentEnrollment = ReapDrainable & {
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
  * and every session owning a process on the lease, must have no open turn
- * (queued, running, requires_action, recovering, waiting_capacity), no
+ * (queued, running, requires_action, waiting_capacity), no unpaused recovery, no
  * non-closed attempt, no pending quiescence and no held `wait_for_input`; and
  * the newest attempt close, turn finish, holder-set change and admission (or
  * settlement) on this lease epoch must all be older than the window. A held input wait means
@@ -54470,6 +54470,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
   const [facts] = await rawRows<{
     idle: boolean;
     session_ids: string[];
+    recovering_session_ids: string[];
     idle_before: Date | string;
   }>(
     tx,
@@ -54494,7 +54495,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
             select 1 from session_turns turn
             where turn.workspace_id = ${input.workspaceId}
               and turn.session_id in (select id from member_sessions)
-              and turn.status in ('queued', 'running', 'requires_action', 'recovering',
+              and turn.status in ('queued', 'running', 'requires_action',
                 'waiting_capacity'))
           and coalesce(greatest(
             (select lease.holders_changed_at from sandbox_leases lease
@@ -54531,10 +54532,24 @@ async function sandboxGroupIdleForCommandContainmentTx(
                 and admission.lease_epoch = lease.lease_epoch)
           ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
         array(select id from member_sessions order by id) as session_ids,
+        array(select distinct turn.session_id from session_turns turn
+          where turn.workspace_id = ${input.workspaceId}
+            and turn.session_id in (select id from member_sessions)
+            and turn.status = 'recovering') as recovering_session_ids,
         now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
     `,
   );
   if (!facts?.idle) return false;
+  for (const sessionId of facts.recovering_session_ids) {
+    // Recovery is queued work, not an executing writer. An effective pause
+    // keeps that work pending across a cold restore; it must not pin a box.
+    // The locked enrollment rechecks control under the existing workspace
+    // fence, while open attempts and physical quiescence still gate cleanup.
+    const control = await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, sessionId, {
+      lock: "none",
+    });
+    if (control.state !== "paused") return false;
+  }
   const idleBefore = new Date(facts.idle_before).getTime();
   const sessions = facts.session_ids.length
     ? await tx
