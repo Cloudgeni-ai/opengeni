@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type { Observability } from "@opengeni/observability";
+import { createTurnCredentialLeases } from "../../src/activities/agent-turn/credential-leases";
 import { finalizeTurnAttempt, type TurnFinalizationDeps } from "../../src/activities/agent-turn/finalization";
 import { createTurnContext } from "../../src/activities/agent-turn/turn-context";
 import { createWorkerCleanupContainment } from "../../src/worker-service-lifecycle";
@@ -26,8 +27,18 @@ const keepAlive = setInterval(() => {}, 1_000);
 const observability = {
   incrementCounter() {}, incrementGauge() {}, observeHistogram() {},
   error(message: string, attributes: unknown) { console.log(message, JSON.stringify(attributes)); },
-  recordWorkerActivity() {},
+  recordWorkerActivity(activity: unknown) { console.log("worker_activity", JSON.stringify(activity)); },
 } as unknown as Observability;
+// Use the complete production lease shape, including inactive providers. No
+// lease is held, so finalization stops their heartbeats without database I/O.
+const leases = createTurnCredentialLeases({
+  db: {} as TurnFinalizationDeps["db"],
+  observability,
+  accountId: "account-1",
+  workspaceId: "workspace-1",
+  codexWorkspaceKey: "workspace-1",
+  getTurnId: () => context.attempt.turnId,
+});
 const containment = createWorkerCleanupContainment({
   drain() {
     console.log("graceful_drain_requested");
@@ -53,7 +64,7 @@ const deps = {
   observability,
   requestWorkerDrain: () => containment.request(),
   turnFinalizationTimeoutMs: 25,
-  leases: { codex: { held: false, stopHeartbeat() {} }, xai: { held: false, stopHeartbeat() {} } },
+  leases,
   machineOpObserver: { drainEvents: () => [] },
   stopLeaseHeartbeat() {},
   turnCompletionMemoryCollector: { schedule() {} },
