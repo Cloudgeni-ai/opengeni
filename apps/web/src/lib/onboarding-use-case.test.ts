@@ -51,12 +51,12 @@ describe("onboarding use case text", () => {
     expect(withKey.length).toBeLessThan(32_768);
   });
 
-  test("the signup Developer setup key lasts 30 days, and the copy says so", () => {
+  test("the signup setup key has full access, lasts 30 days, and the copy says so", () => {
     const now = new Date("2026-10-03T12:00:00.000Z");
     expect(developerSetupKeyRequest(now)).toEqual({
-      name: "Developer setup",
-      description: "Created at signup to add Opengeni agents to your product.",
-      access: "developer_setup",
+      name: "Setup (full access)",
+      description: "Created at signup so an agent can set up Opengeni in your product end to end.",
+      access: "full",
       expiresAt: "2026-11-02T12:00:00.000Z",
     });
     expect(codingAgentSetupPrompt(facts)).toContain("expires in 30 days");

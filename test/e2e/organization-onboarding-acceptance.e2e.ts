@@ -1492,7 +1492,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const organizationId = memberships.memberships[0]!.organizationId;
     const keys = await owner.listOrganizationApiKeys(organizationId);
     expect(keys.map((key) => [key.name, key.access, token.startsWith(key.prefix)])).toEqual([
-      ["Developer setup", "developer_setup", true],
+      ["Setup (full access)", "full", true],
     ]);
     expect(keys[0]!.expiresAt).not.toBeNull();
     const workspace = await owner.getWorkspace(workspaceId!);
