@@ -6,6 +6,12 @@ and reports success.
 
 ## Insights daily storage and actual-debit projection
 
+`0609_insights_daily_usage_reader.sql` performs no backfill and does not alter
+RLS/permission checks. It substitutes only two amount-input calls behind the
+existing owner-fenced live privacy projection; function identity, grants and
+all other definition bytes must remain unchanged. Full UTC days use the private
+daily tables, and partial edges/hourly reads remain bounded raw reads.
+
 The separate `0608_insights_historical_list_allocations.sql` migration installs
 comparison-only snapshot/provenance infrastructure without a history scan. Its
 owner-only resumable backfill opens NO FORCE only for a bounded batch of candidate

@@ -7,7 +7,8 @@ import postgres from "postgres";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
+import { InsightsUsageQuery, InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 import {
   createDb,
   createSession,
@@ -16,7 +17,10 @@ import {
   inspectRuntimeDatabasePosture,
   installInsightsListRateSnapshot,
   resumeInsightsListRateSnapshot,
+  readInsightsUsage,
+  withSessionRlsActorContext,
   type DbClient,
+  type Database,
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -32,6 +36,7 @@ const migrations = [
   "0606_insights_daily_rollups.sql",
   "0607_insights_actual_model_debits.sql",
   "0608_insights_historical_list_allocations.sql",
+  "0609_insights_daily_usage_reader.sql",
 ];
 let shared: OwnerMigratedTestDatabase | null = null;
 let client: DbClient;
@@ -40,6 +45,9 @@ let accountId: string;
 let workspaceId: string;
 let sessionId: string;
 let historicalTurn: string;
+let subjectId: string;
+let readerDefinition: string;
+let readerPosture: postgres.Row;
 let policyBaseline: Awaited<ReturnType<typeof policies>>;
 
 async function policies() {
@@ -74,6 +82,7 @@ beforeAll(async () => {
     connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
   });
   const userId = `rollup-followup-${crypto.randomUUID()}`;
+  subjectId = `user:${userId}`;
   const access = await ensureManagedAccessForUser(client.db, {
     userId,
     email: `${userId}@example.test`,
@@ -118,6 +127,25 @@ beforeAll(async () => {
       (${accountId},${workspaceId},'model_usage_debit',-11,'model_response',${crypto.randomUUID() + ":orphan"},'historic-orphan','{}','2026-09-02T03:00:00Z'),
       (${accountId},null,'model_usage_debit',-13,'model_response',null,'historic-account-orphan','{}','2026-09-02T03:00:00Z')`;
   policyBaseline = await policies();
+  const [reader] =
+    await shared.admin`select pg_get_functiondef(oid) as definition,pg_get_userbyid(proowner) as owner,
+    jsonb_build_object('oid',oid,'owner',proowner,'acl',proacl,'config',proconfig,'definer',prosecdef) as posture
+    from pg_proc where oid='opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure`;
+  readerDefinition = reader!.definition;
+  readerPosture = reader!.posture;
+  // A disposable raw oracle, outside the private production routine inventory.
+  // Only the function's name changes; its source is frozen before the switch.
+  await shared.admin.unsafe(
+    readerDefinition.replace(
+      "opengeni_private.insights_scoped_usage_rows(",
+      "public.insights_test_raw_usage_rows(",
+    ),
+  );
+  await shared.admin
+    .unsafe(`alter function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)
+    owner to "${reader!.owner.replaceAll('"', '""')}"`);
+  await shared.admin`revoke all on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) from PUBLIC`;
+  await shared.admin`grant execute on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) to opengeni_app`;
   await shared.admin`delete from schema_migrations where name=any(${migrations}::text[])`;
   await migrate(shared.ownerUrl, undefined, {
     preinstalledVector: true,
@@ -137,6 +165,143 @@ async function scope<T>(body: (tx: postgres.TransactionSql) => Promise<T>) {
     return await body(tx);
   })) as T;
 }
+
+// Exercise the identical production response builder against the frozen raw
+// projector. Only a compiler-produced function identifier is substituted; bound
+// input values, actor/context establishment and SQL authority are unchanged.
+function rawOracleDatabase(db: Database, diagnosticTimeout?: "60s"): Database {
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === "transaction")
+        return (
+          run: (tx: Database) => Promise<unknown>,
+          config: Parameters<Database["transaction"]>[1],
+        ) =>
+          target.transaction(
+            (tx) => run(rawOracleDatabase(tx as Database, diagnosticTimeout)),
+            config,
+          );
+      if (key === "execute")
+        return (statement: SQL) => {
+          const compiled = statement.getSQL();
+          const toQuery = compiled.toQuery.bind(compiled);
+          const oracle = new Proxy(compiled, {
+            get(query, method) {
+              if (method === "getSQL") return () => oracle;
+              if (method === "toQuery")
+                return (config: Parameters<SQL["toQuery"]>[0]) => {
+                  const result = toQuery(config);
+                  let oracleSql = result.sql.replaceAll(
+                    "opengeni_private.insights_scoped_usage_rows(",
+                    "public.insights_test_raw_usage_rows(",
+                  );
+                  if (diagnosticTimeout)
+                    oracleSql = oracleSql.replace(
+                      "set_config('statement_timeout','10s',true)",
+                      "set_config('statement_timeout','60s',true)",
+                    );
+                  return { ...result, sql: oracleSql };
+                };
+              return Reflect.get(query, method);
+            },
+          });
+          return target.execute(oracle);
+        };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+test("daily source switch changes exactly two input calls and preserves reader identity, grants and authority", async () => {
+  const [reader] = await shared!.admin`select pg_get_functiondef(oid) as definition,
+    jsonb_build_object('oid',oid,'owner',proowner,'acl',proacl,'config',proconfig,'definer',prosecdef) as posture
+    from pg_proc where oid='opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure`;
+  expect(reader!.posture).toEqual(readerPosture);
+  const expected = readerDefinition
+    .replace(
+      "opengeni_private.insights_raw_amount_inputs(a,w.id,p_since,p_until)",
+      "opengeni_private.insights_rollup_amount_inputs(a,w.id,p_since,p_until,p_granularity)",
+    )
+    .replace(
+      "opengeni_private.insights_raw_amount_inputs(a,null,p_since,p_until)",
+      "opengeni_private.insights_rollup_amount_inputs(a,null,p_since,p_until,p_granularity)",
+    );
+  expect(reader!.definition).toBe(expected);
+  expect(await policies()).toEqual(policyBaseline);
+});
+
+test("complete daily and raw API responses agree for six ranges, both scopes, all groupings and detail ceilings", async () => {
+  const oracle = rawOracleDatabase(client.db);
+  for (const range of ["today", "week", "month", "30d", "90d", "ytd"] as const) {
+    for (const organization of [false, true]) {
+      for (const groupBy of [
+        "model",
+        "provider",
+        "payer",
+        "project",
+        "rootSession",
+        "person",
+        "schedule",
+        ...(organization ? ["workspace"] : []),
+      ]) {
+        for (const details of [false, true]) {
+          const input = {
+            accountId,
+            workspaceId: organization ? null : workspaceId,
+            now: new Date("2026-09-10T12:00:00Z"),
+            query: InsightsUsageQuery.parse({ range, groupBy, seriesGroups: true, limit: 2 }),
+            detailsWorkspaceIds: details ? [workspaceId] : [],
+          };
+          await withSessionRlsActorContext({ subjectId }, async () => {
+            const raw = await readInsightsUsage(oracle, input);
+            const fast = await readInsightsUsage(client.db, input);
+            expect(InsightsUsageResponse.parse(fast)).toEqual(InsightsUsageResponse.parse(raw));
+          });
+        }
+      }
+    }
+  }
+});
+
+test("filtered daily API parity includes conjunctive filters, money-only prior and exact UTC midnight", async () => {
+  const oracle = rawOracleDatabase(client.db);
+  for (const filters of [
+    { provider: ["openai"] },
+    { model: ["openai/historical"] },
+    { payer: ["opengeni_credits", "own_key"] },
+    { projectId: ["unfiled"] },
+    { provider: ["openai"], model: ["openai/historical"], payer: ["opengeni_credits"] },
+    { rootSessionId: [sessionId] },
+    { workspaceId: [workspaceId] },
+  ]) {
+    const input = {
+      accountId,
+      workspaceId: null,
+      now: new Date("2026-09-10T12:00:00Z"),
+      query: InsightsUsageQuery.parse({ range: "month", groupBy: "person", ...filters }),
+      detailsWorkspaceIds: [workspaceId],
+      detailsSharedWorkspaces: true,
+    };
+    await withSessionRlsActorContext({ subjectId }, async () => {
+      expect(await readInsightsUsage(client.db, input)).toEqual(
+        await readInsightsUsage(oracle, input),
+      );
+    });
+  }
+  await withSessionRlsActorContext({ subjectId }, async () => {
+    const input = {
+      accountId,
+      workspaceId,
+      now: new Date("2026-09-03T00:00:00Z"),
+      query: InsightsUsageQuery.parse({ range: "today", groupBy: "model" }),
+      detailsWorkspaceIds: [workspaceId],
+    };
+    expect(await readInsightsUsage(client.db, input)).toEqual(
+      await readInsightsUsage(oracle, input),
+    );
+  });
+});
 
 async function assertExact() {
   const model = await shared!.admin`with raw as(
@@ -358,6 +523,41 @@ test("application invokers cannot mutate private tables or attach an owner trigg
     ).rejects.toMatchObject({ code: "42501" });
   }
   await assertExact();
+});
+
+test("opposing concurrent fact dimension moves retain exact model and actual-charge deltas without deadlocks", async () => {
+  const turn = crypto.randomUUID();
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,
+      billing_path,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,occurred_at)
+      values(${accountId},${workspaceId},${sessionId},${turn},'opposing-a','openai','responses','opposing-a','external',100,20,10,30,5,130,'2026-09-07T04:00:00Z'),
+      (${accountId},${workspaceId},${sessionId},${turn},'opposing-b','openai','responses','opposing-b','external',100,20,10,30,5,130,'2026-09-07T04:00:00Z')`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',-3,'model_response',${turn + ":opposing-a"},'opposing-a','2026-09-08T04:00:00Z'),
+      (${accountId},${workspaceId},'model_usage_debit',-5,'model_response',${turn + ":opposing-b"},'opposing-b','2026-09-08T04:00:00Z')`;
+  });
+  for (let n = 0; n < 8; n++) {
+    await Promise.all(
+      ["a", "b"].map((side) =>
+        scope(async (tx) => {
+          const next =
+            n % 2 === 0 ? (side === "a" ? "opposing-b" : "opposing-a") : `opposing-${side}`;
+          await tx`update model_call_facts set model=${next} where workspace_id=${workspaceId} and turn_id=${turn} and source_key=${"opposing-" + side}`;
+        }),
+      ),
+    );
+    await assertExact();
+  }
+  const before = await shared!
+    .admin`select dimensions,xmin::text as version,measures from opengeni_private.insights_model_daily
+    where workspace_id=${workspaceId} and dimensions->>'model' like 'opposing-%' order by dimensions`;
+  await scope(async (tx) => {
+    await tx`update model_call_facts set model=model where workspace_id=${workspaceId} and turn_id=${turn}`;
+  });
+  const after = await shared!
+    .admin`select dimensions,xmin::text as version,measures from opengeni_private.insights_model_daily
+    where workspace_id=${workspaceId} and dimensions->>'model' like 'opposing-%' order by dimensions`;
+  expect(after).toEqual(before);
 });
 
 test("UTC full-day partition leaves at most two bounded raw edges, including zero windows", async () => {
@@ -984,3 +1184,205 @@ test("allocation snapshots and backfills deny app/PUBLIC writes, enforce immutab
   ).rejects.toMatchObject({ code: "42501" });
   await assertExact();
 });
+
+test("large historical daily fixture conserves raw API totals and measures bounded full-day reader performance", async () => {
+  const fixture = await acquireOwnerMigratedTestDatabase("insights-daily-read-performance");
+  if (!fixture) throw new Error("Real owner/app PostgreSQL is required");
+  const owner = postgres(fixture.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  let performanceClient: DbClient | undefined;
+  try {
+    await owner`create table schema_migrations(name text primary key,applied_at timestamptz not null default now())`;
+    await owner`insert into schema_migrations(name) select unnest(${migrations}::text[])`;
+    await migrate(fixture.ownerUrl, undefined, {
+      preinstalledVector: true,
+      applicationDatabaseRoles: ["opengeni_app"],
+    });
+    await provisionRoles(fixture.adminUrl, {
+      appPassword: fixture.appPassword,
+      rlsStrategy: "force",
+    });
+    const appUrl = new URL(fixture.ownerUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = fixture.appPassword;
+    performanceClient = createDb(appUrl.toString(), { max: 4, rlsStrategy: "force" });
+    const userId = `daily-performance-${crypto.randomUUID()}`,
+      actorId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(performanceClient.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Daily performance owner",
+    });
+    const account = access.workspaceGrants[0]!.accountId,
+      workspace = crypto.randomUUID();
+    await fixture.admin`insert into workspaces(id,account_id,name) values(${workspace},${account},'Daily performance shared')`;
+    await fixture.admin`insert into workspace_inference_controls(workspace_id,account_id) values(${workspace},${account})`;
+    await fixture.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,subject_label,role,permissions)
+      values(${account},${workspace},${actorId},'Daily performance owner','owner','["workspace:admin"]'::jsonb)`;
+    const ids: string[] = [];
+    for (let n = 0; n < 8; n++) {
+      const session = await createSession(performanceClient.db, {
+        accountId: account,
+        workspaceId: workspace,
+        initialMessage: `Performance session ${n}`,
+        resources: [],
+        metadata: {},
+        model: "fixture",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: actorId },
+        createdByContext: {},
+      });
+      ids.push(session.id);
+    }
+    // Seed before maintenance is installed: this proves a non-superuser owner
+    // bootstrap over a realistically compressible old-writer history, not a
+    // hand-populated aggregate or a disabled-trigger runtime benchmark.
+    const factCount = 40_000;
+    await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,
+      model,billing_path,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+      estimated_provider_cost_micros,pricing_source,occurred_at,recorded_at)
+      select ${account},${workspace},(${ids}::uuid[])[1+n%8],gen_random_uuid(),'perf-'||n,'openai','responses',
+        'perf-model-'||(n%4),'opengeni_credits',100,20,10,30,5,130,37,'configured_list_price',
+        '2026-01-01T04:00:00Z'::timestamptz+(n%270)*interval '1 day',
+        '2026-01-01T04:01:00Z'::timestamptz+(n%270)*interval '1 day' from generate_series(1,${factCount})n`;
+    await fixture.admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      select account_id,workspace_id,'model_usage_debit',-7,'model_response',turn_id::text||':'||source_key,'debit-'||source_key,
+        occurred_at+interval '1 day' from model_call_facts where account_id=${account} and (substring(source_key from 6)::int)%10=0`;
+    await fixture.admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${account},${workspace},'model_usage_debit',-13,'model_response','orphan','orphan','2026-10-02T00:00:00Z')`;
+    const [rawReader] =
+      await fixture.admin`select pg_get_functiondef(oid) as definition,pg_get_userbyid(proowner) as owner
+      from pg_proc where oid='opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure`;
+    await fixture.admin.unsafe(
+      rawReader!.definition.replace(
+        "opengeni_private.insights_scoped_usage_rows(",
+        "public.insights_test_raw_usage_rows(",
+      ),
+    );
+    await fixture.admin
+      .unsafe(`alter function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)
+      owner to "${rawReader!.owner.replaceAll('"', '""')}"`);
+    await fixture.admin`revoke all on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) from PUBLIC`;
+    await fixture.admin`grant execute on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) to opengeni_app`;
+    await fixture.admin`delete from schema_migrations where name=any(${migrations}::text[])`;
+    const bootstrapStart = performance.now();
+    await migrate(fixture.ownerUrl, undefined, {
+      preinstalledVector: true,
+      applicationDatabaseRoles: ["opengeni_app"],
+    });
+    const bootstrapMs = performance.now() - bootstrapStart;
+    const [inventory] = await fixture.admin`select
+      (select count(*)::int from model_call_facts where workspace_id=${workspace}) as raw_facts,
+      (select count(*)::int from opengeni_private.insights_model_daily where workspace_id=${workspace}) as daily_rows,
+      (select sum(quantity)::text from opengeni_private.insights_charge_daily where account_id=${account}) as charged`;
+    expect(inventory!.raw_facts).toBe(factCount);
+    expect(inventory!.daily_rows).toBeLessThan(factCount / 10);
+    expect(inventory!.charged).toBe(String((factCount / 10) * 7 + 13));
+    // row_security=off fails rather than bypassing a FORCE-bound raw query.
+    // A complete-day source must still succeed, since it issues no raw query.
+    await expect(
+      owner.begin(async (tx) => {
+        await tx`select set_config('row_security','off',true)`;
+        await tx`select count(*) from model_call_facts`;
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+    await owner.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id',${account},true),set_config('opengeni.workspace_id',${workspace},true)`;
+      await tx`select set_config('row_security','off',true)`;
+      const [daily] =
+        await tx`select sum((m->>'calls')::bigint)::int as calls,sum((m->>'chargedMicros')::bigint)::text as charged
+        from opengeni_private.insights_rollup_amount_inputs(${account},${workspace},'2026-01-01T00:00:00Z','2026-10-03T00:00:00Z','day')`;
+      expect(daily!.calls).toBe(factCount);
+      expect(daily!.charged).toBe(String((factCount / 10) * 7 + 13));
+    });
+    console.log(
+      JSON.stringify({
+        benchmark: "daily-owner-bootstrap",
+        facts: factCount,
+        dailyRows: inventory!.daily_rows,
+        bootstrapMs: Math.round(bootstrapMs),
+      }),
+    );
+    const fastDb = performanceClient.db,
+      oracle = rawOracleDatabase(fastDb, "60s");
+    const input = {
+      accountId: account,
+      workspaceId: workspace,
+      now: new Date("2026-10-03T12:00:00Z"),
+      query: InsightsUsageQuery.parse({ range: "ytd", groupBy: "model", seriesGroups: true }),
+      detailsWorkspaceIds: [workspace],
+    };
+    await withSessionRlsActorContext({ subjectId: actorId }, async () => {
+      const firstStart = performance.now(),
+        first = await readInsightsUsage(fastDb, input),
+        firstMs = performance.now() - firstStart;
+      expect(first.totals.calls).toBe(factCount);
+      expect(first.totals.chargedMicros).toBe((factCount / 10) * 7 + 13);
+      console.log(
+        JSON.stringify({
+          benchmark: "daily-first-full-reader",
+          facts: factCount,
+          elapsedMs: Math.round(firstMs),
+        }),
+      );
+      const rawStart = performance.now(),
+        raw = await readInsightsUsage(oracle, input),
+        rawMs = performance.now() - rawStart;
+      expect(first).toEqual(raw);
+      const timings: number[] = [firstMs];
+      for (let n = 0; n < 5; n++) {
+        const start = performance.now(),
+          fast = await readInsightsUsage(fastDb, input);
+        timings.push(performance.now() - start);
+        expect(InsightsUsageResponse.parse(fast)).toEqual(InsightsUsageResponse.parse(raw));
+      }
+      expect(raw.totals.calls).toBe(factCount);
+      expect(raw.totals.chargedMicros).toBe((factCount / 10) * 7 + 13);
+      for (const groupBy of ["workspace", "person"] as const) {
+        const org = {
+          ...input,
+          workspaceId: null,
+          query: InsightsUsageQuery.parse({ range: "ytd", groupBy, seriesGroups: true }),
+        };
+        const start = performance.now();
+        const fastOrg = await readInsightsUsage(fastDb, org);
+        const elapsed = performance.now() - start;
+        expect(fastOrg.totals).toEqual(raw.totals);
+        expect(fastOrg.groups.reduce((sum, group) => sum + group.measures.calls, 0)).toBe(
+          factCount,
+        );
+        expect(fastOrg.groups.reduce((sum, group) => sum + group.measures.chargedMicros, 0)).toBe(
+          (factCount / 10) * 7 + 13,
+        );
+        console.log(
+          JSON.stringify({
+            benchmark: "daily-org-reader",
+            facts: factCount,
+            groupBy,
+            elapsedMs: Math.round(elapsed),
+          }),
+        );
+      }
+      console.log(
+        JSON.stringify({
+          benchmark: "daily-full-api-reader",
+          facts: factCount,
+          dailyRows: inventory!.daily_rows,
+          bootstrapMs: Math.round(bootstrapMs),
+          rawMs: Math.round(rawMs),
+          dailyMs: timings.map(Math.round),
+          localSampleMaxMs: Math.round(Math.max(...timings)),
+          note: "local samples, not staging p95; diagnostic raw-only timeout60s, production daily10s unchanged",
+        }),
+      );
+    });
+  } finally {
+    await performanceClient?.close();
+    await owner.end();
+    await fixture.release();
+  }
+}, 300_000);

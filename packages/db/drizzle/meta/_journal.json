@@ -197,6 +197,13 @@
       "when": 1791067200002,
       "tag": "0608_insights_historical_list_allocations",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791067200003,
+      "tag": "0609_insights_daily_usage_reader",
+      "breakpoints": true
     }
   ]
 }

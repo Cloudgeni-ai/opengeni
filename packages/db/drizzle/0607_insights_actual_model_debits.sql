@@ -209,6 +209,7 @@ BEGIN
     RETURNS TABLE(session_id uuid,provider text,model text,payer text,scheduled_task_id uuid,
       occurred_at timestamptz,recorded_at timestamptz,m jsonb,charge_row boolean)
     LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp AS $fn$
+    DECLARE first_day timestamptz;last_day timestamptz;edge record;
     BEGIN
       IF current_user IS DISTINCT FROM pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid='%1$I.model_call_facts'::regclass)) THEN
         RAISE EXCEPTION 'Insights rollup input is owner-invoked only' USING ERRCODE='42501';END IF;
@@ -219,23 +220,27 @@ BEGIN
         OR granularity IS NULL OR granularity NOT IN('day','hour') OR (granularity='hour' AND hi-lo>interval '1 day') THEN
         RAISE EXCEPTION 'Invalid bounded Insights rollup window' USING ERRCODE='22023';END IF;
       IF lo=hi THEN RETURN;END IF;
-      RETURN QUERY WITH bounds AS(
-        SELECT CASE WHEN lo=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' THEN lo
-          ELSE (date_trunc('day',lo AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END AS first_day,
-          date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS last_day
-      ), inputs AS(
-        SELECT d.dimensions,d.day::timestamp AT TIME ZONE 'UTC' AS occurred_at,d.recorded_at,d.measures
-        FROM opengeni_private.insights_model_daily d CROSS JOIN bounds
+      first_day:=CASE WHEN lo=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' THEN lo
+        ELSE (date_trunc('day',lo AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END;
+      last_day:=date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC';
+      RETURN QUERY SELECT (d.dimensions->>'session_id')::uuid,d.dimensions->>'provider',d.dimensions->>'model',
+        opengeni_private.insights_usage_payer(d.dimensions->>'provider',d.dimensions->>'billing_path'),
+        (d.dimensions->>'scheduled_task_id')::uuid,d.day::timestamp AT TIME ZONE 'UTC',d.recorded_at,
+        opengeni_private.insights_rollup_public_measures(d.measures),false
+        FROM opengeni_private.insights_model_daily d
         WHERE granularity='day' AND d.account_id=a AND d.workspace_id=w
-          AND d.day>=(first_day AT TIME ZONE 'UTC')::date AND d.day<(last_day AT TIME ZONE 'UTC')::date
-        UNION ALL SELECT opengeni_private.insights_rollup_dimensions('model_call_facts',to_jsonb(f)),f.occurred_at,f.recorded_at,
-          opengeni_private.insights_fact_measures(to_jsonb(f)) FROM %1$I.model_call_facts f
-          CROSS JOIN opengeni_private.insights_rollup_edge_ranges(lo,hi,granularity) edge
-          WHERE f.account_id=a AND f.workspace_id=w AND f.occurred_at>=edge.since AND f.occurred_at<edge.until
-      ) SELECT (i.dimensions->>'session_id')::uuid,i.dimensions->>'provider',i.dimensions->>'model',
-        opengeni_private.insights_usage_payer(i.dimensions->>'provider',i.dimensions->>'billing_path'),
-        (i.dimensions->>'scheduled_task_id')::uuid,i.occurred_at,i.recorded_at,
-        opengeni_private.insights_rollup_public_measures(i.measures),false FROM inputs i;
+          AND d.day>=(first_day AT TIME ZONE 'UTC')::date AND d.day<(last_day AT TIME ZONE 'UTC')::date;
+      -- Bind each (at most two) edge as scalar index bounds. Never join facts to
+      -- a set-returning edge function whose cardinality/disabled nested loops
+      -- could turn a small edge into an account-history scan. Full-day windows
+      -- have zero edge iterations and issue no raw model query at all.
+      FOR edge IN SELECT * FROM opengeni_private.insights_rollup_edge_ranges(lo,hi,granularity) LOOP
+        RETURN QUERY SELECT f.session_id,f.provider,f.model,
+          opengeni_private.insights_usage_payer(f.provider,f.billing_path),f.scheduled_task_id,f.occurred_at,f.recorded_at,
+          opengeni_private.insights_rollup_public_measures(opengeni_private.insights_fact_measures(to_jsonb(f))),false
+          FROM %1$I.model_call_facts f WHERE f.account_id=a AND f.workspace_id=w
+            AND f.occurred_at>=edge.since AND f.occurred_at<edge.until;
+      END LOOP;
       RETURN QUERY SELECT (c.dimensions->>'session_id')::uuid,c.dimensions->>'provider',c.dimensions->>'model',
         'opengeni_credits',(c.dimensions->>'scheduled_task_id')::uuid,c.occurred_at,null::timestamptz,
         jsonb_build_object('calls',0,'tokenKnownCalls',0,'cacheKnownCalls',0,'cacheWriteKnownCalls',0,'listClassKnownCalls',0,

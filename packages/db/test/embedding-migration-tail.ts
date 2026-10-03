@@ -87,4 +87,5 @@ export const embeddingMigrationTail = [
   "0606_insights_daily_rollups.sql",
   "0607_insights_actual_model_debits.sql",
   "0608_insights_historical_list_allocations.sql",
+  "0609_insights_daily_usage_reader.sql",
 ];

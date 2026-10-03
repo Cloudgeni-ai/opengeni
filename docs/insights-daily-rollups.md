@@ -41,10 +41,17 @@ raw-input shape: session/provider/model/payer/schedule, occurrence/recording tim
 flat numeric measures, and charge-row flag. Complete UTC days use daily groups;
 only the two incomplete day edges read facts/charge links. Hourly windows must be
 at most one day; day windows must be at most 370 days. Equal bounds return no rows.
+Raw model edges are issued separately with scalar timestamp index bounds, not a
+join against an estimated edge relation. A complete UTC-day window issues no raw
+model query. The owner fixture uses `row_security=off` (fail on RLS, not bypass):
+a FORCE-bound raw query is rejected, but complete-day history is still returned
+without opening a fact-read capability or changing FORCE posture.
 
-This checkpoint deliberately does not modify the parent-owned live privacy
-projector or select the new source automatically. Integration must keep its
-current masking, authenticated detail ceiling, filters and metadata joins intact.
+Rolling migration `0609_insights_daily_usage_reader.sql` switches only the two
+amount-input calls in the existing scoped usage reader to this seam. Definition
+guards require exactly the reviewed call sites and owner/posture; the function
+OID, grants, configuration and every other body byte remain unchanged. Current
+masking, authenticated detail ceilings, filters and metadata joins are preserved.
 The source seam is not an authorization or an application-facing reader. Private
 tables and columns deny app/PUBLIC direct access; helper EXECUTE remains compatible
 with frozen runtime inventories but cannot convey intermediate identities.
@@ -58,10 +65,19 @@ concurrent inserts/conflicts, rollback, updates/deletes, extrema, contributions,
 late ledger/fact races, class conservation, full-day/edge/hour source parity,
 direct-write denial, and frozen/current runtime provisioning including polluted
 column-grant repair. These checks do not establish staging p95.
+The larger fixture seeds 40,000 old-writer calls and actual debits before the
+non-superuser bootstrap, compares full API responses to a frozen raw oracle,
+and measures workspace/model and organization/workspace/person reads. The test
+oracle alone permits a longer timeout for diagnostic raw comparisons; production
+read budgets and authority are not extended.
 
-Automatic selection by all legacy/unified masked readers and the additive source
-grain remain subsequent coordinated work. Until integrated, existing API readers
-remain raw-backed. No historical list total is repriced by these migrations.
+The merged unified workspace/org usage API selects daily groups for full days
+across all six ranges and all eight supported groupings. Recent/cursor calls and
+hourly/partial-edge reads remain bounded raw reads. Existing legacy bundles have
+separate private rollup seams but are not switched by this bounded follow-up.
+The additive source/custom grain is preserved on the source-extension branch,
+not installed here and not a blocker for basic daily reads. No historical list
+total is repriced by these migrations.
 
 ## Versioned historical list-class allocation
 
