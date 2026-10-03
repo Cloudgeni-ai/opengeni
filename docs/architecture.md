@@ -121,9 +121,8 @@ immutable same-turn deadlines. Command results wake only explicit waits; notices
 never block inbox input. Batching preserves causal authority; messages/Steer inherit
 the sender’s human independently of connections. [Details](run-lifecycle.md).
 
-Agent-created sessions inherit omitted model/reasoning from the exact calling
-turn; omitted latency defaults to `standard`. Explicit faster modes require
-canonical validation. Replay/later messages preserve recipient settings.
+Agent-created sessions inherit omitted model/reasoning from the calling turn;
+latency defaults to `standard`.
 
 `runAgentTurn` is non-retryable and attempt-fenced: retry settlement, not unknown
 effects. Unknown Modal Starts retain exact invocation/writer fences in tool results;
@@ -145,16 +144,14 @@ original turn, history, authority and selected model policy—never synthetic in
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
 unresolved writers fence capture, rotation and physical settlement.
-Unknown, locator-less legacy Modal exec observation on a lease-lost closed
-attempt permits same-machine inference only under exact actor/turn/generation
-and home-route checks. Admission/quiescence remain unresolved; recovery results
-warn agents to inspect before replay. Pause/Steer remain strict. Finalization
-contains each stage with heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
+Legacy Modal exec observations on lease-lost attempts allow same-machine
+inference only under exact actor/turn/generation checks; agents inspect before
+replay. Finalization stages carry heartbeat/metric evidence
+(`agent-turn/finalization-monitor.ts`).
 
-Recoverable shutdown transactionally creates a Postgres workflow wake,
-unacknowledged until exact closed-attempt quiescence. Retained-process
-settlement atomically advances its outbox. Workflow-close/writer-exit races
-cannot orphan recovery; repeated Pause re-arms missing quiescence wakes.
+Recoverable shutdown transactionally creates a Postgres workflow wake that
+stays unacknowledged until closed-attempt quiescence, so close/exit races cannot
+orphan recovery.
 
 A command stays attempt-owned until durable exact-provider-identity adoption.
 The reaper recovers missed adoption for closed legacy Modal commands under its
