@@ -39,6 +39,8 @@ export type {
 export { NativeSessionScreen } from "./session-screen";
 export type { NativeSessionScreenProps } from "./session-screen";
 export { ComposerPill, SessionComposer } from "./composer";
+export { ModelPickerSheet } from "./model-picker";
+export type { ModelPickerSheetProps } from "./model-picker";
 export type { SessionComposerProps } from "./composer";
 export { ApprovalStrip, HumanInputCard } from "./decisions";
 export type { ApprovalStripProps, HumanInputCardProps } from "./decisions";

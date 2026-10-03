@@ -77,6 +77,13 @@ const ICONS: Record<string, string> = {
   "triangle-alert": "TriangleAlertIcon",
   wrench: "WrenchIcon",
   x: "XIcon",
+  zap: "ZapIcon",
+  pin: "PinIcon",
+  "pin-off": "PinOffIcon",
+  ellipsis: "EllipsisIcon",
+  "grip-vertical": "GripVerticalIcon",
+  "audio-lines": "AudioLinesIcon",
+  "list-restart": "ListRestartIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};
