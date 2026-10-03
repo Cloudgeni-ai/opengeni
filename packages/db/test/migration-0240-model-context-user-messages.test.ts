@@ -13,6 +13,7 @@ import {
   type DbClient,
 } from "../src/index";
 import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 
 const migrationName = "0240_model_context_user_messages.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
@@ -35,7 +36,7 @@ type FixtureSession = {
 function appDatabaseUrl(blank: BlankTestDatabase): string {
   const url = new URL(blank.databaseUrl);
   url.username = "opengeni_app";
-  url.password = "apppw";
+  url.password = blank.appPassword ?? "apppw";
   return url.toString();
 }
 
@@ -143,6 +144,11 @@ describe("migration 0240 model context user messages", () => {
     let client: DbClient | null = null;
     try {
       await migrate(blank.databaseUrl);
+      await provisionRoles(blank.databaseUrl, {
+        appRole: "opengeni_app",
+        appPassword: blank.appPassword ?? "apppw",
+        rlsStrategy: "force",
+      });
       client = createDb(appDatabaseUrl(blank));
       const access = await bootstrapWorkspace(client.db, {
         accountExternalSource: "migration-0240-test",
