@@ -35,6 +35,11 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
   /** OAuth renewal can preserve the account generation; explicit replacement never does. */
   refreshIncrementsVersion?: boolean;
   metadataIncrementsVersion?: boolean;
+  /** Provider telemetry follows token rotation inside the same credential lock. */
+  onAccessTokenRenewed?: (
+    db: Database,
+    credential: { id: string; version: number },
+  ) => Promise<void>;
   /** One provider-specific quota read for the already-authorized pool. Missing rows fail closed. */
   readCapacity?: (
     db: Database,
@@ -645,7 +650,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
                 eq(tables.credentials.authorityScope, snapshot.scope),
                 ownerPredicate,
               ),
-            ),
+            )
+            .orderBy(asc(tables.credentials.createdAt), asc(tables.credentials.id)),
           scopedDb
             .select()
             .from(tables.rotationSettings)
@@ -661,7 +667,10 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             .limit(1)
             .then((rows) => rows[0] ?? null),
         ]);
-        const activeCredentialId = rotation?.activeCredentialId ?? null;
+        const activeCredentialId =
+          snapshot.scope === "organization"
+            ? assignedConnectionDefault(rotation?.activeCredentialId ?? null, accounts)
+            : (rotation?.activeCredentialId ?? null);
         const now = new Date();
         const eligibleAccounts =
           options.readCapacity && !input.upstreamModelId
@@ -1305,6 +1314,8 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
       )
       .returning(credentialMetadataColumns);
     if (!updated) throw new Error(label + " credential refresh lost its authority fence");
+    if (options.accessToken(currentSecret) !== options.accessToken(next.secret))
+      await options.onAccessTokenRenewed?.(scopedDb, updated);
     return {
       credential: {
         ...subscriptionAccountMetadataFromRow(updated),
