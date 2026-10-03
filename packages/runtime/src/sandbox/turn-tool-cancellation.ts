@@ -196,9 +196,11 @@ type PendingShellStart = {
   runContext: Parameters<FunctionToolInvoke>[0];
   execInvoke: FunctionToolInvoke;
   cancelProviderStart: (() => Promise<void>) | null;
+  /** An exact retained route now owns physical cancellation of this start. */
+  retainedHandoff: boolean;
   settled: boolean;
   settledPromise: Promise<void>;
-  settle(): void;
+  settle(retainedSessionId?: number): void;
   cancellation: Promise<void> | null;
 };
 
@@ -937,6 +939,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             identityValidated: false,
             cancellation: null,
           });
+          pendingStart?.settle(retainedProcess.providerSessionId);
         }
         pendingStart?.settle();
         throw error;
@@ -998,7 +1001,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         cancellation: null,
       };
       this.shellSessions.set(sessionId, state);
-      pendingStart?.settle();
+      pendingStart?.settle(sessionId);
       const maxOutputTokens = args.maxOutputTokens ?? 20_000;
       const initialOutput = execOutput(initial);
       let output = initialOutput ? appendBoundedOutput("", initialOutput, maxOutputTokens) : "";
@@ -1251,6 +1254,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identityValidated: false,
                   cancellation: null,
                 });
+                pendingStart?.settle(retainedProcess.providerSessionId);
               }
               pendingStart?.settle();
               if (error instanceof RoutingMutationOutcomeUnknownError)
@@ -1285,7 +1289,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               // throughout eager waiting; successful adoption removes it below
               // immediately before the running receipt is returned.
               this.shellSessions.set(sessionId, state);
-              pendingStart?.settle();
+              pendingStart?.settle(sessionId);
               return await this.awaitModelFacingShellResult({
                 state,
                 initialOutput: output,
@@ -1702,10 +1706,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       ...input,
       supervision: { managed: false },
       cancellationPath: shellCancellationPath(input.markerPath),
+      retainedHandoff: false,
       settled: false,
       settledPromise,
-      settle: () => {
+      settle: (retainedSessionId) => {
         if (entry.settled) return;
+        // A returned banner or rejected transport is not physical proof. Only
+        // registration on the original retained route transfers cancellation
+        // to shellSessions; unknown starts still require the tombstone helper.
+        entry.retainedHandoff =
+          retainedSessionId !== undefined &&
+          this.shellSessions.get(retainedSessionId)?.processSession != null;
         entry.settled = true;
         resolveSettled();
         this.pendingShellStarts.delete(entry);
@@ -1750,8 +1761,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // The transport can be cancelled after Modal accepted the process. Publish
     // the token-specific in-box tombstone first, then terminate only the PGID
     // whose command line contains the same token. Exit 0 is exact absence;
-    // every other result retries and keeps quiescence closed.
-    while (true) {
+    // every other result retries and keeps quiescence closed. Once this exact
+    // start hands off to a retained route, shellSessions owns cancellation;
+    // retrying a new ordinary mutation here can be fenced forever after Steer.
+    // An already-issued helper must still settle before making that handoff.
+    while (!state.retainedHandoff) {
       try {
         const output = await this.invokePendingShellCancellationCommand(state);
         if (typeof output === "string" && parseExecBannerExitCode(output) === 0) break;

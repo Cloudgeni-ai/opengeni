@@ -1751,7 +1751,13 @@ PID/PGID command line contains the same token. The wrapper publishes its marker
 before checking the tombstone, so a late accepted start cannot execute user code;
 the fence still waits for both exact process-group absence and the original
 provider promise to settle. Timeout, missing marker, and transport failure remain
-non-proof. The queue/chrome projection renders this period as stopping previous
+non-proof. If that original start instead registers a process on its exact
+retained route, pending-start cleanup hands off to the retained process's
+physical cancellation and settlement fence. It must not retry a new ordinary
+mutation after that handoff, since Steer may already fence ordinary admission.
+A rejected or rendered transport error, or an unretained numeric session id,
+does not authorize this handoff; an already-issued proof helper must still
+settle. The queue/chrome projection renders this period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
