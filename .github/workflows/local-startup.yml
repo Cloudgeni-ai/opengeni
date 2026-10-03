@@ -2,26 +2,7 @@ name: Local startup
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/local-startup.yml"
-      - ".bun-version"
-      - ".dockerignore"
-      - ".env.example"
-      - "bun.lock"
-      - "package.json"
-      - "docker-compose.yml"
-      - "docker/**"
-      - "scripts/*development*"
-      - "scripts/dev-*"
-      - "scripts/run-development-relay.sh"
-      - "scripts/bun-version.ts"
-      - "scripts/ci/local-startup*"
-      - ".github/actions/playwright-browsers/**"
-      - "packages/db/**"
-      - "packages/config/**"
-      - "apps/browser-extension/**"
-      - "docs-site/run-locally.mdx"
+  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore with OPE-652.
   schedule:
     - cron: "0 5 * * 1"
 
