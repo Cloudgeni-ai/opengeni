@@ -212,6 +212,14 @@ export {
   withModalCommandStartSignal,
   type ModalCommandStartInvocation,
 } from "./providers/modal-command-start-errors";
+// Pure correlation only: these passive exports grant no dispatch authority.
+export {
+  compileNativeFreshCreate,
+  describeNativeFreshCreate,
+  type NativeFreshCreateSpec,
+  type NativeFreshCreatePreparation,
+  type NativeFreshCreateCompilation,
+} from "./providers/modal-native-create-preparation";
 export {
   OpenSandboxClient,
   OpenSandboxSession,
