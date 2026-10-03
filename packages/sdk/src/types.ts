@@ -2085,6 +2085,7 @@ export const SESSION_EVENT_TYPES = [
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   "turn.startup.phase.started",
   "turn.startup.phase.completed",

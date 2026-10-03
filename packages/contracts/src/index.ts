@@ -13579,6 +13579,7 @@ export const SessionEventType = z.enum([
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   // Compact, attempt-fenced user-visible worker preparation checkpoints. The
   // payload phase is a closed enum and terminal events carry durationMs; no
@@ -13956,6 +13957,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.context.compaction.skipped",
     "session.context.cleared",
     "turn.recovery.requested",
+    "turn.dispatch.expired",
     "session.queue.history",
     "sandbox.box.snapshot",
     "workspace.revision.captured",

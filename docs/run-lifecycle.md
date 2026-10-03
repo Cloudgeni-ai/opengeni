@@ -1150,8 +1150,20 @@ session lock and adopts the selected machine-input batch's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
-and terminal settlement must match that attempt. A typed schedule-to-start
-timeout is the only no-attempt recovery case because its activity never ran.
+and terminal settlement must match that attempt. A heartbeat timeout can occur
+before the activity commits its attempt, as can a schedule-to-start timeout.
+Recovery records a durable `turn.dispatch.expired` receipt for that exact
+attempt id under the same session lock used by claim. Its server-owned
+`producer_id = opengeni:dispatch-retired:<attemptId>`, `producer_seq = 1`, and
+null client-event id keep it separate from caller-controlled operation keys.
+Claim requires the exact scope, event type and strict attempt/timeout payload;
+duplicate recovery validates and reuses the same receipt without advancing the
+cursor twice. A conflicting server receipt fails rather than forging expiry.
+If timeout wins, a late activity cannot create an owner or consume pending
+input; a new dispatch may
+claim the preserved work. If claim wins, recovery closes that exact attempt
+through the existing generation and physical-writer fences. Repeated timeout
+recovery is idempotent, and Temporal settlement alone never revokes an owner.
 
 Raw SDK tool call, result, and approval items are normalized to protocol JSON
 before they enter the attempt-fenced `session_pending_tool_calls` receipt

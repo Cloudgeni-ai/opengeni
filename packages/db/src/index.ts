@@ -70448,7 +70448,7 @@ export type ClaimSessionWorkForAttemptResult =
   | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };
 
 function assertSessionGoalFieldBytes(value: string, maxBytes: number, field: string): void {
@@ -72376,6 +72376,22 @@ export async function claimSessionWorkForAttempt(
         );
         let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
+        // Timeout recovery and claim own the same session fence. If recovery
+        // won before this attempt existed, a delayed activity may not create
+        // its owner (or consume machine input) after Temporal abandoned it.
+        const expiryIdentity = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          attemptId: input.attemptId,
+        };
+        const expiredDispatch = await findSessionDispatchExpiryReceiptTx(
+          tx as unknown as Database,
+          expiryIdentity,
+        );
+        if (isSessionDispatchExpiryReceipt(expiredDispatch, expiryIdentity)) {
+          return { action: "unclaimed", reason: "dispatch-expired" };
+        }
         // Work and realtime may coexist, but claim remains the lazy lifecycle
         // cleanup point for an expired voice lease.
         session = await settleExpiredSessionRealtimeInTransaction(tx, session);
@@ -80593,6 +80609,70 @@ export type RecoverSessionDispatchInput = {
   maxRedispatches: number;
 };
 
+function sessionDispatchExpiryProducer(attemptId: string): string {
+  return `opengeni:dispatch-retired:${attemptId}`;
+}
+
+type SessionDispatchExpiryIdentity = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+};
+
+const SessionDispatchExpiryPayload = z.strictObject({
+  attemptId: z.string().uuid(),
+  timeoutType: z.enum(["HEARTBEAT", "SCHEDULE_TO_START"]),
+});
+
+async function findSessionDispatchExpiryReceiptTx(
+  tx: Database,
+  identity: SessionDispatchExpiryIdentity,
+) {
+  const [receipt] = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.accountId, identity.accountId),
+        eq(schema.sessionEvents.workspaceId, identity.workspaceId),
+        eq(schema.sessionEvents.sessionId, identity.sessionId),
+        eq(schema.sessionEvents.producerId, sessionDispatchExpiryProducer(identity.attemptId)),
+        eq(schema.sessionEvents.producerSeq, 1),
+      ),
+    )
+    .limit(1);
+  return receipt;
+}
+
+function isSessionDispatchExpiryReceipt(
+  receipt: typeof schema.sessionEvents.$inferSelect | undefined,
+  identity: SessionDispatchExpiryIdentity,
+): boolean {
+  if (
+    !receipt ||
+    receipt.accountId !== identity.accountId ||
+    receipt.workspaceId !== identity.workspaceId ||
+    receipt.sessionId !== identity.sessionId ||
+    receipt.type !== "turn.dispatch.expired" ||
+    receipt.producerId !== sessionDispatchExpiryProducer(identity.attemptId) ||
+    receipt.producerSeq !== 1 ||
+    receipt.clientEventId !== null ||
+    receipt.turnId !== null ||
+    receipt.turnGeneration !== null ||
+    receipt.turnAttemptId !== null ||
+    receipt.turnAssociation !== null ||
+    receipt.duplicateOfEventId !== null ||
+    receipt.duplicateReason !== null
+  ) {
+    return false;
+  }
+  const payload = SessionDispatchExpiryPayload.safeParse(
+    fromPostgresLosslessJson(receipt.payload, receipt.payloadCodecVersion),
+  );
+  return payload.success && payload.data.attemptId === identity.attemptId;
+}
+
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
   | {
@@ -80615,9 +80695,9 @@ export type RecoverSessionDispatchResult =
     };
 
 /**
- * Atomically recover the exact attempt that owned a running turn. An activity
- * that never reached the turn worker has no active attempt and returns
- * `unclaimed` without consuming the crash-loop budget.
+ * Atomically recover the exact attempt that owned a running turn. If timeout
+ * wins before its claim, persist an expiry receipt so a delayed activity cannot
+ * create an owner afterward. This does not consume the crash-loop budget.
  */
 export async function recoverSessionDispatch(
   db: Database,
@@ -80631,6 +80711,7 @@ export async function recoverSessionDispatch(
       "session.status.changed",
       "turn.failed",
       "turn.recovery.requested",
+      "turn.dispatch.expired",
     ],
     maxAttempts: 3,
   };
@@ -80650,6 +80731,71 @@ export async function recoverSessionDispatch(
       );
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
       if (!attempt) {
+        const expiryIdentity = {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+        };
+        const existing = await findSessionDispatchExpiryReceiptTx(
+          tx as unknown as Database,
+          expiryIdentity,
+        );
+        if (existing && !isSessionDispatchExpiryReceipt(existing, expiryIdentity)) {
+          throw new SessionControlInvariantError("Conflicting session dispatch expiry receipt");
+        }
+        if (!existing) {
+          const now = new Date();
+          const [inserted] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "turn.dispatch.expired",
+                  payload: { attemptId: input.attemptId, timeoutType: input.timeoutType },
+                  clientEventId: null,
+                  producerId: sessionDispatchExpiryProducer(input.attemptId),
+                  producerSeq: 1,
+                  occurredAt: now,
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .onConflictDoNothing({
+              target: [
+                schema.sessionEvents.workspaceId,
+                schema.sessionEvents.sessionId,
+                schema.sessionEvents.producerId,
+                schema.sessionEvents.producerSeq,
+              ],
+              where: sql`${schema.sessionEvents.producerId} is not null and ${schema.sessionEvents.producerSeq} is not null`,
+            })
+            .returning();
+          if (!inserted) {
+            const duplicate = await findSessionDispatchExpiryReceiptTx(
+              tx as unknown as Database,
+              expiryIdentity,
+            );
+            if (!isSessionDispatchExpiryReceipt(duplicate, expiryIdentity)) {
+              throw new SessionControlInvariantError("Conflicting session dispatch expiry receipt");
+            }
+          } else {
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: inserted.sequence, updatedAt: now })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  eq(schema.sessions.id, input.sessionId),
+                ),
+              );
+          }
+        }
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
