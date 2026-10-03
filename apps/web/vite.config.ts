@@ -88,13 +88,14 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod and the pure Skill receipt schemas initialize before the
-              // contracts barrel reads them. Keep them outside shared app chunks
-              // that import the barrel back: otherwise its SkillWriteReceipt
-              // consumer can evaluate before that schema exists. Co-locating
-              // these leaves also avoids an extra initial graph request.
+              // Zod, Permission and the pure Skill receipt schemas initialize
+              // before the contracts barrel and organization-access read them.
+              // Keep these leaves outside shared app chunks that import their
+              // consumers back; otherwise eager Permission.options or
+              // SkillWriteReceipt reads can run before initialization.
+              // Co-locating them avoids an extra initial graph request too.
               name: "zod-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/]skills\.ts$)/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|skills)\.ts$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
