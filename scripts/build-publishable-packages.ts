@@ -758,18 +758,22 @@ function inputEntry(path: string): BuildInput {
 
 function inputChildStats(entry: Dirent, path: string): Stats | null {
   const isExcludedDirectory = entry.isDirectory() && isExcludedInputDirectory(path);
-  if (isExcludedDirectory) {
+  const isExcludedFile = entry.isFile() && isExcludedInputFile(path);
+  if (isExcludedDirectory || isExcludedFile) {
     pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT");
   }
   try {
     return lstatSync(path);
   } catch (error) {
-    // A build legitimately removes/recreates an excluded directory such as
-    // dist after readdir() has returned its Dirent. Treat only that exact
-    // stale-directory ENOENT as excluded-output churn. A missing ordinary
-    // input, or an excluded path replaced by a symlink/file, remains
-    // visible/fail-closed.
-    if (isExcludedDirectory && (error as NodeJS.ErrnoException).code === "ENOENT") {
+    // Builds replace excluded directories such as dist and remove tsup's
+    // excluded bundled config files after readdir() has returned their Dirent.
+    // Only ENOENT for a proven excluded directory or regular file is output
+    // churn. Missing ordinary inputs and non-ENOENT errors stay fail-closed;
+    // surviving entries are still inspected by the callers.
+    if (
+      (isExcludedDirectory || isExcludedFile) &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
       return null;
     }
     throw error;
