@@ -79,12 +79,20 @@ function basePath(scope: UsageScope): string {
  * or a 501. A 404 from the handler (an unknown workspace) is a real error.
  */
 export function routeUnsupported(error: unknown): boolean {
-  const failure = error as { status?: unknown; code?: unknown; message?: unknown } | null;
+  const failure = error as { status?: unknown; body?: unknown; message?: unknown } | null;
   if (failure?.status === 405 || failure?.status === 501) return true;
-  return (
-    failure?.status === 404 &&
-    (failure.message === "Resource not found." || failure.message === "Not Found")
-  );
+  if (failure?.status !== 404) return false;
+  let serverMessage: unknown = null;
+  if (typeof failure.body === "string" && failure.body) {
+    try {
+      serverMessage = (JSON.parse(failure.body) as { error?: { message?: unknown } }).error
+        ?.message;
+    } catch {
+      serverMessage = failure.body;
+    }
+  }
+  const text = typeof serverMessage === "string" ? serverMessage : String(failure.message ?? "");
+  return /\bResource not found\.|^Not Found$/.test(text);
 }
 
 /** Deployments without the usage query API, remembered briefly per API and scope kind. */

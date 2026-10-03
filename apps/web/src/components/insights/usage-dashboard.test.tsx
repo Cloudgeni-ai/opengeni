@@ -371,7 +371,13 @@ describe("Insights usage dashboard", () => {
   });
 
   test("falls back to the older Insights endpoint only when the route is missing", async () => {
-    nextError = Object.assign(new Error("Resource not found."), { status: 404 });
+    // The SDK's error: a display message, with the server's envelope in `body`.
+    nextError = Object.assign(new Error("OpenGeni API 404: Resource not found. Reference: r1."), {
+      status: 404,
+      body: JSON.stringify({
+        error: { status: 404, code: "not_found", message: "Resource not found." },
+      }),
+    });
     const getWorkspaceInsights = mock(async () => ({
       snapshot: {
         range: "week",
@@ -431,7 +437,12 @@ describe("Insights usage dashboard", () => {
     }
     // A handler's own 404 (an unknown workspace) is an error, not a missing route.
     resetUsageSourceMemo();
-    nextError = Object.assign(new Error("workspace not found"), { status: 404 });
+    nextError = Object.assign(new Error("OpenGeni API 404: workspace not found"), {
+      status: 404,
+      body: JSON.stringify({
+        error: { status: 404, code: "not_found", message: "workspace not found" },
+      }),
+    });
     getWorkspaceInsights.mockClear();
     const missing = await render();
     try {
