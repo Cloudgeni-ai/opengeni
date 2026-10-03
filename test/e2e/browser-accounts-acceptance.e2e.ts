@@ -107,6 +107,7 @@ type BrowserProblems = {
   crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
+    origin?: string | undefined;
     pathnameAndSearch: string;
     responsePhase: string;
     terminal: "failed" | "finished";
@@ -1046,6 +1047,7 @@ function observeBrowser(page: Page): BrowserProblems {
       if (finishedBoundedStream) problems.boundedHttp1NativeSeams += 1;
       problems.acceptedRequestTerminals.push({
         observedAt: finishedAt,
+        origin: finishedUrl.origin,
         pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
         responsePhase: problems.phase,
         terminal: "finished",
@@ -1111,6 +1113,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // actor-transition cancellations instead of broadly allowing CORS text.
       problems.acceptedRequestTerminals.push({
         observedAt: failedAt,
+        origin: failedUrl.origin,
         pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
         responsePhase,
         terminal: "failed",
@@ -1153,6 +1156,7 @@ function observeBrowser(page: Page): BrowserProblems {
         }
         problems.acceptedRequestTerminals.push({
           observedAt: failedAt,
+          origin: failedUrl.origin,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
           responsePhase,
           terminal: "failed",
@@ -1901,7 +1905,7 @@ function firefoxLiveEventsAbortPageErrorsForValidatedRace(
 function webKitLiveEventsPageErrorsForValidatedRace(
   problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
   engine: EngineName,
-  input: { acceptedAt: number; pathname: string; settledAt: number },
+  input: { acceptedAt: number; origin: string; pathname: string; settledAt: number },
 ): string[] {
   if (
     engine !== "webkit" ||
@@ -1923,12 +1927,13 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   const candidates: Array<{ terminalIndex: number; message: string }> = [];
   for (const pageError of problems.pageErrorEvidence) {
     const match =
-      /^\[cross-tab-select-race\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
+      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
         pageError.message,
       );
     const pathnameAndSearch = match?.groups?.pathnameAndSearch;
     if (
       pathnameAndSearch === undefined ||
+      `http://${match?.groups?.authority}` !== input.origin ||
       new URL(pathnameAndSearch, "http://127.0.0.1").pathname !== input.pathname ||
       !Number.isFinite(pageError.observedAt) ||
       pageError.observedAt < input.acceptedAt
@@ -1939,6 +1944,7 @@ function webKitLiveEventsPageErrorsForValidatedRace(
       .flatMap(({ terminal }, index) => {
         const distance = Math.abs(pageError.observedAt - terminal.observedAt);
         return terminal.terminal === "failed" &&
+          terminal.origin === input.origin &&
           terminal.responsePhase === "cross-tab-select-race" &&
           terminal.pathnameAndSearch === pathnameAndSearch &&
           terminal.observedAt >= input.acceptedAt &&
@@ -4260,9 +4266,10 @@ describe("provider-neutral browser account acceptance", () => {
     const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
     const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
     const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
-    const input = { acceptedAt: 100, pathname, settledAt: 200 };
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 200 };
     const terminal = {
       observedAt: 150,
+      origin: input.origin,
       pathnameAndSearch,
       responsePhase: "cross-tab-select-race",
       terminal: "failed" as const,
@@ -4287,6 +4294,8 @@ describe("provider-neutral browser account acceptance", () => {
     expect(match([terminal], [pageError], "chromium")).toEqual([]);
     for (const changed of [
       { responsePhase: "slot-revocation-reauthentication" },
+      { origin: "http://127.0.0.1:23213" },
+      { origin: undefined },
       {
         pathnameAndSearch: `${pathname}?controlAfter=1&interactionAfter=0&transport=http1-bounded`,
       },
@@ -4301,6 +4310,7 @@ describe("provider-neutral browser account acceptance", () => {
     }
     for (const changed of [
       { message: message.replace("cross-tab-select-race", "logout-one") },
+      { message: message.replace(":23212", ":23213") },
       { message: message.replace("000000000001", "000000000002") },
       { message: message.replace("http1-bounded", "http1") },
       { message: message.replace("live-events/stream", "sessions") },
@@ -4741,6 +4751,7 @@ describe("provider-neutral browser account acceptance", () => {
                 ? () =>
                     webKitLiveEventsPageErrorsForValidatedRace(observedProblems, engine, {
                       acceptedAt: racedSelectAcceptedAt,
+                      origin: publicOrigin,
                       pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
                       settledAt: racedSelectionSettledAt,
                     })
