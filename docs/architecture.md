@@ -1335,15 +1335,11 @@ approve each call after active-Site and version-allowlist checks. Older versions
 expose their declared tools under current viewer permissions. These paths create
 no attempt-owned connector rows or duplicate exactly-once journal.
 
-GitHub App binding offers explicit selection of existing owner-authorized
-installations or GitHub's new-installation flow for another personal account/organization.
-Both preserve signed-state and exact owner revalidation.
-
-GitHub connection policies keep routine writes, reviews, and merges independent.
-Canonical sources: `packages/core/src/domain/github-action-policies.ts` (groups),
-`apps/api/src/routes/github.ts` (authorized API), and
-`apps/web/src/components/capabilities/use-github-integration.tsx` (sheet).
-DB connector-policy rows and accepted-attempt snapshots govern execution.
+GitHub binding preserves signed-state/owner checks for selected or newly installed
+Apps. Independent write/review/merge policies use DB rows and accepted snapshots.
+Canonical: `packages/core/src/domain/github-action-policies.ts`,
+`apps/api/src/routes/github.ts`, and
+`apps/web/src/components/capabilities/use-github-integration.tsx`.
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
@@ -1351,13 +1347,11 @@ Canonical: [`capabilities.md`](capabilities.md),
 
 MCP OAuth redirects carry a short signed reference to encrypted, time-limited
 Postgres state under workspace RLS, then check the one-use nonce.
-The personal Gmail connector keeps its historical MCP resource identity but
-uses the reviewed REST bridge for tools. Its built-in OAuth profile reads pinned
-Google metadata and verifies Gmail's `users/me/profile`, requiring the reviewed
-scopes and offline grant before commit; setup has no preview MCP dependency.
-Canonical: `apps/api/src/integrations/oauth-profiles.ts`,
-`apps/api/src/integrations/oauth-client.ts`, and
-`packages/runtime/src/gmail-rest-mcp.ts`; see [Gmail MCP bridge](capabilities.md#gmail-mcp-bridge).
+Gmail retains its personal MCP identity/scopes with a reviewed REST bridge.
+OAuth: `apps/api/src/integrations/oauth-profiles.ts`/`oauth-client.ts`;
+operations/scopes: `packages/runtime/src/gmail-rest-mcp.ts`/`gmail-rest-tools.ts`;
+transactional bytes: `apps/worker/src/activities/gmail-files.ts`.
+See [Gmail](gmail.md) and [setup](capabilities.md#gmail-mcp-bridge).
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 

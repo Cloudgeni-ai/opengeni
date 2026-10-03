@@ -7,7 +7,7 @@ import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@open
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime/gmail-rest-mcp";
+import { GMAIL_REST_MCP_TOOLS, gmailToolSupportsScopes } from "@opengeni/runtime/gmail-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -257,17 +257,9 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
       return { gmailEmail: payload.emailAddress };
     },
     toolsForScopes: (scopes) => {
-      const granted = new Set(scopes);
-      const read = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[0]);
-      const compose = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[1]);
-      const modify = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[2]);
-      return GMAIL_REST_MCP_TOOLS.filter((tool) => {
-        if (["create_draft", "send_message", "send_draft"].includes(tool.name))
-          return compose || modify;
-        if (tool.name === "list_drafts") return read || compose || modify;
-        if (/^(?:label|unlabel)_/u.test(tool.name)) return modify;
-        return read || modify;
-      }).map(({ name, description }) => ({ name, ...(description ? { description } : {}) }));
+      return GMAIL_REST_MCP_TOOLS.filter((tool) => gmailToolSupportsScopes(tool.name, scopes)).map(
+        ({ name, description }) => ({ name, ...(description ? { description } : {}) }),
+      );
     },
   },
 };

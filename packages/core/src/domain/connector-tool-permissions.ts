@@ -32,6 +32,7 @@ import {
 import { HTTPException } from "hono/http-exception";
 import {
   GMAIL_REST_MCP_TOOLS,
+  gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
 } from "@opengeni/runtime";
@@ -172,7 +173,7 @@ export function reviewedConnectorToolCatalog(
   grantedScopes: readonly string[],
 ): ListedTool[] | null {
   const tools = isOfficialGmailMcpConfig(server.url, server.connectionRef)
-    ? GMAIL_REST_MCP_TOOLS
+    ? GMAIL_REST_MCP_TOOLS.filter((tool) => gmailToolSupportsScopes(tool.name, grantedScopes))
     : isOfficialSlackMcpConfig(server.url, server.connectionRef)
       ? slackRestMcpToolsForScopes(grantedScopes)
       : null;
